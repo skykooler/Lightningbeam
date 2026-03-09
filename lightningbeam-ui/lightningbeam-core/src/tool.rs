@@ -11,9 +11,10 @@ use vello::kurbo::Point;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Tool {
+    // ── Vector / shared tools ──────────────────────────────────────────────
     /// Selection tool - select and move objects
     Select,
-    /// Draw/Pen tool - freehand drawing
+    /// Draw/Brush tool - freehand drawing (vector) / paintbrush (raster)
     Draw,
     /// Transform tool - scale, rotate, skew
     Transform,
@@ -37,12 +38,48 @@ pub enum Tool {
     RegionSelect,
     /// Split tool - split audio/video clips at a point
     Split,
+    // ── Raster brush tools ────────────────────────────────────────────────
+    /// Pencil tool - hard-edged raster brush
+    Pencil,
+    /// Pen tool - pressure-sensitive raster pen
+    Pen,
+    /// Airbrush tool - soft spray raster brush
+    Airbrush,
     /// Erase tool - erase raster pixels
     Erase,
     /// Smudge tool - smudge/blend raster pixels
     Smudge,
-    /// Lasso select tool - freehand selection on raster layers
+    /// Clone Stamp - copy pixels from a source point
+    CloneStamp,
+    /// Healing Brush - content-aware pixel repair
+    HealingBrush,
+    /// Pattern Stamp - paint with a repeating pattern
+    PatternStamp,
+    /// Dodge/Burn - lighten or darken pixels
+    DodgeBurn,
+    /// Sponge - saturate or desaturate pixels
+    Sponge,
+    /// Blur/Sharpen - blur or sharpen pixel regions
+    BlurSharpen,
+    // ── Raster fill / shape ───────────────────────────────────────────────
+    /// Gradient tool - fill with a gradient
+    Gradient,
+    /// Custom Shape tool - draw from a shape library
+    CustomShape,
+    // ── Raster selection tools ────────────────────────────────────────────
+    /// Elliptical marquee selection
+    SelectEllipse,
+    /// Lasso select tool - freehand / polygonal / magnetic selection
     SelectLasso,
+    /// Magic Wand - select by colour similarity
+    MagicWand,
+    /// Quick Select - brush-based smart selection
+    QuickSelect,
+    // ── Raster transform tools ────────────────────────────────────────────
+    /// Warp / perspective transform
+    Warp,
+    /// Liquify - freeform pixel warping
+    Liquify,
 }
 
 /// Region select mode
@@ -57,6 +94,23 @@ pub enum RegionSelectMode {
 impl Default for RegionSelectMode {
     fn default() -> Self {
         Self::Rectangle
+    }
+}
+
+/// Lasso selection sub-mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LassoMode {
+    /// Freehand lasso (existing, implemented)
+    Freehand,
+    /// Click-to-place polygonal lasso
+    Polygonal,
+    /// Magnetically snaps to edges
+    Magnetic,
+}
+
+impl Default for LassoMode {
+    fn default() -> Self {
+        Self::Freehand
     }
 }
 
@@ -229,44 +283,77 @@ impl Tool {
     /// Get display name for the tool
     pub fn display_name(self) -> &'static str {
         match self {
-            Tool::Select => "Select",
-            Tool::Draw => "Draw",
-            Tool::Transform => "Transform",
-            Tool::Rectangle => "Rectangle",
-            Tool::Ellipse => "Ellipse",
-            Tool::PaintBucket => "Paint Bucket",
-            Tool::Eyedropper => "Eyedropper",
-            Tool::Line => "Line",
-            Tool::Polygon => "Polygon",
-            Tool::BezierEdit => "Bezier Edit",
-            Tool::Text => "Text",
-            Tool::RegionSelect => "Region Select",
-            Tool::Split => "Split",
-            Tool::Erase => "Erase",
-            Tool::Smudge => "Smudge",
-            Tool::SelectLasso => "Lasso Select",
+            Tool::Select        => "Select",
+            Tool::Draw          => "Brush",
+            Tool::Transform     => "Transform",
+            Tool::Rectangle     => "Rectangle",
+            Tool::Ellipse       => "Ellipse",
+            Tool::PaintBucket   => "Paint Bucket",
+            Tool::Eyedropper    => "Eyedropper",
+            Tool::Line          => "Line",
+            Tool::Polygon       => "Polygon",
+            Tool::BezierEdit    => "Bezier Edit",
+            Tool::Text          => "Text",
+            Tool::RegionSelect  => "Region Select",
+            Tool::Split         => "Split",
+            Tool::Pencil        => "Pencil",
+            Tool::Pen           => "Pen",
+            Tool::Airbrush      => "Airbrush",
+            Tool::Erase         => "Eraser",
+            Tool::Smudge        => "Smudge",
+            Tool::CloneStamp    => "Clone Stamp",
+            Tool::HealingBrush  => "Healing Brush",
+            Tool::PatternStamp  => "Pattern Stamp",
+            Tool::DodgeBurn     => "Dodge / Burn",
+            Tool::Sponge        => "Sponge",
+            Tool::BlurSharpen   => "Blur / Sharpen",
+            Tool::Gradient      => "Gradient",
+            Tool::CustomShape   => "Custom Shape",
+            Tool::SelectEllipse => "Elliptical Select",
+            Tool::SelectLasso   => "Lasso Select",
+            Tool::MagicWand     => "Magic Wand",
+            Tool::QuickSelect   => "Quick Select",
+            Tool::Warp          => "Warp",
+            Tool::Liquify       => "Liquify",
         }
     }
 
     /// Get SVG icon file name for the tool
     pub fn icon_file(self) -> &'static str {
         match self {
-            Tool::Select => "select.svg",
-            Tool::Draw => "draw.svg",
-            Tool::Transform => "transform.svg",
-            Tool::Rectangle => "rectangle.svg",
-            Tool::Ellipse => "ellipse.svg",
-            Tool::PaintBucket => "paint_bucket.svg",
-            Tool::Eyedropper => "eyedropper.svg",
-            Tool::Line => "line.svg",
-            Tool::Polygon => "polygon.svg",
-            Tool::BezierEdit => "bezier_edit.svg",
-            Tool::Text => "text.svg",
-            Tool::RegionSelect => "region_select.svg",
-            Tool::Split => "split.svg",
-            Tool::Erase => "erase.svg",
-            Tool::Smudge => "smudge.svg",
-            Tool::SelectLasso => "lasso.svg",
+            Tool::Select        => "select.svg",
+            Tool::Draw          => "draw.svg",
+            Tool::Transform     => "transform.svg",
+            Tool::Rectangle     => "rectangle.svg",
+            Tool::Ellipse       => "ellipse.svg",
+            Tool::PaintBucket   => "paint_bucket.svg",
+            Tool::Eyedropper    => "eyedropper.svg",
+            Tool::Line          => "line.svg",
+            Tool::Polygon       => "polygon.svg",
+            Tool::BezierEdit    => "bezier_edit.svg",
+            Tool::Text          => "text.svg",
+            Tool::RegionSelect  => "region_select.svg",
+            Tool::Split         => "split.svg",
+            Tool::Erase         => "erase.svg",
+            Tool::Smudge        => "smudge.svg",
+            Tool::SelectLasso   => "lasso.svg",
+            // Not yet implemented — use the placeholder icon
+            Tool::Pencil
+            | Tool::Pen
+            | Tool::Airbrush
+            | Tool::CloneStamp
+            | Tool::HealingBrush
+            | Tool::PatternStamp
+            | Tool::DodgeBurn
+            | Tool::Sponge
+            | Tool::BlurSharpen
+            | Tool::Gradient
+            | Tool::CustomShape
+            | Tool::SelectEllipse
+            | Tool::MagicWand
+            | Tool::QuickSelect
+            | Tool::Warp
+            | Tool::Liquify     => "todo.svg",
         }
     }
 
@@ -294,7 +381,23 @@ impl Tool {
         match layer_type {
             None | Some(LayerType::Vector) => Tool::all(),
             Some(LayerType::Audio) | Some(LayerType::Video) => &[Tool::Select, Tool::Split],
-            Some(LayerType::Raster) => &[Tool::Select, Tool::SelectLasso, Tool::Draw, Tool::Erase, Tool::Smudge, Tool::Eyedropper],
+            Some(LayerType::Raster) => &[
+                // Brush tools
+                Tool::Draw, Tool::Pencil, Tool::Pen, Tool::Airbrush,
+                Tool::Erase, Tool::Smudge,
+                Tool::CloneStamp, Tool::HealingBrush, Tool::PatternStamp,
+                Tool::DodgeBurn, Tool::Sponge, Tool::BlurSharpen,
+                // Fill / shape
+                Tool::PaintBucket, Tool::Gradient,
+                Tool::Rectangle, Tool::Ellipse, Tool::Polygon, Tool::Line, Tool::CustomShape,
+                // Selection
+                Tool::Select, Tool::SelectLasso,
+                Tool::MagicWand, Tool::QuickSelect,
+                // Transform
+                Tool::Transform, Tool::Warp, Tool::Liquify,
+                // Utility
+                Tool::Eyedropper,
+            ],
             _ => &[Tool::Select],
         }
     }

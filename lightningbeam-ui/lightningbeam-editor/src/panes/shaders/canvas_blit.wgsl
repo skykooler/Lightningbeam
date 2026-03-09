@@ -1,30 +1,31 @@
 // Canvas blit shader.
 //
 // Renders a GPU raster canvas (at document resolution) into an Rgba16Float HDR
-// buffer (at viewport resolution), applying the camera transform (pan + zoom)
-// to map document-space pixels to viewport-space pixels.
+// buffer (at viewport resolution), applying a general affine transform that maps
+// viewport UV [0,1]² directly to canvas UV [0,1]².
+//
+// The combined inverse transform (viewport UV → canvas UV) is pre-computed on the
+// CPU and uploaded as a column-major 3×3 matrix packed into three vec4 uniforms.
 //
 // The canvas stores premultiplied linear RGBA.  We output it as-is so the HDR
 // compositor sees the same premultiplied-linear format it always works with,
 // bypassing the sRGB intermediate used for Vello layers.
 //
-// Any viewport pixel whose corresponding document coordinate falls outside
-// [0, canvas_w) × [0, canvas_h) outputs transparent black.
+// Any viewport pixel whose corresponding canvas coordinate falls outside [0,1)²
+// outputs transparent black.
 
-struct CameraParams {
-    pan_x:      f32,
-    pan_y:      f32,
-    zoom:       f32,
-    canvas_w:   f32,
-    canvas_h:   f32,
-    viewport_w: f32,
-    viewport_h: f32,
-    _pad:       f32,
+struct BlitTransform {
+    /// Column 0 of the viewport_uv → canvas_uv affine matrix (+ padding).
+    col0: vec4<f32>,
+    /// Column 1 (+ padding).
+    col1: vec4<f32>,
+    /// Column 2: translation column — col2.xy = translation, col2.z = 1 (+ padding).
+    col2: vec4<f32>,
 }
 
 @group(0) @binding(0) var canvas_tex:     texture_2d<f32>;
 @group(0) @binding(1) var canvas_sampler: sampler;
-@group(0) @binding(2) var<uniform> camera: CameraParams;
+@group(0) @binding(2) var<uniform> transform: BlitTransform;
 /// Selection mask: R8Unorm, 255 = inside selection (keep), 0 = outside (discard).
 /// A 1×1 all-white texture is bound when no selection is active.
 @group(0) @binding(3) var mask_tex:     texture_2d<f32>;
@@ -48,14 +49,10 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Map viewport UV [0,1] → viewport pixel
-    let vp = in.uv * vec2<f32>(camera.viewport_w, camera.viewport_h);
-
-    // Map viewport pixel → document pixel (inverse camera transform)
-    let doc = (vp - vec2<f32>(camera.pan_x, camera.pan_y)) / camera.zoom;
-
-    // Map document pixel → canvas UV [0,1]
-    let canvas_uv = doc / vec2<f32>(camera.canvas_w, camera.canvas_h);
+    // Apply the combined inverse transform: viewport UV → canvas UV.
+    let m = mat3x3<f32>(transform.col0.xyz, transform.col1.xyz, transform.col2.xyz);
+    let canvas_uv_h = m * vec3<f32>(in.uv.x, in.uv.y, 1.0);
+    let canvas_uv = canvas_uv_h.xy;
 
     // Out-of-bounds → transparent
     if canvas_uv.x < 0.0 || canvas_uv.x > 1.0

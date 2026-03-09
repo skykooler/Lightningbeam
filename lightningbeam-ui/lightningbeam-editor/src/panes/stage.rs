@@ -402,6 +402,16 @@ struct VelloRenderContext {
     webcam_frame: Option<lightningbeam_core::webcam::CaptureFrame>,
     /// GPU brush dabs to dispatch in this frame's prepare() call.
     pending_raster_dabs: Option<PendingRasterDabs>,
+    /// GPU affine-resample dispatch for the raster transform tool.
+    pending_transform_dispatch: Option<PendingTransformDispatch>,
+    /// When Some, override the float canvas blit with the display canvas during transform.
+    transform_display: Option<TransformDisplayInfo>,
+    /// GPU ops for Warp/Liquify tools to dispatch in prepare().
+    pending_warp_ops: Vec<PendingWarpOp>,
+    /// When Some, override the layer's raster blit with the warp display canvas.
+    warp_display: Option<(uuid::Uuid, uuid::Uuid)>,  // (layer_id, display_canvas_id)
+    /// Pending GPU gradient fill dispatch for next prepare() frame.
+    pending_gradient_op: Option<PendingGradientOp>,
     /// Instance ID (for storing readback results in the global map).
     instance_id_for_readback: u64,
     /// The (layer_id, keyframe_id) of the raster layer with a live GPU canvas.
@@ -412,6 +422,35 @@ struct VelloRenderContext {
     /// True while the current stroke targets the float buffer (B) rather than
     /// the layer canvas (A).  Used in prepare() to route the GPU canvas blit.
     painting_float: bool,
+    /// Shared pixel buffer for brush preview thumbnails.
+    /// `prepare()` renders all presets here on the first frame;
+    /// the infopanel converts the pixel data to egui TextureHandles.
+    /// Each entry is `(width, height, sRGB-premultiplied RGBA bytes)`.
+    brush_preview_pixels: std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
+
+    // ── New unified raster tool rendering ─────────────────────────────────────
+
+    /// When `Some`, the compositor blits B (the tool output canvas) at the layer
+    /// or float slot described here, instead of the Vello scene / idle raster texture.
+    active_tool_render: Option<crate::raster_tool::ActiveToolRender>,
+    /// Canvas UUIDs to remove from `GpuBrushEngine` at the top of the next `prepare()`.
+    /// Replaced the single `pending_canvas_removal` field.
+    pending_canvas_removals: Vec<uuid::Uuid>,
+    /// First-frame canvas initialization for the active raster tool workspace.
+    /// `prepare()` creates A/B/C canvases and uploads source pixels on the same frame
+    /// the tool starts (mousedown).  Cleared after one consume.
+    pending_workspace_init: Option<crate::raster_tool::WorkspaceInitPacket>,
+    /// GPU work extracted from the active `RasterTool` this frame via
+    /// `take_pending_gpu_work()`.  Executed in `prepare()` before compositing.
+    pending_tool_gpu_work: Option<Box<dyn crate::raster_tool::PendingGpuWork>>,
+    /// Raster layer keyframe UUIDs whose `raster_layer_cache` entry should be
+    /// removed at the top of `prepare()` so the fresh `raw_pixels` are re-uploaded.
+    /// Populated by the pre-callback dirty-keyframe scan (for undo/redo) and by
+    /// stroke/fill/warp commit handlers.
+    pending_layer_cache_removals: Vec<uuid::Uuid>,
+    /// When `Some`, readback this B-canvas into `RASTER_READBACK_RESULTS` after
+    /// dispatching GPU tool work.  Set on mouseup by the unified raster tool commit path.
+    pending_tool_readback_b: Option<uuid::Uuid>,
 }
 
 /// Callback for Vello rendering within egui
@@ -485,6 +524,10 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             camera_transform
         };
 
+        // Timing instrumentation: track where frame budget is spent.
+        // Prints to stderr when any section exceeds 2 ms, or total > 8 ms.
+        let _t_prepare_start = std::time::Instant::now();
+
         // Choose rendering path based on HDR compositing flag
         let mut scene = if USE_HDR_COMPOSITING {
             // HDR Compositing Pipeline: render each layer separately for proper opacity
@@ -502,6 +545,75 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     gpu_brush.remove_canvas(&kf_id);
                 }
             }
+            // Process the bulk-removal list (A/B/C canvases from finished tool ops).
+            // The Vec was moved into this callback by StagePane via std::mem::take,
+            // so it is already gone from StagePane; no drain needed.
+            if !self.ctx.pending_canvas_removals.is_empty() {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    for id in &self.ctx.pending_canvas_removals {
+                        gpu_brush.remove_canvas(id);
+                    }
+                }
+            }
+            // Invalidate raster_layer_cache entries whose raw_pixels changed (undo/redo,
+            // stroke commit, fill commit, etc.).  Removing the entry here causes the
+            // raster-cache section below to re-upload the fresh pixels on the same frame.
+            if !self.ctx.pending_layer_cache_removals.is_empty() {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    for id in &self.ctx.pending_layer_cache_removals {
+                        gpu_brush.remove_layer_texture(id);
+                    }
+                }
+            }
+            let _t_after_removals = std::time::Instant::now();
+
+            // First-frame canvas initialization for the unified raster tool workspace.
+            // Creates A (source), B (output) and C (scratch) canvases; uploads pixels to A.
+            // B and C start zero-initialized (transparent).
+            if let Some(ref init) = self.ctx.pending_workspace_init {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    // A canvas: source pixels.
+                    gpu_brush.ensure_canvas(device, init.a_canvas_id, init.width, init.height);
+                    if let Some(canvas) = gpu_brush.canvases.get(&init.a_canvas_id) {
+                        canvas.upload(queue, &init.a_pixels);
+                    }
+                    // B canvas: output (zero-initialized by GPU allocation).
+                    gpu_brush.ensure_canvas(device, init.b_canvas_id, init.width, init.height);
+                    // C canvas: scratch (zero-initialized by GPU allocation).
+                    gpu_brush.ensure_canvas(device, init.c_canvas_id, init.width, init.height);
+                }
+            }
+
+            // Unified raster tool GPU dispatch (dab shaders, composite pass, etc.).
+            if let Some(ref work) = self.ctx.pending_tool_gpu_work {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    work.execute(device, queue, &mut *gpu_brush);
+                }
+            }
+
+            // Unified tool B-canvas readback on mouseup (commit path).
+            // Triggered when the active RasterTool's finish() returns true.
+            if let Some(b_id) = self.ctx.pending_tool_readback_b {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    let dims = gpu_brush.canvases.get(&b_id).map(|c| (c.width, c.height));
+                    if let Some((w, h)) = dims {
+                        if let Some(pixels) = gpu_brush.readback_canvas(device, queue, b_id) {
+                            let results = RASTER_READBACK_RESULTS.get_or_init(|| {
+                                Arc::new(Mutex::new(std::collections::HashMap::new()))
+                            });
+                            if let Ok(mut map) = results.lock() {
+                                map.insert(self.ctx.instance_id_for_readback, RasterReadbackResult {
+                                    layer_id: uuid::Uuid::nil(), // unused; routing via pending_undo_before
+                                    time: 0.0,
+                                    canvas_width: w,
+                                    canvas_height: h,
+                                    pixels,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
 
             // Lazy float GPU canvas initialization.
             // If a float exists but its GPU canvas hasn't been created yet, upload float.pixels now.
@@ -513,7 +625,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             let pixels = if float_sel.pixels.is_empty() {
                                 vec![0u8; (float_sel.width * float_sel.height * 4) as usize]
                             } else {
-                                float_sel.pixels.clone()
+                                (*float_sel.pixels).clone()
                             };
                             canvas.upload(queue, &pixels);
                         }
@@ -581,6 +693,203 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 }
             }
 
+            // --- Raster transform dispatch ---
+            // Runs after dab dispatch; uploads anchor pixels and runs the affine-resample
+            // shader from anchor → display canvas.
+            if let Some(ref dispatch) = self.ctx.pending_transform_dispatch {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    // Ensure anchor canvas at original dimensions.
+                    gpu_brush.ensure_canvas(device, dispatch.anchor_canvas_id, dispatch.anchor_w, dispatch.anchor_h);
+                    if let Some(canvas) = gpu_brush.canvases.get(&dispatch.anchor_canvas_id) {
+                        canvas.upload(queue, &dispatch.anchor_pixels);
+                    }
+                    // Ensure display canvas at new (transformed) dimensions.
+                    gpu_brush.ensure_canvas(device, dispatch.display_canvas_id, dispatch.new_w, dispatch.new_h);
+                    // Dispatch the affine-resample shader.
+                    let params = crate::gpu_brush::RasterTransformGpuParams {
+                        a00: dispatch.a00, a01: dispatch.a01,
+                        a10: dispatch.a10, a11: dispatch.a11,
+                        b0:  dispatch.b0,  b1:  dispatch.b1,
+                        src_w: dispatch.anchor_w, src_h: dispatch.anchor_h,
+                        dst_w: dispatch.new_w,    dst_h: dispatch.new_h,
+                        _pad0: 0, _pad1: 0,
+                    };
+                    gpu_brush.render_transform(device, queue, &dispatch.anchor_canvas_id, &dispatch.display_canvas_id, params);
+
+                    // Final commit: readback the display canvas so render_content() can swap it in as the new float.
+                    if dispatch.is_final_commit {
+                        if let Some(pixels) = gpu_brush.readback_canvas(device, queue, dispatch.display_canvas_id) {
+                            let results = TRANSFORM_READBACK_RESULTS.get_or_init(|| {
+                                Arc::new(Mutex::new(std::collections::HashMap::new()))
+                            });
+                            if let Ok(mut map) = results.lock() {
+                                map.insert(self.ctx.instance_id_for_readback, TransformReadbackResult {
+                                    pixels,
+                                    width:  dispatch.new_w,
+                                    height: dispatch.new_h,
+                                    x: dispatch.new_x,
+                                    y: dispatch.new_y,
+                                    display_canvas_id: dispatch.display_canvas_id,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // --- Gradient fill GPU dispatch ---
+            if let Some(ref op) = self.ctx.pending_gradient_op {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    // Ensure both canvases exist.
+                    gpu_brush.ensure_canvas(device, op.anchor_canvas_id, op.w, op.h);
+                    gpu_brush.ensure_canvas(device, op.display_canvas_id, op.w, op.h);
+                    // Upload anchor pixels on the first frame (drag start).
+                    if let Some(ref pixels) = op.anchor_pixels {
+                        if let Some(canvas) = gpu_brush.canvases.get(&op.anchor_canvas_id) {
+                            canvas.upload(queue, pixels);
+                        }
+                    }
+                    // Dispatch gradient fill shader.
+                    gpu_brush.apply_gradient_fill(
+                        device, queue,
+                        &op.anchor_canvas_id,
+                        &op.display_canvas_id,
+                        &op.stops,
+                        (op.start_x, op.start_y),
+                        (op.end_x,   op.end_y),
+                        op.opacity,
+                        op.extend_mode,
+                        op.kind,
+                    );
+                }
+            }
+
+            // --- Warp / Liquify GPU dispatch ---
+            if !self.ctx.pending_warp_ops.is_empty() {
+                if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                    let mut final_commit_result: Option<WarpReadbackResult> = None;
+
+                    for op in self.ctx.pending_warp_ops.iter() {
+                        match op {
+                            PendingWarpOp::Init { anchor_canvas_id, display_canvas_id, disp_buf_id, w, h, anchor_pixels, is_liquify } => {
+                                let (w, h) = (*w, *h);
+                                // Always upload anchor_pixels: the GPU canvas may be stale
+                                // (e.g. merge-down updated kf.raw_pixels but left GPU canvas with old content).
+                                gpu_brush.ensure_canvas(device, *anchor_canvas_id, w, h);
+                                if let Some(canvas) = gpu_brush.canvases.get(anchor_canvas_id) {
+                                    canvas.upload(queue, anchor_pixels);
+                                }
+                                gpu_brush.ensure_canvas(device, *display_canvas_id, w, h);
+                                // Initialise displacement buffer and populate display canvas = anchor.
+                                if !gpu_brush.displacement_bufs.contains_key(disp_buf_id) {
+                                    if *is_liquify {
+                                        // Liquify needs a full per-pixel buffer.
+                                        gpu_brush.create_displacement_buf(device, *disp_buf_id, w, h);
+                                    } else {
+                                        // Warp uses a 1×1 grid buffer (zero = identity).
+                                        gpu_brush.create_displacement_buf(device, *disp_buf_id, 1, 1);
+                                    }
+                                    gpu_brush.clear_displacement_buf(queue, disp_buf_id);
+                                }
+                                // Apply identity warp so display canvas immediately shows the anchor.
+                                let (gc, gr) = if *is_liquify { (0, 0) } else { (1, 1) };
+                                gpu_brush.apply_warp(device, queue, anchor_canvas_id, disp_buf_id, display_canvas_id, None, gc, gr);
+                            }
+                            PendingWarpOp::WarpApply { anchor_canvas_id, disp_buf_id, display_canvas_id, disp_data, grid_cols, grid_rows, final_commit, layer_id, time, is_float_warp, .. } => {
+                                // Resize displacement buffer if grid dimensions changed.
+                                let needs_resize = gpu_brush.displacement_bufs.get(disp_buf_id)
+                                    .map_or(true, |db| db.width != *grid_cols || db.height != *grid_rows);
+                                if needs_resize {
+                                    gpu_brush.remove_displacement_buf(disp_buf_id);
+                                    gpu_brush.create_displacement_buf(device, *disp_buf_id, *grid_cols, *grid_rows);
+                                }
+                                gpu_brush.apply_warp(device, queue, anchor_canvas_id, disp_buf_id, display_canvas_id, disp_data.as_deref(), *grid_cols, *grid_rows);
+                                if *final_commit {
+                                    let after_pixels  = gpu_brush.readback_canvas(device, queue, *display_canvas_id);
+                                    let before_pixels = gpu_brush.readback_canvas(device, queue, *anchor_canvas_id);
+                                    if let (Some(after), Some(before)) = (after_pixels, before_pixels) {
+                                        let canvas = gpu_brush.canvases.get(display_canvas_id);
+                                        let (fw, fh) = canvas.map(|c| (c.width, c.height)).unwrap_or((0, 0));
+                                        final_commit_result = Some(WarpReadbackResult { layer_id: *layer_id, time: *time, before_pixels: before, after_pixels: after, width: fw, height: fh, display_canvas_id: *display_canvas_id, anchor_canvas_id: *anchor_canvas_id, is_float_warp: *is_float_warp });
+                                    }
+                                }
+                            }
+                            PendingWarpOp::LiquifyBrushStep { disp_buf_id, params } => {
+                                gpu_brush.liquify_brush_step(device, queue, disp_buf_id, *params);
+                            }
+                            PendingWarpOp::LiquifyApply { anchor_canvas_id, disp_buf_id, display_canvas_id, final_commit, layer_id, time, is_float_warp, .. } => {
+                                // Per-pixel mode: grid_cols = 0.
+                                gpu_brush.apply_warp(device, queue, anchor_canvas_id, disp_buf_id, display_canvas_id, None, 0, 0);
+                                if *final_commit {
+                                    let after_pixels  = gpu_brush.readback_canvas(device, queue, *display_canvas_id);
+                                    let before_pixels = gpu_brush.readback_canvas(device, queue, *anchor_canvas_id);
+                                    if let (Some(after), Some(before)) = (after_pixels, before_pixels) {
+                                        let canvas = gpu_brush.canvases.get(display_canvas_id);
+                                        let (fw, fh) = canvas.map(|c| (c.width, c.height)).unwrap_or((0, 0));
+                                        final_commit_result = Some(WarpReadbackResult { layer_id: *layer_id, time: *time, before_pixels: before, after_pixels: after, width: fw, height: fh, display_canvas_id: *display_canvas_id, anchor_canvas_id: *anchor_canvas_id, is_float_warp: *is_float_warp });
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(result) = final_commit_result {
+                        let results = WARP_READBACK_RESULTS.get_or_init(|| {
+                            Arc::new(Mutex::new(std::collections::HashMap::new()))
+                        });
+                        if let Ok(mut map) = results.lock() {
+                            map.insert(self.ctx.instance_id_for_readback, result);
+                        }
+                    }
+                }
+            }
+
+            // Generate brush preview thumbnails on first use (one-time, blocking readback).
+            if let Ok(mut previews) = self.ctx.brush_preview_pixels.try_lock() {
+                if previews.is_empty() {
+                    if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                        use lightningbeam_core::brush_engine::{BrushEngine, StrokeState};
+                        use lightningbeam_core::raster_layer::{StrokeRecord, StrokePoint, RasterBlendMode};
+                        use lightningbeam_core::brush_settings::bundled_brushes;
+
+                        const PW: u32 = 120;
+                        const PH: u32 = 56;
+
+                        for preset in bundled_brushes() {
+                            let preview_radius = (PH as f32 * 0.22).max(2.5);
+                            let mut scaled = preset.settings.clone();
+                            scaled.radius_log = preview_radius.ln();
+                            scaled.slow_tracking = 0.0;
+                            scaled.slow_tracking_per_dab = 0.0;
+
+                            let y_lo  = PH as f32 * 0.72;
+                            let y_hi  = PH as f32 * 0.28;
+                            let x0    = PW as f32 * 0.10;
+                            let x1    = PW as f32 * 0.90;
+                            let mid_x = (x0 + x1) * 0.5;
+                            let mid_y = (y_lo + y_hi) * 0.5;
+                            let stroke = StrokeRecord {
+                                brush_settings: scaled,
+                                color: [0.85f32, 0.88, 1.0, 1.0],
+                                blend_mode: RasterBlendMode::Normal,
+                                tool_params: [0.0; 4],
+                                points: vec![
+                                    StrokePoint { x: x0,    y: y_lo,  pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
+                                    StrokePoint { x: mid_x, y: mid_y, pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
+                                    StrokePoint { x: x1,    y: y_hi,  pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0 },
+                                ],
+                            };
+                            let mut state = StrokeState::new();
+                            let (dabs, _) = BrushEngine::compute_dabs(&stroke, &mut state, 0.0);
+                            let pixels = gpu_brush.render_to_image(device, queue, &dabs, PW, PH);
+                            previews.push((PW, PH, pixels));
+                        }
+                    }
+                }
+            }
+
+            let _t_after_gpu_dispatches = std::time::Instant::now();
+
             let mut image_cache = shared.image_cache.lock().unwrap();
 
             let composite_result = lightningbeam_core::renderer::render_document_for_compositing(
@@ -589,8 +898,11 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 &mut image_cache,
                 &shared.video_manager,
                 self.ctx.webcam_frame.as_ref(),
+                self.ctx.selection.raster_floating.as_ref(),
+                true, // Draw checkerboard for transparent backgrounds in the UI
             );
             drop(image_cache);
+            let _t_after_scene_build = std::time::Instant::now();
 
             // Get buffer pool for layer rendering
             let mut buffer_pool = shared.buffer_pool.lock().unwrap();
@@ -727,27 +1039,101 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
             // Now render and composite each layer incrementally
             for rendered_layer in &composite_result.layers {
-                // Check if this raster layer has a live GPU canvas that should be
-                // blitted every frame, even when no new dabs arrived this frame.
-                // `painting_canvas` persists for the entire stroke duration.
-                // When painting into float (B), the GPU canvas is B's canvas — don't
-                // use it to replace the Vello scene for the layer (A must still render
-                // via Vello).
-                let gpu_canvas_kf: Option<uuid::Uuid> = if self.ctx.painting_float {
-                    None
-                } else {
-                    self.ctx.painting_canvas
+                // Determine which GPU canvas (if any) to blit for this layer.
+                //
+                // Priority order:
+                // 1. Active tool B canvas (new unified tool render).
+                // 2. Legacy painting_canvas (old per-tool render path, kept during migration).
+                // 3. Warp/Liquify display canvas.
+                // 4. Raster layer texture cache (idle raster layers — bypasses Vello).
+                // 5. None → fall through to Vello scene rendering.
+                //
+                // When painting_float is true, the active tool is working on the float,
+                // so the layer itself should still render normally (via Vello or cache).
+                let gpu_canvas_kf: Option<uuid::Uuid> = {
+                    // 1. New unified tool render: B canvas replaces this layer.
+                    let from_tool = self.ctx.active_tool_render.as_ref()
+                        .filter(|tr| tr.layer_id == Some(rendered_layer.layer_id))
+                        .map(|tr| tr.b_canvas_id);
+
+                    // 2. Legacy painting_canvas (old stroke path).
+                    let from_legacy = if self.ctx.painting_float {
+                        None
+                    } else {
+                        self.ctx.painting_canvas
+                            .filter(|(layer_id, _)| *layer_id == rendered_layer.layer_id)
+                            .map(|(_, kf_id)| kf_id)
+                    };
+
+                    // 3. Warp/Liquify display canvas.
+                    let from_warp = self.ctx.warp_display
                         .filter(|(layer_id, _)| *layer_id == rendered_layer.layer_id)
-                        .map(|(_, kf_id)| kf_id)
+                        .map(|(_, display_id)| display_id);
+
+                    from_tool.or(from_legacy).or(from_warp)
                 };
 
-                if !rendered_layer.has_content && gpu_canvas_kf.is_none() {
+                // 4. Raster layer texture cache: for idle raster layers (no active tool canvas).
+                // Upload raw_pixels to the cache if texture_dirty; then use the cache entry.
+                let raster_cache_kf: Option<uuid::Uuid> = if gpu_canvas_kf.is_none() {
+                    // Find the active keyframe for this raster layer.
+                    let doc = &self.ctx.document;
+                    let raster_kf_id = doc.get_layer(&rendered_layer.layer_id)
+                        .and_then(|l| match l {
+                            lightningbeam_core::layer::AnyLayer::Raster(rl) => {
+                                rl.keyframe_at(self.ctx.playback_time)
+                            }
+                            _ => None,
+                        })
+                        .map(|kf| kf.id);
+
+                    if let Some(kf_id) = raster_kf_id {
+                        if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                            // Check if we have pixels to upload.
+                            let kf_data = doc.get_layer(&rendered_layer.layer_id)
+                                .and_then(|l| match l {
+                                    lightningbeam_core::layer::AnyLayer::Raster(rl) => {
+                                        rl.keyframe_at(self.ctx.playback_time)
+                                    }
+                                    _ => None,
+                                });
+                            if let Some(kf) = kf_data {
+                                if !kf.raw_pixels.is_empty() {
+                                    // Pass dirty=false: the cache entry was already removed
+                                    // above via pending_layer_cache_removals when raw_pixels
+                                    // changed (undo/redo, stroke commit, etc.).  A cache miss
+                                    // triggers upload; a cache hit skips the expensive sRGB
+                                    // conversion + GPU write that was firing every frame.
+                                    gpu_brush.ensure_layer_texture(
+                                        device, queue, kf_id,
+                                        &kf.raw_pixels,
+                                        kf.width, kf.height,
+                                        false,
+                                    );
+                                    Some(kf_id)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                if !rendered_layer.has_content && gpu_canvas_kf.is_none() && raster_cache_kf.is_none() {
                     continue;
                 }
 
                 match &rendered_layer.layer_type {
-                    RenderedLayerType::Content => {
-                        // Regular content layer - render to sRGB, convert to linear, then composite
+                    RenderedLayerType::Vector => {
+                        // Vector/group layer — render Vello scene → sRGB → linear → composite.
                         let srgb_handle = buffer_pool.acquire(device, layer_spec);
                         let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
 
@@ -756,75 +1142,179 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             buffer_pool.get_view(hdr_layer_handle),
                             &instance_resources.hdr_texture_view,
                         ) {
-                            // GPU canvas blit path: if a live GPU canvas exists for this
-                            // raster layer, blit it directly into the HDR buffer (premultiplied
-                            // linear → Rgba16Float), bypassing the sRGB intermediate entirely.
-                            // Vello path: render to sRGB buffer → srgb_to_linear → HDR buffer.
-                            let used_gpu_canvas = if let Some(kf_id) = gpu_canvas_kf {
-                                let mut used = false;
-                                if let Ok(gpu_brush) = shared.gpu_brush.lock() {
-                                    if let Some(canvas) = gpu_brush.canvases.get(&kf_id) {
-                                        let camera = crate::gpu_brush::CameraParams {
-                                            pan_x:      self.ctx.pan_offset.x,
-                                            pan_y:      self.ctx.pan_offset.y,
-                                            zoom:       self.ctx.zoom,
-                                            canvas_w:   canvas.width as f32,
-                                            canvas_h:   canvas.height as f32,
-                                            viewport_w: width as f32,
-                                            viewport_h: height as f32,
-                                            _pad: 0.0,
-                                        };
-                                        shared.canvas_blit.blit(
-                                            device, queue,
-                                            canvas.src_view(),
-                                            hdr_layer_view,  // blit directly to HDR
-                                            &camera,
-                                            None,  // no mask on layer canvas blit
-                                        );
-                                        used = true;
-                                    }
-                                }
-                                used
-                            } else {
-                                false
-                            };
-
-                            if !used_gpu_canvas {
-                                // Render layer scene to sRGB buffer, then convert to HDR
-                                if let Ok(mut renderer) = shared.renderer.lock() {
-                                    renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params).ok();
-                                }
-                                let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                    label: Some("layer_srgb_to_linear_encoder"),
-                                });
-                                shared.srgb_to_linear.convert(device, &mut convert_encoder, srgb_view, hdr_layer_view);
-                                queue.submit(Some(convert_encoder.finish()));
+                            if let Ok(mut renderer) = shared.renderer.lock() {
+                                renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params).ok();
                             }
+                            let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("layer_srgb_to_linear_encoder"),
+                            });
+                            shared.srgb_to_linear.convert(device, &mut convert_encoder, srgb_view, hdr_layer_view);
+                            queue.submit(Some(convert_encoder.finish()));
 
-                            // Composite this layer onto the HDR accumulator with its opacity
                             let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
                                 hdr_layer_handle,
                                 rendered_layer.opacity,
                                 rendered_layer.blend_mode,
                             );
-
                             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("layer_composite_encoder"),
                             });
                             shared.compositor.composite(
-                                device,
-                                queue,
-                                &mut encoder,
-                                &[compositor_layer],
-                                &buffer_pool,
-                                hdr_view,
-                                None, // Don't clear - blend onto existing content
+                                device, queue, &mut encoder, &[compositor_layer], &buffer_pool, hdr_view, None,
                             );
                             queue.submit(Some(encoder.finish()));
                         }
 
                         buffer_pool.release(srgb_handle);
                         buffer_pool.release(hdr_layer_handle);
+                    }
+                    RenderedLayerType::Raster { transform: layer_transform, .. } => {
+                        // Raster layer — GPU canvas blit directly to HDR (bypasses Vello).
+                        // Tool override canvas (gpu_canvas_kf) takes priority over cached texture.
+                        if let Some(use_kf_id) = gpu_canvas_kf.or(raster_cache_kf) {
+                            let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
+                            if let (Some(hdr_layer_view), Some(hdr_view)) = (
+                                buffer_pool.get_view(hdr_layer_handle),
+                                &instance_resources.hdr_texture_view,
+                            ) {
+                                if let Ok(gpu_brush) = shared.gpu_brush.lock() {
+                                    let canvas = gpu_brush.canvases.get(&use_kf_id)
+                                        .or_else(|| gpu_brush.raster_layer_cache.get(&use_kf_id));
+                                    if let Some(canvas) = canvas {
+                                        let bt = crate::gpu_brush::BlitTransform::new(
+                                            *layer_transform,
+                                            canvas.width, canvas.height,
+                                            width, height,
+                                        );
+                                        shared.canvas_blit.blit(
+                                            device, queue, canvas.src_view(), hdr_layer_view, &bt, None,
+                                        );
+                                    }
+                                }
+                                let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
+                                    hdr_layer_handle,
+                                    rendered_layer.opacity,
+                                    rendered_layer.blend_mode,
+                                );
+                                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("raster_composite_encoder"),
+                                });
+                                shared.compositor.composite(
+                                    device, queue, &mut encoder, &[compositor_layer], &buffer_pool, hdr_view, None,
+                                );
+                                queue.submit(Some(encoder.finish()));
+                            }
+                            buffer_pool.release(hdr_layer_handle);
+                        }
+                    }
+                    RenderedLayerType::Video { instances } => {
+                        // Video layer — per-instance: upload decoded frame → blit → composite.
+                        for inst in instances {
+                            if inst.rgba_data.is_empty() { continue; }
+                            let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
+                            if let (Some(hdr_layer_view), Some(hdr_view)) = (
+                                buffer_pool.get_view(hdr_layer_handle),
+                                &instance_resources.hdr_texture_view,
+                            ) {
+                                // Convert sRGB straight-alpha → linear premultiplied.
+                                let linear: Vec<u8> = inst.rgba_data.chunks_exact(4).flat_map(|p| {
+                                    let a = p[3] as f32 / 255.0;
+                                    let lin = |c: u8| -> f32 {
+                                        let f = c as f32 / 255.0;
+                                        if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+                                    };
+                                    let r = (lin(p[0]) * a * 255.0 + 0.5) as u8;
+                                    let g = (lin(p[1]) * a * 255.0 + 0.5) as u8;
+                                    let b = (lin(p[2]) * a * 255.0 + 0.5) as u8;
+                                    [r, g, b, p[3]]
+                                }).collect();
+
+                                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                                    label: Some("video_frame_tex"),
+                                    size: wgpu::Extent3d { width: inst.width, height: inst.height, depth_or_array_layers: 1 },
+                                    mip_level_count: 1, sample_count: 1,
+                                    dimension: wgpu::TextureDimension::D2,
+                                    format: wgpu::TextureFormat::Rgba8Unorm,
+                                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                                    view_formats: &[],
+                                });
+                                queue.write_texture(
+                                    wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                                    &linear,
+                                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(inst.width * 4), rows_per_image: Some(inst.height) },
+                                    wgpu::Extent3d { width: inst.width, height: inst.height, depth_or_array_layers: 1 },
+                                );
+                                let tex_view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+                                let bt = crate::gpu_brush::BlitTransform::new(
+                                    inst.transform, inst.width, inst.height, width, height,
+                                );
+                                shared.canvas_blit.blit(device, queue, &tex_view, hdr_layer_view, &bt, None);
+
+                                let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
+                                    hdr_layer_handle,
+                                    inst.opacity,
+                                    lightningbeam_core::gpu::BlendMode::Normal,
+                                );
+                                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("video_composite_encoder"),
+                                });
+                                shared.compositor.composite(
+                                    device, queue, &mut encoder, &[compositor_layer], &buffer_pool, hdr_view, None,
+                                );
+                                queue.submit(Some(encoder.finish()));
+                            }
+                            buffer_pool.release(hdr_layer_handle);
+                        }
+                    }
+                    RenderedLayerType::Float { canvas_id: float_canvas_id, x: float_x, y: float_y, width: fw, height: fh, transform: layer_transform, pixels: _ } => {
+                        // Floating raster selection — now composited at the correct z-position
+                        // (immediately above its parent layer) rather than on top of everything.
+                        //
+                        // Override priority:
+                        //   1. transform_display: transform tool is active on the float.
+                        //   2. active_tool_render (layer_id=None): unified tool on the float.
+                        //   3. float_canvas_id from this entry: normal float display.
+                        let blit_params: Option<(uuid::Uuid, i32, i32, u32, u32)> =
+                            if let Some(ref td) = self.ctx.transform_display {
+                                Some((td.display_canvas_id, td.x, td.y, td.w, td.h))
+                            } else if let Some(ref tr) = self.ctx.active_tool_render.as_ref().filter(|tr| tr.layer_id.is_none()) {
+                                Some((tr.b_canvas_id, tr.x, tr.y, tr.width, tr.height))
+                            } else {
+                                Some((*float_canvas_id, *float_x, *float_y, *fw, *fh))
+                            };
+
+                        if let Some((blit_canvas_id, blit_x, blit_y, blit_w, blit_h)) = blit_params {
+                            if let Ok(gpu_brush) = shared.gpu_brush.lock() {
+                                if let Some(canvas) = gpu_brush.canvases.get(&blit_canvas_id) {
+                                    let float_hdr_handle = buffer_pool.acquire(device, hdr_spec);
+                                    if let (Some(fhdr_view), Some(hdr_view)) = (
+                                        buffer_pool.get_view(float_hdr_handle),
+                                        &instance_resources.hdr_texture_view,
+                                    ) {
+                                        // float_canvas_px → viewport_px:
+                                        //   layer_transform maps doc_px → viewport_px
+                                        //   translate(blit_x, blit_y) maps float_canvas_px → doc_px
+                                        let float_to_vp = *layer_transform
+                                            * Affine::translate((blit_x as f64, blit_y as f64));
+                                        let bt = crate::gpu_brush::BlitTransform::new(
+                                            float_to_vp, blit_w, blit_h, width, height,
+                                        );
+                                        shared.canvas_blit.blit(
+                                            device, queue, canvas.src_view(), fhdr_view, &bt,
+                                            float_mask_view.as_ref(),
+                                        );
+                                        let float_layer = lightningbeam_core::gpu::CompositorLayer::normal(float_hdr_handle, 1.0);
+                                        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                            label: Some("float_canvas_composite"),
+                                        });
+                                        shared.compositor.composite(device, queue, &mut enc, &[float_layer], &buffer_pool, hdr_view, None);
+                                        queue.submit(Some(enc.finish()));
+                                    }
+                                    buffer_pool.release(float_hdr_handle);
+                                }
+                            }
+                        }
                     }
                     RenderedLayerType::Effect { effect_instances } => {
                         // Effect layer - apply effects to the current HDR accumulator
@@ -1000,54 +1490,20 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 buffer_pool.release(clip_hdr_handle);
             }
 
-            // Blit the float GPU canvas on top of all composited layers.
-            // The float_mask_view clips to the selection shape (None = full float visible).
-            if let Some(ref float_sel) = self.ctx.selection.raster_floating {
-                let float_canvas_id = float_sel.canvas_id;
-                let float_x = float_sel.x;
-                let float_y = float_sel.y;
-                let float_w = float_sel.width;
-                let float_h = float_sel.height;
-                if let Ok(gpu_brush) = shared.gpu_brush.lock() {
-                    if let Some(canvas) = gpu_brush.canvases.get(&float_canvas_id) {
-                        let float_hdr_handle = buffer_pool.acquire(device, hdr_spec);
-                        if let (Some(fhdr_view), Some(hdr_view)) = (
-                            buffer_pool.get_view(float_hdr_handle),
-                            &instance_resources.hdr_texture_view,
-                        ) {
-                            let fcamera = crate::gpu_brush::CameraParams {
-                                pan_x:      self.ctx.pan_offset.x + float_x as f32 * self.ctx.zoom,
-                                pan_y:      self.ctx.pan_offset.y + float_y as f32 * self.ctx.zoom,
-                                zoom:       self.ctx.zoom,
-                                canvas_w:   float_w as f32,
-                                canvas_h:   float_h as f32,
-                                viewport_w: width as f32,
-                                viewport_h: height as f32,
-                                _pad: 0.0,
-                            };
-                            // Blit directly to HDR (straight-alpha linear, no sRGB step)
-                            shared.canvas_blit.blit(
-                                device, queue,
-                                canvas.src_view(),
-                                fhdr_view,
-                                &fcamera,
-                                float_mask_view.as_ref(),
-                            );
-                            let float_layer = lightningbeam_core::gpu::CompositorLayer::normal(float_hdr_handle, 1.0);
-                            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("float_canvas_composite"),
-                            });
-                            shared.compositor.composite(device, queue, &mut enc, &[float_layer], &buffer_pool, hdr_view, None);
-                            queue.submit(Some(enc.finish()));
-                        }
-                        buffer_pool.release(float_hdr_handle);
-                    }
-                }
-            }
-
             // Advance frame counter for buffer cleanup
             buffer_pool.next_frame();
             drop(buffer_pool);
+
+            // --- Frame timing report ---
+            let _t_end = std::time::Instant::now();
+            let total_ms = (_t_end - _t_prepare_start).as_secs_f64() * 1000.0;
+            let removals_ms = (_t_after_removals - _t_prepare_start).as_secs_f64() * 1000.0;
+            let gpu_dispatches_ms = (_t_after_gpu_dispatches - _t_after_removals).as_secs_f64() * 1000.0;
+            let scene_build_ms = (_t_after_scene_build - _t_after_gpu_dispatches).as_secs_f64() * 1000.0;
+            let composite_ms = (_t_end - _t_after_scene_build).as_secs_f64() * 1000.0;
+            crate::debug_overlay::update_prepare_timing(
+                total_ms, removals_ms, gpu_dispatches_ms, scene_build_ms, composite_ms,
+            );
 
             // For drag preview and other overlays, we still need a scene
             // Create an empty scene - the composited result is already in hdr_texture
@@ -1500,300 +1956,6 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     }
 
 
-                    // 3. Draw rectangle creation preview
-                    if let lightningbeam_core::tool::ToolState::CreatingRectangle { ref start_point, ref current_point, centered, constrain_square, .. } = self.ctx.tool_state {
-                        use vello::kurbo::Point;
-
-                        // Calculate rectangle bounds based on mode (same logic as in handler)
-                        let (width, height, position) = if centered {
-                            let dx = current_point.x - start_point.x;
-                            let dy = current_point.y - start_point.y;
-
-                            let (w, h) = if constrain_square {
-                                let size = dx.abs().max(dy.abs()) * 2.0;
-                                (size, size)
-                            } else {
-                                (dx.abs() * 2.0, dy.abs() * 2.0)
-                            };
-
-                            let pos = Point::new(start_point.x - w / 2.0, start_point.y - h / 2.0);
-                            (w, h, pos)
-                        } else {
-                            let mut min_x = start_point.x.min(current_point.x);
-                            let mut min_y = start_point.y.min(current_point.y);
-                            let mut max_x = start_point.x.max(current_point.x);
-                            let mut max_y = start_point.y.max(current_point.y);
-
-                            if constrain_square {
-                                let width = max_x - min_x;
-                                let height = max_y - min_y;
-                                let size = width.max(height);
-
-                                if current_point.x > start_point.x {
-                                    max_x = min_x + size;
-                                } else {
-                                    min_x = max_x - size;
-                                }
-
-                                if current_point.y > start_point.y {
-                                    max_y = min_y + size;
-                                } else {
-                                    min_y = max_y - size;
-                                }
-                            }
-
-                            (max_x - min_x, max_y - min_y, Point::new(min_x, min_y))
-                        };
-
-                        if width > 0.0 && height > 0.0 {
-                            let rect = KurboRect::new(0.0, 0.0, width, height);
-                            let preview_transform = overlay_transform * Affine::translate((position.x, position.y));
-
-                            if self.ctx.fill_enabled {
-                                let fill_color = Color::from_rgba8(
-                                    self.ctx.fill_color.r(),
-                                    self.ctx.fill_color.g(),
-                                    self.ctx.fill_color.b(),
-                                    self.ctx.fill_color.a(),
-                                );
-                                scene.fill(
-                                    Fill::NonZero,
-                                    preview_transform,
-                                    fill_color,
-                                    None,
-                                    &rect,
-                                );
-                            }
-
-                            let stroke_color = Color::from_rgba8(
-                                self.ctx.stroke_color.r(),
-                                self.ctx.stroke_color.g(),
-                                self.ctx.stroke_color.b(),
-                                self.ctx.stroke_color.a(),
-                            );
-                            scene.stroke(
-                                &Stroke::new(self.ctx.stroke_width),
-                                preview_transform,
-                                stroke_color,
-                                None,
-                                &rect,
-                            );
-                        }
-                    }
-
-                    // 4. Draw ellipse creation preview
-                    if let lightningbeam_core::tool::ToolState::CreatingEllipse { ref start_point, ref current_point, corner_mode, constrain_circle, .. } = self.ctx.tool_state {
-                        use vello::kurbo::{Point, Circle as KurboCircle, Ellipse};
-
-                        // Calculate ellipse parameters based on mode (same logic as in handler)
-                        let (rx, ry, position) = if corner_mode {
-                            let min_x = start_point.x.min(current_point.x);
-                            let min_y = start_point.y.min(current_point.y);
-                            let max_x = start_point.x.max(current_point.x);
-                            let max_y = start_point.y.max(current_point.y);
-
-                            let width = max_x - min_x;
-                            let height = max_y - min_y;
-
-                            let (rx, ry) = if constrain_circle {
-                                let radius = width.max(height) / 2.0;
-                                (radius, radius)
-                            } else {
-                                (width / 2.0, height / 2.0)
-                            };
-
-                            let position = Point::new(min_x + rx, min_y + ry);
-
-                            (rx, ry, position)
-                        } else {
-                            let dx = (current_point.x - start_point.x).abs();
-                            let dy = (current_point.y - start_point.y).abs();
-
-                            let (rx, ry) = if constrain_circle {
-                                let radius = (dx * dx + dy * dy).sqrt();
-                                (radius, radius)
-                            } else {
-                                (dx, dy)
-                            };
-
-                            (rx, ry, *start_point)
-                        };
-
-                        if rx > 0.0 && ry > 0.0 {
-                            let preview_transform = overlay_transform * Affine::translate((position.x, position.y));
-
-                            let fill_color = Color::from_rgba8(
-                                self.ctx.fill_color.r(),
-                                self.ctx.fill_color.g(),
-                                self.ctx.fill_color.b(),
-                                self.ctx.fill_color.a(),
-                            );
-                            let stroke_color = Color::from_rgba8(
-                                self.ctx.stroke_color.r(),
-                                self.ctx.stroke_color.g(),
-                                self.ctx.stroke_color.b(),
-                                self.ctx.stroke_color.a(),
-                            );
-
-                            if rx == ry {
-                                let circle = KurboCircle::new((0.0, 0.0), rx);
-                                if self.ctx.fill_enabled {
-                                    scene.fill(Fill::NonZero, preview_transform, fill_color, None, &circle);
-                                }
-                                scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, stroke_color, None, &circle);
-                            } else {
-                                let ellipse = Ellipse::new((0.0, 0.0), (rx, ry), 0.0);
-                                if self.ctx.fill_enabled {
-                                    scene.fill(Fill::NonZero, preview_transform, fill_color, None, &ellipse);
-                                }
-                                scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, stroke_color, None, &ellipse);
-                            }
-                        }
-                    }
-
-                    // 5. Draw line creation preview
-                    if let lightningbeam_core::tool::ToolState::CreatingLine { ref start_point, ref current_point, .. } = self.ctx.tool_state {
-                        use vello::kurbo::Line;
-
-                        // Calculate line length
-                        let dx = current_point.x - start_point.x;
-                        let dy = current_point.y - start_point.y;
-                        let length = (dx * dx + dy * dy).sqrt();
-
-                        if length > 0.0 {
-                            // Use actual stroke color for line preview
-                            let stroke_color = Color::from_rgba8(
-                                self.ctx.stroke_color.r(),
-                                self.ctx.stroke_color.g(),
-                                self.ctx.stroke_color.b(),
-                                self.ctx.stroke_color.a(),
-                            );
-
-                            // Draw the line directly
-                            let line = Line::new(*start_point, *current_point);
-                            scene.stroke(
-                                &Stroke::new(2.0),
-                                overlay_transform,
-                                stroke_color,
-                                None,
-                                &line,
-                            );
-                        }
-                    }
-
-                    // 6. Draw polygon creation preview
-                    if let lightningbeam_core::tool::ToolState::CreatingPolygon { ref center, ref current_point, num_sides, .. } = self.ctx.tool_state {
-                        use vello::kurbo::{BezPath, Point};
-                        use std::f64::consts::PI;
-
-                        // Calculate radius
-                        let dx = current_point.x - center.x;
-                        let dy = current_point.y - center.y;
-                        let radius = (dx * dx + dy * dy).sqrt();
-
-                        if radius > 5.0 && num_sides >= 3 {
-                            let preview_transform = overlay_transform * Affine::translate((center.x, center.y));
-
-                            // Use actual fill color (same as final shape)
-                            let fill_color = Color::from_rgba8(
-                                self.ctx.fill_color.r(),
-                                self.ctx.fill_color.g(),
-                                self.ctx.fill_color.b(),
-                                self.ctx.fill_color.a(),
-                            );
-
-                            // Create the polygon path inline
-                            let mut path = BezPath::new();
-                            let angle_step = 2.0 * PI / num_sides as f64;
-                            let start_angle = -PI / 2.0;
-
-                            // First vertex
-                            let first_x = radius * start_angle.cos();
-                            let first_y = radius * start_angle.sin();
-                            path.move_to(Point::new(first_x, first_y));
-
-                            // Add remaining vertices
-                            for i in 1..num_sides {
-                                let angle = start_angle + angle_step * i as f64;
-                                let x = radius * angle.cos();
-                                let y = radius * angle.sin();
-                                path.line_to(Point::new(x, y));
-                            }
-
-                            path.close_path();
-
-                            if self.ctx.fill_enabled {
-                                scene.fill(
-                                    Fill::NonZero,
-                                    preview_transform,
-                                    fill_color,
-                                    None,
-                                    &path,
-                                );
-                            }
-
-                            let stroke_color = Color::from_rgba8(
-                                self.ctx.stroke_color.r(),
-                                self.ctx.stroke_color.g(),
-                                self.ctx.stroke_color.b(),
-                                self.ctx.stroke_color.a(),
-                            );
-                            scene.stroke(
-                                &Stroke::new(self.ctx.stroke_width),
-                                preview_transform,
-                                stroke_color,
-                                None,
-                                &path,
-                            );
-                        }
-                    }
-
-                    // 7. Draw path drawing preview
-                    if let lightningbeam_core::tool::ToolState::DrawingPath { ref points, .. } = self.ctx.tool_state {
-                        use vello::kurbo::BezPath;
-
-                        if points.len() >= 2 {
-                            // Build a simple line path from the raw points for preview
-                            let mut preview_path = BezPath::new();
-                            preview_path.move_to(points[0]);
-                            for point in &points[1..] {
-                                preview_path.line_to(*point);
-                            }
-
-                            // Draw fill if enabled
-                            if self.ctx.fill_enabled {
-                                let fill_color = Color::from_rgba8(
-                                    self.ctx.fill_color.r(),
-                                    self.ctx.fill_color.g(),
-                                    self.ctx.fill_color.b(),
-                                    self.ctx.fill_color.a(),
-                                );
-                                scene.fill(
-                                    Fill::NonZero,
-                                    overlay_transform,
-                                    fill_color,
-                                    None,
-                                    &preview_path,
-                                );
-                            }
-
-                            let stroke_color = Color::from_rgba8(
-                                self.ctx.stroke_color.r(),
-                                self.ctx.stroke_color.g(),
-                                self.ctx.stroke_color.b(),
-                                self.ctx.stroke_color.a(),
-                            );
-
-                            scene.stroke(
-                                &Stroke::new(self.ctx.stroke_width),
-                                overlay_transform,
-                                stroke_color,
-                                None,
-                                &preview_path,
-                            );
-                        }
-                    }
-
                     // 8. Vector editing preview: DCEL edits are applied live to the document,
                     // so the normal DCEL render path draws the current state. No separate
                     // preview rendering is needed.
@@ -2146,6 +2308,145 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             }
         }
 
+        // Shape / path creation previews — drawn regardless of layer type so raster layers
+        // also see the live outline during drag.
+        {
+            use vello::peniko::{Color, Fill};
+            use vello::kurbo::{Rect as KurboRect, Stroke};
+
+            // Rectangle preview
+            if let lightningbeam_core::tool::ToolState::CreatingRectangle { ref start_point, ref current_point, centered, constrain_square, .. } = self.ctx.tool_state {
+                use vello::kurbo::Point;
+                let (width, height, position) = if centered {
+                    let dx = current_point.x - start_point.x;
+                    let dy = current_point.y - start_point.y;
+                    let (w, h) = if constrain_square {
+                        let size = dx.abs().max(dy.abs()) * 2.0;
+                        (size, size)
+                    } else {
+                        (dx.abs() * 2.0, dy.abs() * 2.0)
+                    };
+                    let pos = Point::new(start_point.x - w / 2.0, start_point.y - h / 2.0);
+                    (w, h, pos)
+                } else {
+                    let mut min_x = start_point.x.min(current_point.x);
+                    let mut min_y = start_point.y.min(current_point.y);
+                    let mut max_x = start_point.x.max(current_point.x);
+                    let mut max_y = start_point.y.max(current_point.y);
+                    if constrain_square {
+                        let size = (max_x - min_x).max(max_y - min_y);
+                        if current_point.x > start_point.x { max_x = min_x + size; } else { min_x = max_x - size; }
+                        if current_point.y > start_point.y { max_y = min_y + size; } else { min_y = max_y - size; }
+                    }
+                    (max_x - min_x, max_y - min_y, Point::new(min_x, min_y))
+                };
+                if width > 0.0 && height > 0.0 {
+                    let rect = KurboRect::new(0.0, 0.0, width, height);
+                    let preview_transform = overlay_transform * Affine::translate((position.x, position.y));
+                    if self.ctx.fill_enabled {
+                        let fc = self.ctx.fill_color;
+                        scene.fill(Fill::NonZero, preview_transform, Color::from_rgba8(fc.r(), fc.g(), fc.b(), fc.a()), None, &rect);
+                    }
+                    let sc = self.ctx.stroke_color;
+                    scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, Color::from_rgba8(sc.r(), sc.g(), sc.b(), sc.a()), None, &rect);
+                }
+            }
+
+            // Ellipse preview
+            if let lightningbeam_core::tool::ToolState::CreatingEllipse { ref start_point, ref current_point, corner_mode, constrain_circle, .. } = self.ctx.tool_state {
+                use vello::kurbo::{Point, Circle as KurboCircle, Ellipse};
+                let (rx, ry, position) = if corner_mode {
+                    let min_x = start_point.x.min(current_point.x);
+                    let min_y = start_point.y.min(current_point.y);
+                    let max_x = start_point.x.max(current_point.x);
+                    let max_y = start_point.y.max(current_point.y);
+                    let (rx, ry) = if constrain_circle {
+                        let r = (max_x - min_x).max(max_y - min_y) / 2.0;
+                        (r, r)
+                    } else { ((max_x - min_x) / 2.0, (max_y - min_y) / 2.0) };
+                    (rx, ry, Point::new(min_x + rx, min_y + ry))
+                } else {
+                    let dx = (current_point.x - start_point.x).abs();
+                    let dy = (current_point.y - start_point.y).abs();
+                    let (rx, ry) = if constrain_circle {
+                        let r = (dx * dx + dy * dy).sqrt(); (r, r)
+                    } else { (dx, dy) };
+                    (rx, ry, *start_point)
+                };
+                if rx > 0.0 && ry > 0.0 {
+                    let preview_transform = overlay_transform * Affine::translate((position.x, position.y));
+                    let fc = self.ctx.fill_color;
+                    let fill_color = Color::from_rgba8(fc.r(), fc.g(), fc.b(), fc.a());
+                    let sc = self.ctx.stroke_color;
+                    let stroke_color = Color::from_rgba8(sc.r(), sc.g(), sc.b(), sc.a());
+                    if rx == ry {
+                        let circle = KurboCircle::new((0.0, 0.0), rx);
+                        if self.ctx.fill_enabled { scene.fill(Fill::NonZero, preview_transform, fill_color, None, &circle); }
+                        scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, stroke_color, None, &circle);
+                    } else {
+                        let ellipse = Ellipse::new((0.0, 0.0), (rx, ry), 0.0);
+                        if self.ctx.fill_enabled { scene.fill(Fill::NonZero, preview_transform, fill_color, None, &ellipse); }
+                        scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, stroke_color, None, &ellipse);
+                    }
+                }
+            }
+
+            // Line preview
+            if let lightningbeam_core::tool::ToolState::CreatingLine { ref start_point, ref current_point, .. } = self.ctx.tool_state {
+                use vello::kurbo::Line;
+                let dx = current_point.x - start_point.x;
+                let dy = current_point.y - start_point.y;
+                if (dx * dx + dy * dy).sqrt() > 0.0 {
+                    let sc = self.ctx.stroke_color;
+                    let line = Line::new(*start_point, *current_point);
+                    scene.stroke(&Stroke::new(2.0), overlay_transform, Color::from_rgba8(sc.r(), sc.g(), sc.b(), sc.a()), None, &line);
+                }
+            }
+
+            // Polygon preview
+            if let lightningbeam_core::tool::ToolState::CreatingPolygon { ref center, ref current_point, num_sides, .. } = self.ctx.tool_state {
+                use vello::kurbo::{BezPath, Point};
+                use std::f64::consts::PI;
+                let dx = current_point.x - center.x;
+                let dy = current_point.y - center.y;
+                let radius = (dx * dx + dy * dy).sqrt();
+                if radius > 5.0 && num_sides >= 3 {
+                    let preview_transform = overlay_transform * Affine::translate((center.x, center.y));
+                    let angle_step = 2.0 * PI / num_sides as f64;
+                    let start_angle = -PI / 2.0;
+                    let mut path = BezPath::new();
+                    path.move_to(Point::new(radius * start_angle.cos(), radius * start_angle.sin()));
+                    for i in 1..num_sides {
+                        let angle = start_angle + angle_step * i as f64;
+                        path.line_to(Point::new(radius * angle.cos(), radius * angle.sin()));
+                    }
+                    path.close_path();
+                    if self.ctx.fill_enabled {
+                        let fc = self.ctx.fill_color;
+                        scene.fill(Fill::NonZero, preview_transform, Color::from_rgba8(fc.r(), fc.g(), fc.b(), fc.a()), None, &path);
+                    }
+                    let sc = self.ctx.stroke_color;
+                    scene.stroke(&Stroke::new(self.ctx.stroke_width), preview_transform, Color::from_rgba8(sc.r(), sc.g(), sc.b(), sc.a()), None, &path);
+                }
+            }
+
+            // Freehand path preview
+            if let lightningbeam_core::tool::ToolState::DrawingPath { ref points, .. } = self.ctx.tool_state {
+                use vello::kurbo::BezPath;
+                if points.len() >= 2 {
+                    let mut preview_path = BezPath::new();
+                    preview_path.move_to(points[0]);
+                    for point in &points[1..] { preview_path.line_to(*point); }
+                    if self.ctx.fill_enabled {
+                        let fc = self.ctx.fill_color;
+                        scene.fill(Fill::NonZero, overlay_transform, Color::from_rgba8(fc.r(), fc.g(), fc.b(), fc.a()), None, &preview_path);
+                    }
+                    let sc = self.ctx.stroke_color;
+                    scene.stroke(&Stroke::new(self.ctx.stroke_width), overlay_transform, Color::from_rgba8(sc.r(), sc.g(), sc.b(), sc.a()), None, &preview_path);
+                }
+            }
+        }
+
         // Render scene to texture using shared renderer
         if let Some(texture_view) = &instance_resources.texture_view {
             if USE_HDR_COMPOSITING {
@@ -2431,6 +2732,49 @@ pub struct StagePane {
     /// True while the current stroke is being painted onto the float buffer (B)
     /// rather than the layer canvas (A).
     painting_float: bool,
+    /// Timestamp (ui time in seconds) of the last `compute_dabs` call for this stroke.
+    /// Used to compute `dt` for the unified distance+time dab accumulator.
+    raster_last_compute_time: f64,
+    /// Clone stamp: (source_world - drag_start_world) computed at stroke start.
+    /// Constant for the entire stroke; cleared when the stroke ends.
+    clone_stroke_offset: Option<(f32, f32)>,
+    /// Live state for the raster transform tool (scale/rotate/move float).
+    raster_transform_state: Option<RasterTransformState>,
+    /// GPU transform work to dispatch in prepare().
+    pending_transform_dispatch: Option<PendingTransformDispatch>,
+    /// Accumulated state for the quick-select brush tool.
+    quick_select_state: Option<QuickSelectState>,
+    /// Live state for the Warp tool.
+    warp_state: Option<WarpState>,
+    /// Live state for the Liquify tool.
+    liquify_state: Option<LiquifyState>,
+    /// Live state for the Gradient fill tool.
+    gradient_state: Option<GradientState>,
+    /// GPU gradient fill dispatch to run next prepare() frame.
+    pending_gradient_op: Option<PendingGradientOp>,
+    /// GPU ops for Warp/Liquify to dispatch in prepare().
+    pending_warp_ops: Vec<PendingWarpOp>,
+
+    // ── New unified raster tool state ─────────────────────────────────────────
+    /// The active `RasterTool` implementation plus its GPU workspace.
+    /// Set on mousedown; cleared (and workspace queued for removal) on commit/cancel.
+    active_raster_tool: Option<(Box<dyn crate::raster_tool::RasterTool>, crate::raster_tool::RasterWorkspace)>,
+    /// Canvas UUIDs to remove from `GpuBrushEngine` at the top of the next `prepare()`.
+    /// Drains into `VelloRenderContext::pending_canvas_removals` each frame.
+    pending_canvas_removals: Vec<uuid::Uuid>,
+    /// First-frame canvas init packet for the active raster tool.  Forwarded to
+    /// `VelloRenderContext` on the mousedown frame; cleared after one forwarding.
+    pending_workspace_init: Option<crate::raster_tool::WorkspaceInitPacket>,
+    /// Keyframe UUIDs whose `raster_layer_cache` entry must be removed so fresh
+    /// `raw_pixels` are re-uploaded.  Drained into `VelloRenderContext` each frame.
+    pending_layer_cache_removals: Vec<uuid::Uuid>,
+    /// True when the unified raster tool has finished (mouseup) and is waiting for
+    /// the GPU readback result.  Cleared in render_content() after the result arrives.
+    active_tool_awaiting_readback: bool,
+    /// B-canvas UUID to readback into RASTER_READBACK_RESULTS on the next prepare().
+    /// Set on mouseup when `tool.finish()` returns true; forwarded to VelloRenderContext.
+    pending_tool_readback_b: Option<uuid::Uuid>,
+
     /// Synthetic drag/click override for test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     replay_override: Option<ReplayDragState>,
@@ -2444,6 +2788,156 @@ pub struct ReplayDragState {
     pub dragged: bool,
     pub drag_stopped: bool,
 }
+
+/// Accumulated state for the Quick Select brush-based selection tool.
+struct QuickSelectState {
+    /// Per-pixel OR'd selection mask (width × height).
+    mask: Vec<bool>,
+    /// RGBA snapshot of the canvas at drag start (read-only for all fills).
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    /// Last canvas-pixel position where a fill was run (for debouncing).
+    last_pos: (i32, i32),
+}
+
+/// Live state for an ongoing raster Warp operation.
+struct WarpState {
+    layer_id: uuid::Uuid,
+    time: f64,
+    /// Anchor canvas: existing keyframe GPU canvas (kf.id), read-only during warp.
+    anchor_canvas_id: uuid::Uuid,
+    /// Display canvas: warp-shader output shown in place of the layer.
+    display_canvas_id: uuid::Uuid,
+    /// Displacement map buffer (zero = no deformation).
+    disp_buf_id: uuid::Uuid,
+    anchor_w: u32,
+    anchor_h: u32,
+    grid_cols: u32,
+    grid_rows: u32,
+    /// Per-control-point state: [home_x, home_y, displaced_x, displaced_y].
+    /// Coordinates are in world space (canvas pixels, offset by float_offset if float warp).
+    control_points: Vec<[f32; 4]>,
+    /// Index of the control point being dragged (if any).
+    active_point: Option<usize>,
+    /// Index of the control point the cursor is currently over.
+    hovered_point: Option<usize>,
+    /// True when control points changed and a GPU re-apply is needed.
+    dirty: bool,
+    /// True once the first warp dispatch has been sent (display canvas has content).
+    warp_applied: bool,
+    /// True after Enter: waiting for final readback.
+    wants_commit: bool,
+    /// When warping a floating selection: its world-space top-left offset.
+    /// None = warping the full layer canvas.
+    float_offset: Option<(i32, i32)>,
+}
+
+/// Live state for an ongoing raster Liquify operation.
+struct LiquifyState {
+    layer_id: uuid::Uuid,
+    time: f64,
+    /// Anchor canvas: existing keyframe GPU canvas (kf.id), read-only during liquify.
+    anchor_canvas_id: uuid::Uuid,
+    display_canvas_id: uuid::Uuid,
+    disp_buf_id: uuid::Uuid,
+    anchor_w: u32,
+    anchor_h: u32,
+    /// Last brush position (canvas pixels) for debouncing.
+    last_brush_pos: Option<(f32, f32)>,
+    /// True once the first brush step has been applied.
+    liquify_applied: bool,
+    /// True after Enter: waiting for final readback.
+    wants_commit: bool,
+    /// When liquifying a floating selection: its world-space top-left offset. None = full layer.
+    float_offset: Option<(i32, i32)>,
+}
+
+/// Live state for an ongoing raster Gradient fill drag.
+struct GradientState {
+    layer_id: uuid::Uuid,
+    time: f64,
+    start: egui::Vec2,
+    end: egui::Vec2,
+    /// Snapshot of canvas pixels at drag start (used for CPU commit path).
+    before_pixels: Vec<u8>,
+    canvas_w: u32,
+    canvas_h: u32,
+    /// Anchor canvas: holds before_pixels (read-only by gradient shader each frame).
+    anchor_canvas_id: uuid::Uuid,
+    /// Display canvas: gradient shader writes here each frame; shown via painting_canvas or float path.
+    display_canvas_id: uuid::Uuid,
+    /// True when painting onto a floating selection instead of the layer canvas.
+    is_float: bool,
+    /// World-space top-left of the float in canvas pixels (None for non-float).
+    float_offset: Option<(f32, f32)>,
+}
+
+/// GPU ops queued by the Warp/Liquify handlers for `prepare()`.
+enum PendingWarpOp {
+    /// Upload control-point grid displacements and run warp-apply shader.
+    /// disp_data: one vec2 per control point (grid_cols * grid_rows entries).
+    /// None = reuse existing buffer (e.g. for final-commit re-apply).
+    WarpApply {
+        anchor_canvas_id: uuid::Uuid,
+        disp_buf_id: uuid::Uuid,
+        display_canvas_id: uuid::Uuid,
+        disp_data: Option<Vec<[f32; 2]>>,
+        grid_cols: u32,
+        grid_rows: u32,
+        w: u32, h: u32,
+        final_commit: bool,
+        layer_id: uuid::Uuid,
+        time: f64,
+        /// True when warping a floating selection.
+        is_float_warp: bool,
+    },
+    /// Update the displacement map from one brush step (Liquify tool).
+    LiquifyBrushStep {
+        disp_buf_id: uuid::Uuid,
+        params: crate::gpu_brush::LiquifyBrushParams,
+    },
+    /// Run warp-apply shader (Liquify tool — displacement already updated).
+    LiquifyApply {
+        anchor_canvas_id: uuid::Uuid,
+        disp_buf_id: uuid::Uuid,
+        display_canvas_id: uuid::Uuid,
+        w: u32, h: u32,
+        final_commit: bool,
+        layer_id: uuid::Uuid,
+        time: f64,
+        /// True when liquifying a floating selection.
+        is_float_warp: bool,
+    },
+    /// Initialise GPU resources for a new warp/liquify operation.
+    /// anchor_canvas_id = kf.id (reuses existing GPU canvas; ensure_canvas is a no-op if present).
+    /// anchor_pixels: uploaded to anchor canvas only if it was missing (e.g. after stroke commit).
+    /// is_liquify: if true, displacement buffer is full w×h (per-pixel); otherwise 1×1 (grid mode init).
+    Init {
+        anchor_canvas_id: uuid::Uuid,
+        display_canvas_id: uuid::Uuid,
+        disp_buf_id: uuid::Uuid,
+        w: u32, h: u32,
+        anchor_pixels: Vec<u8>,
+        is_liquify: bool,
+    },
+}
+
+/// Result stored by `prepare()` after a warp/liquify commit readback.
+struct WarpReadbackResult {
+    layer_id: uuid::Uuid,
+    time: f64,
+    before_pixels: Vec<u8>,
+    after_pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+    display_canvas_id: uuid::Uuid,
+    anchor_canvas_id: uuid::Uuid,
+    /// True when warping a floating selection (don't write to kf.raw_pixels).
+    is_float_warp: bool,
+}
+
+static WARP_READBACK_RESULTS: OnceLock<Arc<Mutex<std::collections::HashMap<u64, WarpReadbackResult>>>> = OnceLock::new();
 
 /// Cached DCEL snapshot for undo when editing vertices, curves, or control points
 #[derive(Clone)]
@@ -2488,6 +2982,112 @@ struct PendingRasterDabs {
     /// the undo action.
     wants_final_readback: bool,
 }
+
+/// Which transform handle the user is interacting with.
+#[derive(Clone, Copy, PartialEq)]
+enum RasterTransformHandle {
+    Move,
+    Corner { right: bool, bottom: bool },
+    EdgeH  { bottom: bool },
+    EdgeV  { right: bool  },
+    Rotate,
+    Origin,  // the pivot point, draggable
+}
+
+/// Live state for an ongoing raster transform operation.
+struct RasterTransformState {
+    /// canvas_id of the float when this state was created. If different → stale, reinit.
+    float_canvas_id: uuid::Uuid,
+    /// Anchor: original pixels, never written during transform.
+    anchor_canvas_id: uuid::Uuid,
+    /// sRGB-encoded pixel data for the anchor canvas (re-uploaded each dispatch).
+    anchor_pixels: Vec<u8>,
+    anchor_w: u32,
+    anchor_h: u32,
+    /// Display canvas: compute shader output, shown in place of float during transform.
+    display_canvas_id: uuid::Uuid,
+    /// Center of the transformed bounding box in canvas (world) coords.
+    cx: f32, cy: f32,
+    scale_x: f32, scale_y: f32,
+    /// Rotation in radians.
+    angle: f32,
+    /// Pivot point for rotate/scale (defaults to center).
+    origin_x: f32, origin_y: f32,
+    /// Which handle is being dragged, if any.
+    active_handle: Option<RasterTransformHandle>,
+    /// Which handle the cursor is currently over (for visual feedback).
+    hovered_handle: Option<RasterTransformHandle>,
+    /// World position where the current drag started.
+    drag_start_world: egui::Vec2,
+    /// Snapped values captured at drag start.
+    snap_cx: f32, snap_cy: f32,
+    snap_sx: f32, snap_sy: f32,
+    snap_angle: f32,
+    snap_origin_x: f32, snap_origin_y: f32,
+    /// True once at least one GPU transform dispatch has been queued.
+    transform_applied: bool,
+    /// True after Enter: waiting for the final readback before clearing state.
+    wants_apply: bool,
+}
+
+/// GPU work queued by `handle_raster_transform_tool` for `prepare()`.
+struct PendingTransformDispatch {
+    anchor_canvas_id: uuid::Uuid,
+    /// Anchor pixels — re-uploaded each dispatch to keep the anchor immutable.
+    anchor_pixels: Vec<u8>,
+    anchor_w: u32,
+    anchor_h: u32,
+    /// Display canvas: compute shader output (was float_canvas_id).
+    display_canvas_id: uuid::Uuid,
+    /// AABB of the transformed output (for readback result positioning).
+    new_x: i32, new_y: i32,
+    /// Output canvas dimensions (may differ from anchor if scaled/rotated).
+    new_w: u32,
+    new_h: u32,
+    /// Inverse affine coefficients: src_pixel = A * out_pixel + b.
+    a00: f32, a01: f32,
+    a10: f32, a11: f32,
+    b0: f32, b1: f32,
+    /// If true, readback the display canvas after dispatch and store in TRANSFORM_READBACK_RESULTS.
+    is_final_commit: bool,
+}
+
+/// Pending GPU dispatch for the gradient fill tool.
+struct PendingGradientOp {
+    anchor_canvas_id:  uuid::Uuid,
+    display_canvas_id: uuid::Uuid,
+    w: u32,
+    h: u32,
+    /// If Some: upload these sRGB-premultiplied pixels to the anchor canvas first.
+    anchor_pixels: Option<Vec<u8>>,
+    start_x: f32,
+    start_y: f32,
+    end_x: f32,
+    end_y: f32,
+    opacity:     f32,
+    extend_mode: u32,
+    kind:        u32,  // 0 = Linear, 1 = Radial
+    stops: Vec<crate::gpu_brush::GpuGradientStop>,
+}
+
+/// Pixels read back from the transformed display canvas, stored per-instance.
+struct TransformReadbackResult {
+    pixels: Vec<u8>,
+    width:  u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    display_canvas_id: uuid::Uuid,
+}
+
+/// Sent from StagePane to VelloCallback to override float blit with display canvas.
+struct TransformDisplayInfo {
+    display_canvas_id: uuid::Uuid,
+    x: i32, y: i32,
+    w: u32, h: u32,
+}
+
+static TRANSFORM_READBACK_RESULTS: OnceLock<Arc<Mutex<std::collections::HashMap<u64, TransformReadbackResult>>>> = OnceLock::new();
 
 /// Result stored by `prepare()` after a stroke-end readback.
 struct RasterReadbackResult {
@@ -2554,6 +3154,22 @@ impl StagePane {
             pending_canvas_removal: None,
             stroke_clip_selection: None,
             painting_float: false,
+            raster_last_compute_time: 0.0,
+            clone_stroke_offset: None,
+            raster_transform_state: None,
+            pending_transform_dispatch: None,
+            quick_select_state: None,
+            warp_state: None,
+            liquify_state: None,
+            gradient_state: None,
+            pending_gradient_op: None,
+            pending_warp_ops: Vec::new(),
+            active_raster_tool: None,
+            pending_canvas_removals: Vec::new(),
+            pending_workspace_init: None,
+            pending_layer_cache_removals: Vec::new(),
+            active_tool_awaiting_readback: false,
+            pending_tool_readback_b: None,
             #[cfg(debug_assertions)]
             replay_override: None,
         }
@@ -3635,21 +4251,18 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Point;
 
-        // Check if we have an active vector layer
         let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
-            Some(layer) => layer,
-            None => return,
-        };
-
-        // Only work on VectorLayer
-        if !matches!(active_layer, AnyLayer::Vector(_)) {
-            return;
-        }
+        let is_raster = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+        let is_vector = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Vector(_)));
+        if !is_raster && !is_vector { return; }
 
         let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
@@ -3726,28 +4339,43 @@ impl StagePane {
 
                 // Only create shape if rectangle has non-zero size
                 if width > 1.0 && height > 1.0 {
-                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
-                    use lightningbeam_core::actions::AddShapeAction;
-
-                    let path = Self::create_rectangle_path(min_x, min_y, max_x, max_y);
-
-                    let fill_color = if *shared.fill_enabled {
-                        Some(ShapeColor::from_egui(*shared.fill_color))
+                    if is_raster {
+                        let sc = *shared.stroke_color;
+                        let fc = *shared.fill_color;
+                        let fill_en = *shared.fill_enabled;
+                        let thickness = *shared.stroke_width as f32;
+                        // Subtract 0.5 to align with Vello's pixel-center convention
+                        // (ImageBrush displays pixel (px,py) centered at world (px+0.5, py+0.5))
+                        let (x0, y0, x1, y1) = (min_x as f32 - 0.5, min_y as f32 - 0.5, max_x as f32 - 0.5, max_y as f32 - 0.5);
+                        let stroke_rgba = [sc.r(), sc.g(), sc.b(), sc.a()];
+                        let fill_rgba = fill_en.then(|| [fc.r(), fc.g(), fc.b(), fc.a()]);
+                        Self::apply_raster_pixel_edit(shared, active_layer_id, "Draw rectangle", |pixels, w, h| {
+                            lightningbeam_core::raster_draw::draw_rect(
+                                pixels, w, h, x0, y0, x1, y1,
+                                Some(stroke_rgba), fill_rgba, thickness,
+                            );
+                        });
                     } else {
-                        None
-                    };
+                        use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
+                        use lightningbeam_core::actions::AddShapeAction;
 
-                    let action = AddShapeAction::new(
-                        active_layer_id,
-                        *shared.playback_time,
-                        path,
-                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
-                        Some(ShapeColor::from_egui(*shared.stroke_color)),
-                        fill_color,
-                        true, // closed
-                    ).with_description("Add rectangle");
-                    let _ = shared.action_executor.execute(Box::new(action));
-
+                        let path = Self::create_rectangle_path(min_x, min_y, max_x, max_y);
+                        let fill_color = if *shared.fill_enabled {
+                            Some(ShapeColor::from_egui(*shared.fill_color))
+                        } else {
+                            None
+                        };
+                        let action = AddShapeAction::new(
+                            active_layer_id,
+                            *shared.playback_time,
+                            path,
+                            Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                            Some(ShapeColor::from_egui(*shared.stroke_color)),
+                            fill_color,
+                            true, // closed
+                        ).with_description("Add rectangle");
+                        let _ = shared.action_executor.execute(Box::new(action));
+                    }
                     // Clear tool state to stop preview rendering
                     *shared.tool_state = ToolState::Idle;
                 }
@@ -3768,21 +4396,18 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Point;
 
-        // Check if we have an active vector layer
         let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
-            Some(layer) => layer,
-            None => return,
-        };
-
-        // Only work on VectorLayer
-        if !matches!(active_layer, AnyLayer::Vector(_)) {
-            return;
-        }
+        let is_raster = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+        let is_vector = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Vector(_)));
+        if !is_raster && !is_vector { return; }
 
         let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
@@ -3850,28 +4475,42 @@ impl StagePane {
 
                 // Only create shape if ellipse has non-zero size
                 if rx > 1.0 && ry > 1.0 {
-                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
-                    use lightningbeam_core::actions::AddShapeAction;
-
-                    let path = Self::create_ellipse_path(position.x, position.y, rx, ry);
-
-                    let fill_color = if *shared.fill_enabled {
-                        Some(ShapeColor::from_egui(*shared.fill_color))
+                    if is_raster {
+                        let sc = *shared.stroke_color;
+                        let fc = *shared.fill_color;
+                        let fill_en = *shared.fill_enabled;
+                        let thickness = *shared.stroke_width as f32;
+                        let (cx, cy) = (position.x as f32 - 0.5, position.y as f32 - 0.5);
+                        let (erx, ery) = (rx as f32, ry as f32);
+                        let stroke_rgba = [sc.r(), sc.g(), sc.b(), sc.a()];
+                        let fill_rgba = fill_en.then(|| [fc.r(), fc.g(), fc.b(), fc.a()]);
+                        Self::apply_raster_pixel_edit(shared, active_layer_id, "Draw ellipse", |pixels, w, h| {
+                            lightningbeam_core::raster_draw::draw_ellipse(
+                                pixels, w, h, cx, cy, erx, ery,
+                                Some(stroke_rgba), fill_rgba, thickness,
+                            );
+                        });
                     } else {
-                        None
-                    };
+                        use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
+                        use lightningbeam_core::actions::AddShapeAction;
 
-                    let action = AddShapeAction::new(
-                        active_layer_id,
-                        *shared.playback_time,
-                        path,
-                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
-                        Some(ShapeColor::from_egui(*shared.stroke_color)),
-                        fill_color,
-                        true, // closed
-                    ).with_description("Add ellipse");
-                    let _ = shared.action_executor.execute(Box::new(action));
-
+                        let path = Self::create_ellipse_path(position.x, position.y, rx, ry);
+                        let fill_color = if *shared.fill_enabled {
+                            Some(ShapeColor::from_egui(*shared.fill_color))
+                        } else {
+                            None
+                        };
+                        let action = AddShapeAction::new(
+                            active_layer_id,
+                            *shared.playback_time,
+                            path,
+                            Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                            Some(ShapeColor::from_egui(*shared.stroke_color)),
+                            fill_color,
+                            true, // closed
+                        ).with_description("Add ellipse");
+                        let _ = shared.action_executor.execute(Box::new(action));
+                    }
                     // Clear tool state to stop preview rendering
                     *shared.tool_state = ToolState::Idle;
                 }
@@ -3884,7 +4523,7 @@ impl StagePane {
         ui: &mut egui::Ui,
         response: &egui::Response,
         world_pos: egui::Vec2,
-        _shift_held: bool,
+        shift_held: bool,
         _ctrl_held: bool,
         shared: &mut SharedPaneState,
     ) {
@@ -3892,23 +4531,36 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Point;
 
-        // Check if we have an active vector layer
         let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
-            Some(layer) => layer,
-            None => return,
-        };
+        let is_raster = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+        let is_vector = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Vector(_)));
+        if !is_raster && !is_vector { return; }
 
-        // Only work on VectorLayer
-        if !matches!(active_layer, AnyLayer::Vector(_)) {
-            return;
+        let mut point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
+
+        // Shift: snap to 45° angle increments (raster; also applied to vector for consistency).
+        if shift_held {
+            if let ToolState::CreatingLine { start_point, .. } = shared.tool_state {
+                let dx = point.x - start_point.x;
+                let dy = point.y - start_point.y;
+                let len = (dx * dx + dy * dy).sqrt();
+                let angle = (dy as f32).atan2(dx as f32);
+                let snapped = (angle / (std::f32::consts::PI / 4.0)).round()
+                    * (std::f32::consts::PI / 4.0);
+                point = Point::new(
+                    start_point.x + len * snapped.cos() as f64,
+                    start_point.y + len * snapped.sin() as f64,
+                );
+            }
         }
-
-        let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating line
         if self.rsp_drag_started(response) || self.rsp_clicked(response) {
@@ -3931,30 +4583,38 @@ impl StagePane {
         // Mouse up: create the line shape
         if self.rsp_drag_stopped(response) || (self.rsp_any_released(ui) && matches!(shared.tool_state, ToolState::CreatingLine { .. })) {
             if let ToolState::CreatingLine { start_point, current_point } = shared.tool_state.clone() {
-                // Calculate line length to ensure it's not too small
                 let dx = current_point.x - start_point.x;
                 let dy = current_point.y - start_point.y;
                 let length = (dx * dx + dy * dy).sqrt();
 
-                // Only create shape if line has reasonable length
                 if length > 1.0 {
-                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
-                    use lightningbeam_core::actions::AddShapeAction;
+                    if is_raster {
+                        let sc = *shared.stroke_color;
+                        let thickness = *shared.stroke_width as f32;
+                        let (ax, ay) = (start_point.x as f32 - 0.5, start_point.y as f32 - 0.5);
+                        let (bx, by) = (current_point.x as f32 - 0.5, current_point.y as f32 - 0.5);
+                        let stroke_rgba = [sc.r(), sc.g(), sc.b(), sc.a()];
+                        Self::apply_raster_pixel_edit(shared, active_layer_id, "Draw line", |pixels, w, h| {
+                            lightningbeam_core::raster_draw::draw_line(
+                                pixels, w, h, ax, ay, bx, by, stroke_rgba, thickness,
+                            );
+                        });
+                    } else {
+                        use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
+                        use lightningbeam_core::actions::AddShapeAction;
 
-                    let path = Self::create_line_path(start_point, current_point);
-
-                    let action = AddShapeAction::new(
-                        active_layer_id,
-                        *shared.playback_time,
-                        path,
-                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
-                        Some(ShapeColor::from_egui(*shared.stroke_color)),
-                        None, // no fill for lines
-                        false, // not closed
-                    ).with_description("Add line");
-                    let _ = shared.action_executor.execute(Box::new(action));
-
-                    // Clear tool state to stop preview rendering
+                        let path = Self::create_line_path(start_point, current_point);
+                        let action = AddShapeAction::new(
+                            active_layer_id,
+                            *shared.playback_time,
+                            path,
+                            Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                            Some(ShapeColor::from_egui(*shared.stroke_color)),
+                            None, // no fill for lines
+                            false, // not closed
+                        ).with_description("Add line");
+                        let _ = shared.action_executor.execute(Box::new(action));
+                    }
                     *shared.tool_state = ToolState::Idle;
                 }
             }
@@ -3974,7 +4634,6 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Point;
 
-        // Check if we have an active vector layer
         let active_layer_id = match *shared.active_layer_id {
             Some(id) => id,
             None => return,
@@ -3985,11 +4644,13 @@ impl StagePane {
             None => return,
         };
 
-        // Only work on VectorLayer
-        if !matches!(active_layer, AnyLayer::Vector(_)) {
+        let is_raster = matches!(active_layer, AnyLayer::Raster(_));
+        let is_vector = matches!(active_layer, AnyLayer::Vector(_));
+        if !is_raster && !is_vector {
             return;
         }
 
+        let num_sides = *shared.polygon_sides;
         let point = self.snap_point(Point::new(world_pos.x as f64, world_pos.y as f64), shared);
 
         // Mouse down: start creating polygon (center point)
@@ -3997,7 +4658,7 @@ impl StagePane {
             *shared.tool_state = ToolState::CreatingPolygon {
                 center: point,
                 current_point: point,
-                num_sides: 5,  // Default to 5 sides (pentagon)
+                num_sides,
             };
         }
 
@@ -4022,27 +4683,55 @@ impl StagePane {
 
                 // Only create shape if polygon has reasonable size
                 if radius > 5.0 {
-                    use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
-                    use lightningbeam_core::actions::AddShapeAction;
+                    if is_raster {
+                        use lightningbeam_core::raster_draw;
+                        use std::f64::consts::TAU;
 
-                    let path = Self::create_polygon_path(center, num_sides, radius);
+                        let cx = center.x as f32 - 0.5;
+                        let cy = center.y as f32 - 0.5;
+                        let r = radius as f32;
+                        let n = num_sides as usize;
+                        let vertices: Vec<(f32, f32)> = (0..n).map(|i| {
+                            let angle = (i as f64 / n as f64) * TAU - std::f64::consts::FRAC_PI_2;
+                            (cx + r * angle.cos() as f32, cy + r * angle.sin() as f32)
+                        }).collect();
 
-                    let fill_color = if *shared.fill_enabled {
-                        Some(ShapeColor::from_egui(*shared.fill_color))
+                        let stroke_color = shared.stroke_color.to_array();
+                        let stroke_rgba = [stroke_color[0], stroke_color[1], stroke_color[2], stroke_color[3]];
+                        let fill_rgba = if *shared.fill_enabled {
+                            let fc = shared.fill_color.to_array();
+                            Some([fc[0], fc[1], fc[2], fc[3]])
+                        } else {
+                            None
+                        };
+                        let thickness = *shared.stroke_width as f32;
+
+                        let _ = Self::apply_raster_pixel_edit(shared, active_layer_id, "Add polygon", |pixels, w, h| {
+                            raster_draw::draw_polygon(pixels, w, h, &vertices, Some(stroke_rgba), fill_rgba, thickness);
+                        });
                     } else {
-                        None
-                    };
+                        use lightningbeam_core::shape::{ShapeColor, StrokeStyle};
+                        use lightningbeam_core::actions::AddShapeAction;
 
-                    let action = AddShapeAction::new(
-                        active_layer_id,
-                        *shared.playback_time,
-                        path,
-                        Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
-                        Some(ShapeColor::from_egui(*shared.stroke_color)),
-                        fill_color,
-                        true, // closed
-                    ).with_description("Add polygon");
-                    let _ = shared.action_executor.execute(Box::new(action));
+                        let path = Self::create_polygon_path(center, num_sides, radius);
+
+                        let fill_color = if *shared.fill_enabled {
+                            Some(ShapeColor::from_egui(*shared.fill_color))
+                        } else {
+                            None
+                        };
+
+                        let action = AddShapeAction::new(
+                            active_layer_id,
+                            *shared.playback_time,
+                            path,
+                            Some(StrokeStyle { width: *shared.stroke_width, ..Default::default() }),
+                            Some(ShapeColor::from_egui(*shared.stroke_color)),
+                            fill_color,
+                            true, // closed
+                        ).with_description("Add polygon");
+                        let _ = shared.action_executor.execute(Box::new(action));
+                    }
 
                     // Clear tool state to stop preview rendering
                     *shared.tool_state = ToolState::Idle;
@@ -4667,7 +5356,8 @@ impl StagePane {
         let (w, h) = (kf.width, kf.height);
         let action = RasterStrokeAction::new(
             float.layer_id, float.time,
-            float.canvas_before, canvas_after,
+            std::sync::Arc::try_unwrap(float.canvas_before).unwrap_or_else(|a| (*a).clone()),
+            canvas_after,
             w, h,
         );
         if let Err(e) = shared.action_executor.execute(Box::new(action)) {
@@ -4727,6 +5417,268 @@ impl StagePane {
         mask
     }
 
+    /// Allocate the three A/B/C GPU canvases and build a [`crate::raster_tool::RasterWorkspace`]
+    /// for a new raster tool operation.
+    ///
+    /// Called on **mousedown** before any tool-specific code runs.  The returned
+    /// [`crate::raster_tool::WorkspaceInitPacket`] must be stored in `self.pending_workspace_init`
+    /// so that [`VelloCallback::prepare`] can create the GPU textures on the first frame.
+    ///
+    /// - If a floating selection is active, the workspace targets it (Float path).
+    /// - Otherwise, any lingering float is committed first, then the active raster
+    ///   layer's keyframe becomes the workspace source (Layer path).
+    ///
+    /// Returns `None` when there is no raster target (no active layer, or the active
+    /// layer is not a raster layer).
+    fn begin_raster_workspace(
+        shared: &mut SharedPaneState,
+    ) -> Option<(crate::raster_tool::RasterWorkspace, crate::raster_tool::WorkspaceInitPacket)> {
+        use crate::raster_tool::{WorkspaceInitPacket, WorkspaceSource, RasterWorkspace};
+        use lightningbeam_core::layer::AnyLayer;
+
+        if let Some(ref float) = shared.selection.raster_floating {
+            // ── Float-active path ─────────────────────────────────────────
+            // Paint onto the floating selection's existing GPU canvas (A).
+            // Do NOT commit the float; it remains active.
+            let pixels = if float.pixels.is_empty() {
+                vec![0u8; (float.width * float.height * 4) as usize]
+            } else {
+                (*float.pixels).clone()
+            };
+            let (w, h, x, y) = (float.width, float.height, float.x, float.y);
+
+            let a_id = uuid::Uuid::new_v4();
+            let b_id = uuid::Uuid::new_v4();
+            let c_id = uuid::Uuid::new_v4();
+
+            let ws = RasterWorkspace {
+                a_canvas_id: a_id,
+                b_canvas_id: b_id,
+                c_canvas_id: c_id,
+                mask_texture: None,
+                width: w,
+                height: h,
+                x,
+                y,
+                source: WorkspaceSource::Float,
+                before_pixels: pixels.clone(),
+            };
+            let init = WorkspaceInitPacket {
+                a_canvas_id: a_id,
+                a_pixels: pixels,
+                b_canvas_id: b_id,
+                c_canvas_id: c_id,
+                width: w,
+                height: h,
+            };
+            Some((ws, init))
+        } else {
+            // ── Layer-active path ─────────────────────────────────────────
+            // Commit any lingering float so buffer_before reflects the fully-composited canvas.
+            Self::commit_raster_floating_now(shared);
+
+            let layer_id = (*shared.active_layer_id)?;
+            let time = *shared.playback_time;
+
+            let (doc_w, doc_h) = {
+                let doc = shared.action_executor.document();
+                (doc.width as u32, doc.height as u32)
+            };
+
+            // Ensure the keyframe exists before reading its ID.
+            {
+                let doc = shared.action_executor.document_mut();
+                if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                    rl.ensure_keyframe_at(time, doc_w, doc_h);
+                } else {
+                    return None; // not a raster layer
+                }
+            }
+
+            // Read keyframe id and pixels.
+            let (kf_id, w, h, pixels) = {
+                let doc = shared.action_executor.document();
+                let AnyLayer::Raster(rl) = doc.get_layer(&layer_id)? else { return None };
+                let kf = rl.keyframe_at(time)?;
+                let pixels = if kf.raw_pixels.is_empty() {
+                    vec![0u8; (kf.width * kf.height * 4) as usize]
+                } else {
+                    kf.raw_pixels.clone()
+                };
+                (kf.id, kf.width, kf.height, pixels)
+            };
+
+            let a_id = uuid::Uuid::new_v4();
+            let b_id = uuid::Uuid::new_v4();
+            let c_id = uuid::Uuid::new_v4();
+
+            let ws = RasterWorkspace {
+                a_canvas_id: a_id,
+                b_canvas_id: b_id,
+                c_canvas_id: c_id,
+                mask_texture: None,
+                width: w,
+                height: h,
+                x: 0,
+                y: 0,
+                source: WorkspaceSource::Layer {
+                    layer_id,
+                    time,
+                    kf_id,
+                    canvas_w: doc_w,
+                    canvas_h: doc_h,
+                },
+                before_pixels: pixels.clone(),
+            };
+            let init = WorkspaceInitPacket {
+                a_canvas_id: a_id,
+                a_pixels: pixels,
+                b_canvas_id: b_id,
+                c_canvas_id: c_id,
+                width: w,
+                height: h,
+            };
+            Some((ws, init))
+        }
+    }
+
+    /// Unified raster stroke handler using the [`crate::raster_tool::RasterTool`] trait.
+    ///
+    /// Handles all paint-style brush tools (Paint, Pencil, Airbrush, Eraser, etc.).
+    /// - **mousedown**: calls `begin_raster_workspace()` + instantiates `BrushRasterTool`.
+    /// - **drag**: calls `tool.update()` each frame.
+    /// - **mouseup**: calls `tool.finish()`, schedules GPU B-canvas readback if committed.
+    fn handle_unified_raster_stroke_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        def: &'static dyn crate::tools::RasterToolDef,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::ToolState;
+        use lightningbeam_core::raster_layer::RasterBlendMode;
+        use crate::raster_tool::{BrushRasterTool, RasterTool, WorkspaceSource};
+
+        let active_layer_id = match *shared.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        // Only operate on raster layers
+        let is_raster = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
+        if !is_raster { return; }
+
+        let blend_mode = def.blend_mode();
+
+        // ----------------------------------------------------------------
+        // Mouse down: initialise the workspace and start the tool
+        // ----------------------------------------------------------------
+        let stroke_start = (self.rsp_primary_pressed(ui) && response.hovered()
+                            && self.active_raster_tool.is_none())
+                        || (self.rsp_clicked(response) && self.active_raster_tool.is_none());
+        if stroke_start {
+            // Build brush settings from the tool definition.
+            let bp = def.brush_params(shared.raster_settings);
+            let (mut b, radius, opacity, hardness, spacing) =
+                (bp.base_settings, bp.radius, bp.opacity, bp.hardness, bp.spacing);
+            b.radius_log      = radius.ln() - b.pressure_radius_gain * 0.5;
+            b.hardness        = hardness;
+            b.opaque          = opacity;
+            b.dabs_per_radius = spacing;
+            if matches!(blend_mode, RasterBlendMode::Smudge) {
+                b.dabs_per_actual_radius = 0.0;
+                b.smudge_radius_log = shared.raster_settings.smudge_strength;
+            }
+            if matches!(blend_mode, RasterBlendMode::BlurSharpen) {
+                b.dabs_per_actual_radius = 0.0;
+            }
+            let color = if matches!(blend_mode, RasterBlendMode::Erase) {
+                [1.0f32, 1.0, 1.0, 1.0]
+            } else {
+                let c = if shared.raster_settings.brush_use_fg {
+                    *shared.stroke_color
+                } else {
+                    *shared.fill_color
+                };
+                let s2l = |v: u8| -> f32 {
+                    let f = v as f32 / 255.0;
+                    if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+                };
+                [s2l(c.r()), s2l(c.g()), s2l(c.b()), c.a() as f32 / 255.0]
+            };
+
+            if let Some((ws, init)) = Self::begin_raster_workspace(shared) {
+                let mut tool = Box::new(BrushRasterTool::new(color, b, blend_mode));
+                self.raster_last_compute_time = ui.input(|i| i.time);
+                tool.begin(&ws, world_pos, 0.0, shared.raster_settings);
+                self.pending_workspace_init = Some(init);
+                *shared.tool_state = ToolState::DrawingRasterStroke { points: vec![] };
+                self.active_raster_tool = Some((tool, ws));
+            }
+        }
+
+        // ----------------------------------------------------------------
+        // Per-frame update: fires every frame while stroke is active so
+        // time-based brushes (airbrush) accumulate dabs even when stationary.
+        // ----------------------------------------------------------------
+        if self.active_raster_tool.is_some()
+            && matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. })
+            && !stroke_start
+        {
+            let current_time = ui.input(|i| i.time);
+            let dt = (current_time - self.raster_last_compute_time).clamp(0.0, 0.1) as f32;
+            self.raster_last_compute_time = current_time;
+            if let Some((ref mut tool, ref ws)) = self.active_raster_tool {
+                tool.update(ws, world_pos, dt, shared.raster_settings);
+            }
+        }
+
+        // Keep egui repainting while a stroke is in progress.
+        if matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. }) {
+            ui.ctx().request_repaint();
+        }
+
+        // ----------------------------------------------------------------
+        // Mouse up: finish the tool, trigger readback if needed
+        // ----------------------------------------------------------------
+        let stroke_end = self.rsp_drag_stopped(response)
+            || (self.rsp_any_released(ui)
+                && self.active_raster_tool.is_some()
+                && matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. }));
+        if stroke_end {
+            *shared.tool_state = ToolState::Idle;
+            if self.active_raster_tool.is_some() {
+                let needs_commit = {
+                    let (ref mut tool, ref ws) = self.active_raster_tool.as_mut().unwrap();
+                    tool.finish(ws)
+                };
+                if needs_commit {
+                    let ws = &self.active_raster_tool.as_ref().unwrap().1;
+                    self.painting_float = matches!(ws.source, WorkspaceSource::Float);
+                    let (undo_layer_id, undo_time) = match &ws.source {
+                        WorkspaceSource::Layer { layer_id, time, .. } => (*layer_id, *time),
+                        WorkspaceSource::Float => (uuid::Uuid::nil(), 0.0),
+                    };
+                    self.pending_undo_before = Some((
+                        undo_layer_id, undo_time, ws.width, ws.height,
+                        ws.before_pixels.clone(),
+                    ));
+                    self.pending_tool_readback_b = Some(ws.b_canvas_id);
+                    self.active_tool_awaiting_readback = true;
+                    // Keep active_raster_tool alive until render_content() consumes the result.
+                } else {
+                    // No commit (no dabs were placed); discard immediately.
+                    if let Some((_, ws)) = self.active_raster_tool.take() {
+                        self.pending_canvas_removals.extend(ws.canvas_ids());
+                    }
+                }
+            }
+        }
+    }
+
     fn lift_selection_to_float(shared: &mut SharedPaneState) {
         use lightningbeam_core::layer::AnyLayer;
         use lightningbeam_core::selection::RasterFloatingSelection;
@@ -4767,14 +5719,14 @@ impl StagePane {
         // Re-set selection (commit_raster_floating_now cleared it) and create float.
         shared.selection.raster_selection = Some(sel);
         shared.selection.raster_floating = Some(RasterFloatingSelection {
-            pixels: float_pixels,
+            pixels: std::sync::Arc::new(float_pixels),
             width: w,
             height: h,
             x: x0,
             y: y0,
             layer_id,
             time,
-            canvas_before,
+            canvas_before: std::sync::Arc::new(canvas_before),
             canvas_id: uuid::Uuid::new_v4(),
         });
     }
@@ -4782,6 +5734,27 @@ impl StagePane {
     /// `self.pending_raster_dabs` for dispatch by `VelloCallback::prepare()`.
     ///
     /// The actual pixel rendering happens on the GPU (compute shader).  The CPU
+    /// Build the `tool_params: [f32; 4]` for a StrokeRecord.
+    /// For clone/healing: [offset_x, offset_y, 0, 0] (computed from clone_stroke_offset).
+    /// For all other tools: delegates to def.tool_params().
+    fn make_tool_params(
+        &self,
+        def: &dyn crate::tools::RasterToolDef,
+        shared: &SharedPaneState,
+    ) -> [f32; 4] {
+        use lightningbeam_core::raster_layer::RasterBlendMode;
+        match def.blend_mode() {
+            RasterBlendMode::CloneStamp | RasterBlendMode::Healing => {
+                if let Some((ox, oy)) = self.clone_stroke_offset {
+                    [ox, oy, 0.0, 0.0]
+                } else {
+                    [0.0; 4]
+                }
+            }
+            _ => def.tool_params(shared.raster_settings),
+        }
+    }
+
     /// only does dab placement arithmetic (cheap).  On stroke end a readback is
     /// requested so the undo system can capture the final pixel state.
     fn handle_raster_stroke_tool(
@@ -4789,9 +5762,10 @@ impl StagePane {
         ui: &mut egui::Ui,
         response: &egui::Response,
         world_pos: egui::Vec2,
-        blend_mode: lightningbeam_core::raster_layer::RasterBlendMode,
+        def: &'static dyn crate::tools::RasterToolDef,
         shared: &mut SharedPaneState,
     ) {
+        let blend_mode = def.blend_mode();
         use lightningbeam_core::tool::ToolState;
         use lightningbeam_core::layer::AnyLayer;
         use lightningbeam_core::raster_layer::StrokePoint;
@@ -4810,24 +5784,37 @@ impl StagePane {
         if !is_raster { return; }
 
         let brush = {
-            use lightningbeam_core::brush_settings::BrushSettings;
-            BrushSettings {
-                radius_log: shared.brush_radius.ln(),
-                hardness: *shared.brush_hardness,
-                opaque: *shared.brush_opacity,
-                dabs_per_radius: *shared.brush_spacing,
-                color_h: 0.0,
-                color_s: 0.0,
-                color_v: 0.0,
-                pressure_radius_gain: 0.3,
-                pressure_opacity_gain: 0.8,
+            // Delegate brush parameter extraction to the tool definition.
+            let bp = def.brush_params(shared.raster_settings);
+            let (base_settings, radius, opacity, hardness, spacing) =
+                (bp.base_settings, bp.radius, bp.opacity, bp.hardness, bp.spacing);
+            let mut b = base_settings;
+            // Compensate for pressure_radius_gain so that the UI-chosen radius is the
+            // actual rendered radius at our fixed mouse pressure of 1.0.
+            // radius_at_pressure(1.0) = exp(radius_log + gain × 0.5)
+            // → radius_log = ln(radius) - gain × 0.5
+            b.radius_log      = radius.ln() - b.pressure_radius_gain * 0.5;
+            b.hardness        = hardness;
+            b.opaque          = opacity;
+            b.dabs_per_radius = spacing;
+            if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::Smudge) {
+                // Zero dabs_per_actual_radius so the spacing slider is the sole density control.
+                b.dabs_per_actual_radius = 0.0;
+                // strength controls how far behind the stroke to sample (smudge_dist multiplier).
+                // smudge_dist = radius * exp(smudge_radius_log), so log(strength) gives the ratio.
+                b.smudge_radius_log = shared.raster_settings.smudge_strength; // linear [0,1] strength
             }
+            if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::BlurSharpen) {
+                // Zero dabs_per_actual_radius so the spacing slider is the sole density control.
+                b.dabs_per_actual_radius = 0.0;
+            }
+            b
         };
 
         let color = if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::Erase) {
             [1.0f32, 1.0, 1.0, 1.0]
         } else {
-            let c = if *shared.brush_use_fg { *shared.stroke_color } else { *shared.fill_color };
+            let c = if shared.raster_settings.brush_use_fg { *shared.stroke_color } else { *shared.fill_color };
             let s2l = |v: u8| -> f32 {
                 let f = v as f32 / 255.0;
                 if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
@@ -4838,7 +5825,27 @@ impl StagePane {
         // ----------------------------------------------------------------
         // Mouse down: capture buffer_before, start stroke, compute first dab
         // ----------------------------------------------------------------
-        if self.rsp_drag_started(response) || self.rsp_clicked(response) {
+        // Use primary_pressed (fires immediately on mouse-down) so the first dab
+        // appears before any drag movement.  Guard against re-triggering if a stroke
+        // is already in progress.
+        // rsp_clicked fires on the release frame of a quick click; the first condition
+        // already handles the press frame with is_none() guard.  The clicked guard is
+        // only needed when no stroke is active (avoids re-starting mid-stroke).
+        let stroke_start = (self.rsp_primary_pressed(ui) && response.hovered()
+                            && self.raster_stroke_state.is_none())
+                        || (self.rsp_clicked(response) && self.raster_stroke_state.is_none());
+        if stroke_start {
+            // Clone stamp / healing brush: compute and store the source offset (source - drag_start).
+            // This is constant for the entire stroke and used in every StrokeRecord below.
+            if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::CloneStamp
+                                  | lightningbeam_core::raster_layer::RasterBlendMode::Healing) {
+                self.clone_stroke_offset = shared.raster_settings.clone_source.map(|s| (
+                    s.x - world_pos.x, s.y - world_pos.y,
+                ));
+            } else {
+                self.clone_stroke_offset = None;
+            }
+
             // Determine if we are painting into the float (B) or the layer (A).
             let painting_float = shared.selection.raster_floating.is_some();
             self.painting_float = painting_float;
@@ -4850,14 +5857,13 @@ impl StagePane {
                 let (canvas_id, float_x, float_y, canvas_width, canvas_height,
                      buffer_before, layer_id, time) = {
                     let float = shared.selection.raster_floating.as_ref().unwrap();
-                    let buf = float.pixels.clone();
+                    let buf = (*float.pixels).clone();
                     (float.canvas_id, float.x, float.y, float.width, float.height,
                      buf, float.layer_id, float.time)
                 };
 
                 // Compute first dab (same arithmetic as the layer case).
                 let mut stroke_state = StrokeState::new();
-                stroke_state.distance_since_last_dab = f32::MAX;
                 // Convert to float-local space: dabs must be in canvas pixel coords.
                 let first_pt = StrokePoint {
                     x: world_pos.x - float_x as f32,
@@ -4868,9 +5874,11 @@ impl StagePane {
                     brush_settings: brush.clone(),
                     color,
                     blend_mode,
+                    tool_params: self.make_tool_params(def, shared),
                     points: vec![first_pt.clone()],
                 };
-                let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state);
+                let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state, 0.0);
+                self.raster_last_compute_time = ui.input(|i| i.time);
 
                 self.painting_canvas = Some((layer_id, canvas_id));
                 self.pending_undo_before = Some((
@@ -4946,7 +5954,6 @@ impl StagePane {
 
                 // Compute the first dab (single-point tap)
                 let mut stroke_state = StrokeState::new();
-                stroke_state.distance_since_last_dab = f32::MAX;
 
                 let first_pt = StrokePoint {
                     x: world_pos.x, y: world_pos.y,
@@ -4956,9 +5963,11 @@ impl StagePane {
                     brush_settings: brush.clone(),
                     color,
                     blend_mode,
+                    tool_params: self.make_tool_params(def, shared),
                     points: vec![first_pt.clone()],
                 };
-                let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state);
+                let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, &mut stroke_state, 0.0);
+                self.raster_last_compute_time = ui.input(|i| i.time);
 
                 // Layer strokes apply selection masking at readback time via stroke_clip_selection.
 
@@ -4996,6 +6005,7 @@ impl StagePane {
         // Mouse drag: compute dabs for this segment
         // ----------------------------------------------------------------
         if self.rsp_dragged(response) {
+            let tool_params = self.make_tool_params(def, shared);
             if let Some((layer_id, time, ref mut stroke_state, _)) = self.raster_stroke_state {
                 if let Some(prev_pt) = self.raster_last_point.take() {
                     // Get canvas info and float offset now (used for both distance check
@@ -5038,9 +6048,13 @@ impl StagePane {
                             brush_settings: brush.clone(),
                             color,
                             blend_mode,
+                            tool_params,
                             points: vec![prev_pt, curr_local],
                         };
-                        let (dabs, dab_bbox) = BrushEngine::compute_dabs(&seg, stroke_state);
+                        let current_time = ui.input(|i| i.time);
+                        let dt = (current_time - self.raster_last_compute_time).clamp(0.0, 0.1) as f32;
+                        self.raster_last_compute_time = current_time;
+                        let (dabs, dab_bbox) = BrushEngine::compute_dabs(&seg, stroke_state, dt);
                         self.pending_raster_dabs = Some(PendingRasterDabs {
                             keyframe_id: canvas_id,
                             layer_id,
@@ -5057,6 +6071,80 @@ impl StagePane {
                     self.raster_last_point = Some(moved_pt);
                 }
             }
+        }
+
+        // ----------------------------------------------------------------
+        // Stationary time-based dabs: when the mouse hasn't moved this frame,
+        // still pass dt to the engine so time-based brushes (airbrush, etc.)
+        // can accumulate and fire at the cursor position.
+        // ----------------------------------------------------------------
+        if self.pending_raster_dabs.is_none()
+            && matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. })
+        {
+            let current_time = ui.input(|i| i.time);
+            if self.raster_last_compute_time > 0.0 {
+                let dt = (current_time - self.raster_last_compute_time).clamp(0.0, 0.1) as f32;
+                self.raster_last_compute_time = current_time;
+                let tool_params = self.make_tool_params(def, shared);
+
+                if let Some((layer_id, time, ref mut stroke_state, _)) = self.raster_stroke_state {
+                    let canvas_info = if self.painting_float {
+                        shared.selection.raster_floating.as_ref().map(|f| {
+                            (f.canvas_id, f.width, f.height, f.x as f32, f.y as f32)
+                        })
+                    } else {
+                        let doc = shared.action_executor.document();
+                        if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&layer_id) {
+                            if let Some(kf) = rl.keyframe_at(time) {
+                                Some((kf.id, kf.width, kf.height, 0.0f32, 0.0f32))
+                            } else { None }
+                        } else { None }
+                    };
+
+                    if let Some((canvas_id, cw, ch, cx, cy)) = canvas_info {
+                        let pt = StrokePoint {
+                            x: world_pos.x - cx,
+                            y: world_pos.y - cy,
+                            pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0,
+                        };
+                        let single = StrokeRecord {
+                            brush_settings: brush.clone(),
+                            color,
+                            blend_mode,
+                            tool_params,
+                            points: vec![pt],
+                        };
+                        let (dabs, dab_bbox) = BrushEngine::compute_dabs(&single, stroke_state, dt);
+                        if !dabs.is_empty() {
+                            self.pending_raster_dabs = Some(PendingRasterDabs {
+                                keyframe_id: canvas_id,
+                                layer_id,
+                                time,
+                                canvas_width: cw,
+                                canvas_height: ch,
+                                initial_pixels: None,
+                                dabs,
+                                dab_bbox,
+                                wants_final_readback: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reset compute-time tracker when stroke ends so next stroke starts fresh.
+        if !matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. }) {
+            self.raster_last_compute_time = 0.0;
+        }
+
+        // Keep egui repainting while a stroke is active so that:
+        //   1. Time-based dabs (dabs_per_second) fire at the correct rate even when the
+        //      mouse is held stationary (no move events → no automatic egui repaint).
+        //   2. The post-stroke Vello update (consuming the readback result) happens on
+        //      the very next frame rather than waiting for the next user input event.
+        if matches!(*shared.tool_state, ToolState::DrawingRasterStroke { .. }) {
+            ui.ctx().request_repaint();
         }
 
         // ----------------------------------------------------------------
@@ -5106,6 +6194,88 @@ impl StagePane {
     }
 
     /// Rectangular marquee selection tool for raster layers.
+    /// Snapshot the active raster keyframe pixels, pass them to `draw_fn` to
+    /// modify the buffer, then apply the result as an undoable `RasterFillAction`.
+    ///
+    /// Returns `false` if the layer or keyframe is not available.
+    fn apply_raster_pixel_edit<F>(
+        shared: &mut SharedPaneState,
+        layer_id: uuid::Uuid,
+        description: &'static str,
+        draw_fn: F,
+    ) -> bool
+    where
+        F: FnOnce(&mut [u8], u32, u32),
+    {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::actions::RasterFillAction;
+
+        let time = *shared.playback_time;
+        // Canvas dimensions (to create keyframe if needed).
+        let (doc_w, doc_h) = {
+            let doc = shared.action_executor.document();
+            (doc.width as u32, doc.height as u32)
+        };
+        // Ensure a keyframe exists at the current time.
+        {
+            let doc = shared.action_executor.document_mut();
+            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                rl.ensure_keyframe_at(time, doc_w, doc_h);
+            }
+        }
+        // Snapshot the pixel buffer before drawing.
+        let (buffer_before, w, h) = {
+            let doc = shared.action_executor.document();
+            match doc.get_layer(&layer_id) {
+                Some(AnyLayer::Raster(rl)) => match rl.keyframe_at(time) {
+                    Some(kf) => {
+                        let expected = (kf.width * kf.height * 4) as usize;
+                        let buf = if kf.raw_pixels.len() == expected {
+                            kf.raw_pixels.clone()
+                        } else {
+                            vec![0u8; expected]
+                        };
+                        (buf, kf.width, kf.height)
+                    }
+                    None => return false,
+                },
+                _ => return false,
+            }
+        };
+        let mut buffer_after = buffer_before.clone();
+        draw_fn(&mut buffer_after, w, h);
+        let action = RasterFillAction::new(layer_id, time, buffer_before, buffer_after, w, h)
+            .with_description(description);
+        let _ = shared.action_executor.execute(Box::new(action));
+        true
+    }
+
+    /// Build a per-pixel boolean mask for an ellipse inscribed in the given
+    /// axis-aligned bounding box. Used by the elliptical marquee mode.
+    fn make_ellipse_mask(x0: i32, y0: i32, x1: i32, y1: i32) -> lightningbeam_core::selection::RasterSelection {
+        use lightningbeam_core::selection::RasterSelection;
+        let w = (x1 - x0) as u32;
+        let h = (y1 - y0) as u32;
+        if w == 0 || h == 0 {
+            return RasterSelection::Mask { data: vec![], width: 0, height: 0, origin_x: x0, origin_y: y0 };
+        }
+        // Center in local pixel space. Add 0.5 to radii so the ellipse
+        // touches every edge pixel without cutting them off.
+        let cx = (w as f32 - 1.0) / 2.0;
+        let cy = (h as f32 - 1.0) / 2.0;
+        let rx = cx + 0.5;
+        let ry = cy + 0.5;
+        let mut data = vec![false; (w * h) as usize];
+        for row in 0..h {
+            for col in 0..w {
+                let dx = (col as f32 - cx) / rx;
+                let dy = (row as f32 - cy) / ry;
+                data[(row * w + col) as usize] = dx * dx + dy * dy <= 1.0;
+            }
+        }
+        RasterSelection::Mask { data, width: w, height: h, origin_x: x0, origin_y: y0 }
+    }
+
     fn handle_raster_select_tool(
         &mut self,
         ui: &mut egui::Ui,
@@ -5116,6 +6286,7 @@ impl StagePane {
         use lightningbeam_core::layer::AnyLayer;
         use lightningbeam_core::selection::RasterSelection;
         use lightningbeam_core::tool::ToolState;
+        use crate::tools::SelectionShape;
 
         let Some(layer_id) = *shared.active_layer_id else { return };
         let doc = shared.action_executor.document();
@@ -5123,6 +6294,7 @@ impl StagePane {
             if let AnyLayer::Raster(rl) = l { rl.keyframe_at(*shared.playback_time) } else { None }
         }) else { return };
         let (canvas_w, canvas_h) = (kf.width as i32, kf.height as i32);
+        let ellipse = shared.raster_settings.select_shape == SelectionShape::Ellipse;
 
         if self.rsp_drag_started(response) {
             let (px, py) = (world_pos.x as i32, world_pos.y as i32);
@@ -5154,7 +6326,11 @@ impl StagePane {
                     *current = (px, py);
                     let (x0, x1) = (start.0.min(px).max(0), start.0.max(px).min(canvas_w));
                     let (y0, y1) = (start.1.min(py).max(0), start.1.max(py).min(canvas_h));
-                    shared.selection.raster_selection = Some(RasterSelection::Rect(x0, y0, x1, y1));
+                    shared.selection.raster_selection = Some(if ellipse {
+                        Self::make_ellipse_mask(x0, y0, x1, y1)
+                    } else {
+                        RasterSelection::Rect(x0, y0, x1, y1)
+                    });
                 }
                 ToolState::MovingRasterSelection { ref mut last } => {
                     let (dx, dy) = (px - last.0, py - last.1);
@@ -5166,6 +6342,13 @@ impl StagePane {
                                 RasterSelection::Rect(*x0 + dx, *y0 + dy, *x1 + dx, *y1 + dy),
                             RasterSelection::Lasso(pts) =>
                                 RasterSelection::Lasso(pts.iter().map(|(x, y)| (x + dx, y + dy)).collect()),
+                            RasterSelection::Mask { data, width, height, origin_x, origin_y } =>
+                                RasterSelection::Mask {
+                                    data: std::mem::take(data),
+                                    width: *width, height: *height,
+                                    origin_x: *origin_x + dx,
+                                    origin_y: *origin_y + dy,
+                                },
                         };
                     }
                     // Shift floating pixels if any.
@@ -5184,7 +6367,11 @@ impl StagePane {
                     let (x0, x1) = (start.0.min(current.0).max(0), start.0.max(current.0).min(canvas_w));
                     let (y0, y1) = (start.1.min(current.1).max(0), start.1.max(current.1).min(canvas_h));
                     if x1 > x0 && y1 > y0 {
-                        shared.selection.raster_selection = Some(RasterSelection::Rect(x0, y0, x1, y1));
+                        shared.selection.raster_selection = Some(if ellipse {
+                            Self::make_ellipse_mask(x0, y0, x1, y1)
+                        } else {
+                            RasterSelection::Rect(x0, y0, x1, y1)
+                        });
                         Self::lift_selection_to_float(shared);
                     } else {
                         shared.selection.raster_selection = None;
@@ -5334,36 +6521,443 @@ impl StagePane {
         shared: &mut SharedPaneState,
     ) {
         use lightningbeam_core::layer::AnyLayer;
-        use lightningbeam_core::shape::ShapeColor;
-        use lightningbeam_core::actions::PaintBucketAction;
-        use vello::kurbo::Point;
 
-        // Check if we have an active vector layer
         let active_layer_id = match shared.active_layer_id {
-            Some(id) => id,
+            Some(id) => *id,
             None => return,
         };
 
-        let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
-            Some(layer) => layer,
-            None => return,
-        };
+        if !self.rsp_clicked(response) { return; }
 
-        if !matches!(active_layer, AnyLayer::Vector(_)) {
-            return;
-        }
+        let is_raster = shared.action_executor.document()
+            .get_layer(&active_layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
 
-        if self.rsp_clicked(response) {
+        if is_raster {
+            self.handle_raster_paint_bucket(world_pos, active_layer_id, shared);
+        } else {
+            use lightningbeam_core::shape::ShapeColor;
+            use lightningbeam_core::actions::PaintBucketAction;
+            use vello::kurbo::Point;
             let click_point = Point::new(world_pos.x as f64, world_pos.y as f64);
             let fill_color = ShapeColor::from_egui(*shared.fill_color);
-
             let action = PaintBucketAction::new(
-                *active_layer_id,
+                active_layer_id,
                 *shared.playback_time,
                 click_point,
                 fill_color,
             );
             let _ = shared.action_executor.execute(Box::new(action));
+        }
+    }
+
+    fn handle_raster_paint_bucket(
+        &mut self,
+        world_pos: egui::Vec2,
+        layer_id: uuid::Uuid,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::actions::RasterFillAction;
+        use lightningbeam_core::flood_fill::{raster_flood_fill, FillThresholdMode};
+        use crate::tools::FillThresholdMode as EditorMode;
+
+        let time = *shared.playback_time;
+
+        // Ensure a keyframe exists at the current time.
+        let (doc_w, doc_h) = {
+            let doc = shared.action_executor.document();
+            (doc.width as u32, doc.height as u32)
+        };
+        {
+            let doc = shared.action_executor.document_mut();
+            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                rl.ensure_keyframe_at(time, doc_w, doc_h);
+            }
+        }
+
+        // Snapshot current pixels.
+        let (buffer_before, width, height) = {
+            let doc = shared.action_executor.document();
+            if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&layer_id) {
+                if let Some(kf) = rl.keyframe_at(time) {
+                    let expected = (kf.width * kf.height * 4) as usize;
+                    let buf = if kf.raw_pixels.len() == expected {
+                        kf.raw_pixels.clone()
+                    } else {
+                        vec![0u8; expected]
+                    };
+                    (buf, kf.width, kf.height)
+                } else { return; }
+            } else { return; }
+        };
+
+        let seed_x = world_pos.x as i32;
+        let seed_y = world_pos.y as i32;
+        if seed_x < 0 || seed_y < 0 || seed_x >= width as i32 || seed_y >= height as i32 {
+            return;
+        }
+
+        let fill_egui = *shared.fill_color;
+        let fill_color = [fill_egui.r(), fill_egui.g(), fill_egui.b(), fill_egui.a()];
+        let threshold  = shared.raster_settings.fill_threshold;
+        let softness   = shared.raster_settings.fill_softness;
+        let core_mode  = match shared.raster_settings.fill_threshold_mode {
+            EditorMode::Absolute => FillThresholdMode::Absolute,
+            EditorMode::Relative => FillThresholdMode::Relative,
+        };
+
+        let mut buffer_after = buffer_before.clone();
+        raster_flood_fill(
+            &mut buffer_after,
+            width, height,
+            seed_x, seed_y,
+            fill_color,
+            threshold, softness,
+            core_mode,
+            true, // paint bucket always fills contiguous region
+            shared.selection.raster_selection.as_ref(),
+        );
+
+        let action = RasterFillAction::new(layer_id, time, buffer_before, buffer_after, width, height);
+        let _ = shared.action_executor.execute(Box::new(action));
+    }
+
+    fn handle_magic_wand_tool(
+        &mut self,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::flood_fill::{raster_fill_mask, FillThresholdMode};
+        use lightningbeam_core::selection::RasterSelection;
+        use crate::tools::FillThresholdMode as EditorMode;
+
+        if !self.rsp_clicked(response) { return; }
+
+        let Some(layer_id) = *shared.active_layer_id else { return };
+
+        let is_raster = shared.action_executor.document()
+            .get_layer(&layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+        if !is_raster { return; }
+
+        let time = *shared.playback_time;
+
+        // Ensure keyframe exists.
+        let (doc_w, doc_h) = {
+            let doc = shared.action_executor.document();
+            (doc.width as u32, doc.height as u32)
+        };
+        {
+            let doc = shared.action_executor.document_mut();
+            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                rl.ensure_keyframe_at(time, doc_w, doc_h);
+            }
+        }
+
+        let (pixels, width, height) = {
+            let doc = shared.action_executor.document();
+            if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&layer_id) {
+                if let Some(kf) = rl.keyframe_at(time) {
+                    let expected = (kf.width * kf.height * 4) as usize;
+                    let buf = if kf.raw_pixels.len() == expected {
+                        kf.raw_pixels.clone()
+                    } else {
+                        vec![0u8; expected]
+                    };
+                    (buf, kf.width, kf.height)
+                } else { return; }
+            } else { return; }
+        };
+
+        let seed_x = world_pos.x as i32;
+        let seed_y = world_pos.y as i32;
+        if seed_x < 0 || seed_y < 0 || seed_x >= width as i32 || seed_y >= height as i32 {
+            return;
+        }
+
+        let threshold  = shared.raster_settings.wand_threshold;
+        let contiguous = shared.raster_settings.wand_contiguous;
+        let core_mode  = match shared.raster_settings.wand_mode {
+            EditorMode::Absolute => FillThresholdMode::Absolute,
+            EditorMode::Relative => FillThresholdMode::Relative,
+        };
+
+        // Use existing raster_selection as clip if present (so the wand only
+        // selects inside the current selection — Shift/Intersect not yet supported).
+        let dist_map = raster_fill_mask(
+            &pixels, width, height,
+            seed_x, seed_y,
+            threshold, core_mode, contiguous,
+            None, // ignore existing selection for wand — it defines a new one
+        );
+
+        let data: Vec<bool> = dist_map.iter().map(|d| d.is_some()).collect();
+
+        shared.selection.raster_selection = Some(RasterSelection::Mask {
+            data,
+            width,
+            height,
+            origin_x: 0,
+            origin_y: 0,
+        });
+        Self::lift_selection_to_float(shared);
+    }
+
+    fn handle_quick_select_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::selection::RasterSelection;
+
+        let Some(layer_id) = *shared.active_layer_id else { return };
+
+        let is_raster = shared.action_executor.document()
+            .get_layer(&layer_id)
+            .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+        if !is_raster { return; }
+
+        let time = *shared.playback_time;
+        let radius = shared.raster_settings.quick_select_radius;
+        let threshold = shared.raster_settings.wand_threshold;
+
+        if self.rsp_drag_started(response) {
+            // Commit any existing float selection before starting a new one.
+            Self::commit_raster_floating_now(shared);
+
+            // Ensure the keyframe exists.
+            let (doc_w, doc_h) = {
+                let doc = shared.action_executor.document();
+                (doc.width as u32, doc.height as u32)
+            };
+            {
+                let doc = shared.action_executor.document_mut();
+                if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                    rl.ensure_keyframe_at(time, doc_w, doc_h);
+                }
+            }
+
+            // Snapshot canvas pixels.
+            let (pixels, width, height) = {
+                let doc = shared.action_executor.document();
+                if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&layer_id) {
+                    if let Some(kf) = rl.keyframe_at(time) {
+                        let expected = (kf.width * kf.height * 4) as usize;
+                        let buf = if kf.raw_pixels.len() == expected {
+                            kf.raw_pixels.clone()
+                        } else {
+                            vec![0u8; expected]
+                        };
+                        (buf, kf.width, kf.height)
+                    } else { return; }
+                } else { return; }
+            };
+
+            let seed_x = world_pos.x as i32;
+            let seed_y = world_pos.y as i32;
+            let mask = vec![false; (width * height) as usize];
+
+            let mut qs = QuickSelectState {
+                mask,
+                pixels,
+                width,
+                height,
+                last_pos: (seed_x - (radius as i32 * 2), seed_y), // force first fill
+            };
+
+            // Run the initial fill at the starting position.
+            let mode = match shared.raster_settings.wand_mode {
+                crate::tools::FillThresholdMode::Absolute =>
+                    lightningbeam_core::flood_fill::FillThresholdMode::Absolute,
+                crate::tools::FillThresholdMode::Relative =>
+                    lightningbeam_core::flood_fill::FillThresholdMode::Relative,
+            };
+            Self::quick_select_fill_point(&mut qs, seed_x, seed_y, threshold, mode, radius);
+
+            shared.selection.raster_selection = Some(RasterSelection::Mask {
+                data: qs.mask.clone(),
+                width: qs.width,
+                height: qs.height,
+                origin_x: 0,
+                origin_y: 0,
+            });
+
+            self.quick_select_state = Some(qs);
+        }
+
+        if self.rsp_dragged(response) {
+            let mode = match shared.raster_settings.wand_mode {
+                crate::tools::FillThresholdMode::Absolute =>
+                    lightningbeam_core::flood_fill::FillThresholdMode::Absolute,
+                crate::tools::FillThresholdMode::Relative =>
+                    lightningbeam_core::flood_fill::FillThresholdMode::Relative,
+            };
+
+            if let Some(ref mut qs) = self.quick_select_state {
+                let sx = world_pos.x as i32;
+                let sy = world_pos.y as i32;
+                let dx = sx - qs.last_pos.0;
+                let dy = sy - qs.last_pos.1;
+                let min_move = (radius / 2.0).max(1.0) as i32;
+                if dx * dx + dy * dy >= min_move * min_move {
+                    Self::quick_select_fill_point(qs, sx, sy, threshold, mode, radius);
+                }
+                // Always sync raster_selection from the current mask so the
+                // marching ants update every frame (same pattern as marquee select).
+                shared.selection.raster_selection = Some(RasterSelection::Mask {
+                    data: qs.mask.clone(),
+                    width: qs.width,
+                    height: qs.height,
+                    origin_x: 0,
+                    origin_y: 0,
+                });
+            }
+        }
+
+        if self.rsp_drag_stopped(response) {
+            if self.quick_select_state.is_some() {
+                Self::lift_selection_to_float(shared);
+                self.quick_select_state = None;
+            }
+        }
+    }
+
+    /// Run a single flood-fill from `(seed_x, seed_y)` clipped to a local region
+    /// and OR the result into `qs.mask`.
+    fn quick_select_fill_point(
+        qs: &mut QuickSelectState,
+        seed_x: i32, seed_y: i32,
+        threshold: f32,
+        mode: lightningbeam_core::flood_fill::FillThresholdMode,
+        radius: f32,
+    ) {
+        use lightningbeam_core::flood_fill::raster_fill_mask;
+        use lightningbeam_core::selection::RasterSelection;
+
+        if seed_x < 0 || seed_y < 0
+            || seed_x >= qs.width as i32
+            || seed_y >= qs.height as i32
+        {
+            return;
+        }
+
+        let expand = (radius * 3.0) as i32;
+        let clip_x0 = (seed_x - expand).max(0);
+        let clip_y0 = (seed_y - expand).max(0);
+        let clip_x1 = (seed_x + expand).min(qs.width as i32);
+        let clip_y1 = (seed_y + expand).min(qs.height as i32);
+        let clip = RasterSelection::Rect(clip_x0, clip_y0, clip_x1, clip_y1);
+
+        let dist_map = raster_fill_mask(
+            &qs.pixels, qs.width, qs.height,
+            seed_x, seed_y,
+            threshold, mode, true, // contiguous = true
+            Some(&clip),
+        );
+
+        for (i, d) in dist_map.iter().enumerate() {
+            if d.is_some() {
+                qs.mask[i] = true;
+            }
+        }
+        qs.last_pos = (seed_x, seed_y);
+    }
+
+    /// Draw marching ants for a pixel mask selection.
+    ///
+    /// Animates horizontal edges leftward and vertical edges downward (position-based),
+    /// producing a coherent clockwise-like marching effect without contour tracing.
+    fn draw_marching_ants_mask(
+        painter: &egui::Painter,
+        rect_min: egui::Pos2,
+        data: &[bool],
+        width: u32, height: u32,
+        origin_x: i32, origin_y: i32,
+        zoom: f32, pan: egui::Vec2,
+        phase: f32,
+    ) {
+        let w = width as i32;
+        let h = height as i32;
+
+        // Phase in screen pixels: 4px on, 4px off cycling every 8 screen pixels.
+        // One canvas pixel = zoom screen pixels; scale phase accordingly.
+        let screen_phase = phase; // already in screen pixels (matches draw_marching_ants)
+        let cycle_canvas = 8.0 / zoom.max(0.01); // canvas-pixel length of a full 8-screen-px cycle
+        let half_cycle_canvas = cycle_canvas / 2.0;
+
+        let to_screen = |cx: i32, cy: i32| egui::pos2(
+            rect_min.x + pan.x + cx as f32 * zoom,
+            rect_min.y + pan.y + cy as f32 * zoom,
+        );
+
+        // Pre-scan: compute tight bounding box of set pixels so we don't iterate
+        // the full canvas every frame (critical perf for large canvases with small masks).
+        let mut min_row = h;
+        let mut max_row = -1i32;
+        let mut min_col = w;
+        let mut max_col = -1i32;
+        for row in 0..h {
+            for col in 0..w {
+                if data[(row * w + col) as usize] {
+                    if row < min_row { min_row = row; }
+                    if row > max_row { max_row = row; }
+                    if col < min_col { min_col = col; }
+                    if col > max_col { max_col = col; }
+                }
+            }
+        }
+        if max_row < 0 { return; } // Empty mask — nothing to draw.
+        let r0 = (min_row - 1).max(0);
+        let r1 = (max_row + 1).min(h - 1);
+        let c0 = (min_col - 1).max(0);
+        let c1 = (max_col + 1).min(w - 1);
+
+        // Horizontal edges: between (row-1) and (row). Animate along x axis.
+        // Use screen-space phase so the dash pattern looks correct at any zoom.
+        for row in r0..=(r1 + 1) {
+            for col in c0..=c1 {
+                let above = row > 0   && data[((row-1) * w + col) as usize];
+                let below = row < h   && data[(row     * w + col) as usize];
+                if above == below { continue; }
+                let cx = origin_x + col;
+                let cy = origin_y + row;
+                // canvas-pixel position along the edge, converted to screen pixels for phase
+                let cx_screen = cx as f32 * zoom;
+                let on = (cx_screen - screen_phase).rem_euclid(8.0) < 4.0;
+                // Also check next pixel to handle partial overlap of the 4-px window
+                let _ = half_cycle_canvas; // suppress unused warning
+                if on {
+                    let p0 = to_screen(cx, cy);
+                    let p1 = to_screen(cx + 1, cy);
+                    painter.line_segment([p0, p1], egui::Stroke::new(2.5, egui::Color32::WHITE));
+                    painter.line_segment([p0, p1], egui::Stroke::new(1.5, egui::Color32::BLACK));
+                }
+            }
+        }
+
+        // Vertical edges: between (col-1) and (col). Animate along y axis.
+        for col in c0..=(c1 + 1) {
+            for row in r0..=r1 {
+                let left  = col > 0 && data[(row * w + col - 1) as usize];
+                let right = col < w && data[(row * w + col    ) as usize];
+                if left == right { continue; }
+                let cx = origin_x + col;
+                let cy = origin_y + row;
+                let cy_screen = cy as f32 * zoom;
+                let on = (cy_screen - screen_phase).rem_euclid(8.0) < 4.0;
+                if on {
+                    let p0 = to_screen(cx, cy);
+                    let p1 = to_screen(cx, cy + 1);
+                    painter.line_segment([p0, p1], egui::Stroke::new(2.5, egui::Color32::WHITE));
+                    painter.line_segment([p0, p1], egui::Stroke::new(1.5, egui::Color32::BLACK));
+                }
+            }
         }
     }
 
@@ -6018,6 +7612,560 @@ impl StagePane {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Raster transform tool
+    // -------------------------------------------------------------------------
+
+    /// CPU computation for raster transform: output AABB and inverse affine matrix.
+    ///
+    /// Returns `(new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1)` where
+    /// the inverse affine maps output pixel (ox, oy) → source pixel (sx, sy):
+    ///   sx = a00*ox + a01*oy + b0
+    ///   sy = a10*ox + a11*oy + b1
+    fn compute_transform_params(
+        orig_w: u32, orig_h: u32,
+        cx: f32, cy: f32,
+        scale_x: f32, scale_y: f32,
+        angle: f32,
+    ) -> (u32, u32, i32, i32, f32, f32, f32, f32, f32, f32) {
+        let hw = scale_x * orig_w as f32 / 2.0;
+        let hh = scale_y * orig_h as f32 / 2.0;
+        let cos_a = angle.cos();
+        let sin_a = angle.sin();
+
+        // Rotate corners of scaled rect around (cx, cy)
+        let local = [(-hw, -hh), (hw, -hh), (-hw, hh), (hw, hh)];
+        let rotated: [(f32, f32); 4] = local.map(|(lx, ly)| {
+            (cx + lx * cos_a - ly * sin_a, cy + lx * sin_a + ly * cos_a)
+        });
+
+        // AABB of rotated corners
+        let min_x = rotated.iter().map(|p| p.0).fold(f32::INFINITY,     f32::min).floor();
+        let min_y = rotated.iter().map(|p| p.1).fold(f32::INFINITY,     f32::min).floor();
+        let max_x = rotated.iter().map(|p| p.0).fold(f32::NEG_INFINITY, f32::max).ceil();
+        let max_y = rotated.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max).ceil();
+        let new_x = min_x as i32;
+        let new_y = min_y as i32;
+        let new_w = ((max_x - min_x).max(1.0)) as u32;
+        let new_h = ((max_y - min_y).max(1.0)) as u32;
+
+        // Inverse affine: R^-1 * S^-1
+        // Forward: dst = cx + R * S * (src_center_offset)
+        // Inverse: src_pixel = (src_w/2, src_h/2) + S^-1 * R^-1 * (out_pixel - cx, out_pixel_y - cy)
+        // with out_pixel center accounted for by baking +0.5 into b (CPU side).
+        let a00 =  cos_a / scale_x;
+        let a01 =  sin_a / scale_x;
+        let a10 = -sin_a / scale_y;
+        let a11 =  cos_a / scale_y;
+
+        // b accounts for the center offset and the new AABB origin.
+        // For output pixel (ox, oy) at its center (ox + 0.5, oy + 0.5) in output canvas coords,
+        // the source pixel is:
+        //   (src_w/2, src_h/2) + A^-1 * ((new_x + ox + 0.5) - cx, (new_y + oy + 0.5) - cy)
+        // We bake (new_x + 0.5 - cx, new_y + 0.5 - cy) into b so the shader just uses ox/oy directly.
+        let off_x = new_x as f32 + 0.5 - cx;
+        let off_y = new_y as f32 + 0.5 - cy;
+        let b0 = orig_w as f32 / 2.0 + a00 * off_x + a01 * off_y;
+        let b1 = orig_h as f32 / 2.0 + a10 * off_x + a11 * off_y;
+
+        (new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1)
+    }
+
+    fn handle_raster_transform_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        // If float was cleared, clear transform state.
+        if shared.selection.raster_floating.is_none() {
+            self.raster_transform_state = None;
+            return;
+        }
+        let float_canvas_id = shared.selection.raster_floating.as_ref().unwrap().canvas_id;
+
+        // If the float changed (new selection made), clear and reinit state.
+        if let Some(ref ts) = self.raster_transform_state {
+            if ts.float_canvas_id != float_canvas_id {
+                self.raster_transform_state = None;
+            }
+        }
+
+        // --- Lazy init ---
+        if self.raster_transform_state.is_none() {
+            let float = shared.selection.raster_floating.as_ref().unwrap();
+            let expected_len = (float.width * float.height * 4) as usize;
+            let anchor_pixels = if float.pixels.len() == expected_len {
+                (*float.pixels).clone()
+            } else {
+                vec![0u8; expected_len]
+            };
+            let cx = float.x as f32 + float.width  as f32 / 2.0;
+            let cy = float.y as f32 + float.height as f32 / 2.0;
+            self.raster_transform_state = Some(RasterTransformState {
+                float_canvas_id:   float.canvas_id,
+                anchor_canvas_id:  uuid::Uuid::new_v4(),
+                anchor_pixels,
+                anchor_w: float.width,
+                anchor_h: float.height,
+                display_canvas_id: uuid::Uuid::new_v4(),
+                cx, cy,
+                scale_x: 1.0, scale_y: 1.0, angle: 0.0,
+                origin_x: cx, origin_y: cy,
+                active_handle: None, hovered_handle: None,
+                drag_start_world: world_pos,
+                snap_cx: cx, snap_cy: cy,
+                snap_sx: 1.0, snap_sy: 1.0, snap_angle: 0.0,
+                snap_origin_x: cx, snap_origin_y: cy,
+                transform_applied: true,
+                wants_apply: false,
+            });
+            // Queue an identity dispatch immediately so the display canvas is populated
+            // from frame 1. Without this, Move-only drags don't update the image because
+            // transform_applied would stay false (no scale/rotate → no needs_dispatch).
+            let init_dispatch = {
+                let ts = self.raster_transform_state.as_ref().unwrap();
+                let (new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1) =
+                    Self::compute_transform_params(ts.anchor_w, ts.anchor_h, ts.cx, ts.cy, 1.0, 1.0, 0.0);
+                PendingTransformDispatch {
+                    anchor_canvas_id:  ts.anchor_canvas_id,
+                    anchor_pixels:     ts.anchor_pixels.clone(),
+                    anchor_w:          ts.anchor_w,
+                    anchor_h:          ts.anchor_h,
+                    display_canvas_id: ts.display_canvas_id,
+                    new_x, new_y, new_w, new_h,
+                    a00, a01, a10, a11, b0, b1,
+                    is_final_commit: false,
+                }
+            };
+            self.pending_transform_dispatch = Some(init_dispatch);
+        }
+
+        // Early return while waiting for a final readback (wants_apply set, readback pending).
+        if self.raster_transform_state.as_ref().map_or(false, |ts| ts.wants_apply) {
+            return;
+        }
+
+        // --- Keyboard shortcuts ---
+        // Enter: queue final dispatch + readback, keep state alive until readback completes.
+        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let dispatch = self.raster_transform_state.as_ref().and_then(|ts| {
+                if ts.transform_applied {
+                    let (new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1) =
+                        Self::compute_transform_params(ts.anchor_w, ts.anchor_h, ts.cx, ts.cy, ts.scale_x, ts.scale_y, ts.angle);
+                    Some(PendingTransformDispatch {
+                        anchor_canvas_id: ts.anchor_canvas_id,
+                        anchor_pixels:    ts.anchor_pixels.clone(),
+                        anchor_w: ts.anchor_w, anchor_h: ts.anchor_h,
+                        display_canvas_id: ts.display_canvas_id,
+                        new_x, new_y, new_w, new_h,
+                        a00, a01, a10, a11, b0, b1,
+                        is_final_commit: true,
+                    })
+                } else {
+                    None
+                }
+            });
+            if let Some(d) = dispatch {
+                self.pending_transform_dispatch = Some(d);
+                // Keep state alive (wants_apply = true) until readback completes.
+                self.raster_transform_state.as_mut().unwrap().wants_apply = true;
+            } else {
+                // No transform was applied — just clear state.
+                self.raster_transform_state = None;
+            }
+            return;
+        }
+
+        // Escape: float canvas is unchanged — just clear state.
+        // The anchor/display canvases are orphaned; they'll be freed when the GPU engine
+        // is next queried (the canvases are small and short-lived).
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.raster_transform_state = None;
+            return;
+        }
+
+        // Read drag states before the mutable borrow of raster_transform_state.
+        let drag_started = self.rsp_drag_started(response);
+        let dragged      = self.rsp_dragged(response);
+        let drag_stopped = self.rsp_drag_stopped(response);
+        let shift        = ui.input(|i| i.modifiers.shift);
+
+        // Collect pending dispatch from the inner block to assign after the borrow ends.
+        let pending_dispatch;
+        {
+            let ts = self.raster_transform_state.as_mut().unwrap();
+
+            // --- Compute handle positions in world space ---
+            let hw = ts.scale_x * ts.anchor_w as f32 / 2.0;
+            let hh = ts.scale_y * ts.anchor_h as f32 / 2.0;
+            let cos_a = ts.angle.cos();
+            let sin_a = ts.angle.sin();
+            let zoom  = self.zoom;
+
+            // Local offset → world position
+            let to_world = |lx: f32, ly: f32| -> egui::Vec2 {
+                egui::vec2(ts.cx + lx * cos_a - ly * sin_a, ts.cy + lx * sin_a + ly * cos_a)
+            };
+
+            // Rotate handle: above top-center, 24 screen-pixels outside bbox.
+            let rotate_offset = 24.0 / zoom;
+            let rotate_handle = to_world(0.0, -hh - rotate_offset);
+
+            let handles: [(RasterTransformHandle, egui::Vec2); 10] = [
+                (RasterTransformHandle::Corner { right: false, bottom: false }, to_world(-hw, -hh)),
+                (RasterTransformHandle::Corner { right: true,  bottom: false }, to_world( hw, -hh)),
+                (RasterTransformHandle::Corner { right: false, bottom: true  }, to_world(-hw,  hh)),
+                (RasterTransformHandle::Corner { right: true,  bottom: true  }, to_world( hw,  hh)),
+                (RasterTransformHandle::EdgeH  { bottom: false }, to_world(0.0, -hh)),
+                (RasterTransformHandle::EdgeH  { bottom: true  }, to_world(0.0,  hh)),
+                (RasterTransformHandle::EdgeV  { right: false  }, to_world(-hw, 0.0)),
+                (RasterTransformHandle::EdgeV  { right: true   }, to_world( hw, 0.0)),
+                (RasterTransformHandle::Rotate,                   rotate_handle),
+                (RasterTransformHandle::Origin,                   egui::vec2(ts.origin_x, ts.origin_y)),
+            ];
+
+            let hit_r_world = 8.0 / zoom;
+            let hovered = handles.iter()
+                .find(|(_, wp)| (world_pos - *wp).length() <= hit_r_world)
+                .map(|(h, _)| *h);
+
+            // Inside bbox → Move handle (if no specific handle hit)
+            let in_bbox = {
+                let dx = world_pos.x - ts.cx;
+                let dy = world_pos.y - ts.cy;
+                let local_x =  dx * cos_a + dy * sin_a;
+                let local_y = -dx * sin_a + dy * cos_a;
+                local_x.abs() <= hw && local_y.abs() <= hh
+            };
+            let hovered = hovered.or_else(|| if in_bbox { Some(RasterTransformHandle::Move) } else { None });
+
+            // Store hovered handle for visual feedback in the draw function.
+            ts.hovered_handle = if ts.active_handle.is_none() { hovered } else { ts.active_handle };
+
+            // Set cursor icon based on hovered/active handle.
+            if let Some(h) = ts.active_handle.or(ts.hovered_handle) {
+                let cursor = match h {
+                    RasterTransformHandle::Move   => egui::CursorIcon::Grab,
+                    RasterTransformHandle::Origin => egui::CursorIcon::Crosshair,
+                    RasterTransformHandle::Corner { right, bottom } => {
+                        if right == bottom { egui::CursorIcon::ResizeNwSe }
+                        else               { egui::CursorIcon::ResizeNeSw }
+                    }
+                    RasterTransformHandle::EdgeH { .. } => egui::CursorIcon::ResizeVertical,
+                    RasterTransformHandle::EdgeV { .. } => egui::CursorIcon::ResizeHorizontal,
+                    RasterTransformHandle::Rotate       => egui::CursorIcon::AllScroll,
+                };
+                ui.ctx().set_cursor_icon(cursor);
+            }
+
+            // --- Drag start: use press_origin for hit testing (drag fires after threshold) ---
+            if drag_started {
+                let click_world = ui.input(|i| i.pointer.press_origin())
+                    .map(|sp| {
+                        let canvas_pos = sp - response.rect.min.to_vec2();
+                        egui::vec2(
+                            (canvas_pos.x - self.pan_offset.x) / self.zoom,
+                            (canvas_pos.y - self.pan_offset.y) / self.zoom,
+                        )
+                    })
+                    .unwrap_or(world_pos);
+
+                // Recompute hovered handle at click_world position.
+                let click_hovered = handles.iter()
+                    .find(|(_, wp)| (click_world - *wp).length() <= hit_r_world)
+                    .map(|(h, _)| *h);
+                let click_in_bbox = {
+                    let dx = click_world.x - ts.cx;
+                    let dy = click_world.y - ts.cy;
+                    let local_x =  dx * cos_a + dy * sin_a;
+                    let local_y = -dx * sin_a + dy * cos_a;
+                    local_x.abs() <= hw && local_y.abs() <= hh
+                };
+                let click_handle = click_hovered.or_else(|| if click_in_bbox { Some(RasterTransformHandle::Move) } else { None });
+
+                ts.active_handle     = click_handle;
+                ts.drag_start_world  = click_world;
+                ts.snap_cx           = ts.cx;
+                ts.snap_cy           = ts.cy;
+                ts.snap_sx           = ts.scale_x;
+                ts.snap_sy           = ts.scale_y;
+                ts.snap_angle        = ts.angle;
+                ts.snap_origin_x     = ts.origin_x;
+                ts.snap_origin_y     = ts.origin_y;
+            }
+
+            // --- Drag ---
+            let mut needs_dispatch = false;
+            if dragged {
+                if let Some(handle) = ts.active_handle {
+                    let delta      = world_pos - ts.drag_start_world;
+                    let snap_hw    = ts.snap_sx * ts.anchor_w as f32 / 2.0;
+                    let snap_hh    = ts.snap_sy * ts.anchor_h as f32 / 2.0;
+                    let local_dx   =  delta.x * cos_a + delta.y * sin_a;
+                    let local_dy   = -delta.x * sin_a + delta.y * cos_a;
+
+                    match handle {
+                        RasterTransformHandle::Move => {
+                            ts.cx = ts.snap_cx + delta.x;
+                            ts.cy = ts.snap_cy + delta.y;
+                            ts.origin_x = ts.snap_origin_x + delta.x;
+                            ts.origin_y = ts.snap_origin_y + delta.y;
+                            // Pure move: display canvas keeps same pixels, position updated via compute_transform_params.
+                        }
+                        RasterTransformHandle::Origin => {
+                            ts.origin_x = ts.snap_origin_x + delta.x;
+                            ts.origin_y = ts.snap_origin_y + delta.y;
+                            // No GPU dispatch needed for origin move alone.
+                        }
+                        RasterTransformHandle::Corner { right, bottom } => {
+                            let sign_x = if right  { 1.0_f32 } else { -1.0 };
+                            let sign_y = if bottom { 1.0_f32 } else { -1.0 };
+                            // Divide by 2: dragged corner = new_cx ± new_hw, and
+                            // new_cx = wfx ± new_hw, so corner = wfx ± 2*new_hw.
+                            // To make the corner move 1:1 with mouse, new_hw grows by delta/2.
+                            // Signed clamp: allow negative scale (flip) but prevent exactly 0
+                            // which would make the inverse affine matrix singular.
+                            let raw_hw = snap_hw + sign_x * local_dx / 2.0;
+                            let new_hw = if raw_hw.abs() < 0.001 { if raw_hw <= 0.0 { -0.001 } else { 0.001 } } else { raw_hw };
+                            let new_hh = if shift {
+                                // Preserve aspect ratio; sign follows new_hw.
+                                new_hw * (ts.anchor_h as f32 / ts.anchor_w as f32).max(0.001)
+                            } else {
+                                let raw_hh = snap_hh + sign_y * local_dy / 2.0;
+                                if raw_hh.abs() < 0.001 { if raw_hh <= 0.0 { -0.001 } else { 0.001 } } else { raw_hh }
+                            };
+                            ts.scale_x = new_hw / (ts.anchor_w as f32 / 2.0).max(0.001);
+                            ts.scale_y = new_hh / (ts.anchor_h as f32 / 2.0).max(0.001);
+                            // Fixed corner world pos (opposite corner, from snap state).
+                            let wfx = ts.snap_cx - sign_x * snap_hw * cos_a + sign_y * snap_hh * sin_a;
+                            let wfy = ts.snap_cy - sign_x * snap_hw * sin_a - sign_y * snap_hh * cos_a;
+                            // New center: fixed corner + rotated new half-extents.
+                            ts.cx = wfx + sign_x * new_hw * cos_a - sign_y * new_hh * sin_a;
+                            ts.cy = wfy + sign_x * new_hw * sin_a + sign_y * new_hh * cos_a;
+                            // Maintain origin's relative position within the scaled bbox.
+                            let o_dx = ts.snap_origin_x - ts.snap_cx;
+                            let o_dy = ts.snap_origin_y - ts.snap_cy;
+                            let o_local_x =  o_dx * cos_a + o_dy * sin_a;
+                            let o_local_y = -o_dx * sin_a + o_dy * cos_a;
+                            let o_norm_x = if snap_hw > 0.0 { o_local_x / snap_hw } else { 0.0 };
+                            let o_norm_y = if snap_hh > 0.0 { o_local_y / snap_hh } else { 0.0 };
+                            let no_x = o_norm_x * new_hw;
+                            let no_y = o_norm_y * new_hh;
+                            ts.origin_x = ts.cx + no_x * cos_a - no_y * sin_a;
+                            ts.origin_y = ts.cy + no_x * sin_a + no_y * cos_a;
+                            needs_dispatch = true;
+                        }
+                        RasterTransformHandle::EdgeH { bottom } => {
+                            let sign_y = if bottom { 1.0_f32 } else { -1.0 };
+                            let raw_hh = snap_hh + sign_y * local_dy / 2.0;
+                            let new_hh = if raw_hh.abs() < 0.001 { if raw_hh <= 0.0 { -0.001 } else { 0.001 } } else { raw_hh };
+                            ts.scale_y = new_hh / (ts.anchor_h as f32 / 2.0).max(0.001);
+                            // Fixed edge world position (opposite edge center).
+                            let wfx = ts.snap_cx + sign_y * snap_hh * sin_a;
+                            let wfy = ts.snap_cy - sign_y * snap_hh * cos_a;
+                            ts.cx = wfx - sign_y * new_hh * sin_a;
+                            ts.cy = wfy + sign_y * new_hh * cos_a;
+                            // Maintain origin's relative Y position within the scaled bbox.
+                            let o_dx = ts.snap_origin_x - ts.snap_cx;
+                            let o_dy = ts.snap_origin_y - ts.snap_cy;
+                            let o_local_x =  o_dx * cos_a + o_dy * sin_a;
+                            let o_local_y = -o_dx * sin_a + o_dy * cos_a;
+                            let o_norm_y = if snap_hh > 0.0 { o_local_y / snap_hh } else { 0.0 };
+                            let no_x = o_local_x; // X local coord unchanged by EdgeH
+                            let no_y = o_norm_y * new_hh;
+                            ts.origin_x = ts.cx + no_x * cos_a - no_y * sin_a;
+                            ts.origin_y = ts.cy + no_x * sin_a + no_y * cos_a;
+                            needs_dispatch = true;
+                        }
+                        RasterTransformHandle::EdgeV { right } => {
+                            let sign_x = if right { 1.0_f32 } else { -1.0 };
+                            let raw_hw = snap_hw + sign_x * local_dx / 2.0;
+                            let new_hw = if raw_hw.abs() < 0.001 { if raw_hw <= 0.0 { -0.001 } else { 0.001 } } else { raw_hw };
+                            ts.scale_x = new_hw / (ts.anchor_w as f32 / 2.0).max(0.001);
+                            // Fixed edge world position (opposite edge center).
+                            let wfx = ts.snap_cx - sign_x * snap_hw * cos_a;
+                            let wfy = ts.snap_cy - sign_x * snap_hw * sin_a;
+                            ts.cx = wfx + sign_x * new_hw * cos_a;
+                            ts.cy = wfy + sign_x * new_hw * sin_a;
+                            // Maintain origin's relative X position within the scaled bbox.
+                            let o_dx = ts.snap_origin_x - ts.snap_cx;
+                            let o_dy = ts.snap_origin_y - ts.snap_cy;
+                            let o_local_x =  o_dx * cos_a + o_dy * sin_a;
+                            let o_local_y = -o_dx * sin_a + o_dy * cos_a;
+                            let o_norm_x = if snap_hw > 0.0 { o_local_x / snap_hw } else { 0.0 };
+                            let no_x = o_norm_x * new_hw;
+                            let no_y = o_local_y; // Y local coord unchanged by EdgeV
+                            ts.origin_x = ts.cx + no_x * cos_a - no_y * sin_a;
+                            ts.origin_y = ts.cy + no_x * sin_a + no_y * cos_a;
+                            needs_dispatch = true;
+                        }
+                        RasterTransformHandle::Rotate => {
+                            // Rotate around origin (not center).
+                            let v_start = ts.drag_start_world - egui::vec2(ts.origin_x, ts.origin_y);
+                            let v_now   = world_pos           - egui::vec2(ts.origin_x, ts.origin_y);
+                            let a_start = v_start.y.atan2(v_start.x);
+                            let a_now   = v_now.y.atan2(v_now.x);
+                            let d_angle = a_now - a_start;
+                            ts.angle = ts.snap_angle + d_angle;
+                            // Also rotate cx/cy around the origin.
+                            let ox  = ts.snap_origin_x;
+                            let oy  = ts.snap_origin_y;
+                            let dcx = ts.snap_cx - ox;
+                            let dcy = ts.snap_cy - oy;
+                            let (cos_d, sin_d) = (d_angle.cos(), d_angle.sin());
+                            ts.cx = ox + dcx * cos_d - dcy * sin_d;
+                            ts.cy = oy + dcx * sin_d + dcy * cos_d;
+                            needs_dispatch = true;
+                        }
+                    }
+                }
+            }
+
+            // Build pending dispatch before the borrow ends (avoid partial move issues).
+            if needs_dispatch && dragged {
+                let (new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1) =
+                    Self::compute_transform_params(ts.anchor_w, ts.anchor_h, ts.cx, ts.cy, ts.scale_x, ts.scale_y, ts.angle);
+                ts.transform_applied = true;
+                let anchor_canvas_id  = ts.anchor_canvas_id;
+                let anchor_pixels     = ts.anchor_pixels.clone();
+                let anchor_w          = ts.anchor_w;
+                let anchor_h          = ts.anchor_h;
+                let display_canvas_id = ts.display_canvas_id;
+                pending_dispatch = Some(PendingTransformDispatch {
+                    anchor_canvas_id, anchor_pixels, anchor_w, anchor_h,
+                    display_canvas_id, new_x, new_y, new_w, new_h,
+                    a00, a01, a10, a11, b0, b1,
+                    is_final_commit: false,
+                });
+            } else {
+                pending_dispatch = None;
+            }
+
+            // --- Drag stop ---
+            if drag_stopped {
+                ts.active_handle = None;
+            }
+        }
+
+        if let Some(p) = pending_dispatch {
+            self.pending_transform_dispatch = Some(p);
+        }
+
+        // Handle drawing is deferred to render_raster_transform_overlays(), called
+        // from render_content() AFTER the VelloCallback is registered, so the handles
+        // appear on top of the Vello scene rather than underneath it.
+    }
+
+    fn draw_raster_transform_handles_static(
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        ts: &RasterTransformState,
+        zoom: f32,
+        pan: egui::Vec2,
+    ) {
+        let painter = ui.painter_at(rect);
+
+        // World → screen
+        let w2s = |wx: f32, wy: f32| -> egui::Pos2 {
+            egui::pos2(
+                wx * zoom + pan.x + rect.min.x,
+                wy * zoom + pan.y + rect.min.y,
+            )
+        };
+
+        let hw = ts.scale_x * ts.anchor_w as f32 / 2.0;
+        let hh = ts.scale_y * ts.anchor_h as f32 / 2.0;
+        let cos_a = ts.angle.cos();
+        let sin_a = ts.angle.sin();
+        let to_world = |lx: f32, ly: f32| -> (f32, f32) {
+            (ts.cx + lx * cos_a - ly * sin_a, ts.cy + lx * sin_a + ly * cos_a)
+        };
+
+        // Draw bounding box outline (4 edges between corners)
+        let corners_local = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)];
+        let corners_screen: Vec<egui::Pos2> = corners_local.iter()
+            .map(|&(lx, ly)| { let (wx, wy) = to_world(lx, ly); w2s(wx, wy) })
+            .collect();
+        let outline_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 200);
+        let shadow_color  = egui::Color32::from_rgba_unmultiplied(0,   0,   0,   120);
+        for i in 0..4 {
+            let a = corners_screen[i];
+            let b = corners_screen[(i + 1) % 4];
+            painter.line_segment([a, b], egui::Stroke::new(2.0, shadow_color));
+            painter.line_segment([a, b], egui::Stroke::new(1.0, outline_color));
+        }
+
+        // Colors
+        let handle_normal  = egui::Color32::WHITE;
+        let handle_hovered = egui::Color32::from_rgb(100, 180, 255); // light blue
+        let handle_active  = egui::Color32::from_rgb(30,  120, 255); // bright blue
+
+        let handle_color = |h: RasterTransformHandle| -> egui::Color32 {
+            if ts.active_handle == Some(h) { handle_active }
+            else if ts.hovered_handle == Some(h) { handle_hovered }
+            else { handle_normal }
+        };
+
+        // Draw corner + edge handles (paired with their handle enum variant)
+        let handle_pairs: [(RasterTransformHandle, (f32, f32)); 8] = [
+            (RasterTransformHandle::Corner { right: false, bottom: false }, to_world(-hw, -hh)),
+            (RasterTransformHandle::Corner { right: true,  bottom: false }, to_world( hw, -hh)),
+            (RasterTransformHandle::Corner { right: false, bottom: true  }, to_world(-hw,  hh)),
+            (RasterTransformHandle::Corner { right: true,  bottom: true  }, to_world( hw,  hh)),
+            (RasterTransformHandle::EdgeH  { bottom: false }, to_world(0.0, -hh)),
+            (RasterTransformHandle::EdgeH  { bottom: true  }, to_world(0.0,  hh)),
+            (RasterTransformHandle::EdgeV  { right: false  }, to_world(-hw, 0.0)),
+            (RasterTransformHandle::EdgeV  { right: true   }, to_world( hw, 0.0)),
+        ];
+        for (handle, (wx, wy)) in handle_pairs {
+            let sp = w2s(wx, wy);
+            let is_hover = ts.hovered_handle == Some(handle) || ts.active_handle == Some(handle);
+            let size = if is_hover { 10.0 } else { 8.0 };
+            let inner = if is_hover {  8.0 } else { 6.0 };
+            painter.rect_filled(
+                egui::Rect::from_center_size(sp, egui::vec2(size, size)),
+                0.0,
+                shadow_color,
+            );
+            painter.rect_filled(
+                egui::Rect::from_center_size(sp, egui::vec2(inner, inner)),
+                0.0,
+                handle_color(handle),
+            );
+        }
+
+        // Draw rotate handle (circle above top-center)
+        let rotate_offset = 24.0 / zoom;
+        let (rwx, rwy) = to_world(0.0, -hh - rotate_offset);
+        let rsp = w2s(rwx, rwy);
+        // Line from top-center to rotate handle
+        let (tcx, tcy) = to_world(0.0, -hh);
+        painter.line_segment([w2s(tcx, tcy), rsp], egui::Stroke::new(1.0, outline_color));
+        let rot_hov = ts.hovered_handle == Some(RasterTransformHandle::Rotate)
+            || ts.active_handle  == Some(RasterTransformHandle::Rotate);
+        let rot_color = if ts.active_handle  == Some(RasterTransformHandle::Rotate) { handle_active }
+            else if ts.hovered_handle == Some(RasterTransformHandle::Rotate) { handle_hovered }
+            else { handle_normal };
+        let rot_r = if rot_hov { 7.0 } else { 5.0 };
+        painter.circle_filled(rsp, rot_r, rot_color);
+        painter.circle_stroke(rsp, rot_r, egui::Stroke::new(1.5, shadow_color));
+
+        // Draw origin handle (pivot point for rotate/scale) — a small crosshair circle.
+        // origin_x/origin_y are already in world coords, use w2s directly.
+        let origin_sp = w2s(ts.origin_x, ts.origin_y);
+        let orig_color = if ts.hovered_handle == Some(RasterTransformHandle::Origin)
+            || ts.active_handle == Some(RasterTransformHandle::Origin) { handle_hovered } else { handle_normal };
+        painter.circle_filled(origin_sp, 5.0, orig_color);
+        painter.circle_stroke(origin_sp, 5.0, egui::Stroke::new(1.5, shadow_color));
+        let arm = 6.0;
+        painter.line_segment([origin_sp - egui::vec2(arm, 0.0), origin_sp + egui::vec2(arm, 0.0)],
+            egui::Stroke::new(1.0, shadow_color));
+        painter.line_segment([origin_sp - egui::vec2(0.0, arm), origin_sp + egui::vec2(0.0, arm)],
+            egui::Stroke::new(1.0, shadow_color));
+    }
+
     /// Apply an affine transform to selected DCEL vertices and their connected edge control points.
     /// Reads original positions from `original_dcel` and writes transformed positions to `dcel`.
     fn apply_dcel_transform(
@@ -6044,6 +8192,890 @@ impl StagePane {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Warp tool
+    // -----------------------------------------------------------------------
+
+    fn handle_raster_warp_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::Tool;
+        use uuid::Uuid;
+
+        // Ensure we're on a raster layer.
+        let Some(layer_id) = *shared.active_layer_id else { return; };
+        let is_raster = shared.action_executor.document().get_layer(&layer_id)
+            .map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
+        if !is_raster { return; }
+
+        let grid_cols = shared.raster_settings.warp_grid_cols.max(2);
+        let grid_rows = shared.raster_settings.warp_grid_rows.max(2);
+
+        // ---- Keyboard: Enter = commit, Escape = cancel ----
+        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+        if escape {
+            if let Some(ws) = self.warp_state.take() {
+                // Schedule cleanup of display canvas.
+                self.pending_canvas_removal = Some(ws.display_canvas_id);
+                self.painting_canvas = None;
+                let _ = (ws.anchor_canvas_id, ws.disp_buf_id);
+            }
+            return;
+        }
+
+        if enter {
+            if let Some(ref mut ws) = self.warp_state {
+                if !ws.wants_commit {
+                    ws.wants_commit = true;
+                    let disp_data = Self::extract_grid_disps(&ws.control_points);
+                    self.pending_warp_ops.push(PendingWarpOp::WarpApply {
+                        anchor_canvas_id:  ws.anchor_canvas_id,
+                        disp_buf_id:       ws.disp_buf_id,
+                        display_canvas_id: ws.display_canvas_id,
+                        disp_data:         Some(disp_data),
+                        grid_cols:         ws.grid_cols,
+                        grid_rows:         ws.grid_rows,
+                        w: ws.anchor_w, h: ws.anchor_h,
+                        final_commit: true,
+                        layer_id:     ws.layer_id,
+                        time:         ws.time,
+                        is_float_warp: ws.float_offset.is_some(),
+                    });
+                }
+            }
+            return;
+        }
+
+        // ---- Lazy init (first time Warp tool is active on this layer) ----
+        let time = *shared.playback_time;
+        let needs_init = self.warp_state.as_ref()
+            .map_or(true, |ws| ws.layer_id != layer_id);
+
+        if needs_init {
+            // Clean up old state if switching layers.
+            if let Some(old) = self.warp_state.take() {
+                self.pending_canvas_removal = Some(old.display_canvas_id);
+                self.painting_canvas = None;
+            }
+
+            // Determine anchor source: floating selection on this layer, or the keyframe.
+            let float_offset: Option<(i32, i32)>;
+            let anchor_canvas_id: uuid::Uuid;
+            let anchor_pixels: Vec<u8>;
+            let w: u32;
+            let h: u32;
+
+            if let Some(float_sel) = shared.selection.raster_floating.as_ref()
+                .filter(|f| f.layer_id == layer_id)
+            {
+                // Warp the floating selection.
+                float_offset    = Some((float_sel.x, float_sel.y));
+                anchor_canvas_id = float_sel.canvas_id;
+                w               = float_sel.width;
+                h               = float_sel.height;
+                anchor_pixels   = if float_sel.pixels.is_empty() {
+                    vec![0u8; (w * h * 4) as usize]
+                } else {
+                    (*float_sel.pixels).clone()
+                };
+            } else {
+                // Warp the full keyframe canvas.
+                float_offset = None;
+                let doc = shared.action_executor.document();
+                let (kf_id, kw, kh, raw_pix) = doc.get_layer(&layer_id)
+                    .and_then(|l| if let lightningbeam_core::layer::AnyLayer::Raster(rl) = l {
+                        rl.keyframe_at(time).map(|kf| {
+                            let expected = (kf.width * kf.height * 4) as usize;
+                            let mut pix = kf.raw_pixels.clone();
+                            if pix.len() != expected { pix.resize(expected, 0); }
+                            (kf.id, kf.width, kf.height, pix)
+                        })
+                    } else { None })
+                    .unwrap_or_else(|| {
+                        let dw = 1920u32; let dh = 1080u32;
+                        (Uuid::new_v4(), dw, dh, vec![0u8; (dw * dh * 4) as usize])
+                    });
+                anchor_canvas_id = kf_id;
+                w               = kw;
+                h               = kh;
+                anchor_pixels   = raw_pix;
+            }
+
+            let display_canvas_id = Uuid::new_v4();
+            let disp_buf_id       = Uuid::new_v4();
+
+            // Build evenly-spaced control point grid in world space.
+            // For a float, control points are offset by float_offset so they align with the float.
+            let (ox, oy) = float_offset
+                .map(|(x, y)| (x as f32, y as f32))
+                .unwrap_or((0.0, 0.0));
+            let num_pts = (grid_cols * grid_rows) as usize;
+            let mut control_points = Vec::with_capacity(num_pts);
+            for row in 0..grid_rows {
+                for col in 0..grid_cols {
+                    let hx = ox + col as f32 / (grid_cols - 1) as f32 * w as f32;
+                    let hy = oy + row as f32 / (grid_rows - 1) as f32 * h as f32;
+                    control_points.push([hx, hy, hx, hy]);
+                }
+            }
+
+            // Queue GPU init.
+            self.pending_warp_ops.push(PendingWarpOp::Init {
+                anchor_canvas_id,
+                display_canvas_id,
+                disp_buf_id,
+                w, h,
+                anchor_pixels,
+                is_liquify: false,
+            });
+
+            self.warp_state = Some(WarpState {
+                layer_id,
+                time,
+                anchor_canvas_id,
+                display_canvas_id,
+                disp_buf_id,
+                anchor_w: w,
+                anchor_h: h,
+                grid_cols,
+                grid_rows,
+                float_offset,
+                control_points,
+                active_point: None,
+                hovered_point: None,
+                dirty: false,
+                warp_applied: false,
+                wants_commit: false,
+            });
+        }
+
+        // Pre-check drag states before taking the warp_state borrow.
+        let drag_started = self.rsp_drag_started(response);
+        let dragged      = self.rsp_dragged(response);
+        let drag_stopped = self.rsp_drag_stopped(response);
+        let drag_delta   = response.drag_delta() / self.zoom;
+
+        let ws = match self.warp_state.as_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+
+        // Update painting_canvas each frame (in case it was cleared).
+        // NOTE: Can't write to self.painting_canvas here while ws borrows self.warp_state.
+        // Set painting_canvas after the ws block via a flag.
+
+        // ---- Draw grid overlay ----
+        // Use Order::Foreground so the grid renders on top of the GPU canvas paint callback.
+        let rect = response.rect;
+        let mut painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("warp_grid_overlay"),
+        ));
+        painter.set_clip_rect(rect);
+        let to_screen = |cx: f32, cy: f32| -> egui::Pos2 {
+            egui::pos2(
+                rect.min.x + self.pan_offset.x + cx * self.zoom,
+                rect.min.y + self.pan_offset.y + cy * self.zoom,
+            )
+        };
+        // Horizontal lines
+        for row in 0..ws.grid_rows {
+            for col in 0..ws.grid_cols - 1 {
+                let a = &ws.control_points[(row * ws.grid_cols + col) as usize];
+                let b = &ws.control_points[(row * ws.grid_cols + col + 1) as usize];
+                painter.line_segment([to_screen(a[2], a[3]), to_screen(b[2], b[3])],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(180, 180, 180, 180)));
+            }
+        }
+        // Vertical lines
+        for row in 0..ws.grid_rows - 1 {
+            for col in 0..ws.grid_cols {
+                let a = &ws.control_points[(row * ws.grid_cols + col) as usize];
+                let b = &ws.control_points[((row + 1) * ws.grid_cols + col) as usize];
+                painter.line_segment([to_screen(a[2], a[3]), to_screen(b[2], b[3])],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(180, 180, 180, 180)));
+            }
+        }
+
+        // ---- Hit-test control points (hover uses current pos; drag-start uses press_origin) ----
+        let hover_r = 10.0_f32;
+        let mouse_screen = egui::pos2(
+            rect.min.x + self.pan_offset.x + world_pos.x * self.zoom,
+            rect.min.y + self.pan_offset.y + world_pos.y * self.zoom,
+        );
+        let mut new_hover: Option<usize> = None;
+        for (i, pt) in ws.control_points.iter().enumerate() {
+            let screen_pt = to_screen(pt[2], pt[3]);
+            if screen_pt.distance(mouse_screen) < hover_r {
+                new_hover = Some(i);
+                break;
+            }
+        }
+        ws.hovered_point = new_hover;
+
+        // Draw control points
+        for (i, pt) in ws.control_points.iter().enumerate() {
+            let screen_pt = to_screen(pt[2], pt[3]);
+            let (size, color) = if ws.active_point == Some(i) {
+                (5.0, egui::Color32::WHITE)
+            } else if ws.hovered_point == Some(i) {
+                (4.0, egui::Color32::from_rgb(255, 220, 80))
+            } else {
+                (3.0, egui::Color32::from_rgba_unmultiplied(220, 220, 220, 200))
+            };
+            painter.rect_filled(egui::Rect::from_center_size(screen_pt, egui::Vec2::splat(size * 2.0)), 0.0, color);
+            painter.rect_stroke(egui::Rect::from_center_size(screen_pt, egui::Vec2::splat(size * 2.0)),
+                0.0, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(60, 60, 60, 200)), egui::StrokeKind::Inside);
+        }
+
+        // ---- Drag handling ----
+        if drag_started {
+            // Use press_origin for hit-testing — drag_started fires after the threshold,
+            // so world_pos is already offset from where the user actually clicked.
+            let click_screen = ui.input(|i| i.pointer.press_origin())
+                .unwrap_or_else(|| egui::pos2(mouse_screen.x, mouse_screen.y));
+            ws.active_point = ws.control_points.iter().enumerate()
+                .find(|(_, pt)| to_screen(pt[2], pt[3]).distance(click_screen) < hover_r)
+                .map(|(i, _)| i);
+        }
+        if dragged {
+            if let Some(idx) = ws.active_point {
+                ws.control_points[idx][2] += drag_delta.x;
+                ws.control_points[idx][3] += drag_delta.y;
+                ws.dirty = true;
+            }
+        }
+        if drag_stopped {
+            ws.active_point = None;
+        }
+
+        // ---- Collect pending warp op data before releasing ws borrow ----
+        let pending_op = if ws.dirty && !ws.wants_commit {
+            ws.dirty = false;
+            ws.warp_applied = true;
+            let disp_data = Self::extract_grid_disps(&ws.control_points);
+            Some(PendingWarpOp::WarpApply {
+                anchor_canvas_id:  ws.anchor_canvas_id,
+                disp_buf_id:       ws.disp_buf_id,
+                display_canvas_id: ws.display_canvas_id,
+                disp_data:         Some(disp_data),
+                grid_cols:         ws.grid_cols,
+                grid_rows:         ws.grid_rows,
+                w: ws.anchor_w, h: ws.anchor_h,
+                final_commit: false,
+                layer_id:     ws.layer_id,
+                time:         ws.time,
+                is_float_warp: ws.float_offset.is_some(),
+            })
+        } else {
+            None
+        };
+        let (ws_layer_id, ws_display_id, ws_float_offset) = (ws.layer_id, ws.display_canvas_id, ws.float_offset);
+        drop(ws);  // release borrow of warp_state
+
+        // Display canvas is initialised by Init (zero-displacement apply), so it always
+        // has valid content. For full-layer warp, override the layer blit unconditionally.
+        // For float warp the override is done via transform_display in render_content().
+        if ws_float_offset.is_none() {
+            self.painting_canvas = Some((ws_layer_id, ws_display_id));
+        }
+        if let Some(op) = pending_op {
+            self.pending_warp_ops.push(op);
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// Compute a per-pixel displacement map from a warp control-point grid.
+    ///
+    /// For each pixel (x, y) we find its fractional grid position, then bilinearly
+    /// interpolate the displacements of the surrounding 4 grid points.
+    /// Extract per-control-point displacements (displaced - home) from the control point array.
+    /// Returns a tiny vec (grid_cols * grid_rows entries) uploaded to the GPU displacement buffer.
+    /// The shader does bilinear interpolation per pixel, so no per-pixel CPU work is needed.
+    fn extract_grid_disps(control_points: &[[f32; 4]]) -> Vec<[f32; 2]> {
+        // The warp shader is an inverse warp: output pixel (x,y) samples source at (x+d.x, y+d.y).
+        // So to make content follow the handle (forward warp), negate: d = home - displaced.
+        control_points.iter()
+            .map(|p| [p[0] - p[2], p[1] - p[3]])
+            .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // Liquify tool
+    // -----------------------------------------------------------------------
+
+    fn handle_raster_liquify_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use uuid::Uuid;
+
+        // Ensure we're on a raster layer.
+        let Some(layer_id) = *shared.active_layer_id else { return; };
+        let is_raster = shared.action_executor.document().get_layer(&layer_id)
+            .map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
+        if !is_raster { return; }
+
+        let radius   = shared.raster_settings.liquify_radius;
+        let strength = shared.raster_settings.liquify_strength;
+        let mode     = shared.raster_settings.liquify_mode.as_u32();
+
+        // ---- Keyboard: Enter = commit, Escape = cancel ----
+        let enter  = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+        if escape {
+            if let Some(ls) = self.liquify_state.take() {
+                self.pending_canvas_removal = Some(ls.display_canvas_id);
+                self.painting_canvas = None;
+                let _ = (ls.anchor_canvas_id, ls.disp_buf_id);
+            }
+            return;
+        }
+
+        if enter {
+            if let Some(ref mut ls) = self.liquify_state {
+                if !ls.wants_commit {
+                    ls.wants_commit = true;
+                    self.pending_warp_ops.push(PendingWarpOp::LiquifyApply {
+                        anchor_canvas_id:  ls.anchor_canvas_id,
+                        disp_buf_id:       ls.disp_buf_id,
+                        display_canvas_id: ls.display_canvas_id,
+                        w: ls.anchor_w, h: ls.anchor_h,
+                        final_commit: true,
+                        layer_id:     ls.layer_id,
+                        time:         ls.time,
+                        is_float_warp: ls.float_offset.is_some(),
+                    });
+                }
+            }
+            return;
+        }
+
+        // ---- Draw brush cursor ----
+        let liq_rect  = response.rect;
+        let screen_cx = liq_rect.min.x + self.pan_offset.x + world_pos.x * self.zoom;
+        let screen_cy = liq_rect.min.y + self.pan_offset.y + world_pos.y * self.zoom;
+        let screen_r  = radius * self.zoom;
+        let painter   = ui.painter_at(liq_rect);
+        let time      = ui.input(|i| i.time) as f32;
+        let phase     = (time * 8.0).rem_euclid(8.0);
+
+        let pts: Vec<egui::Pos2> = (0..64).map(|i| {
+            let a = i as f32 / 64.0 * std::f32::consts::TAU;
+            egui::pos2(screen_cx + a.cos() * screen_r,
+                       screen_cy + a.sin() * screen_r)
+        }).collect();
+        Self::draw_marching_ants(&painter, &pts, phase);
+
+        // ---- Lazy init ----
+        let playhead_time = *shared.playback_time;
+        let needs_init = self.liquify_state.as_ref()
+            .map_or(true, |ls| ls.layer_id != layer_id);
+
+        if needs_init {
+            if let Some(old) = self.liquify_state.take() {
+                self.pending_canvas_removal = Some(old.display_canvas_id);
+                self.painting_canvas = None;
+            }
+
+            // Determine anchor: floating selection on this layer, or the keyframe.
+            let float_offset: Option<(i32, i32)>;
+            let anchor_canvas_id: uuid::Uuid;
+            let anchor_pixels: Vec<u8>;
+            let w: u32;
+            let h: u32;
+
+            if let Some(float_sel) = shared.selection.raster_floating.as_ref()
+                .filter(|f| f.layer_id == layer_id)
+            {
+                float_offset     = Some((float_sel.x, float_sel.y));
+                anchor_canvas_id = float_sel.canvas_id;
+                w                = float_sel.width;
+                h                = float_sel.height;
+                anchor_pixels    = if float_sel.pixels.is_empty() {
+                    vec![0u8; (w * h * 4) as usize]
+                } else {
+                    (*float_sel.pixels).clone()
+                };
+            } else {
+                float_offset = None;
+                let doc = shared.action_executor.document();
+                let (kf_id, kw, kh, raw_pix) = doc.get_layer(&layer_id)
+                    .and_then(|l| if let lightningbeam_core::layer::AnyLayer::Raster(rl) = l {
+                        rl.keyframe_at(playhead_time).map(|kf| {
+                            let expected = (kf.width * kf.height * 4) as usize;
+                            let mut pix = kf.raw_pixels.clone();
+                            if pix.len() != expected { pix.resize(expected, 0); }
+                            (kf.id, kf.width, kf.height, pix)
+                        })
+                    } else { None })
+                    .unwrap_or_else(|| {
+                        let dw = 1920u32; let dh = 1080u32;
+                        (Uuid::new_v4(), dw, dh, vec![0u8; (dw * dh * 4) as usize])
+                    });
+                anchor_canvas_id = kf_id;
+                w                = kw;
+                h                = kh;
+                anchor_pixels    = raw_pix;
+            }
+
+            let display_canvas_id = Uuid::new_v4();
+            let disp_buf_id       = Uuid::new_v4();
+
+            self.pending_warp_ops.push(PendingWarpOp::Init {
+                anchor_canvas_id,
+                display_canvas_id,
+                disp_buf_id,
+                w, h,
+                anchor_pixels,
+                is_liquify: true,
+            });
+
+            self.liquify_state = Some(LiquifyState {
+                layer_id,
+                time: playhead_time,
+                anchor_canvas_id,
+                display_canvas_id,
+                disp_buf_id,
+                anchor_w: w,
+                anchor_h: h,
+                last_brush_pos: None,
+                liquify_applied: false,
+                wants_commit: false,
+                float_offset,
+            });
+        }
+
+        // Pre-check drag states before taking the liquify_state borrow.
+        let drag_started_l = self.rsp_drag_started(response);
+        let dragged_l      = self.rsp_dragged(response);
+        let drag_stopped_l = self.rsp_drag_stopped(response);
+
+        // Extract what we need from liquify_state and update it, then release borrow.
+        // Returns (layer_id, display_id, brush_op) where brush_op is Some if we should
+        // push GPU ops this frame.
+        let brush_op = {
+            let ls = match self.liquify_state.as_mut() {
+                Some(ls) => ls,
+                None => return,
+            };
+
+            let mut op: Option<(uuid::Uuid, uuid::Uuid, uuid::Uuid, u32, u32, f64, f32, f32, f32, f32)> = None;
+
+            if drag_started_l {
+                ls.last_brush_pos = Some((world_pos.x, world_pos.y));
+                ls.liquify_applied = true;
+                op = Some((ls.anchor_canvas_id, ls.disp_buf_id, ls.display_canvas_id,
+                           ls.anchor_w, ls.anchor_h, ls.time,
+                           world_pos.x, world_pos.y, 0.0, 0.0));
+            } else if dragged_l {
+                if let Some((lx, ly)) = ls.last_brush_pos {
+                    let dx = world_pos.x - lx;
+                    let dy = world_pos.y - ly;
+                    let dist2 = dx * dx + dy * dy;
+                    let min_step = (radius / 4.0).max(1.0);
+                    if dist2 >= min_step * min_step {
+                        let len = dist2.sqrt().max(0.001);
+                        ls.last_brush_pos = Some((world_pos.x, world_pos.y));
+                        op = Some((ls.anchor_canvas_id, ls.disp_buf_id, ls.display_canvas_id,
+                                   ls.anchor_w, ls.anchor_h, ls.time,
+                                   world_pos.x, world_pos.y, dx / len, dy / len));
+                    }
+                }
+            }
+            if drag_stopped_l {
+                ls.last_brush_pos = None;
+            }
+            let is_float = ls.float_offset.is_some();
+            op.map(|o| (ls.layer_id, is_float, o))
+        };
+
+        // For full-layer liquify: override layer blit with display canvas.
+        // For float liquify: override the float blit via transform_display in render_content().
+        if let Some(ls) = self.liquify_state.as_ref() {
+            if ls.float_offset.is_none() {
+                self.painting_canvas = Some((ls.layer_id, ls.display_canvas_id));
+            }
+        }
+
+        if let Some((ls_layer_id, is_float_warp, (anchor_id, disp_buf, display_id, w, h, time, cx, cy, dx, dy))) = brush_op {
+            self.pending_warp_ops.push(PendingWarpOp::LiquifyBrushStep {
+                disp_buf_id: disp_buf,
+                params: crate::gpu_brush::LiquifyBrushParams {
+                    cx, cy, radius, strength,
+                    dx, dy, mode,
+                    map_w: w, map_h: h,
+                    _pad0: 0, _pad1: 0, _pad2: 0,
+                },
+            });
+            self.pending_warp_ops.push(PendingWarpOp::LiquifyApply {
+                anchor_canvas_id:  anchor_id,
+                disp_buf_id:       disp_buf,
+                display_canvas_id: display_id,
+                w, h,
+                final_commit: false,
+                layer_id: ls_layer_id,
+                time,
+                is_float_warp,
+            });
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn handle_raster_gradient_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::actions::RasterFillAction;
+        use lightningbeam_core::layer::AnyLayer;
+
+        let active_layer_id = match *shared.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+
+        let drag_started = response.drag_started();
+        let dragged      = response.dragged();
+        let drag_stopped = response.drag_stopped();
+
+        // ── Drag started: snapshot pixels, create GPU canvases ───────────────
+        if drag_started {
+            // Determine whether we're painting on the floating selection or the layer.
+            // Float: gradient writes into float.canvas_id (shown by the float path).
+            // Layer: gradient writes into a new display canvas shown via painting_canvas.
+            let float_info = shared.selection.raster_floating.as_ref().map(|f| {
+                let pixels = if f.pixels.is_empty() {
+                    vec![0u8; (f.width * f.height * 4) as usize]
+                } else {
+                    (*f.pixels).clone()
+                };
+                (pixels, f.width, f.height, f.time, f.canvas_id, f.x as f32, f.y as f32, f.layer_id)
+            });
+
+            let layer_result = if float_info.is_none() {
+                let doc = shared.action_executor.document();
+                let r = if let Some(layer) = doc.get_layer(&active_layer_id) {
+                    if let AnyLayer::Raster(rl) = layer {
+                        let time = *shared.playback_time;
+                        if let Some(kf) = rl.keyframe_at(time) {
+                            let w = doc.width as u32;
+                            let h = doc.height as u32;
+                            let pixels = if kf.raw_pixels.is_empty() {
+                                vec![0u8; (w * h * 4) as usize]
+                            } else { kf.raw_pixels.clone() };
+                            Some((pixels, w, h, kf.time))
+                        } else { None }
+                    } else { None }
+                } else { None };
+                drop(doc);
+                r
+            } else { None };
+
+            // Unpack into a common set of fields.
+            let setup = if let Some((pixels, w, h, time, fid, fx, fy, flid)) = float_info {
+                Some((pixels, w, h, time, flid, true, Some(fid), Some((fx, fy))))
+            } else if let Some((pixels, w, h, time)) = layer_result {
+                Some((pixels, w, h, time, active_layer_id, false, None, None))
+            } else { None };
+
+            if let Some((before_pixels, canvas_w, canvas_h, kf_time,
+                         target_layer_id, is_float,
+                         existing_display_id, float_offset)) = setup
+            {
+                let anchor_canvas_id  = uuid::Uuid::new_v4();
+                let display_canvas_id = existing_display_id.unwrap_or_else(uuid::Uuid::new_v4);
+
+                // Convert world drag-start to canvas-local coords.
+                let (sx, sy) = if let Some((fx, fy)) = float_offset {
+                    (world_pos.x - fx, world_pos.y - fy)
+                } else {
+                    (world_pos.x, world_pos.y)
+                };
+
+                let gpu_stops = Self::gradient_to_gpu_stops(&shared.raster_settings.gradient);
+                let gradient  = &shared.raster_settings.gradient;
+
+                self.gradient_state = Some(GradientState {
+                    layer_id: target_layer_id,
+                    time: kf_time,
+                    start: world_pos,
+                    end:   world_pos,
+                    before_pixels: before_pixels.clone(),
+                    canvas_w,
+                    canvas_h,
+                    anchor_canvas_id,
+                    display_canvas_id,
+                    is_float,
+                    float_offset,
+                });
+
+                self.pending_gradient_op = Some(PendingGradientOp {
+                    anchor_canvas_id,
+                    display_canvas_id,
+                    w: canvas_w,
+                    h: canvas_h,
+                    anchor_pixels: Some(before_pixels),
+                    start_x: sx, start_y: sy,
+                    end_x:   sx, end_y:   sy,
+                    opacity:     shared.raster_settings.gradient_opacity,
+                    extend_mode: Self::gradient_extend_to_u32(gradient.extend),
+                    kind:        Self::gradient_kind_to_u32(gradient.kind),
+                    stops:       gpu_stops,
+                });
+
+                // For layer gradient show a separate display canvas via painting_canvas.
+                // For float gradient the float's own canvas_id IS display_canvas_id
+                // and is already shown by the float rendering path.
+                if !is_float {
+                    self.painting_canvas = Some((target_layer_id, display_canvas_id));
+                }
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // ── Dragged: update end point, queue GPU dispatch ─────────────────────
+        // Skip on the same frame as drag_started — that block already queued the initial
+        // GPU op with anchor_pixels = Some(...).  Overwriting it here would lose the upload.
+        if dragged && !drag_started {
+            if let Some(ref mut gs) = self.gradient_state {
+                gs.end = world_pos;
+            }
+            if let Some(ref gs) = self.gradient_state {
+                let gradient = &shared.raster_settings.gradient;
+                // Convert world coords to canvas-local (subtract float offset if needed).
+                let to_local = |v: egui::Vec2| -> (f32, f32) {
+                    if let Some((fx, fy)) = gs.float_offset {
+                        (v.x - fx, v.y - fy)
+                    } else {
+                        (v.x, v.y)
+                    }
+                };
+                let (sx, sy) = to_local(gs.start);
+                let (ex, ey) = to_local(gs.end);
+                self.pending_gradient_op = Some(PendingGradientOp {
+                    anchor_canvas_id:  gs.anchor_canvas_id,
+                    display_canvas_id: gs.display_canvas_id,
+                    w: gs.canvas_w,
+                    h: gs.canvas_h,
+                    anchor_pixels: None,  // already on GPU
+                    start_x: sx, start_y: sy,
+                    end_x:   ex, end_y:   ey,
+                    opacity:     shared.raster_settings.gradient_opacity,
+                    extend_mode: Self::gradient_extend_to_u32(gradient.extend),
+                    kind:        Self::gradient_kind_to_u32(gradient.kind),
+                    stops:       Self::gradient_to_gpu_stops(gradient),
+                });
+                ui.ctx().request_repaint();
+            }
+        }
+
+        // ── Drag stopped: commit ──────────────────────────────────────────────
+        if drag_stopped {
+            if let Some(ref mut gs) = self.gradient_state {
+                gs.end = world_pos;
+            }
+            if let Some(ref gs) = self.gradient_state {
+                let after_pixels = Self::compute_gradient_pixels(gs, shared);
+                if gs.is_float {
+                    // Update the float's pixel buffer in place.
+                    // The float's GPU canvas (display_canvas_id) already shows the result.
+                    if let Some(ref mut float) = shared.selection.raster_floating {
+                        float.pixels = std::sync::Arc::new(after_pixels);
+                    }
+                } else {
+                    let action = RasterFillAction::new(
+                        gs.layer_id, gs.time,
+                        gs.before_pixels.clone(), after_pixels,
+                        gs.canvas_w, gs.canvas_h,
+                    ).with_description("Gradient Fill");
+                    let _ = shared.action_executor.execute(Box::new(action));
+                }
+            }
+            if let Some(gs) = self.gradient_state.take() {
+                // Always remove the anchor canvas (temporary scratch).
+                // For layer gradient, also remove the display canvas.
+                // For float gradient, display_canvas_id IS the float's canvas — keep it.
+                if gs.is_float {
+                    self.pending_canvas_removal = Some(gs.anchor_canvas_id);
+                } else {
+                    self.pending_canvas_removal = Some(gs.display_canvas_id);
+                    // Anchor leaks here (pre-existing behaviour); acceptable for now.
+                }
+            }
+            self.painting_canvas = None;
+        }
+
+        // Keep painting_canvas pointing at the display canvas each frame (layer gradient only).
+        if let Some(ref gs) = self.gradient_state {
+            if !gs.is_float {
+                self.painting_canvas = Some((gs.layer_id, gs.display_canvas_id));
+            }
+        }
+
+        // Draw direction line overlay.
+        if let Some(ref gs) = self.gradient_state {
+            let zoom = self.zoom;
+            let pan  = self.pan_offset;
+            let world_to_screen = |v: egui::Vec2| egui::pos2(v.x * zoom + pan.x, v.y * zoom + pan.y);
+            let p0 = world_to_screen(gs.start);
+            let p1 = world_to_screen(gs.end);
+            let painter = ui.painter();
+            painter.line_segment(
+                [p0, p1],
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+            );
+            painter.circle_filled(p0, 5.0, egui::Color32::WHITE);
+            painter.circle_filled(p1, 5.0, egui::Color32::WHITE);
+            painter.circle_stroke(p0, 5.0, egui::Stroke::new(1.0, egui::Color32::DARK_GRAY));
+            painter.circle_stroke(p1, 5.0, egui::Stroke::new(1.0, egui::Color32::DARK_GRAY));
+        }
+    }
+
+    fn gradient_extend_to_u32(extend: lightningbeam_core::gradient::GradientExtend) -> u32 {
+        use lightningbeam_core::gradient::GradientExtend;
+        match extend {
+            GradientExtend::Pad     => 0,
+            GradientExtend::Reflect => 1,
+            GradientExtend::Repeat  => 2,
+        }
+    }
+
+    fn gradient_kind_to_u32(kind: lightningbeam_core::gradient::GradientType) -> u32 {
+        use lightningbeam_core::gradient::GradientType;
+        match kind {
+            GradientType::Linear => 0,
+            GradientType::Radial => 1,
+        }
+    }
+
+    /// Convert gradient stops to GPU-ready form (sRGB u8 → linear f32).
+    fn gradient_to_gpu_stops(gradient: &lightningbeam_core::gradient::ShapeGradient) -> Vec<crate::gpu_brush::GpuGradientStop> {
+        gradient.stops.iter().map(|s| {
+            crate::gpu_brush::GpuGradientStop::from_srgb_u8(
+                s.position, s.color.r, s.color.g, s.color.b, s.color.a,
+            )
+        }).collect()
+    }
+
+    /// Compute gradient-filled pixel buffer (CPU), respecting active selection.
+    ///
+    /// All blending is done in linear premultiplied space to match the GPU shader.
+    fn compute_gradient_pixels(gs: &GradientState, shared: &SharedPaneState) -> Vec<u8> {
+        let w = gs.canvas_w;
+        let h = gs.canvas_h;
+        let gradient = &shared.raster_settings.gradient;
+        let opacity  = shared.raster_settings.gradient_opacity;
+
+        // Selection confinement (not applicable to float — the float IS the selection).
+        let sel = if gs.is_float { None } else { shared.selection.raster_selection.as_ref() };
+
+        // Convert world start/end to canvas-local coords (subtract float offset if any).
+        let (start_x, start_y) = if let Some((fx, fy)) = gs.float_offset {
+            (gs.start.x - fx, gs.start.y - fy)
+        } else {
+            (gs.start.x, gs.start.y)
+        };
+        let (end_x, end_y) = if let Some((fx, fy)) = gs.float_offset {
+            (gs.end.x - fx, gs.end.y - fy)
+        } else {
+            (gs.end.x, gs.end.y)
+        };
+
+        let dx = end_x - start_x;
+        let dy = end_y - start_y;
+        let len2 = dx * dx + dy * dy;
+        let is_radial = gradient.kind == lightningbeam_core::gradient::GradientType::Radial;
+
+        // sRGB ↔ linear helpers (match gpu_brush.rs).
+        let srgb_to_linear = |c: f32| -> f32 {
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        let linear_to_srgb = |c: f32| -> f32 {
+            let c = c.clamp(0.0, 1.0);
+            if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+        };
+
+        let mut out = gs.before_pixels.clone();
+
+        for py in 0..h {
+            for px in 0..w {
+                let idx = ((py * w + px) * 4) as usize;
+
+                let cx_f = px as f32 + 0.5;
+                let cy_f = py as f32 + 0.5;
+                let t_raw = if is_radial {
+                    // Radial: center at start point, radius = |end-start|.
+                    let radius = len2.sqrt();
+                    if radius < 0.5 { 0.0f32 } else {
+                        let pdx = cx_f - start_x;
+                        let pdy = cy_f - start_y;
+                        (pdx * pdx + pdy * pdy).sqrt() / radius
+                    }
+                } else {
+                    // Linear: project pixel centre onto gradient axis.
+                    if len2 < 1.0 { 0.0f32 } else {
+                        let fx = cx_f - start_x;
+                        let fy = cy_f - start_y;
+                        (fx * dx + fy * dy) / len2
+                    }
+                };
+
+                let t = gradient.apply_extend(t_raw);
+                let [gr, gg, gb, ga] = gradient.eval(t);
+
+                // Selection confinement.
+                if let Some(s) = sel {
+                    if !s.contains_pixel(px as i32, py as i32) {
+                        continue;
+                    }
+                }
+
+                // Effective alpha: gradient alpha × tool opacity (straight-alpha [0,1]).
+                let a = ga as f32 / 255.0 * opacity;
+
+                // Convert gradient RGB from sRGB straight-alpha to linear straight-alpha.
+                let gr_lin = srgb_to_linear(gr as f32 / 255.0);
+                let gg_lin = srgb_to_linear(gg as f32 / 255.0);
+                let gb_lin = srgb_to_linear(gb as f32 / 255.0);
+
+                // Source pixel: sRGB premultiplied bytes → linear premultiplied floats.
+                // (upload() does the same conversion for the GPU anchor canvas.)
+                let src_r_lin = srgb_to_linear(out[idx]     as f32 / 255.0);
+                let src_g_lin = srgb_to_linear(out[idx + 1] as f32 / 255.0);
+                let src_b_lin = srgb_to_linear(out[idx + 2] as f32 / 255.0);
+                let src_a     = out[idx + 3] as f32 / 255.0;
+
+                // Alpha-over in linear premultiplied space (matches GPU shader exactly).
+                let out_a       = a + src_a * (1.0 - a);
+                let out_r_lin   = gr_lin * a + src_r_lin * (1.0 - a);
+                let out_g_lin   = gg_lin * a + src_g_lin * (1.0 - a);
+                let out_b_lin   = gb_lin * a + src_b_lin * (1.0 - a);
+
+                // Convert linear premultiplied → sRGB premultiplied bytes.
+                out[idx]     = (linear_to_srgb(out_r_lin) * 255.0 + 0.5) as u8;
+                out[idx + 1] = (linear_to_srgb(out_g_lin) * 255.0 + 0.5) as u8;
+                out[idx + 2] = (linear_to_srgb(out_b_lin) * 255.0 + 0.5) as u8;
+                out[idx + 3] = (out_a * 255.0).clamp(0.0, 255.0) as u8;
+            }
+        }
+
+        out
+    }
+
+    /// Compute gradient pixels and queue upload to the preview GPU canvas for next prepare().
     fn handle_transform_tool(
         &mut self,
         ui: &mut egui::Ui,
@@ -6054,6 +9086,15 @@ impl StagePane {
         use lightningbeam_core::tool::ToolState;
         use lightningbeam_core::layer::AnyLayer;
         use vello::kurbo::Point;
+
+        // Raster floating selection on a raster layer → raster transform path.
+        if let Some(active_id) = *shared.active_layer_id {
+            let is_raster = shared.action_executor.document().get_layer(&active_id)
+                .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
+            if is_raster && shared.selection.raster_floating.is_some() {
+                return self.handle_raster_transform_tool(ui, response, world_pos, shared);
+            }
+        }
 
         // Check if we have an active layer
         let active_layer_id = match *shared.active_layer_id {
@@ -7321,6 +10362,21 @@ impl StagePane {
             });
         }
 
+        // Alt+click: set source point for clone/healing tools.
+        {
+            use lightningbeam_core::tool::Tool;
+            let tool_uses_alt = crate::tools::raster_tool_def(shared.selected_tool)
+                .map_or(false, |d| d.uses_alt_click());
+            if tool_uses_alt
+                && alt_held
+                && self.rsp_primary_pressed(ui)
+                && response.hovered()
+            {
+                eprintln!("[clone/healing] set clone source to ({:.1}, {:.1})", world_pos.x, world_pos.y);
+                shared.raster_settings.clone_source = Some(world_pos);
+            }
+        }
+
         // Handle tool input (only if not using Alt modifier for panning)
         if !alt_held {
             use lightningbeam_core::tool::Tool;
@@ -7351,19 +10407,23 @@ impl StagePane {
                         shared.action_executor.document().get_layer(&id)
                     }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
                     if is_raster {
-                        self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Normal, shared);
+                        self.handle_unified_raster_stroke_tool(ui, &response, world_pos, &crate::tools::paint::PAINT, shared);
                     } else {
                         self.handle_draw_tool(ui, &response, world_pos, shared);
                     }
                 }
-                Tool::Erase => {
-                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Erase, shared);
-                }
-                Tool::Smudge => {
-                    self.handle_raster_stroke_tool(ui, &response, world_pos, lightningbeam_core::raster_layer::RasterBlendMode::Smudge, shared);
+                tool if crate::tools::raster_tool_def(&tool).is_some() => {
+                    let def = crate::tools::raster_tool_def(&tool).unwrap();
+                    self.handle_raster_stroke_tool(ui, &response, world_pos, def, shared);
                 }
                 Tool::SelectLasso => {
                     self.handle_raster_lasso_tool(ui, &response, world_pos, shared);
+                }
+                Tool::MagicWand => {
+                    self.handle_magic_wand_tool(&response, world_pos, shared);
+                }
+                Tool::QuickSelect => {
+                    self.handle_quick_select_tool(ui, &response, world_pos, shared);
                 }
                 Tool::Transform => {
                     self.handle_transform_tool(ui, &response, world_pos, shared);
@@ -7382,6 +10442,15 @@ impl StagePane {
                 }
                 Tool::RegionSelect => {
                     self.handle_region_select_tool(ui, &response, world_pos, shared);
+                }
+                Tool::Warp => {
+                    self.handle_raster_warp_tool(ui, &response, world_pos, shared);
+                }
+                Tool::Liquify => {
+                    self.handle_raster_liquify_tool(ui, &response, world_pos, shared);
+                }
+                Tool::Gradient => {
+                    self.handle_raster_gradient_tool(ui, &response, world_pos, shared);
                 }
                 _ => {
                     // Other tools not implemented yet
@@ -7695,6 +10764,9 @@ impl StagePane {
     ) {
         use lightningbeam_core::selection::RasterSelection;
 
+        // Don't show marching ants during raster transform — the handles show the bbox outline.
+        if self.raster_transform_state.is_some() { return; }
+
         let has_sel = shared.selection.raster_selection.is_some();
         if !has_sel { return; }
 
@@ -7717,6 +10789,13 @@ impl StagePane {
                 }
                 RasterSelection::Lasso(pts) => {
                     Self::draw_marching_ants_lasso(&painter, rect.min, pts, zoom, pan, phase);
+                }
+                RasterSelection::Mask { data, width, height, origin_x, origin_y } => {
+                    Self::draw_marching_ants_mask(
+                        &painter, rect.min,
+                        data, *width, *height, *origin_x, *origin_y,
+                        zoom, pan, phase,
+                    );
                 }
             }
         }
@@ -7821,6 +10900,83 @@ impl StagePane {
             }
         }
     }
+
+    /// Draw the brush-size outline cursor for raster paint tools.
+    ///
+    /// Renders an alternating black/white dashed ellipse (marching-ants style) centred on
+    /// `pos` (screen space). The ellipse shape reflects the brush's `elliptical_dab_ratio`
+    /// and angle; for brushes with position jitter (`offset_by_random`) the radius is
+    /// expanded so the outline marks the full extent where paint can land.
+    fn draw_brush_cursor(
+        &self,
+        ui: &mut egui::Ui,
+        rect: egui::Rect,
+        pos: egui::Pos2,
+        shared: &SharedPaneState,
+    ) {
+        use lightningbeam_core::tool::Tool;
+
+        // Compute semi-axes (world pixels) and dab rotation angle.
+        let (a_world, b_world, dab_angle_rad) = if matches!(*shared.selected_tool, Tool::QuickSelect) {
+            let r = shared.raster_settings.quick_select_radius;
+            (r, r, 0.0_f32)
+        } else if let Some(def) = crate::tools::raster_tool_def(shared.selected_tool) {
+            let r = def.cursor_radius(shared.raster_settings);
+            // For the standard paint brush, also account for elliptical shape.
+            if matches!(*shared.selected_tool,
+                Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush)
+            {
+                let bs = &shared.raster_settings.active_brush_settings;
+                let ratio = bs.elliptical_dab_ratio.max(1.0);
+                let expand = 1.0 + bs.offset_by_random;
+                (r * expand, r * expand / ratio, bs.elliptical_dab_angle.to_radians())
+            } else {
+                (r, r, 0.0_f32)
+            }
+        } else {
+            let bs = &shared.raster_settings.active_brush_settings;
+            let r = shared.raster_settings.brush_radius;
+            let ratio = bs.elliptical_dab_ratio.max(1.0);
+            let expand = 1.0 + bs.offset_by_random;
+            (r * expand, r * expand / ratio, bs.elliptical_dab_angle.to_radians())
+        };
+
+        let a = a_world * self.zoom; // major semi-axis in screen pixels
+        let b = b_world * self.zoom; // minor semi-axis in screen pixels
+        if a < 1.0 { return; }
+
+        let painter = ui.painter_at(rect);
+        let cos_a = dab_angle_rad.cos();
+        let sin_a = dab_angle_rad.sin();
+
+        // Approximate ellipse perimeter (Ramanujan) to decide how many dashes to draw.
+        let h = ((a - b) / (a + b)).powi(2);
+        let perimeter = std::f32::consts::PI * (a + b)
+            * (1.0 + 3.0 * h / (10.0 + (4.0 - 3.0 * h).sqrt()));
+        let dash_px = 4.0_f32;
+        let n = ((perimeter / dash_px).ceil() as usize).max(8);
+
+        let pt = |i: usize| -> egui::Pos2 {
+            let t = i as f32 / n as f32 * std::f32::consts::TAU;
+            let ex = a * t.cos();
+            let ey = b * t.sin();
+            pos + egui::vec2(ex * cos_a - ey * sin_a, ex * sin_a + ey * cos_a)
+        };
+
+        // Alternating black/white 1-px segments.
+        for i in 0..n {
+            let color = if i % 2 == 0 { egui::Color32::BLACK } else { egui::Color32::WHITE };
+            painter.line_segment([pt(i), pt(i + 1)], egui::Stroke::new(1.0, color));
+        }
+
+        // Small crosshair at centre.
+        let arm = 3.0_f32.min(a * 0.3).max(1.0);
+        for (color, width) in [(egui::Color32::BLACK, 2.0_f32), (egui::Color32::WHITE, 1.0_f32)] {
+            let s = egui::Stroke::new(width, color);
+            painter.line_segment([pos - egui::vec2(arm, 0.0), pos + egui::vec2(arm, 0.0)], s);
+            painter.line_segment([pos - egui::vec2(0.0, arm), pos + egui::vec2(0.0, arm)], s);
+        }
+    }
 }
 
 
@@ -7887,7 +11043,10 @@ impl PaneRenderer for StagePane {
                                     }
                                 }
                             }
-                            float.pixels = pixels;
+                            float.pixels = std::sync::Arc::new(pixels);
+                            // Invalidate the float's GPU canvas so the lazy-init
+                            // in prepare() re-uploads the fresh pixels next frame.
+                            self.pending_canvas_removals.push(float.canvas_id);
                         }
                     }
                     self.stroke_clip_selection = None;
@@ -7936,6 +11095,14 @@ impl PaneRenderer for StagePane {
                         self.pending_canvas_removal = Some(kf_id);
                     }
                 }
+                // Unified tool cleanup: clear active_raster_tool and queue A/B/C for removal.
+                // Runs after both the float and layer branches.
+                if self.active_tool_awaiting_readback {
+                    self.active_tool_awaiting_readback = false;
+                    if let Some((_, ws)) = self.active_raster_tool.take() {
+                        self.pending_canvas_removals.extend(ws.canvas_ids());
+                    }
+                }
             }
         }
 
@@ -7955,6 +11122,163 @@ impl PaneRenderer for StagePane {
                 }
                 // Clear the pending request since we've processed it
                 self.pending_eyedropper_sample = None;
+            }
+        }
+
+        // Consume transform readback results: swap display canvas in as the new float canvas.
+        if let Ok(mut results) = TRANSFORM_READBACK_RESULTS
+            .get_or_init(|| Arc::new(Mutex::new(std::collections::HashMap::new())))
+            .lock()
+        {
+            if let Some(rb) = results.remove(&self.instance_id) {
+                if let Some(ref mut float) = shared.selection.raster_floating {
+                    self.pending_canvas_removal = Some(float.canvas_id);
+                    float.canvas_id = rb.display_canvas_id;
+                    float.pixels = std::sync::Arc::new(rb.pixels);
+                    float.width     = rb.width;
+                    float.height    = rb.height;
+                    float.x         = rb.x;
+                    float.y         = rb.y;
+                }
+                // Update the selection border to match the new (transformed) float bounds,
+                // so marching ants appear around the result after switching tools / Enter.
+                // This also replaces the stale pre-transform rect so commit masking is correct.
+                shared.selection.raster_selection = Some(
+                    lightningbeam_core::selection::RasterSelection::Rect(
+                        rb.x, rb.y,
+                        rb.x + rb.width  as i32,
+                        rb.y + rb.height as i32,
+                    )
+                );
+                // Readback complete — clear transform state.
+                self.raster_transform_state = None;
+            }
+        }
+
+        // Consume warp/liquify readback results: create RasterFillAction and clean up.
+        if let Ok(mut results) = WARP_READBACK_RESULTS
+            .get_or_init(|| Arc::new(Mutex::new(std::collections::HashMap::new())))
+            .lock()
+        {
+            if let Some(rb) = results.remove(&self.instance_id) {
+                if rb.is_float_warp {
+                    // Float warp: update the floating selection's pixel data and GPU canvas.
+                    // Do NOT write to kf.raw_pixels (it belongs to the full-canvas keyframe).
+                    if let Some(float_sel) = shared.selection.raster_floating.as_mut() {
+                        float_sel.pixels = std::sync::Arc::new(rb.after_pixels);
+                        float_sel.canvas_id = rb.display_canvas_id;
+                    }
+                    // Release the old anchor canvas (float's original canvas_id, now replaced).
+                    self.pending_canvas_removal = Some(rb.anchor_canvas_id);
+                } else {
+                    use lightningbeam_core::actions::raster_fill::RasterFillAction;
+                    let action = RasterFillAction::new(
+                        rb.layer_id, rb.time,
+                        rb.before_pixels, rb.after_pixels,
+                        rb.width, rb.height,
+                    ).with_description("Warp");
+                    let _ = shared.action_executor.execute(Box::new(action));
+
+                    // Clean up display canvas (deferred: keep alive this frame to avoid flash).
+                    self.pending_canvas_removal = Some(rb.display_canvas_id);
+                }
+
+                self.painting_canvas = None;
+                // Clear tool state.
+                if let Some(ws) = self.warp_state.take() {
+                    let _ = (ws.anchor_canvas_id, ws.disp_buf_id);
+                }
+                if let Some(ls) = self.liquify_state.take() {
+                    let _ = (ls.anchor_canvas_id, ls.disp_buf_id);
+                }
+            }
+        }
+
+        // Clear transform state if the float was committed externally (by another tool),
+        // or if the user switched away from the Transform tool without finishing.
+        {
+            use lightningbeam_core::tool::Tool;
+            let float_gone  = shared.selection.raster_floating.is_none();
+            let not_transform = !matches!(*shared.selected_tool, Tool::Transform);
+            if (float_gone || not_transform) && self.raster_transform_state.is_some() {
+                // If a transform was applied but not yet committed, queue the final dispatch now.
+                let needs_dispatch = self.raster_transform_state.as_ref()
+                    .map_or(false, |ts| ts.transform_applied && !ts.wants_apply);
+                if needs_dispatch {
+                    let dispatch = {
+                        let ts = self.raster_transform_state.as_ref().unwrap();
+                        let (new_w, new_h, new_x, new_y, a00, a01, a10, a11, b0, b1) =
+                            Self::compute_transform_params(ts.anchor_w, ts.anchor_h, ts.cx, ts.cy, ts.scale_x, ts.scale_y, ts.angle);
+                        PendingTransformDispatch {
+                            anchor_canvas_id: ts.anchor_canvas_id,
+                            anchor_pixels:    ts.anchor_pixels.clone(),
+                            anchor_w: ts.anchor_w, anchor_h: ts.anchor_h,
+                            display_canvas_id: ts.display_canvas_id,
+                            new_x, new_y, new_w, new_h,
+                            a00, a01, a10, a11, b0, b1,
+                            is_final_commit: true,
+                        }
+                    };
+                    self.pending_transform_dispatch = Some(dispatch);
+                    self.raster_transform_state.as_mut().unwrap().wants_apply = true;
+                    // Don't clear state yet — wait for readback (handles stay visible 1 frame).
+                } else if !self.raster_transform_state.as_ref().map_or(false, |ts| ts.wants_apply) {
+                    // No pending dispatch — just clear.
+                    self.raster_transform_state = None;
+                }
+            }
+        }
+
+        // Clear warp/liquify state if user switched away without committing.
+        {
+            use lightningbeam_core::tool::Tool;
+            let not_warp    = !matches!(*shared.selected_tool, Tool::Warp);
+            let not_liquify = !matches!(*shared.selected_tool, Tool::Liquify);
+
+            if not_warp && self.warp_state.is_some() {
+                if let Some(ws) = self.warp_state.take() {
+                    if ws.warp_applied && !ws.wants_commit {
+                        // Queue final commit so work isn't lost.
+                        let disp_data = Self::extract_grid_disps(&ws.control_points);
+                        self.pending_warp_ops.push(PendingWarpOp::WarpApply {
+                            anchor_canvas_id: ws.anchor_canvas_id,
+                            disp_buf_id: ws.disp_buf_id,
+                            display_canvas_id: ws.display_canvas_id,
+                            disp_data: Some(disp_data),
+                            grid_cols: ws.grid_cols,
+                            grid_rows: ws.grid_rows,
+                            w: ws.anchor_w, h: ws.anchor_h,
+                            final_commit: true,
+                            layer_id: ws.layer_id,
+                            time: ws.time,
+                            is_float_warp: ws.float_offset.is_some(),
+                        });
+                    } else {
+                        // No changes or already committing — just discard.
+                        self.pending_canvas_removal = Some(ws.display_canvas_id);
+                        self.painting_canvas = None;
+                    }
+                }
+            }
+
+            if not_liquify && self.liquify_state.is_some() {
+                if let Some(ls) = self.liquify_state.take() {
+                    if ls.liquify_applied && !ls.wants_commit {
+                        self.pending_warp_ops.push(PendingWarpOp::LiquifyApply {
+                            anchor_canvas_id: ls.anchor_canvas_id,
+                            disp_buf_id: ls.disp_buf_id,
+                            display_canvas_id: ls.display_canvas_id,
+                            w: ls.anchor_w, h: ls.anchor_h,
+                            final_commit: true,
+                            layer_id: ls.layer_id,
+                            time: ls.time,
+                            is_float_warp: ls.float_offset.is_some(),
+                        });
+                    } else {
+                        self.pending_canvas_removal = Some(ls.display_canvas_id);
+                        self.painting_canvas = None;
+                    }
+                }
             }
         }
 
@@ -8258,6 +11582,65 @@ impl PaneRenderer for StagePane {
                 vello::kurbo::Point::new(local.x as f64, local.y as f64)
             });
 
+        // Compute transform_display for the VelloCallback.
+        // Only override the float blit once the display canvas has actual content
+        // (transform_applied = true). Before the first drag, show the regular float canvas.
+        let transform_display = self.raster_transform_state.as_ref()
+            .filter(|ts| ts.transform_applied)
+            .map(|ts| {
+                let (new_w, new_h, new_x, new_y, ..) = Self::compute_transform_params(
+                    ts.anchor_w, ts.anchor_h, ts.cx, ts.cy, ts.scale_x, ts.scale_y, ts.angle,
+                );
+                TransformDisplayInfo {
+                    display_canvas_id: ts.display_canvas_id,
+                    x: new_x, y: new_y, w: new_w, h: new_h,
+                }
+            });
+
+        // Compute warp_display: show the warp/liquify display canvas in place of the layer
+        // (for full-layer warp) or as float blit override (for float warp via transform_display).
+        let warp_display = self.warp_state.as_ref()
+            .filter(|ws| ws.warp_applied && ws.float_offset.is_none())
+            .map(|ws| (ws.layer_id, ws.display_canvas_id))
+            .or_else(|| self.liquify_state.as_ref()
+                .filter(|ls| ls.liquify_applied && ls.float_offset.is_none())
+                .map(|ls| (ls.layer_id, ls.display_canvas_id)));
+
+        // For float warp/liquify: override the float blit with the display canvas.
+        let transform_display = transform_display.or_else(|| {
+            self.warp_state.as_ref()
+                .and_then(|ws| ws.float_offset.map(|(ox, oy)| TransformDisplayInfo {
+                    display_canvas_id: ws.display_canvas_id,
+                    x: ox, y: oy, w: ws.anchor_w, h: ws.anchor_h,
+                }))
+        }).or_else(|| {
+            self.liquify_state.as_ref()
+                .and_then(|ls| ls.float_offset.map(|(ox, oy)| TransformDisplayInfo {
+                    display_canvas_id: ls.display_canvas_id,
+                    x: ox, y: oy, w: ls.anchor_w, h: ls.anchor_h,
+                }))
+        });
+
+        // Scan for raster keyframes whose texture_dirty flag was set since last frame
+        // (e.g. by undo/redo or a stroke action execute/rollback). Must run BEFORE
+        // document_arc() is called below so that Arc::make_mut does not clone the document.
+        {
+            let doc = shared.action_executor.document_mut();
+            fn collect_dirty(layers: &mut [lightningbeam_core::layer::AnyLayer], out: &mut Vec<uuid::Uuid>) {
+                for layer in layers.iter_mut() {
+                    if let lightningbeam_core::layer::AnyLayer::Raster(rl) = layer {
+                        for kf in &mut rl.keyframes {
+                            if kf.texture_dirty {
+                                out.push(kf.id);
+                                kf.texture_dirty = false;
+                            }
+                        }
+                    }
+                }
+            }
+            collect_dirty(&mut doc.root.children, &mut self.pending_layer_cache_removals);
+        }
+
         // Use egui's custom painting callback for Vello
         // document_arc() returns Arc<Document> - cheap pointer copy, not deep clone
         let callback = VelloCallback { ctx: VelloRenderContext {
@@ -8286,10 +11669,33 @@ impl PaneRenderer for StagePane {
             mouse_world_pos,
             webcam_frame: shared.webcam_frame.clone(),
             pending_raster_dabs: self.pending_raster_dabs.take(),
+            pending_transform_dispatch: self.pending_transform_dispatch.take(),
+            transform_display,
+            pending_warp_ops: std::mem::take(&mut self.pending_warp_ops),
+            warp_display,
+            pending_gradient_op: self.pending_gradient_op.take(),
             instance_id_for_readback: self.instance_id,
             painting_canvas: self.painting_canvas,
             pending_canvas_removal: self.pending_canvas_removal.take(),
             painting_float: self.painting_float,
+            brush_preview_pixels: shared.brush_preview_pixels.clone(),
+            active_tool_render: self.active_raster_tool.as_ref().map(|(_, ws)| {
+                crate::raster_tool::ActiveToolRender {
+                    b_canvas_id: ws.b_canvas_id,
+                    x: ws.x, y: ws.y,
+                    width: ws.width, height: ws.height,
+                    layer_id: match &ws.source {
+                        crate::raster_tool::WorkspaceSource::Layer { layer_id, .. } => Some(*layer_id),
+                        crate::raster_tool::WorkspaceSource::Float => None,
+                    },
+                }
+            }),
+            pending_canvas_removals: std::mem::take(&mut self.pending_canvas_removals),
+            pending_workspace_init: self.pending_workspace_init.take(),
+            pending_tool_gpu_work: self.active_raster_tool.as_mut()
+                .and_then(|(tool, _)| tool.take_pending_gpu_work()),
+            pending_layer_cache_removals: std::mem::take(&mut self.pending_layer_cache_removals),
+            pending_tool_readback_b: self.pending_tool_readback_b.take(),
         }};
 
         let cb = egui_wgpu::Callback::new_paint_callback(
@@ -8373,6 +11779,13 @@ impl PaneRenderer for StagePane {
         // Raster selection overlays: marching ants + floating selection texture
         self.render_raster_selection_overlays(ui, rect, shared);
 
+        // Raster transform handles (drawn after Vello scene so they appear on top)
+        if let Some(ref ts) = self.raster_transform_state {
+            let zoom = self.zoom;
+            let pan  = self.pan_offset;
+            Self::draw_raster_transform_handles_static(ui, rect, ts, zoom, pan);
+        }
+
         // Render snap indicator (works for all tools, not just Select/BezierEdit)
         self.render_snap_indicator(ui, rect, shared);
 
@@ -8401,14 +11814,67 @@ impl PaneRenderer for StagePane {
             );
         }
 
-        // Set custom tool cursor when pointer is over the stage canvas
-        // (system cursors from transform handles take priority via render_overlay check)
+        // Draw clone source indicator when clone stamp or healing brush tool is selected.
+        let tool_uses_alt = crate::tools::raster_tool_def(shared.selected_tool)
+            .map_or(false, |d| d.uses_alt_click());
+        if tool_uses_alt {
+            if let Some(src_world) = shared.raster_settings.clone_source {
+                let src_canvas = egui::vec2(
+                    src_world.x * self.zoom + self.pan_offset.x,
+                    src_world.y * self.zoom + self.pan_offset.y,
+                );
+                let src_screen = rect.min + src_canvas;
+                let painter = ui.painter_at(rect);
+                let r = 8.0_f32;    // circle radius
+                let arm = 14.0_f32; // arm half-length (extends past the circle)
+                let gap = r + 2.0;  // gap between circle edge and arm start
+                for (width, color) in [
+                    (3.0_f32, egui::Color32::BLACK),
+                    (1.5_f32, egui::Color32::WHITE),
+                ] {
+                    let s = egui::Stroke::new(width, color);
+                    painter.circle_stroke(src_screen, r, s);
+                    painter.line_segment([src_screen - egui::vec2(arm, 0.0), src_screen - egui::vec2(gap, 0.0)], s);
+                    painter.line_segment([src_screen + egui::vec2(gap, 0.0), src_screen + egui::vec2(arm, 0.0)], s);
+                    painter.line_segment([src_screen - egui::vec2(0.0, arm), src_screen - egui::vec2(0.0, gap)], s);
+                    painter.line_segment([src_screen + egui::vec2(0.0, gap), src_screen + egui::vec2(0.0, arm)], s);
+                }
+            }
+        }
+
+        // Set custom tool cursor when pointer is over the stage canvas.
+        // Raster paint tools get a brush-size outline; everything else uses the SVG cursor.
         if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
             if rect.contains(pos) {
-                crate::custom_cursor::set(
-                    ui.ctx(),
-                    crate::custom_cursor::CustomCursor::from_tool(*shared.selected_tool),
-                );
+                use lightningbeam_core::tool::Tool;
+                let is_raster_paint = matches!(
+                    *shared.selected_tool,
+                    Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush
+                    | Tool::Erase | Tool::Smudge
+                    | Tool::CloneStamp | Tool::HealingBrush | Tool::PatternStamp
+                    | Tool::DodgeBurn | Tool::Sponge | Tool::BlurSharpen
+                    | Tool::QuickSelect
+                ) && shared.active_layer_id.and_then(|id| {
+                    shared.action_executor.document().get_layer(&id)
+                }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
+
+                // Only override the cursor when no higher-order layer (e.g. a modal dialog)
+                // is covering the canvas at this position.
+                let canvas_is_topmost = ui.ctx()
+                    .layer_id_at(pos)
+                    .map_or(true, |l| l == ui.layer_id());
+
+                if is_raster_paint && canvas_is_topmost {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                    self.draw_brush_cursor(ui, rect, pos, shared);
+                } else if is_raster_paint {
+                    // A modal is covering the canvas — let the system cursor show normally.
+                } else {
+                    crate::custom_cursor::set(
+                        ui.ctx(),
+                        crate::custom_cursor::CustomCursor::from_tool(*shared.selected_tool),
+                    );
+                }
             }
         }
     }

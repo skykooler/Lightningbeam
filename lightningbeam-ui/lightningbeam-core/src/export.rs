@@ -390,6 +390,59 @@ impl VideoExportSettings {
     }
 }
 
+// ── Image export ─────────────────────────────────────────────────────────────
+
+/// Image export formats (single-frame still image)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+    WebP,
+}
+
+impl ImageFormat {
+    pub fn name(self) -> &'static str {
+        match self { Self::Png => "PNG", Self::Jpeg => "JPEG", Self::WebP => "WebP" }
+    }
+    pub fn extension(self) -> &'static str {
+        match self { Self::Png => "png", Self::Jpeg => "jpg", Self::WebP => "webp" }
+    }
+    /// Whether quality (1–100) applies to this format.
+    pub fn has_quality(self) -> bool { matches!(self, Self::Jpeg | Self::WebP) }
+}
+
+/// Settings for exporting a single frame as a still image.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageExportSettings {
+    pub format: ImageFormat,
+    /// Document time (seconds) of the frame to render.
+    pub time: f64,
+    /// Override width; None = use document canvas width.
+    pub width: Option<u32>,
+    /// Override height; None = use document canvas height.
+    pub height: Option<u32>,
+    /// Encode quality 1–100 (JPEG / WebP only).
+    pub quality: u8,
+    /// Preserve the alpha channel in the output (respect document background alpha).
+    /// When false, the image is composited onto an opaque background before encoding.
+    /// Only meaningful for formats that support alpha (PNG, WebP).
+    pub allow_transparency: bool,
+}
+
+impl Default for ImageExportSettings {
+    fn default() -> Self {
+        Self { format: ImageFormat::Png, time: 0.0, width: None, height: None, quality: 90, allow_transparency: false }
+    }
+}
+
+impl ImageExportSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(w) = self.width  { if w == 0 { return Err("Width must be > 0".into());  } }
+        if let Some(h) = self.height { if h == 0 { return Err("Height must be > 0".into()); } }
+        Ok(())
+    }
+}
+
 /// Progress updates during export
 #[derive(Debug, Clone)]
 pub enum ExportProgress {

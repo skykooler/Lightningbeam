@@ -117,6 +117,8 @@ pub struct Face {
     pub image_fill: Option<uuid::Uuid>,
     pub fill_rule: FillRule,
     #[serde(default)]
+    pub gradient_fill: Option<crate::gradient::ShapeGradient>,
+    #[serde(default)]
     pub deleted: bool,
 }
 
@@ -244,6 +246,7 @@ impl Dcel {
             fill_color: None,
             image_fill: None,
             fill_rule: FillRule::NonZero,
+            gradient_fill: None,
             deleted: false,
         };
         let debug_recorder = if std::env::var("DAW_DCEL_RECORD").is_ok() {
@@ -375,6 +378,7 @@ impl Dcel {
             fill_color: None,
             image_fill: None,
             fill_rule: FillRule::NonZero,
+            gradient_fill: None,
             deleted: false,
         };
         if let Some(idx) = self.free_faces.pop() {

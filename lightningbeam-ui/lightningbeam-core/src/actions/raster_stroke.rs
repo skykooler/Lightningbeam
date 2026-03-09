@@ -49,12 +49,14 @@ impl Action for RasterStrokeAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
         let kf = get_keyframe_mut(document, &self.layer_id, self.time, self.width, self.height)?;
         kf.raw_pixels = self.buffer_after.clone();
+        kf.texture_dirty = true;
         Ok(())
     }
 
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         let kf = get_keyframe_mut(document, &self.layer_id, self.time, self.width, self.height)?;
         kf.raw_pixels = self.buffer_before.clone();
+        kf.texture_dirty = true;
         Ok(())
     }
 

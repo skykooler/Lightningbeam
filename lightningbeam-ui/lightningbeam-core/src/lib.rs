@@ -53,6 +53,8 @@ pub mod webcam;
 pub mod raster_layer;
 pub mod brush_settings;
 pub mod brush_engine;
+pub mod raster_draw;
+pub mod gradient;
 
 #[cfg(debug_assertions)]
 pub mod test_mode;

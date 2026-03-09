@@ -18,11 +18,32 @@ pub enum RasterBlendMode {
     Erase,
     /// Smudge / blend surrounding pixels
     Smudge,
+    /// Clone stamp: copy pixels from a source region
+    CloneStamp,
+    /// Healing brush: color-corrected clone stamp (preserves source texture, shifts color to match destination)
+    Healing,
+    /// Pattern stamp: paint with a repeating procedural tile pattern
+    PatternStamp,
+    /// Dodge / Burn: lighten (dodge) or darken (burn) existing pixels
+    DodgeBurn,
+    /// Sponge: saturate or desaturate existing pixels
+    Sponge,
+    /// Blur / Sharpen: soften or crisp up existing pixels
+    BlurSharpen,
 }
 
 impl Default for RasterBlendMode {
     fn default() -> Self {
         Self::Normal
+    }
+}
+
+impl RasterBlendMode {
+    /// Returns false for blend modes that operate on existing pixels and don't
+    /// use the brush color at all (clone, heal, dodge/burn, sponge).
+    /// Used by brush_engine.rs to decide whether color_a should be 1.0 or stroke.color[3].
+    pub fn uses_brush_color(self) -> bool {
+        !matches!(self, Self::CloneStamp | Self::Healing | Self::DodgeBurn | Self::Sponge | Self::BlurSharpen)
     }
 }
 
@@ -48,6 +69,13 @@ pub struct StrokeRecord {
     /// RGBA linear color [r, g, b, a]
     pub color: [f32; 4],
     pub blend_mode: RasterBlendMode,
+    /// Generic tool parameters — encoding depends on blend_mode:
+    /// - CloneStamp / Healing: [offset_x, offset_y, 0, 0]
+    /// - PatternStamp:         [pattern_type, pattern_scale, 0, 0]
+    /// - DodgeBurn / Sponge:   [mode, 0, 0, 0]
+    /// - all others:           [0, 0, 0, 0]
+    #[serde(default)]
+    pub tool_params: [f32; 4],
     pub points: Vec<StrokePoint>,
 }
 
@@ -85,7 +113,13 @@ pub struct RasterKeyframe {
     /// and encoded back to PNG on save.  An empty Vec means the canvas is blank (transparent).
     #[serde(skip)]
     pub raw_pixels: Vec<u8>,
+    /// Set to `true` whenever `raw_pixels` changes so the GPU texture cache can re-upload.
+    /// Always `true` after load; cleared by the renderer after uploading.
+    #[serde(skip, default = "default_true")]
+    pub texture_dirty: bool,
 }
+
+fn default_true() -> bool { true }
 
 impl RasterKeyframe {
     /// Returns true when the pixel buffer has been initialised (non-blank).
@@ -105,6 +139,7 @@ impl RasterKeyframe {
             stroke_log: Vec::new(),
             tween_after: TweenType::Hold,
             raw_pixels: Vec::new(),
+            texture_dirty: true,
         }
     }
 }

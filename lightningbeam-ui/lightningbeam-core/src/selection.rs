@@ -15,6 +15,16 @@ pub enum RasterSelection {
     Rect(i32, i32, i32, i32),
     /// Closed freehand lasso polygon.
     Lasso(Vec<(i32, i32)>),
+    /// Per-pixel boolean mask (e.g. from magic wand flood fill).
+    /// `data` is row-major, length = width × height.
+    Mask {
+        data: Vec<bool>,
+        width: u32,
+        height: u32,
+        /// Top-left canvas pixel of the mask's bounding canvas region.
+        origin_x: i32,
+        origin_y: i32,
+    },
 }
 
 impl RasterSelection {
@@ -29,6 +39,23 @@ impl RasterSelection {
                 let y1 = pts.iter().map(|p| p.1).max().unwrap_or(0);
                 (x0, y0, x1, y1)
             }
+            Self::Mask { data, width, height, origin_x, origin_y } => {
+                let w = *width as i32;
+                let mut bx0 = i32::MAX; let mut by0 = i32::MAX;
+                let mut bx1 = i32::MIN; let mut by1 = i32::MIN;
+                for row in 0..*height as i32 {
+                    for col in 0..w {
+                        if data[(row * w + col) as usize] {
+                            bx0 = bx0.min(origin_x + col);
+                            by0 = by0.min(origin_y + row);
+                            bx1 = bx1.max(origin_x + col + 1);
+                            by1 = by1.max(origin_y + row + 1);
+                        }
+                    }
+                }
+                if bx0 == i32::MAX { (*origin_x, *origin_y, *origin_x, *origin_y) }
+                else { (bx0, by0, bx1, by1) }
+            }
         }
     }
 
@@ -37,6 +64,14 @@ impl RasterSelection {
         match self {
             Self::Rect(x0, y0, x1, y1) => px >= *x0 && px < *x1 && py >= *y0 && py < *y1,
             Self::Lasso(pts) => point_in_polygon(px, py, pts),
+            Self::Mask { data, width, height, origin_x, origin_y } => {
+                let lx = px - origin_x;
+                let ly = py - origin_y;
+                if lx < 0 || ly < 0 || lx >= *width as i32 || ly >= *height as i32 {
+                    return false;
+                }
+                data[(ly * *width as i32 + lx) as usize]
+            }
         }
     }
 }
@@ -69,7 +104,9 @@ fn point_in_polygon(px: i32, py: i32, polygon: &[(i32, i32)]) -> bool {
 #[derive(Clone, Debug)]
 pub struct RasterFloatingSelection {
     /// sRGB-encoded premultiplied RGBA, width × height × 4 bytes.
-    pub pixels: Vec<u8>,
+    /// Wrapped in Arc so the renderer can clone a reference each frame (O(1))
+    /// instead of copying megabytes of pixel data.
+    pub pixels: std::sync::Arc<Vec<u8>>,
     pub width: u32,
     pub height: u32,
     /// Top-left position in canvas pixel coordinates.
@@ -81,7 +118,7 @@ pub struct RasterFloatingSelection {
     /// Snapshot of `raw_pixels` before the cut/paste was initiated, used for
     /// undo (via `RasterStrokeAction`) when the float is committed, and for
     /// Cancel (Escape) to restore the canvas without creating an undo entry.
-    pub canvas_before: Vec<u8>,
+    pub canvas_before: std::sync::Arc<Vec<u8>>,
     /// Key for this float's GPU canvas in `GpuBrushEngine::canvases`.
     /// Allows painting strokes directly onto the float buffer (B) without
     /// touching the layer canvas (A).

@@ -5,9 +5,40 @@
 
 use eframe::egui;
 use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const FRAME_HISTORY_SIZE: usize = 60; // Track last 60 frames for FPS stats
+
+/// Timing breakdown for the GPU prepare() pass, written by the render thread.
+#[derive(Debug, Clone, Default)]
+pub struct PrepareTiming {
+    pub total_ms: f64,
+    pub removals_ms: f64,
+    pub gpu_dispatches_ms: f64,
+    pub scene_build_ms: f64,
+    pub composite_ms: f64,
+}
+
+static LAST_PREPARE_TIMING: OnceLock<Mutex<PrepareTiming>> = OnceLock::new();
+
+/// Called from `VelloCallback::prepare()` every frame to update the timing snapshot.
+pub fn update_prepare_timing(
+    total_ms: f64,
+    removals_ms: f64,
+    gpu_dispatches_ms: f64,
+    scene_build_ms: f64,
+    composite_ms: f64,
+) {
+    let cell = LAST_PREPARE_TIMING.get_or_init(|| Mutex::new(PrepareTiming::default()));
+    if let Ok(mut t) = cell.lock() {
+        t.total_ms         = total_ms;
+        t.removals_ms      = removals_ms;
+        t.gpu_dispatches_ms = gpu_dispatches_ms;
+        t.scene_build_ms   = scene_build_ms;
+        t.composite_ms     = composite_ms;
+    }
+}
 const DEVICE_REFRESH_INTERVAL: Duration = Duration::from_secs(2); // Refresh devices every 2 seconds
 const MEMORY_REFRESH_INTERVAL: Duration = Duration::from_millis(500); // Refresh memory every 500ms
 
@@ -27,6 +58,9 @@ pub struct DebugStats {
     pub midi_devices: Vec<String>,
     pub audio_input_devices: Vec<String>,
     pub has_pointer: bool,
+
+    // GPU prepare() timing breakdown (from render thread)
+    pub prepare_timing: PrepareTiming,
 
     // Performance metrics for each section
     pub timing_memory_us: u64,
@@ -170,6 +204,12 @@ impl DebugStatsCollector {
 
         let timing_total_us = collection_start.elapsed().as_micros() as u64;
 
+        let prepare_timing = LAST_PREPARE_TIMING
+            .get()
+            .and_then(|m| m.lock().ok())
+            .map(|t| t.clone())
+            .unwrap_or_default();
+
         DebugStats {
             fps_current,
             fps_min,
@@ -184,6 +224,7 @@ impl DebugStatsCollector {
             midi_devices,
             audio_input_devices,
             has_pointer,
+            prepare_timing,
             timing_memory_us,
             timing_gpu_us,
             timing_midi_us,
@@ -228,6 +269,16 @@ pub fn render_debug_overlay(ctx: &egui::Context, stats: &DebugStats) {
                         stats.fps_current, stats.fps_min, stats.fps_avg, stats.fps_max
                     ));
                     ui.label(format!("Frame time: {:.2} ms", stats.frame_time_ms));
+
+                    ui.add_space(8.0);
+
+                    // GPU prepare() timing section
+                    let pt = &stats.prepare_timing;
+                    ui.colored_label(egui::Color32::YELLOW, format!("GPU prepare: {:.2} ms", pt.total_ms));
+                    ui.label(format!("  removals:      {:.2} ms", pt.removals_ms));
+                    ui.label(format!("  gpu_dispatch:  {:.2} ms", pt.gpu_dispatches_ms));
+                    ui.label(format!("  scene_build:   {:.2} ms", pt.scene_build_ms));
+                    ui.label(format!("  composite:     {:.2} ms", pt.composite_ms));
 
                     ui.add_space(8.0);
 

@@ -13,6 +13,8 @@ use uuid::Uuid;
 mod panes;
 use panes::{PaneInstance, PaneRenderer};
 
+mod tools;
+
 mod widgets;
 
 mod menu;
@@ -25,6 +27,8 @@ use theme::{Theme, ThemeMode};
 mod waveform_gpu;
 mod cqt_gpu;
 mod gpu_brush;
+
+mod raster_tool;
 
 mod config;
 use config::AppConfig;
@@ -332,6 +336,7 @@ mod tool_icons {
     pub static ERASE: &[u8] = include_bytes!("../../../src/assets/erase.svg");
     pub static SMUDGE: &[u8] = include_bytes!("../../../src/assets/smudge.svg");
     pub static LASSO: &[u8] = include_bytes!("../../../src/assets/lasso.svg");
+    pub static TODO: &[u8] = include_bytes!("../../../src/assets/todo.svg");
 }
 
 /// Embedded focus icon SVGs
@@ -399,11 +404,28 @@ impl ToolIconCache {
                 Tool::Polygon => tool_icons::POLYGON,
                 Tool::BezierEdit => tool_icons::BEZIER_EDIT,
                 Tool::Text => tool_icons::TEXT,
-                Tool::RegionSelect => tool_icons::SELECT, // Reuse select icon for now
+                Tool::RegionSelect => tool_icons::SELECT,
                 Tool::Split => tool_icons::SPLIT,
                 Tool::Erase => tool_icons::ERASE,
                 Tool::Smudge => tool_icons::SMUDGE,
                 Tool::SelectLasso => tool_icons::LASSO,
+                // Not yet implemented — use placeholder icon
+                Tool::Pencil
+                | Tool::Pen
+                | Tool::Airbrush
+                | Tool::CloneStamp
+                | Tool::HealingBrush
+                | Tool::PatternStamp
+                | Tool::DodgeBurn
+                | Tool::Sponge
+                | Tool::BlurSharpen
+                | Tool::Gradient
+                | Tool::CustomShape
+                | Tool::SelectEllipse
+                | Tool::MagicWand
+                | Tool::QuickSelect
+                | Tool::Warp
+                | Tool::Liquify => tool_icons::TODO,
             };
             if let Some(texture) = rasterize_svg(svg_data, tool.icon_file(), 180, ctx) {
                 self.icons.insert(tool, texture);
@@ -766,12 +788,10 @@ struct EditorApp {
     draw_simplify_mode: lightningbeam_core::tool::SimplifyMode, // Current simplification mode for draw tool
     rdp_tolerance: f64, // RDP simplification tolerance (default: 10.0)
     schneider_max_error: f64, // Schneider curve fitting max error (default: 30.0)
-    // Raster brush settings
-    brush_radius: f32,   // brush radius in pixels
-    brush_opacity: f32,  // brush opacity 0.0–1.0
-    brush_hardness: f32, // brush hardness 0.0–1.0
-    brush_spacing: f32,  // dabs_per_radius (fraction of radius per dab)
-    brush_use_fg: bool,  // true = paint with FG (stroke) color, false = BG (fill) color
+    /// All per-tool raster paint settings (brush, eraser, smudge, clone, pattern, dodge/burn, sponge).
+    raster_settings: tools::RasterToolSettings,
+    /// GPU-rendered brush preview pixel buffers, shared with VelloCallback::prepare().
+    brush_preview_pixels: std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
     // Audio engine integration
     #[allow(dead_code)] // Must be kept alive to maintain audio output
     audio_stream: Option<cpal::Stream>,
@@ -841,6 +861,7 @@ struct EditorApp {
     // Region select state
     region_selection: Option<lightningbeam_core::selection::RegionSelection>,
     region_select_mode: lightningbeam_core::tool::RegionSelectMode,
+    lasso_mode: lightningbeam_core::tool::LassoMode,
 
     // VU meter levels
     input_level: f32,
@@ -934,6 +955,9 @@ impl EditorApp {
         // Disable egui's "Unaligned" debug overlay (on by default in debug builds)
         #[cfg(debug_assertions)]
         cc.egui_ctx.style_mut(|style| style.debug.show_unaligned = false);
+
+        // Disable egui's built-in Ctrl+Plus/Minus zoom — we handle zoom ourselves.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
         // Load application config
         let config = AppConfig::load();
@@ -1049,11 +1073,8 @@ impl EditorApp {
             draw_simplify_mode: lightningbeam_core::tool::SimplifyMode::Smooth, // Default to smooth curves
             rdp_tolerance: 10.0, // Default RDP tolerance
             schneider_max_error: 30.0, // Default Schneider max error
-            brush_radius: 10.0,
-            brush_opacity: 1.0,
-            brush_hardness: 0.5,
-            brush_spacing: 0.1,
-            brush_use_fg: true,
+            raster_settings: tools::RasterToolSettings::default(),
+            brush_preview_pixels: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             audio_stream,
             audio_controller,
             audio_event_rx,
@@ -1097,6 +1118,7 @@ impl EditorApp {
             polygon_sides: 5,                // Default to pentagon
             region_selection: None,
             region_select_mode: lightningbeam_core::tool::RegionSelectMode::default(),
+            lasso_mode: lightningbeam_core::tool::LassoMode::default(),
             input_level: 0.0,
             output_level: (0.0, 0.0),
             track_levels: HashMap::new(),
@@ -1852,7 +1874,8 @@ impl EditorApp {
                 let cy = y0 + row;
                 let inside = match sel {
                     RasterSelection::Rect(..) => true,
-                    RasterSelection::Lasso(_) => sel.contains_pixel(cx as i32, cy as i32),
+                    RasterSelection::Lasso(_) | RasterSelection::Mask { .. } =>
+                        sel.contains_pixel(cx as i32, cy as i32),
                 };
                 if inside {
                     let src = ((cy * canvas_w + cx) * 4) as usize;
@@ -1976,7 +1999,8 @@ impl EditorApp {
 
         let action = RasterStrokeAction::new(
             float.layer_id, float.time,
-            float.canvas_before, canvas_after,
+            std::sync::Arc::try_unwrap(float.canvas_before).unwrap_or_else(|a| (*a).clone()),
+            canvas_after,
             w, h,
         );
         if let Err(e) = self.action_executor.execute(Box::new(action)) {
@@ -1995,7 +2019,7 @@ impl EditorApp {
         let document = self.action_executor.document_mut();
         let Some(AnyLayer::Raster(rl)) = document.get_layer_mut(&float.layer_id) else { return };
         let Some(kf) = rl.keyframe_at_mut(float.time) else { return };
-        kf.raw_pixels = float.canvas_before;
+        kf.raw_pixels = std::sync::Arc::try_unwrap(float.canvas_before).unwrap_or_else(|a| (*a).clone());
     }
 
     /// Drop (discard) the floating selection keeping the hole punched in the
@@ -2015,7 +2039,8 @@ impl EditorApp {
         let (w, h) = (kf.width, kf.height);
         let action = RasterStrokeAction::new(
             float.layer_id, float.time,
-            float.canvas_before, canvas_after,
+            std::sync::Arc::try_unwrap(float.canvas_before).unwrap_or_else(|a| (*a).clone()),
+            canvas_after,
             w, h,
         );
         if let Err(e) = self.action_executor.execute(Box::new(action)) {
@@ -2036,7 +2061,7 @@ impl EditorApp {
             if matches!(document.get_layer(&layer_id), Some(AnyLayer::Raster(_))) {
                 if let Some(float) = &self.selection.raster_floating {
                     self.clipboard_manager.copy(ClipboardContent::RasterPixels {
-                        pixels: float.pixels.clone(),
+                        pixels: (*float.pixels).clone(),
                         width: float.width,
                         height: float.height,
                     });
@@ -2516,14 +2541,14 @@ impl EditorApp {
 
                 use lightningbeam_core::selection::{RasterFloatingSelection, RasterSelection};
                 self.selection.raster_floating = Some(RasterFloatingSelection {
-                    pixels,
+                    pixels: std::sync::Arc::new(pixels),
                     width,
                     height,
                     x: paste_x,
                     y: paste_y,
                     layer_id,
                     time: self.playback_time,
-                    canvas_before,
+                    canvas_before: std::sync::Arc::new(canvas_before),
                     canvas_id: uuid::Uuid::new_v4(),
                 });
                 // Update the marquee to show the floating selection bounds.
@@ -2942,14 +2967,42 @@ impl EditorApp {
             }
             MenuAction::Export => {
                 println!("Menu: Export");
-                // Open export dialog with calculated timeline endpoint
                 let timeline_endpoint = self.action_executor.document().calculate_timeline_endpoint();
-                // Derive project name from the .beam file path, falling back to document name
                 let project_name = self.current_file_path.as_ref()
                     .and_then(|p| p.file_stem())
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| self.action_executor.document().name.clone());
-                self.export_dialog.open(timeline_endpoint, &project_name);
+
+                // Build document hint for smart export-type defaulting.
+                let hint = {
+                    use lightningbeam_core::layer::AnyLayer;
+                    use export::dialog::DocumentHint;
+                    fn scan(layers: &[AnyLayer], hint: &mut DocumentHint) {
+                        for l in layers {
+                            match l {
+                                AnyLayer::Video(_)  => hint.has_video  = true,
+                                AnyLayer::Audio(_)  => hint.has_audio  = true,
+                                AnyLayer::Raster(_) => hint.has_raster = true,
+                                AnyLayer::Vector(_) | AnyLayer::Effect(_) => hint.has_vector = true,
+                                AnyLayer::Group(g)  => scan(&g.children, hint),
+                            }
+                        }
+                    }
+                    let doc = self.action_executor.document();
+                    let mut h = DocumentHint {
+                        has_video:    false,
+                        has_audio:    false,
+                        has_raster:   false,
+                        has_vector:   false,
+                        current_time: doc.current_time,
+                        doc_width:    doc.width  as u32,
+                        doc_height:   doc.height as u32,
+                    };
+                    scan(&doc.root.children, &mut h);
+                    h
+                };
+
+                self.export_dialog.open(timeline_endpoint, &project_name, &hint);
             }
             MenuAction::Quit => {
                 println!("Menu: Quit");
@@ -4535,16 +4588,9 @@ impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _frame_start = std::time::Instant::now();
 
-        // Disable egui's built-in Ctrl+Plus/Minus zoom behavior
-        // We handle zoom ourselves for the Stage pane
-        ctx.options_mut(|o| {
-            o.zoom_with_keyboard = false;
-        });
-
         // Force continuous repaint if we have pending waveform updates
         // This ensures thumbnails update immediately when waveform data arrives
         if !self.audio_pools_with_new_waveforms.is_empty() {
-            println!("🔄 [UPDATE] Pending waveform updates for pools: {:?}", self.audio_pools_with_new_waveforms);
             ctx.request_repaint();
         }
 
@@ -5264,6 +5310,17 @@ impl eframe::App for EditorApp {
 
             let export_started = if let Some(orchestrator) = &mut self.export_orchestrator {
                 match export_result {
+                    ExportResult::Image(settings, output_path) => {
+                        println!("🖼 [MAIN] Starting image export: {}", output_path.display());
+                        let doc = self.action_executor.document();
+                        orchestrator.start_image_export(
+                            settings,
+                            output_path,
+                            doc.width  as u32,
+                            doc.height as u32,
+                        );
+                        false // image export is silent (no progress dialog)
+                    }
                     ExportResult::AudioOnly(settings, output_path) => {
                         println!("🎵 [MAIN] Starting audio-only export: {}", output_path.display());
 
@@ -5374,6 +5431,7 @@ impl eframe::App for EditorApp {
                     let mut temp_image_cache = lightningbeam_core::renderer::ImageCache::new();
 
                     if let Some(renderer) = &mut temp_renderer {
+                        // Drive incremental video export.
                         if let Ok(has_more) = orchestrator.render_next_video_frame(
                             self.action_executor.document_mut(),
                             device,
@@ -5383,9 +5441,23 @@ impl eframe::App for EditorApp {
                             &self.video_manager,
                         ) {
                             if has_more {
-                                // More frames to render - request repaint for next frame
                                 ctx.request_repaint();
                             }
+                        }
+
+                        // Drive single-frame image export (two-frame async: render then readback).
+                        match orchestrator.render_image_frame(
+                            self.action_executor.document_mut(),
+                            device,
+                            queue,
+                            renderer,
+                            &mut temp_image_cache,
+                            &self.video_manager,
+                            self.selection.raster_floating.as_ref(),
+                        ) {
+                            Ok(false) => { ctx.request_repaint(); } // readback pending
+                            Ok(true)  => {}                          // done or cancelled
+                            Err(e)    => { eprintln!("Image export failed: {e}"); }
                         }
                     }
                 }
@@ -5605,11 +5677,7 @@ impl eframe::App for EditorApp {
                     draw_simplify_mode: &mut self.draw_simplify_mode,
                     rdp_tolerance: &mut self.rdp_tolerance,
                     schneider_max_error: &mut self.schneider_max_error,
-                    brush_radius: &mut self.brush_radius,
-                    brush_opacity: &mut self.brush_opacity,
-                    brush_hardness: &mut self.brush_hardness,
-                    brush_spacing: &mut self.brush_spacing,
-                    brush_use_fg: &mut self.brush_use_fg,
+                    raster_settings: &mut self.raster_settings,
                     audio_controller: self.audio_controller.as_ref(),
                     video_manager: &self.video_manager,
                     playback_time: &mut self.playback_time,
@@ -5650,6 +5718,7 @@ impl eframe::App for EditorApp {
                     script_saved: &mut self.script_saved,
                     region_selection: &mut self.region_selection,
                     region_select_mode: &mut self.region_select_mode,
+                    lasso_mode: &mut self.lasso_mode,
                     pending_graph_loads: &self.pending_graph_loads,
                     clipboard_consumed: &mut clipboard_consumed,
                     keymap: &self.keymap,
@@ -5660,6 +5729,7 @@ impl eframe::App for EditorApp {
                     test_mode: &mut self.test_mode,
                     #[cfg(debug_assertions)]
                     synthetic_input: &mut synthetic_input_storage,
+                    brush_preview_pixels: &self.brush_preview_pixels,
                 },
                 pane_instances: &mut self.pane_instances,
             };

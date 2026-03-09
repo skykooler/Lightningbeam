@@ -11,12 +11,15 @@
 /// - Document settings (when nothing is focused)
 
 use eframe::egui::{self, DragValue, Ui};
-use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction};
+use lightningbeam_core::brush_settings::{bundled_brushes, BrushSettings};
+use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction, SetFillPaintAction};
+use lightningbeam_core::gradient::ShapeGradient;
 use lightningbeam_core::layer::{AnyLayer, LayerTrait};
 use lightningbeam_core::selection::FocusSelection;
 use lightningbeam_core::shape::ShapeColor;
 use lightningbeam_core::tool::{SimplifyMode, Tool};
 use super::{NodePath, PaneRenderer, SharedPaneState};
+use super::gradient_editor::gradient_stop_editor;
 use uuid::Uuid;
 
 /// Info panel pane state
@@ -25,13 +28,36 @@ pub struct InfopanelPane {
     tool_section_open: bool,
     /// Whether the shape properties section is expanded
     shape_section_open: bool,
+    /// Index of the selected paint brush preset (None = custom / unset)
+    selected_brush_preset: Option<usize>,
+    /// Whether the paint brush picker is expanded
+    brush_picker_expanded: bool,
+    /// Index of the selected eraser brush preset
+    selected_eraser_preset: Option<usize>,
+    /// Whether the eraser brush picker is expanded
+    eraser_picker_expanded: bool,
+    /// Cached preview textures, one per preset (populated lazily).
+    brush_preview_textures: Vec<egui::TextureHandle>,
+    /// Selected stop index for gradient editor in shape section.
+    selected_shape_gradient_stop: Option<usize>,
+    /// Selected stop index for gradient editor in tool section (gradient tool).
+    selected_tool_gradient_stop: Option<usize>,
 }
 
 impl InfopanelPane {
     pub fn new() -> Self {
+        let presets = bundled_brushes();
+        let default_eraser_idx = presets.iter().position(|p| p.name == "Brush");
         Self {
             tool_section_open: true,
             shape_section_open: true,
+            selected_brush_preset: None,
+            brush_picker_expanded: false,
+            selected_eraser_preset: default_eraser_idx,
+            eraser_picker_expanded: false,
+            brush_preview_textures: Vec::new(),
+            selected_shape_gradient_stop: None,
+            selected_tool_gradient_stop: None,
         }
     }
 }
@@ -47,6 +73,8 @@ struct SelectionInfo {
 
     // Shape property values (None = mixed)
     fill_color: Option<Option<ShapeColor>>,
+    /// None = mixed across selection; Some(None) = no gradient; Some(Some(g)) = all same gradient
+    fill_gradient: Option<Option<ShapeGradient>>,
     stroke_color: Option<Option<ShapeColor>>,
     stroke_width: Option<f64>,
 }
@@ -58,6 +86,7 @@ impl Default for SelectionInfo {
             dcel_count: 0,
             layer_id: None,
             fill_color: None,
+            fill_gradient: None,
             stroke_color: None,
             stroke_width: None,
         }
@@ -120,20 +149,31 @@ impl InfopanelPane {
                         // Gather fill properties from selected faces
                         let mut first_fill_color: Option<Option<ShapeColor>> = None;
                         let mut fill_color_mixed = false;
+                        let mut first_fill_gradient: Option<Option<ShapeGradient>> = None;
+                        let mut fill_gradient_mixed = false;
 
                         for &fid in shared.selection.selected_faces() {
                             let face = dcel.face(fid);
                             let fc = face.fill_color;
+                            let fg = face.gradient_fill.clone();
 
                             match first_fill_color {
                                 None => first_fill_color = Some(fc),
                                 Some(prev) if prev != fc => fill_color_mixed = true,
                                 _ => {}
                             }
+                            match &first_fill_gradient {
+                                None => first_fill_gradient = Some(fg),
+                                Some(prev) if *prev != fg => fill_gradient_mixed = true,
+                                _ => {}
+                            }
                         }
 
                         if !fill_color_mixed {
                             info.fill_color = first_fill_color;
+                        }
+                        if !fill_gradient_mixed {
+                            info.fill_gradient = first_fill_gradient;
                         }
                     }
                 }
@@ -151,7 +191,8 @@ impl InfopanelPane {
             .and_then(|id| shared.action_executor.document().get_layer(&id))
             .map_or(false, |l| matches!(l, AnyLayer::Raster(_)));
 
-        let is_raster_paint_tool = active_is_raster && matches!(tool, Tool::Draw | Tool::Erase | Tool::Smudge);
+        let raster_tool_def = active_is_raster.then(|| crate::tools::raster_tool_def(&tool)).flatten();
+        let is_raster_paint_tool = raster_tool_def.is_some();
 
         // Only show tool options for tools that have options
         let is_vector_tool = !active_is_raster && matches!(
@@ -159,23 +200,30 @@ impl InfopanelPane {
             Tool::Select | Tool::BezierEdit | Tool::Draw | Tool::Rectangle
             | Tool::Ellipse | Tool::Line | Tool::Polygon
         );
-        let has_options = is_vector_tool || is_raster_paint_tool || matches!(
+        let is_raster_transform = active_is_raster
+            && matches!(tool, Tool::Transform)
+            && shared.selection.raster_floating.is_some();
+
+        let is_raster_select = active_is_raster && matches!(tool, Tool::Select);
+        let is_raster_shape = active_is_raster && matches!(
             tool,
-            Tool::PaintBucket | Tool::RegionSelect
+            Tool::Rectangle | Tool::Ellipse | Tool::Line | Tool::Polygon
+        );
+        let has_options = is_vector_tool || is_raster_paint_tool || is_raster_transform
+            || is_raster_select || is_raster_shape || matches!(
+            tool,
+            Tool::PaintBucket | Tool::RegionSelect | Tool::MagicWand | Tool::QuickSelect
+            | Tool::Warp | Tool::Liquify | Tool::Gradient
         );
 
         if !has_options {
             return;
         }
 
-        let header_label = if is_raster_paint_tool {
-            match tool {
-                Tool::Erase => "Eraser",
-                Tool::Smudge => "Smudge",
-                _ => "Brush",
-            }
+        let header_label = if is_raster_transform {
+            "Raster Transform"
         } else {
-            "Tool Options"
+            raster_tool_def.map(|d| d.header_label()).unwrap_or("Tool Options")
         };
 
         egui::CollapsingHeader::new(header_label)
@@ -188,6 +236,23 @@ impl InfopanelPane {
                 if is_vector_tool {
                     ui.checkbox(shared.snap_enabled, "Snap to Geometry");
                     ui.add_space(2.0);
+                }
+
+                // Raster transform tool hint.
+                if is_raster_transform {
+                    ui.label("Drag handles to move, scale, or rotate.");
+                    ui.add_space(4.0);
+                    ui.label("Enter — apply    Esc — cancel");
+                    ui.add_space(4.0);
+                    return;
+                }
+
+                // Raster paint tool: delegate to per-tool impl.
+                if let Some(def) = raster_tool_def {
+                    def.render_ui(ui, shared.raster_settings);
+                    if def.show_brush_preset_picker() {
+                        self.render_raster_tool_options(ui, shared, def.is_eraser());
+                    }
                 }
 
                 match tool {
@@ -242,15 +307,190 @@ impl InfopanelPane {
                     }
 
                     Tool::PaintBucket => {
-                        // Gap tolerance
+                        if active_is_raster {
+                            use crate::tools::FillThresholdMode;
+                            ui.horizontal(|ui| {
+                                ui.label("Threshold:");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut shared.raster_settings.fill_threshold,
+                                        0.0_f32..=255.0,
+                                    )
+                                    .step_by(1.0),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Softness:");
+                                ui.add(
+                                    egui::Slider::new(
+                                        &mut shared.raster_settings.fill_softness,
+                                        0.0_f32..=100.0,
+                                    )
+                                    .custom_formatter(|v, _| format!("{:.0}%", v)),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Mode:");
+                                ui.selectable_value(
+                                    &mut shared.raster_settings.fill_threshold_mode,
+                                    FillThresholdMode::Absolute,
+                                    "Absolute",
+                                );
+                                ui.selectable_value(
+                                    &mut shared.raster_settings.fill_threshold_mode,
+                                    FillThresholdMode::Relative,
+                                    "Relative",
+                                );
+                            });
+                        } else {
+                            // Vector: gap tolerance
+                            ui.horizontal(|ui| {
+                                ui.label("Gap Tolerance:");
+                                ui.add(
+                                    DragValue::new(shared.paint_bucket_gap_tolerance)
+                                        .speed(0.1)
+                                        .range(0.0..=50.0),
+                                );
+                            });
+                        }
+                    }
+
+                    Tool::Select if is_raster_select => {
+                        use crate::tools::SelectionShape;
                         ui.horizontal(|ui| {
-                            ui.label("Gap Tolerance:");
-                            ui.add(
-                                DragValue::new(shared.paint_bucket_gap_tolerance)
-                                    .speed(0.1)
-                                    .range(0.0..=50.0),
+                            ui.label("Shape:");
+                            ui.selectable_value(
+                                &mut shared.raster_settings.select_shape,
+                                SelectionShape::Rect,
+                                "Rectangle",
+                            );
+                            ui.selectable_value(
+                                &mut shared.raster_settings.select_shape,
+                                SelectionShape::Ellipse,
+                                "Ellipse",
                             );
                         });
+                    }
+
+                    Tool::MagicWand => {
+                        use crate::tools::FillThresholdMode;
+                        ui.horizontal(|ui| {
+                            ui.label("Threshold:");
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut shared.raster_settings.wand_threshold,
+                                    0.0_f32..=255.0,
+                                )
+                                .step_by(1.0),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Mode:");
+                            ui.selectable_value(
+                                &mut shared.raster_settings.wand_mode,
+                                FillThresholdMode::Absolute,
+                                "Absolute",
+                            );
+                            ui.selectable_value(
+                                &mut shared.raster_settings.wand_mode,
+                                FillThresholdMode::Relative,
+                                "Relative",
+                            );
+                        });
+                        ui.checkbox(&mut shared.raster_settings.wand_contiguous, "Contiguous");
+                    }
+
+                    Tool::QuickSelect => {
+                        use crate::tools::FillThresholdMode;
+                        ui.horizontal(|ui| {
+                            ui.label("Radius:");
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut shared.raster_settings.quick_select_radius,
+                                    1.0_f32..=200.0,
+                                )
+                                .step_by(1.0),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Threshold:");
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut shared.raster_settings.wand_threshold,
+                                    0.0_f32..=255.0,
+                                )
+                                .step_by(1.0),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Mode:");
+                            ui.selectable_value(
+                                &mut shared.raster_settings.wand_mode,
+                                FillThresholdMode::Absolute,
+                                "Absolute",
+                            );
+                            ui.selectable_value(
+                                &mut shared.raster_settings.wand_mode,
+                                FillThresholdMode::Relative,
+                                "Relative",
+                            );
+                        });
+                    }
+
+                    Tool::Warp => {
+                        ui.horizontal(|ui| {
+                            ui.label("Grid:");
+                            let cols = shared.raster_settings.warp_grid_cols;
+                            let rows = shared.raster_settings.warp_grid_rows;
+                            for (label, c, r) in [("3×3", 3u32, 3u32), ("4×4", 4, 4), ("5×5", 5, 5), ("8×8", 8, 8)] {
+                                let selected = cols == c && rows == r;
+                                if ui.selectable_label(selected, label).clicked() {
+                                    shared.raster_settings.warp_grid_cols = c;
+                                    shared.raster_settings.warp_grid_rows = r;
+                                }
+                            }
+                        });
+                        ui.small("Enter to commit · Escape to cancel");
+                    }
+
+                    Tool::Liquify => {
+                        use crate::tools::LiquifyMode;
+                        ui.horizontal(|ui| {
+                            ui.label("Mode:");
+                            for (label, mode) in [
+                                ("Push",        LiquifyMode::Push),
+                                ("Pucker",       LiquifyMode::Pucker),
+                                ("Bloat",        LiquifyMode::Bloat),
+                                ("Smooth",       LiquifyMode::Smooth),
+                                ("Reconstruct",  LiquifyMode::Reconstruct),
+                            ] {
+                                let selected = shared.raster_settings.liquify_mode == mode;
+                                if ui.selectable_label(selected, label).clicked() {
+                                    shared.raster_settings.liquify_mode = mode;
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Radius:");
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut shared.raster_settings.liquify_radius,
+                                    5.0_f32..=500.0,
+                                )
+                                .step_by(1.0),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Strength:");
+                            ui.add(
+                                egui::Slider::new(
+                                    &mut shared.raster_settings.liquify_strength,
+                                    0.01_f32..=1.0,
+                                )
+                                .step_by(0.01),
+                            );
+                        });
+                        ui.small("Enter to commit · Escape to cancel");
                     }
 
                     Tool::Polygon => {
@@ -300,48 +540,20 @@ impl InfopanelPane {
                         });
                     }
 
-                    // Raster paint tools
-                    Tool::Draw | Tool::Erase | Tool::Smudge if is_raster_paint_tool => {
-                        // Color source toggle (Draw tool only)
-                        if matches!(tool, Tool::Draw) {
-                            ui.horizontal(|ui| {
-                                ui.label("Color:");
-                                ui.selectable_value(shared.brush_use_fg, true, "FG");
-                                ui.selectable_value(shared.brush_use_fg, false, "BG");
-                            });
-                        }
+                    Tool::Gradient if active_is_raster => {
                         ui.horizontal(|ui| {
-                            ui.label("Size:");
-                            ui.add(
-                                egui::Slider::new(shared.brush_radius, 1.0_f32..=200.0)
-                                    .logarithmic(true)
-                                    .suffix(" px"),
-                            );
+                            ui.label("Opacity:");
+                            ui.add(egui::Slider::new(
+                                &mut shared.raster_settings.gradient_opacity,
+                                0.0_f32..=1.0,
+                            ).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
                         });
-                        if !matches!(tool, Tool::Smudge) {
-                            ui.horizontal(|ui| {
-                                ui.label("Opacity:");
-                                ui.add(
-                                    egui::Slider::new(shared.brush_opacity, 0.0_f32..=1.0)
-                                        .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                                );
-                            });
-                        }
-                        ui.horizontal(|ui| {
-                            ui.label("Hardness:");
-                            ui.add(
-                                egui::Slider::new(shared.brush_hardness, 0.0_f32..=1.0)
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Spacing:");
-                            ui.add(
-                                egui::Slider::new(shared.brush_spacing, 0.01_f32..=1.0)
-                                    .logarithmic(true)
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
-                            );
-                        });
+                        ui.add_space(4.0);
+                        gradient_stop_editor(
+                            ui,
+                            &mut shared.raster_settings.gradient,
+                            &mut self.selected_tool_gradient_stop,
+                        );
                     }
 
                     _ => {}
@@ -349,6 +561,192 @@ impl InfopanelPane {
 
                 ui.add_space(4.0);
             });
+    }
+
+    /// Render all options for a raster paint tool (brush picker + sliders).
+    /// `is_eraser` drives which shared state is read/written.
+    fn render_raster_tool_options(
+        &mut self,
+        ui: &mut Ui,
+        shared: &mut SharedPaneState,
+        is_eraser: bool,
+    ) {
+        self.render_brush_preset_grid(ui, shared, is_eraser);
+        ui.add_space(2.0);
+
+        let rs = &mut shared.raster_settings;
+
+        if !is_eraser {
+            ui.horizontal(|ui| {
+                ui.label("Color:");
+                ui.selectable_value(&mut rs.brush_use_fg, true, "FG");
+                ui.selectable_value(&mut rs.brush_use_fg, false, "BG");
+            });
+        }
+
+        macro_rules! field {
+            ($eraser:ident, $brush:ident) => {
+                if is_eraser { &mut rs.$eraser } else { &mut rs.$brush }
+            }
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Size:");
+            ui.add(egui::Slider::new(field!(eraser_radius, brush_radius), 1.0_f32..=200.0).logarithmic(true).suffix(" px"));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Opacity:");
+            ui.add(egui::Slider::new(field!(eraser_opacity, brush_opacity), 0.0_f32..=1.0)
+                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Hardness:");
+            ui.add(egui::Slider::new(field!(eraser_hardness, brush_hardness), 0.0_f32..=1.0)
+                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Spacing:");
+            ui.add(egui::Slider::new(field!(eraser_spacing, brush_spacing), 0.01_f32..=1.0)
+                .logarithmic(true)
+                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+        });
+    }
+
+    /// Render the brush preset thumbnail grid (collapsible).
+    /// `is_eraser` drives which picker state and which shared settings are updated.
+    fn render_brush_preset_grid(&mut self, ui: &mut Ui, shared: &mut SharedPaneState, is_eraser: bool) {
+        let presets = bundled_brushes();
+        if presets.is_empty() { return; }
+
+        // Build preview TextureHandles from GPU-rendered pixel data when available.
+        if self.brush_preview_textures.len() != presets.len() {
+            if let Ok(previews) = shared.brush_preview_pixels.try_lock() {
+                if previews.len() == presets.len() {
+                    self.brush_preview_textures.clear();
+                    for (idx, (w, h, pixels)) in previews.iter().enumerate() {
+                        let image = egui::ColorImage::from_rgba_premultiplied(
+                            [*w as usize, *h as usize],
+                            pixels,
+                        );
+                        let handle = ui.ctx().load_texture(
+                            format!("brush_preview_{}", presets[idx].name),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.brush_preview_textures.push(handle);
+                    }
+                }
+            }
+        }
+
+        // Read picker state into locals to avoid multiple &mut self borrows.
+        let mut expanded = if is_eraser { self.eraser_picker_expanded } else { self.brush_picker_expanded };
+        let mut selected = if is_eraser { self.selected_eraser_preset } else { self.selected_brush_preset };
+
+        let gap = 3.0;
+        let cols = 2usize;
+        let avail_w = ui.available_width();
+        let cell_w = ((avail_w - gap * (cols as f32 - 1.0)) / cols as f32).max(50.0);
+        let cell_h = 80.0;
+
+        if !expanded {
+            // Collapsed: show just the currently selected preset as a single wide cell.
+            let show_idx = selected.unwrap_or(0);
+            if let Some(preset) = presets.get(show_idx) {
+                let full_w = avail_w.max(50.0);
+                let (rect, resp) = ui.allocate_exact_size(egui::vec2(full_w, cell_h), egui::Sense::click());
+                let painter = ui.painter();
+                let bg = if resp.hovered() {
+                    egui::Color32::from_rgb(50, 56, 70)
+                } else {
+                    egui::Color32::from_rgb(45, 65, 95)
+                };
+                painter.rect_filled(rect, 4.0, bg);
+                painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 140, 220)), egui::StrokeKind::Middle);
+                let preview_rect = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(4.0, 4.0),
+                    egui::vec2(rect.width() - 8.0, cell_h - 22.0),
+                );
+                if let Some(tex) = self.brush_preview_textures.get(show_idx) {
+                    painter.image(tex.id(), preview_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE);
+                }
+                painter.text(egui::pos2(rect.center().x, rect.max.y - 9.0),
+                    egui::Align2::CENTER_CENTER, preset.name,
+                    egui::FontId::proportional(9.5), egui::Color32::from_rgb(140, 190, 255));
+                if resp.clicked() { expanded = true; }
+            }
+        } else {
+            // Expanded: full grid; clicking a preset selects it and collapses.
+            for (row_idx, chunk) in presets.chunks(cols).enumerate() {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for (col_idx, preset) in chunk.iter().enumerate() {
+                        let idx = row_idx * cols + col_idx;
+                        let is_sel = selected == Some(idx);
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(cell_w, cell_h), egui::Sense::click());
+                        let painter = ui.painter();
+                        let bg = if is_sel {
+                            egui::Color32::from_rgb(45, 65, 95)
+                        } else if resp.hovered() {
+                            egui::Color32::from_rgb(45, 50, 62)
+                        } else {
+                            egui::Color32::from_rgb(32, 36, 44)
+                        };
+                        painter.rect_filled(rect, 4.0, bg);
+                        if is_sel {
+                            painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 140, 220)), egui::StrokeKind::Middle);
+                        }
+                        let preview_rect = egui::Rect::from_min_size(
+                            rect.min + egui::vec2(4.0, 4.0),
+                            egui::vec2(cell_w - 8.0, cell_h - 22.0),
+                        );
+                        if let Some(tex) = self.brush_preview_textures.get(idx) {
+                            painter.image(tex.id(), preview_rect,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE);
+                        }
+                        painter.text(egui::pos2(rect.center().x, rect.max.y - 9.0),
+                            egui::Align2::CENTER_CENTER, preset.name,
+                            egui::FontId::proportional(9.5),
+                            if is_sel { egui::Color32::from_rgb(140, 190, 255) } else { egui::Color32::from_gray(160) });
+                        if resp.clicked() {
+                            selected = Some(idx);
+                            expanded = false;
+                            let s = &preset.settings;
+                            let rs = &mut shared.raster_settings;
+                            if is_eraser {
+                                rs.eraser_opacity  = s.opaque.clamp(0.0, 1.0);
+                                rs.eraser_hardness = s.hardness.clamp(0.0, 1.0);
+                                rs.eraser_spacing  = s.dabs_per_radius;
+                                rs.active_eraser_settings = s.clone();
+                            } else {
+                                rs.brush_opacity  = s.opaque.clamp(0.0, 1.0);
+                                rs.brush_hardness = s.hardness.clamp(0.0, 1.0);
+                                rs.brush_spacing  = s.dabs_per_radius;
+                                rs.active_brush_settings = s.clone();
+                                // If the user was on a preset-backed tool (Pencil/Pen/Airbrush)
+                                // and manually picked a different brush, revert to the generic tool.
+                                if matches!(*shared.selected_tool, Tool::Pencil | Tool::Pen | Tool::Airbrush) {
+                                    *shared.selected_tool = Tool::Draw;
+                                }
+                            }
+                        }
+                    }
+                });
+                ui.add_space(gap);
+            }
+        }
+
+        // Write back picker state.
+        if is_eraser {
+            self.eraser_picker_expanded = expanded;
+            self.selected_eraser_preset = selected;
+        } else {
+            self.brush_picker_expanded = expanded;
+            self.selected_brush_preset = selected;
+        }
     }
 
     // Transform section: deferred to Phase 2 (DCEL elements don't have instance transforms)
@@ -377,28 +775,72 @@ impl InfopanelPane {
                 self.shape_section_open = true;
                 ui.add_space(4.0);
 
-                // Fill color
+                // Fill — determine current fill type
+                let has_gradient = matches!(&info.fill_gradient, Some(Some(_)));
+                let has_solid = matches!(&info.fill_color, Some(Some(_)));
+                let fill_is_none = matches!(&info.fill_color, Some(None))
+                    && matches!(&info.fill_gradient, Some(None));
+                let fill_mixed = info.fill_color.is_none() && info.fill_gradient.is_none();
+
+                // Fill type toggle row
                 ui.horizontal(|ui| {
                     ui.label("Fill:");
-                    match info.fill_color {
-                        Some(Some(color)) => {
+                    if fill_mixed {
+                        ui.label("--");
+                    } else {
+                        if ui.selectable_label(fill_is_none, "None").clicked() && !fill_is_none {
+                            let action = SetFillPaintAction::solid(
+                                layer_id, time, face_ids.clone(), None,
+                            );
+                            shared.pending_actions.push(Box::new(action));
+                        }
+                        if ui.selectable_label(has_solid || (!has_gradient && !fill_is_none), "Solid").clicked() && !has_solid {
+                            // Switch to solid: use existing color or default to black
+                            let color = info.fill_color.flatten()
+                                .unwrap_or(ShapeColor::rgba(0, 0, 0, 255));
+                            let action = SetFillPaintAction::solid(
+                                layer_id, time, face_ids.clone(), Some(color),
+                            );
+                            shared.pending_actions.push(Box::new(action));
+                        }
+                        if ui.selectable_label(has_gradient, "Gradient").clicked() && !has_gradient {
+                            let grad = info.fill_gradient.clone().flatten()
+                                .unwrap_or_default();
+                            let action = SetFillPaintAction::gradient(
+                                layer_id, time, face_ids.clone(), Some(grad),
+                            );
+                            shared.pending_actions.push(Box::new(action));
+                        }
+                    }
+                });
+
+                // Solid fill color editor
+                if !fill_mixed && has_solid {
+                    if let Some(Some(color)) = info.fill_color {
+                        ui.horizontal(|ui| {
                             let mut rgba = [color.r, color.g, color.b, color.a];
                             if ui.color_edit_button_srgba_unmultiplied(&mut rgba).changed() {
                                 let new_color = ShapeColor::rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
-                                let action = SetShapePropertiesAction::set_fill_color(
+                                let action = SetFillPaintAction::solid(
                                     layer_id, time, face_ids.clone(), Some(new_color),
                                 );
                                 shared.pending_actions.push(Box::new(action));
                             }
-                        }
-                        Some(None) => {
-                            ui.label("None");
-                        }
-                        None => {
-                            ui.label("--");
+                        });
+                    }
+                }
+
+                // Gradient fill editor
+                if !fill_mixed && has_gradient {
+                    if let Some(Some(mut grad)) = info.fill_gradient.clone() {
+                        if gradient_stop_editor(ui, &mut grad, &mut self.selected_shape_gradient_stop) {
+                            let action = SetFillPaintAction::gradient(
+                                layer_id, time, face_ids.clone(), Some(grad),
+                            );
+                            shared.pending_actions.push(Box::new(action));
                         }
                     }
-                });
+                }
 
                 // Stroke color
                 ui.horizontal(|ui| {
@@ -861,6 +1303,40 @@ impl InfopanelPane {
 
                 ui.add_space(4.0);
             });
+    }
+}
+
+/// Draw a brush dab preview into `rect` approximating the brush falloff shape.
+///
+/// Renders N concentric filled circles from outermost to innermost.  Because each
+/// inner circle overwrites the pixels of all outer circles beneath it, the visible
+/// alpha at distance `d` from the centre equals the alpha of the innermost circle
+/// whose radius ≥ `d`.  This step-approximates the actual brush falloff formula:
+/// `opa = ((1 − r) / (1 − hardness))²` for `r > hardness`, 1 inside the hard core.
+fn paint_brush_dab(painter: &egui::Painter, rect: egui::Rect, s: &BrushSettings) {
+    let center = rect.center();
+    let max_r = (rect.width().min(rect.height()) / 2.0 - 2.0).max(1.0);
+    let h = s.hardness;
+    let a = s.opaque;
+
+    const N: usize = 12;
+    for i in 0..N {
+        // t: normalized radial position of this ring, 1.0 = outermost edge
+        let t = 1.0 - i as f32 / N as f32;
+        let r = max_r * t;
+
+        let opa_weight = if h >= 1.0 || t <= h {
+            1.0f32
+        } else {
+            let x = (1.0 - t) / (1.0 - h).max(1e-4);
+            (x * x).min(1.0)
+        };
+
+        let alpha = (opa_weight * a * 220.0).min(220.0) as u8;
+        painter.circle_filled(
+            center, r,
+            egui::Color32::from_rgba_unmultiplied(200, 200, 220, alpha),
+        );
     }
 }
 

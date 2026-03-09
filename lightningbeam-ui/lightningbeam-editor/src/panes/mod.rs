@@ -68,6 +68,7 @@ pub enum WebcamRecordCommand {
 
 pub mod toolbar;
 pub mod stage;
+pub mod gradient_editor;
 pub mod timeline;
 pub mod infopanel;
 pub mod outliner;
@@ -187,13 +188,8 @@ pub struct SharedPaneState<'a> {
     pub draw_simplify_mode: &'a mut lightningbeam_core::tool::SimplifyMode,
     pub rdp_tolerance: &'a mut f64,
     pub schneider_max_error: &'a mut f64,
-    /// Raster brush settings
-    pub brush_radius: &'a mut f32,
-    pub brush_opacity: &'a mut f32,
-    pub brush_hardness: &'a mut f32,
-    pub brush_spacing: &'a mut f32,
-    /// Whether the brush paints with the foreground (fill) color (true) or background (stroke) color (false)
-    pub brush_use_fg: &'a mut bool,
+    /// All per-tool raster paint settings (replaces 20+ individual fields).
+    pub raster_settings: &'a mut crate::tools::RasterToolSettings,
     /// Audio engine controller for playback control (wrapped in Arc<Mutex<>> for thread safety)
     pub audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
     /// Video manager for video decoding and frame caching
@@ -269,6 +265,8 @@ pub struct SharedPaneState<'a> {
     pub region_selection: &'a mut Option<lightningbeam_core::selection::RegionSelection>,
     /// Region select mode (Rectangle or Lasso)
     pub region_select_mode: &'a mut lightningbeam_core::tool::RegionSelectMode,
+    /// Lasso select sub-mode (Freehand / Polygonal / Magnetic)
+    pub lasso_mode: &'a mut lightningbeam_core::tool::LassoMode,
     /// Counter for in-flight graph preset loads — increment when sending a
     /// GraphLoadPreset command so the repaint loop stays alive until the
     /// audio thread sends GraphPresetLoaded back
@@ -291,6 +289,10 @@ pub struct SharedPaneState<'a> {
     /// Synthetic input from test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     pub synthetic_input: &'a mut Option<crate::test_mode::SyntheticInput>,
+    /// GPU-rendered brush preview thumbnails.  Populated by `VelloCallback::prepare()`
+    /// on the first frame; panes (e.g. infopanel) convert the pixel data to egui
+    /// TextureHandles.  Each entry is `(width, height, sRGB-premultiplied RGBA bytes)`.
+    pub brush_preview_pixels: &'a std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
 }
 
 /// Trait for pane rendering

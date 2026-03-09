@@ -20,7 +20,7 @@ struct GpuDab {
     x: f32, y: f32, radius: f32, hardness: f32,             // bytes  0–15
     opacity: f32, color_r: f32, color_g: f32, color_b: f32, // bytes 16–31
     color_a: f32, ndx: f32, ndy: f32, smudge_dist: f32,     // bytes 32–47
-    blend_mode: u32, _pad0: u32, _pad1: u32, _pad2: u32,    // bytes 48–63
+    blend_mode: u32, elliptical_dab_ratio: f32, elliptical_dab_angle: f32, lock_alpha: f32, // bytes 48–63
 }
 
 struct Params {
@@ -76,7 +76,20 @@ fn bilinear_sample(px: f32, py: f32) -> vec4<f32> {
 fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
     let dx = f32(px) + 0.5 - dab.x;
     let dy = f32(py) + 0.5 - dab.y;
-    let rr = (dx * dx + dy * dy) / (dab.radius * dab.radius);
+
+    // Normalised squared distance — supports circular and elliptical dabs.
+    var rr: f32;
+    if dab.elliptical_dab_ratio > 1.001 {
+        // Rotate into the dab's local frame.
+        // Major axis is along dab.elliptical_dab_angle; minor axis is compressed by ratio.
+        let c = cos(dab.elliptical_dab_angle);
+        let s = sin(dab.elliptical_dab_angle);
+        let dx_r =  dx * c + dy * s;                               // along major axis
+        let dy_r = (-dx * s + dy * c) * dab.elliptical_dab_ratio;  // minor axis compressed
+        rr = (dx_r * dx_r + dy_r * dy_r) / (dab.radius * dab.radius);
+    } else {
+        rr = (dx * dx + dy * dy) / (dab.radius * dab.radius);
+    }
     if rr > 1.0 { return current; }
 
     // Quadratic falloff: flat inner core, smooth quadratic outer zone.
@@ -94,15 +107,17 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
     }
 
     if dab.blend_mode == 0u {
-        // Normal: "over" operator
+        // Normal: "over" operator on premultiplied RGBA.
+        // If lock_alpha > 0.5, preserve the destination alpha unchanged.
         let dab_a = opa_weight * dab.opacity * dab.color_a;
         if dab_a <= 0.0 { return current; }
         let ba = 1.0 - dab_a;
+        let out_a = select(dab_a + ba * current.a, current.a, dab.lock_alpha > 0.5);
         return vec4<f32>(
             dab_a * dab.color_r + ba * current.r,
             dab_a * dab.color_g + ba * current.g,
             dab_a * dab.color_b + ba * current.b,
-            dab_a               + ba * current.a,
+            out_a,
         );
     } else if dab.blend_mode == 1u {
         // Erase: multiplicative alpha reduction
@@ -111,7 +126,7 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
         let new_a = current.a * (1.0 - dab_a);
         let scale = select(0.0, new_a / current.a, current.a > 1e-6);
         return vec4<f32>(current.r * scale, current.g * scale, current.b * scale, new_a);
-    } else {
+    } else if dab.blend_mode == 2u {
         // Smudge: directional warp — sample from position behind the stroke direction
         let alpha = opa_weight * dab.opacity;
         if alpha <= 0.0 { return current; }
@@ -125,6 +140,192 @@ fn apply_dab(current: vec4<f32>, dab: GpuDab, px: i32, py: i32) -> vec4<f32> {
             alpha * src.b + da * current.b,
             alpha * src.a + da * current.a,
         );
+    } else if dab.blend_mode == 3u {
+        // Clone stamp: sample from (this_pixel + offset) in the source canvas.
+        // color_r/color_g store the world-space offset (source_world - drag_start_world)
+        // computed once when the stroke begins. Each pixel samples its own source texel.
+        let alpha = opa_weight * dab.opacity;
+        if alpha <= 0.0 { return current; }
+        let src_x = f32(px) + 0.5 + dab.color_r;
+        let src_y = f32(py) + 0.5 + dab.color_g;
+        let src = bilinear_sample(src_x, src_y);
+        let ba  = 1.0 - alpha;
+        return vec4<f32>(
+            alpha * src.r + ba * current.r,
+            alpha * src.g + ba * current.g,
+            alpha * src.b + ba * current.b,
+            alpha * src.a + ba * current.a,
+        );
+    } else if dab.blend_mode == 5u {
+        // Pattern stamp: procedural tiling pattern using brush color.
+        // ndx = pattern_type (0=Checker, 1=Dots, 2=H-Lines, 3=V-Lines, 4=Diagonal, 5=Crosshatch)
+        // ndy = pattern_scale (tile size in pixels, >= 1.0)
+        let scale = max(dab.ndy, 1.0);
+        let pt    = u32(dab.ndx);
+
+        // Fractional position within the tile [0.0, 1.0)
+        let tx = fract(f32(px) / scale);
+        let ty = fract(f32(py) / scale);
+
+        var on: bool;
+        if pt == 0u {           // Checkerboard
+            let cx = u32(floor(f32(px) / scale));
+            let cy = u32(floor(f32(py) / scale));
+            on = (cx + cy) % 2u == 0u;
+        } else if pt == 1u {    // Polka dots (r ≈ 0.35 of cell radius)
+            let ddx = tx - 0.5; let ddy = ty - 0.5;
+            on = ddx * ddx + ddy * ddy < 0.1225;
+        } else if pt == 2u {    // Horizontal lines (50% duty)
+            on = ty < 0.5;
+        } else if pt == 3u {    // Vertical lines (50% duty)
+            on = tx < 0.5;
+        } else if pt == 4u {    // Diagonal \ (top-left → bottom-right)
+            on = fract((f32(px) + f32(py)) / scale) < 0.5;
+        } else if pt == 5u {    // Diagonal / (top-right → bottom-left)
+            on = fract((f32(px) - f32(py)) / scale) < 0.5;
+        } else {                // Crosshatch (type 6+)
+            on = tx < 0.4 || ty < 0.4;
+        }
+
+        if !on { return current; }
+
+        // Paint with brush color — same compositing as Normal blend
+        let dab_a = opa_weight * dab.opacity * dab.color_a;
+        if dab_a <= 0.0 { return current; }
+        let ba = 1.0 - dab_a;
+        return vec4<f32>(
+            dab_a * dab.color_r + ba * current.r,
+            dab_a * dab.color_g + ba * current.g,
+            dab_a * dab.color_b + ba * current.b,
+            dab_a + ba * current.a,
+        );
+    } else if dab.blend_mode == 4u {
+        // Healing brush: per-pixel color-corrected clone stamp.
+        // color_r/color_g = source offset (ox, oy), same as clone stamp.
+        // For each pixel: result = src_pixel + (local_dest_mean - local_src_mean)
+        // Means are computed from 4 cardinal neighbors at ±half-radius — per-pixel, no banding.
+        let alpha = opa_weight * dab.opacity;
+        if alpha <= 0.0 { return current; }
+
+        let cw = i32(params.canvas_w);
+        let ch = i32(params.canvas_h);
+        let ox = dab.color_r;
+        let oy = dab.color_g;
+        let hr = max(dab.radius * 0.5, 1.0);
+        let ihr = i32(hr);
+
+        // Per-pixel DESTINATION mean: 4 cardinal neighbors from canvas_src (pre-batch state)
+        let d_n = textureLoad(canvas_src, vec2<i32>(px,                      clamp(py - ihr, 0, ch - 1)), 0);
+        let d_s = textureLoad(canvas_src, vec2<i32>(px,                      clamp(py + ihr, 0, ch - 1)), 0);
+        let d_w = textureLoad(canvas_src, vec2<i32>(clamp(px - ihr, 0, cw - 1), py                     ), 0);
+        let d_e = textureLoad(canvas_src, vec2<i32>(clamp(px + ihr, 0, cw - 1), py                     ), 0);
+        let d_mean = (d_n + d_s + d_w + d_e) * 0.25;
+
+        // Per-pixel SOURCE mean: 4 cardinal neighbors at offset position (bilinear for sub-pixel offsets)
+        let spx = f32(px) + 0.5 + ox;
+        let spy = f32(py) + 0.5 + oy;
+        let s_mean = (bilinear_sample(spx,        spy - hr)
+                   + bilinear_sample(spx,        spy + hr)
+                   + bilinear_sample(spx - hr,   spy     )
+                   + bilinear_sample(spx + hr,   spy     )) * 0.25;
+
+        // Source pixel + color correction
+        let s_pixel   = bilinear_sample(spx, spy);
+        let corrected = clamp(s_pixel + (d_mean - s_mean), vec4<f32>(0.0), vec4<f32>(1.0));
+
+        let ba = 1.0 - alpha;
+        return vec4<f32>(
+            alpha * corrected.r + ba * current.r,
+            alpha * corrected.g + ba * current.g,
+            alpha * corrected.b + ba * current.b,
+            alpha * corrected.a + ba * current.a,
+        );
+    } else if dab.blend_mode == 6u {
+        // Dodge / Burn: power-curve exposure adjustment.
+        // color_r: 0.0 = dodge, 1.0 = burn
+        // Uses pow(channel, gamma) which is asymmetric across channels:
+        //   burn  (gamma > 1): low channels compressed toward 0 faster than high ones → saturation increases
+        //   dodge (gamma < 1): low channels lifted faster than high ones → saturation decreases
+        // This matches the behaviour of GIMP / Photoshop dodge-burn tools.
+        let s = opa_weight * dab.opacity;
+        if s <= 0.0 { return current; }
+
+        let rgb = max(current.rgb, vec3<f32>(0.0));
+        var adjusted: vec3<f32>;
+        if dab.color_r < 0.5 {
+            // Dodge: gamma < 1 → brightens
+            adjusted = pow(rgb, vec3<f32>(max(1.0 - s, 0.001)));
+        } else {
+            // Burn: gamma > 1 → darkens and increases saturation
+            adjusted = pow(rgb, vec3<f32>(1.0 + s));
+        }
+        return vec4<f32>(clamp(adjusted, vec3<f32>(0.0), vec3<f32>(1.0)), current.a);
+    } else if dab.blend_mode == 7u {
+        // Sponge: saturate or desaturate existing pixels.
+        // color_r: 0.0 = saturate, 1.0 = desaturate
+        // Computes luminance, then moves RGB toward (desaturate) or away from (saturate) it.
+        let s = opa_weight * dab.opacity;
+        if s <= 0.0 { return current; }
+
+        let luma = dot(current.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let luma_vec = vec3<f32>(luma);
+        var adjusted: vec3<f32>;
+        if dab.color_r < 0.5 {
+            // Saturate: push RGB away from luma (increase chroma)
+            adjusted = clamp(current.rgb + s * (current.rgb - luma_vec), vec3<f32>(0.0), vec3<f32>(1.0));
+        } else {
+            // Desaturate: blend RGB toward luma
+            adjusted = mix(current.rgb, luma_vec, s);
+        }
+        return vec4<f32>(adjusted, current.a);
+    } else if dab.blend_mode == 8u {
+        // Blur / Sharpen: 5×5 separable Gaussian kernel.
+        // color_r: 0.0 = blur, 1.0 = sharpen
+        // ndx:     kernel radius in canvas pixels (> 0)
+        //
+        // Samples are placed on a grid at ±step and ±2*step per axis, where step = kr/2.
+        // Weights are exp(-x²/2σ²) with σ = step, factored as a separable product.
+        // This gives a true Gaussian falloff rather than a flat ring, so edges blend
+        // into a smooth gradient rather than a flat averaged zone.
+        let s = opa_weight * dab.opacity;
+        if s <= 0.0 { return current; }
+
+        let kr   = max(dab.ndx, 1.0);
+        let cx2  = f32(px) + 0.5;
+        let cy2  = f32(py) + 0.5;
+        let step = kr * 0.5;
+
+        // 1-D Gaussian weights at distances 0, ±step, ±2*step  (σ = step):
+        //   exp(0) = 1.0,  exp(-0.5) ≈ 0.6065,  exp(-2.0) ≈ 0.1353
+        var gauss = array<f32, 5>(0.1353, 0.6065, 1.0, 0.6065, 0.1353);
+
+        var blur_sum = vec4<f32>(0.0);
+        var blur_w   = 0.0;
+        for (var iy = 0; iy < 5; iy++) {
+            for (var ix = 0; ix < 5; ix++) {
+                let w   = gauss[ix] * gauss[iy];
+                let spx = cx2 + (f32(ix) - 2.0) * step;
+                let spy = cy2 + (f32(iy) - 2.0) * step;
+                blur_sum += bilinear_sample(spx, spy) * w;
+                blur_w   += w;
+            }
+        }
+        let blurred = blur_sum / blur_w;
+
+        let c = textureLoad(canvas_src, vec2<i32>(px, py), 0);
+        var result: vec4<f32>;
+        if dab.color_r < 0.5 {
+            // Blur: blend current toward the Gaussian-weighted local average.
+            result = mix(current, blurred, s);
+        } else {
+            // Sharpen: unsharp mask — push pixel away from the local average.
+            // sharpened = 2*src - blurred  →  highlights diverge, shadows diverge.
+            let sharpened = clamp(c * 2.0 - blurred, vec4<f32>(0.0), vec4<f32>(1.0));
+            result = mix(current, sharpened, s);
+        }
+        return result;
+    } else {
+        return current;
     }
 }
 

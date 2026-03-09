@@ -5,7 +5,8 @@
 
 use eframe::egui;
 use lightningbeam_core::layer::{AnyLayer, LayerType};
-use lightningbeam_core::tool::{Tool, RegionSelectMode};
+use lightningbeam_core::tool::{Tool, RegionSelectMode, LassoMode};
+use lightningbeam_core::brush_settings::bundled_brushes;
 use crate::keymap::tool_app_action;
 use super::{NodePath, PaneRenderer, SharedPaneState};
 
@@ -101,7 +102,7 @@ impl PaneRenderer for ToolbarPane {
             }
 
             // Draw sub-tool arrow indicator for tools with modes
-            let has_sub_tools = matches!(tool, Tool::RegionSelect);
+            let has_sub_tools = matches!(tool, Tool::RegionSelect | Tool::SelectLasso);
             if has_sub_tools {
                 let arrow_size = 6.0;
                 let margin = 4.0;
@@ -125,6 +126,22 @@ impl PaneRenderer for ToolbarPane {
             // Check for click first
             if response.clicked() {
                 *shared.selected_tool = *tool;
+                // Preset-backed tools: auto-select the matching bundled brush.
+                let preset_name = match tool {
+                    Tool::Pencil   => Some("Pencil"),
+                    Tool::Pen      => Some("Pen"),
+                    Tool::Airbrush => Some("Airbrush"),
+                    _ => None,
+                };
+                if let Some(name) = preset_name {
+                    if let Some(preset) = bundled_brushes().iter().find(|p| p.name == name) {
+                        let s = &preset.settings;
+                        shared.raster_settings.brush_opacity  = s.opaque.clamp(0.0, 1.0);
+                        shared.raster_settings.brush_hardness = s.hardness.clamp(0.0, 1.0);
+                        shared.raster_settings.brush_spacing  = s.dabs_per_radius;
+                        shared.raster_settings.active_brush_settings = s.clone();
+                    }
+                }
             }
 
             // Right-click context menu for tools with sub-options
@@ -147,6 +164,33 @@ impl PaneRenderer for ToolbarPane {
                             ).clicked() {
                                 *shared.region_select_mode = RegionSelectMode::Lasso;
                                 *shared.selected_tool = Tool::RegionSelect;
+                                ui.close();
+                            }
+                        }
+                        Tool::SelectLasso => {
+                            ui.set_min_width(130.0);
+                            if ui.selectable_label(
+                                *shared.lasso_mode == LassoMode::Freehand,
+                                "Freehand",
+                            ).clicked() {
+                                *shared.lasso_mode = LassoMode::Freehand;
+                                *shared.selected_tool = Tool::SelectLasso;
+                                ui.close();
+                            }
+                            if ui.selectable_label(
+                                *shared.lasso_mode == LassoMode::Polygonal,
+                                "Polygonal",
+                            ).clicked() {
+                                *shared.lasso_mode = LassoMode::Polygonal;
+                                *shared.selected_tool = Tool::SelectLasso;
+                                ui.close();
+                            }
+                            if ui.selectable_label(
+                                *shared.lasso_mode == LassoMode::Magnetic,
+                                "Magnetic",
+                            ).clicked() {
+                                *shared.lasso_mode = LassoMode::Magnetic;
+                                *shared.selected_tool = Tool::SelectLasso;
                                 ui.close();
                             }
                         }
@@ -174,6 +218,13 @@ impl PaneRenderer for ToolbarPane {
                 let mode = match *shared.region_select_mode {
                     RegionSelectMode::Rectangle => "Rectangle",
                     RegionSelectMode::Lasso => "Lasso",
+                };
+                format!("{} - {}{}\nRight-click for options", tool.display_name(), mode, hint)
+            } else if *tool == Tool::SelectLasso {
+                let mode = match *shared.lasso_mode {
+                    LassoMode::Freehand  => "Freehand",
+                    LassoMode::Polygonal => "Polygonal",
+                    LassoMode::Magnetic  => "Magnetic",
                 };
                 format!("{} - {}{}\nRight-click for options", tool.display_name(), mode, hint)
             } else {

@@ -32,22 +32,41 @@ impl CustomCursor {
     /// Convert a Tool enum to the corresponding custom cursor
     pub fn from_tool(tool: Tool) -> Self {
         match tool {
-            Tool::Select => CustomCursor::Select,
-            Tool::Draw => CustomCursor::Draw,
-            Tool::Transform => CustomCursor::Transform,
-            Tool::Rectangle => CustomCursor::Rectangle,
-            Tool::Ellipse => CustomCursor::Ellipse,
-            Tool::PaintBucket => CustomCursor::PaintBucket,
-            Tool::Eyedropper => CustomCursor::Eyedropper,
-            Tool::Line => CustomCursor::Line,
-            Tool::Polygon => CustomCursor::Polygon,
-            Tool::BezierEdit => CustomCursor::BezierEdit,
-            Tool::Text => CustomCursor::Text,
-            Tool::RegionSelect => CustomCursor::Select, // Reuse select cursor for now
-            Tool::Split => CustomCursor::Select, // Reuse select cursor for now
-            Tool::Erase => CustomCursor::Draw, // Reuse draw cursor for raster erase
-            Tool::Smudge => CustomCursor::Draw, // Reuse draw cursor for raster smudge
-            Tool::SelectLasso => CustomCursor::Select, // Reuse select cursor for lasso
+            Tool::Select        => CustomCursor::Select,
+            Tool::Draw          => CustomCursor::Draw,
+            Tool::Transform     => CustomCursor::Transform,
+            Tool::Rectangle     => CustomCursor::Rectangle,
+            Tool::Ellipse       => CustomCursor::Ellipse,
+            Tool::PaintBucket   => CustomCursor::PaintBucket,
+            Tool::Eyedropper    => CustomCursor::Eyedropper,
+            Tool::Line          => CustomCursor::Line,
+            Tool::Polygon       => CustomCursor::Polygon,
+            Tool::BezierEdit    => CustomCursor::BezierEdit,
+            Tool::Text          => CustomCursor::Text,
+            Tool::RegionSelect  => CustomCursor::Select,
+            Tool::Split         => CustomCursor::Select,
+            Tool::Erase         => CustomCursor::Draw,
+            Tool::Smudge        => CustomCursor::Draw,
+            Tool::SelectLasso   => CustomCursor::Select,
+            // Raster brush tools — use draw cursor until implemented
+            Tool::Pencil
+            | Tool::Pen
+            | Tool::Airbrush
+            | Tool::CloneStamp
+            | Tool::HealingBrush
+            | Tool::PatternStamp
+            | Tool::DodgeBurn
+            | Tool::Sponge
+            | Tool::BlurSharpen => CustomCursor::Draw,
+            // Selection tools — use select cursor until implemented
+            Tool::SelectEllipse
+            | Tool::MagicWand
+            | Tool::QuickSelect => CustomCursor::Select,
+            // Other tools — use select cursor until implemented
+            Tool::Gradient
+            | Tool::CustomShape
+            | Tool::Warp
+            | Tool::Liquify     => CustomCursor::Select,
         }
     }
 
