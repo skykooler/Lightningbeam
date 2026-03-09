@@ -44,35 +44,31 @@ pub fn get(preferred: &[&str]) -> Option<(String, Vec<u8>)> {
 
 #[cfg(target_os = "macos")]
 mod platform_impl {
-    use objc2::rc::Retained;
     use objc2_app_kit::NSPasteboard;
     use objc2_foundation::{NSData, NSString};
 
     pub fn set(entries: &[(&str, &[u8])]) {
-        // SAFETY: must be called from the main thread (same as ClipboardManager).
-        unsafe {
-            let pb = NSPasteboard::generalPasteboard();
-            for &(mime, data) in entries {
-                let ns_type: Retained<NSString> = NSString::from_str(mime);
-                let ns_data: Retained<NSData> = NSData::with_bytes(data);
-                // setData:forType: appends to the current clipboard contents
-                // (arboard already called clearContents, so no double-clear needed).
-                pb.setData_forType(Some(&ns_data), &ns_type);
-            }
+        let pb = NSPasteboard::generalPasteboard();
+        for &(mime, data) in entries {
+            let ns_type = NSString::from_str(mime);
+            let ns_data = NSData::with_bytes(data);
+            // setData:forType: appends to the current clipboard contents
+            // (arboard already called clearContents, so no double-clear needed).
+            pb.setData_forType(Some(&ns_data), &ns_type);
         }
     }
 
     pub fn get(preferred: &[&str]) -> Option<(String, Vec<u8>)> {
-        // SAFETY: must be called from the main thread.
-        unsafe {
-            let pb = NSPasteboard::generalPasteboard();
-            for &mime in preferred {
-                let ns_type: Retained<NSString> = NSString::from_str(mime);
-                if let Some(ns_data) = pb.dataForType(&ns_type) {
-                    // NSData implements AsRef<[u8]> in objc2-foundation.
-                    let bytes = AsRef::<[u8]>::as_ref(&ns_data).to_vec();
-                    return Some((mime.to_string(), bytes));
-                }
+        let pb = NSPasteboard::generalPasteboard();
+        for &mime in preferred {
+            let ns_type = NSString::from_str(mime);
+            if let Some(ns_data) = pb.dataForType(&ns_type) {
+                let len = ns_data.length();
+                // SAFETY: bytes() is valid for length() bytes per NSData contract.
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(ns_data.bytes() as *const u8, len).to_vec()
+                };
+                return Some((mime.to_string(), bytes));
             }
         }
         None
