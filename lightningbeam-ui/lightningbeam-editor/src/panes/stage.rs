@@ -625,7 +625,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             let pixels = if float_sel.pixels.is_empty() {
                                 vec![0u8; (float_sel.width * float_sel.height * 4) as usize]
                             } else {
-                                float_sel.pixels.clone()
+                                (*float_sel.pixels).clone()
                             };
                             canvas.upload(queue, &pixels);
                         }
@@ -898,6 +898,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 &mut image_cache,
                 &shared.video_manager,
                 self.ctx.webcam_frame.as_ref(),
+                self.ctx.selection.raster_floating.as_ref(),
+                true, // Draw checkerboard for transparent backgrounds in the UI
             );
             drop(image_cache);
             let _t_after_scene_build = std::time::Instant::now();
@@ -1130,8 +1132,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 }
 
                 match &rendered_layer.layer_type {
-                    RenderedLayerType::Content => {
-                        // Regular content layer - render to sRGB, convert to linear, then composite
+                    RenderedLayerType::Vector => {
+                        // Vector/group layer — render Vello scene → sRGB → linear → composite.
                         let srgb_handle = buffer_pool.acquire(device, layer_spec);
                         let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
 
@@ -1140,79 +1142,179 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             buffer_pool.get_view(hdr_layer_handle),
                             &instance_resources.hdr_texture_view,
                         ) {
-                            // GPU canvas blit path: if a live GPU canvas exists for this
-                            // raster layer (active tool B canvas, legacy painting_canvas, or
-                            // raster layer texture cache), blit it directly into the HDR buffer
-                            // (premultiplied linear → Rgba16Float), bypassing Vello entirely.
-                            // Vello path: render to sRGB buffer → srgb_to_linear → HDR buffer.
-                            let used_gpu_canvas = if let Some(kf_id) = gpu_canvas_kf.or(raster_cache_kf) {
-                                let mut used = false;
-                                if let Ok(gpu_brush) = shared.gpu_brush.lock() {
-                                    // Try tool canvases first, then the layer texture cache.
-                                    let canvas = gpu_brush.canvases.get(&kf_id)
-                                        .or_else(|| gpu_brush.raster_layer_cache.get(&kf_id));
-                                    if let Some(canvas) = canvas {
-                                        let camera = crate::gpu_brush::CameraParams {
-                                            pan_x:      self.ctx.pan_offset.x,
-                                            pan_y:      self.ctx.pan_offset.y,
-                                            zoom:       self.ctx.zoom,
-                                            canvas_w:   canvas.width as f32,
-                                            canvas_h:   canvas.height as f32,
-                                            viewport_w: width as f32,
-                                            viewport_h: height as f32,
-                                            _pad: 0.0,
-                                        };
-                                        shared.canvas_blit.blit(
-                                            device, queue,
-                                            canvas.src_view(),
-                                            hdr_layer_view,  // blit directly to HDR
-                                            &camera,
-                                            None,  // no mask on layer canvas blit
-                                        );
-                                        used = true;
-                                    }
-                                }
-                                used
-                            } else {
-                                false
-                            };
-
-                            if !used_gpu_canvas {
-                                // Render layer scene to sRGB buffer, then convert to HDR
-                                if let Ok(mut renderer) = shared.renderer.lock() {
-                                    renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params).ok();
-                                }
-                                let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                    label: Some("layer_srgb_to_linear_encoder"),
-                                });
-                                shared.srgb_to_linear.convert(device, &mut convert_encoder, srgb_view, hdr_layer_view);
-                                queue.submit(Some(convert_encoder.finish()));
+                            if let Ok(mut renderer) = shared.renderer.lock() {
+                                renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params).ok();
                             }
+                            let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                label: Some("layer_srgb_to_linear_encoder"),
+                            });
+                            shared.srgb_to_linear.convert(device, &mut convert_encoder, srgb_view, hdr_layer_view);
+                            queue.submit(Some(convert_encoder.finish()));
 
-                            // Composite this layer onto the HDR accumulator with its opacity
                             let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
                                 hdr_layer_handle,
                                 rendered_layer.opacity,
                                 rendered_layer.blend_mode,
                             );
-
                             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                                 label: Some("layer_composite_encoder"),
                             });
                             shared.compositor.composite(
-                                device,
-                                queue,
-                                &mut encoder,
-                                &[compositor_layer],
-                                &buffer_pool,
-                                hdr_view,
-                                None, // Don't clear - blend onto existing content
+                                device, queue, &mut encoder, &[compositor_layer], &buffer_pool, hdr_view, None,
                             );
                             queue.submit(Some(encoder.finish()));
                         }
 
                         buffer_pool.release(srgb_handle);
                         buffer_pool.release(hdr_layer_handle);
+                    }
+                    RenderedLayerType::Raster { transform: layer_transform, .. } => {
+                        // Raster layer — GPU canvas blit directly to HDR (bypasses Vello).
+                        // Tool override canvas (gpu_canvas_kf) takes priority over cached texture.
+                        if let Some(use_kf_id) = gpu_canvas_kf.or(raster_cache_kf) {
+                            let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
+                            if let (Some(hdr_layer_view), Some(hdr_view)) = (
+                                buffer_pool.get_view(hdr_layer_handle),
+                                &instance_resources.hdr_texture_view,
+                            ) {
+                                if let Ok(gpu_brush) = shared.gpu_brush.lock() {
+                                    let canvas = gpu_brush.canvases.get(&use_kf_id)
+                                        .or_else(|| gpu_brush.raster_layer_cache.get(&use_kf_id));
+                                    if let Some(canvas) = canvas {
+                                        let bt = crate::gpu_brush::BlitTransform::new(
+                                            *layer_transform,
+                                            canvas.width, canvas.height,
+                                            width, height,
+                                        );
+                                        shared.canvas_blit.blit(
+                                            device, queue, canvas.src_view(), hdr_layer_view, &bt, None,
+                                        );
+                                    }
+                                }
+                                let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
+                                    hdr_layer_handle,
+                                    rendered_layer.opacity,
+                                    rendered_layer.blend_mode,
+                                );
+                                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("raster_composite_encoder"),
+                                });
+                                shared.compositor.composite(
+                                    device, queue, &mut encoder, &[compositor_layer], &buffer_pool, hdr_view, None,
+                                );
+                                queue.submit(Some(encoder.finish()));
+                            }
+                            buffer_pool.release(hdr_layer_handle);
+                        }
+                    }
+                    RenderedLayerType::Video { instances } => {
+                        // Video layer — per-instance: upload decoded frame → blit → composite.
+                        for inst in instances {
+                            if inst.rgba_data.is_empty() { continue; }
+                            let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
+                            if let (Some(hdr_layer_view), Some(hdr_view)) = (
+                                buffer_pool.get_view(hdr_layer_handle),
+                                &instance_resources.hdr_texture_view,
+                            ) {
+                                // Convert sRGB straight-alpha → linear premultiplied.
+                                let linear: Vec<u8> = inst.rgba_data.chunks_exact(4).flat_map(|p| {
+                                    let a = p[3] as f32 / 255.0;
+                                    let lin = |c: u8| -> f32 {
+                                        let f = c as f32 / 255.0;
+                                        if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+                                    };
+                                    let r = (lin(p[0]) * a * 255.0 + 0.5) as u8;
+                                    let g = (lin(p[1]) * a * 255.0 + 0.5) as u8;
+                                    let b = (lin(p[2]) * a * 255.0 + 0.5) as u8;
+                                    [r, g, b, p[3]]
+                                }).collect();
+
+                                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                                    label: Some("video_frame_tex"),
+                                    size: wgpu::Extent3d { width: inst.width, height: inst.height, depth_or_array_layers: 1 },
+                                    mip_level_count: 1, sample_count: 1,
+                                    dimension: wgpu::TextureDimension::D2,
+                                    format: wgpu::TextureFormat::Rgba8Unorm,
+                                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                                    view_formats: &[],
+                                });
+                                queue.write_texture(
+                                    wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                                    &linear,
+                                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(inst.width * 4), rows_per_image: Some(inst.height) },
+                                    wgpu::Extent3d { width: inst.width, height: inst.height, depth_or_array_layers: 1 },
+                                );
+                                let tex_view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+                                let bt = crate::gpu_brush::BlitTransform::new(
+                                    inst.transform, inst.width, inst.height, width, height,
+                                );
+                                shared.canvas_blit.blit(device, queue, &tex_view, hdr_layer_view, &bt, None);
+
+                                let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
+                                    hdr_layer_handle,
+                                    inst.opacity,
+                                    lightningbeam_core::gpu::BlendMode::Normal,
+                                );
+                                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("video_composite_encoder"),
+                                });
+                                shared.compositor.composite(
+                                    device, queue, &mut encoder, &[compositor_layer], &buffer_pool, hdr_view, None,
+                                );
+                                queue.submit(Some(encoder.finish()));
+                            }
+                            buffer_pool.release(hdr_layer_handle);
+                        }
+                    }
+                    RenderedLayerType::Float { canvas_id: float_canvas_id, x: float_x, y: float_y, width: fw, height: fh, transform: layer_transform, pixels: _ } => {
+                        // Floating raster selection — now composited at the correct z-position
+                        // (immediately above its parent layer) rather than on top of everything.
+                        //
+                        // Override priority:
+                        //   1. transform_display: transform tool is active on the float.
+                        //   2. active_tool_render (layer_id=None): unified tool on the float.
+                        //   3. float_canvas_id from this entry: normal float display.
+                        let blit_params: Option<(uuid::Uuid, i32, i32, u32, u32)> =
+                            if let Some(ref td) = self.ctx.transform_display {
+                                Some((td.display_canvas_id, td.x, td.y, td.w, td.h))
+                            } else if let Some(ref tr) = self.ctx.active_tool_render.as_ref().filter(|tr| tr.layer_id.is_none()) {
+                                Some((tr.b_canvas_id, tr.x, tr.y, tr.width, tr.height))
+                            } else {
+                                Some((*float_canvas_id, *float_x, *float_y, *fw, *fh))
+                            };
+
+                        if let Some((blit_canvas_id, blit_x, blit_y, blit_w, blit_h)) = blit_params {
+                            if let Ok(gpu_brush) = shared.gpu_brush.lock() {
+                                if let Some(canvas) = gpu_brush.canvases.get(&blit_canvas_id) {
+                                    let float_hdr_handle = buffer_pool.acquire(device, hdr_spec);
+                                    if let (Some(fhdr_view), Some(hdr_view)) = (
+                                        buffer_pool.get_view(float_hdr_handle),
+                                        &instance_resources.hdr_texture_view,
+                                    ) {
+                                        // float_canvas_px → viewport_px:
+                                        //   layer_transform maps doc_px → viewport_px
+                                        //   translate(blit_x, blit_y) maps float_canvas_px → doc_px
+                                        let float_to_vp = *layer_transform
+                                            * Affine::translate((blit_x as f64, blit_y as f64));
+                                        let bt = crate::gpu_brush::BlitTransform::new(
+                                            float_to_vp, blit_w, blit_h, width, height,
+                                        );
+                                        shared.canvas_blit.blit(
+                                            device, queue, canvas.src_view(), fhdr_view, &bt,
+                                            float_mask_view.as_ref(),
+                                        );
+                                        let float_layer = lightningbeam_core::gpu::CompositorLayer::normal(float_hdr_handle, 1.0);
+                                        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                            label: Some("float_canvas_composite"),
+                                        });
+                                        shared.compositor.composite(device, queue, &mut enc, &[float_layer], &buffer_pool, hdr_view, None);
+                                        queue.submit(Some(enc.finish()));
+                                    }
+                                    buffer_pool.release(float_hdr_handle);
+                                }
+                            }
+                        }
                     }
                     RenderedLayerType::Effect { effect_instances } => {
                         // Effect layer - apply effects to the current HDR accumulator
@@ -1386,59 +1488,6 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 }
                 buffer_pool.release(clip_srgb_handle);
                 buffer_pool.release(clip_hdr_handle);
-            }
-
-            // Blit the float GPU canvas on top of all composited layers.
-            // During transform: blit the display canvas (compute shader output) instead of the float.
-            // The float_mask_view clips to the selection shape (None = full float visible).
-            let blit_params = if let Some(ref td) = self.ctx.transform_display {
-                // During transform: show the display canvas (compute shader output) instead of float.
-                Some((td.display_canvas_id, td.x, td.y, td.w, td.h))
-            } else if let Some(ref tr) = self.ctx.active_tool_render.as_ref().filter(|tr| tr.layer_id.is_none()) {
-                // Unified raster tool active on the float: show B canvas instead of float's own canvas.
-                Some((tr.b_canvas_id, tr.x, tr.y, tr.width, tr.height))
-            } else if let Some(ref float_sel) = self.ctx.selection.raster_floating {
-                // Regular float blit.
-                Some((float_sel.canvas_id, float_sel.x, float_sel.y, float_sel.width, float_sel.height))
-            } else {
-                None
-            };
-            if let Some((blit_canvas_id, blit_x, blit_y, blit_w, blit_h)) = blit_params {
-                if let Ok(gpu_brush) = shared.gpu_brush.lock() {
-                    if let Some(canvas) = gpu_brush.canvases.get(&blit_canvas_id) {
-                        let float_hdr_handle = buffer_pool.acquire(device, hdr_spec);
-                        if let (Some(fhdr_view), Some(hdr_view)) = (
-                            buffer_pool.get_view(float_hdr_handle),
-                            &instance_resources.hdr_texture_view,
-                        ) {
-                            let fcamera = crate::gpu_brush::CameraParams {
-                                pan_x:      self.ctx.pan_offset.x + blit_x as f32 * self.ctx.zoom,
-                                pan_y:      self.ctx.pan_offset.y + blit_y as f32 * self.ctx.zoom,
-                                zoom:       self.ctx.zoom,
-                                canvas_w:   blit_w as f32,
-                                canvas_h:   blit_h as f32,
-                                viewport_w: width as f32,
-                                viewport_h: height as f32,
-                                _pad: 0.0,
-                            };
-                            // Blit directly to HDR (straight-alpha linear, no sRGB step)
-                            shared.canvas_blit.blit(
-                                device, queue,
-                                canvas.src_view(),
-                                fhdr_view,
-                                &fcamera,
-                                float_mask_view.as_ref(),
-                            );
-                            let float_layer = lightningbeam_core::gpu::CompositorLayer::normal(float_hdr_handle, 1.0);
-                            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("float_canvas_composite"),
-                            });
-                            shared.compositor.composite(device, queue, &mut enc, &[float_layer], &buffer_pool, hdr_view, None);
-                            queue.submit(Some(enc.finish()));
-                        }
-                        buffer_pool.release(float_hdr_handle);
-                    }
-                }
             }
 
             // Advance frame counter for buffer cleanup
@@ -5302,7 +5351,8 @@ impl StagePane {
         let (w, h) = (kf.width, kf.height);
         let action = RasterStrokeAction::new(
             float.layer_id, float.time,
-            float.canvas_before, canvas_after,
+            std::sync::Arc::try_unwrap(float.canvas_before).unwrap_or_else(|a| (*a).clone()),
+            canvas_after,
             w, h,
         );
         if let Err(e) = shared.action_executor.execute(Box::new(action)) {
@@ -5388,7 +5438,7 @@ impl StagePane {
             let pixels = if float.pixels.is_empty() {
                 vec![0u8; (float.width * float.height * 4) as usize]
             } else {
-                float.pixels.clone()
+                (*float.pixels).clone()
             };
             let (w, h, x, y) = (float.width, float.height, float.x, float.y);
 
@@ -5664,14 +5714,14 @@ impl StagePane {
         // Re-set selection (commit_raster_floating_now cleared it) and create float.
         shared.selection.raster_selection = Some(sel);
         shared.selection.raster_floating = Some(RasterFloatingSelection {
-            pixels: float_pixels,
+            pixels: std::sync::Arc::new(float_pixels),
             width: w,
             height: h,
             x: x0,
             y: y0,
             layer_id,
             time,
-            canvas_before,
+            canvas_before: std::sync::Arc::new(canvas_before),
             canvas_id: uuid::Uuid::new_v4(),
         });
     }
@@ -5802,7 +5852,7 @@ impl StagePane {
                 let (canvas_id, float_x, float_y, canvas_width, canvas_height,
                      buffer_before, layer_id, time) = {
                     let float = shared.selection.raster_floating.as_ref().unwrap();
-                    let buf = float.pixels.clone();
+                    let buf = (*float.pixels).clone();
                     (float.canvas_id, float.x, float.y, float.width, float.height,
                      buf, float.layer_id, float.time)
                 };
@@ -7642,7 +7692,7 @@ impl StagePane {
             let float = shared.selection.raster_floating.as_ref().unwrap();
             let expected_len = (float.width * float.height * 4) as usize;
             let anchor_pixels = if float.pixels.len() == expected_len {
-                float.pixels.clone()
+                (*float.pixels).clone()
             } else {
                 vec![0u8; expected_len]
             };
@@ -8227,7 +8277,7 @@ impl StagePane {
                 anchor_pixels   = if float_sel.pixels.is_empty() {
                     vec![0u8; (w * h * 4) as usize]
                 } else {
-                    float_sel.pixels.clone()
+                    (*float_sel.pixels).clone()
                 };
             } else {
                 // Warp the full keyframe canvas.
@@ -8550,7 +8600,7 @@ impl StagePane {
                 anchor_pixels    = if float_sel.pixels.is_empty() {
                     vec![0u8; (w * h * 4) as usize]
                 } else {
-                    float_sel.pixels.clone()
+                    (*float_sel.pixels).clone()
                 };
             } else {
                 float_offset = None;
@@ -8705,7 +8755,7 @@ impl StagePane {
                 let pixels = if f.pixels.is_empty() {
                     vec![0u8; (f.width * f.height * 4) as usize]
                 } else {
-                    f.pixels.clone()
+                    (*f.pixels).clone()
                 };
                 (pixels, f.width, f.height, f.time, f.canvas_id, f.x as f32, f.y as f32, f.layer_id)
             });
@@ -8838,7 +8888,7 @@ impl StagePane {
                     // Update the float's pixel buffer in place.
                     // The float's GPU canvas (display_canvas_id) already shows the result.
                     if let Some(ref mut float) = shared.selection.raster_floating {
-                        float.pixels = after_pixels;
+                        float.pixels = std::sync::Arc::new(after_pixels);
                     }
                 } else {
                     let action = RasterFillAction::new(
@@ -10988,7 +11038,7 @@ impl PaneRenderer for StagePane {
                                     }
                                 }
                             }
-                            float.pixels = pixels;
+                            float.pixels = std::sync::Arc::new(pixels);
                             // Invalidate the float's GPU canvas so the lazy-init
                             // in prepare() re-uploads the fresh pixels next frame.
                             self.pending_canvas_removals.push(float.canvas_id);
@@ -11079,7 +11129,7 @@ impl PaneRenderer for StagePane {
                 if let Some(ref mut float) = shared.selection.raster_floating {
                     self.pending_canvas_removal = Some(float.canvas_id);
                     float.canvas_id = rb.display_canvas_id;
-                    float.pixels    = rb.pixels;
+                    float.pixels = std::sync::Arc::new(rb.pixels);
                     float.width     = rb.width;
                     float.height    = rb.height;
                     float.x         = rb.x;
@@ -11110,7 +11160,7 @@ impl PaneRenderer for StagePane {
                     // Float warp: update the floating selection's pixel data and GPU canvas.
                     // Do NOT write to kf.raw_pixels (it belongs to the full-canvas keyframe).
                     if let Some(float_sel) = shared.selection.raster_floating.as_mut() {
-                        float_sel.pixels    = rb.after_pixels;
+                        float_sel.pixels = std::sync::Arc::new(rb.after_pixels);
                         float_sel.canvas_id = rb.display_canvas_id;
                     }
                     // Release the old anchor canvas (float's original canvas_id, now replaced).

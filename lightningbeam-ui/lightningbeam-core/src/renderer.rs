@@ -88,14 +88,53 @@ fn decode_image_asset(asset: &ImageAsset) -> Option<ImageBrush> {
 // Per-Layer Rendering for HDR Compositing Pipeline
 // ============================================================================
 
+/// A single decoded video frame ready for GPU upload, with its document-space transform.
+pub struct VideoRenderInstance {
+    /// sRGB RGBA8 pixel data (straight alpha — as decoded by ffmpeg).
+    pub rgba_data: Arc<Vec<u8>>,
+    pub width: u32,
+    pub height: u32,
+    /// Affine transform that maps from video-pixel space to document space.
+    /// Composed from the clip's animated position/rotation/scale properties.
+    pub transform: Affine,
+    /// Final opacity [0,1] after cascading layer and instance opacity.
+    pub opacity: f32,
+}
+
 /// Type of rendered layer for compositor handling
-#[derive(Clone, Debug)]
 pub enum RenderedLayerType {
-    /// Regular content layer (vector, video) - composite its scene
-    Content,
-    /// Effect layer - apply effects to current composite state
+    /// Vector / group layer — Vello scene in `RenderedLayer::scene` is used.
+    Vector,
+    /// Raster keyframe — bypass Vello; compositor uploads pixels via GPU texture cache.
+    Raster {
+        kf_id: Uuid,
+        width: u32,
+        height: u32,
+        /// True when `raw_pixels` changed since the last upload; forces a cache re-upload.
+        dirty: bool,
+        /// Accumulated parent-clip affine (IDENTITY for top-level layers).
+        /// Compositor composes this with the camera into the blit matrix.
+        transform: Affine,
+    },
+    /// Video layer — bypass Vello; each active clip instance carries decoded frame data.
+    Video {
+        instances: Vec<VideoRenderInstance>,
+    },
+    /// Floating raster selection — blitted immediately above its parent layer.
+    Float {
+        canvas_id: Uuid,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        /// Accumulated parent-clip affine (IDENTITY for top-level layers).
+        transform: Affine,
+        /// CPU pixel data (sRGB-premultiplied RGBA8). Arc so the per-frame clone is O(1).
+        /// Used by the export compositor; the live compositor reads the GPU canvas directly.
+        pixels: std::sync::Arc<Vec<u8>>,
+    },
+    /// Effect layer — applied as a post-process pass on the HDR accumulator.
     Effect {
-        /// Active effect instances at the current time
         effect_instances: Vec<ClipInstance>,
     },
 }
@@ -104,7 +143,7 @@ pub enum RenderedLayerType {
 pub struct RenderedLayer {
     /// The layer's unique identifier
     pub layer_id: Uuid,
-    /// The Vello scene containing the layer's rendered content
+    /// Vello scene — only populated for `RenderedLayerType::Vector`.
     pub scene: Scene,
     /// Layer opacity (0.0 to 1.0)
     pub opacity: f32,
@@ -112,12 +151,12 @@ pub struct RenderedLayer {
     pub blend_mode: BlendMode,
     /// Whether this layer has any visible content
     pub has_content: bool,
-    /// Type of layer for compositor (content vs effect)
+    /// Layer variant — determines how the compositor renders this entry.
     pub layer_type: RenderedLayerType,
 }
 
 impl RenderedLayer {
-    /// Create a new rendered layer with default settings
+    /// Create a new vector layer with default settings.
     pub fn new(layer_id: Uuid) -> Self {
         Self {
             layer_id,
@@ -125,11 +164,11 @@ impl RenderedLayer {
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             has_content: false,
-            layer_type: RenderedLayerType::Content,
+            layer_type: RenderedLayerType::Vector,
         }
     }
 
-    /// Create with specific opacity and blend mode
+    /// Create a vector layer with specific opacity and blend mode.
     pub fn with_settings(layer_id: Uuid, opacity: f32, blend_mode: BlendMode) -> Self {
         Self {
             layer_id,
@@ -137,11 +176,11 @@ impl RenderedLayer {
             opacity,
             blend_mode,
             has_content: false,
-            layer_type: RenderedLayerType::Content,
+            layer_type: RenderedLayerType::Vector,
         }
     }
 
-    /// Create an effect layer with active effect instances
+    /// Create an effect layer with active effect instances.
     pub fn effect_layer(layer_id: Uuid, opacity: f32, effect_instances: Vec<ClipInstance>) -> Self {
         let has_content = !effect_instances.is_empty();
         Self {
@@ -179,12 +218,14 @@ pub fn render_document_for_compositing(
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
     camera_frame: Option<&crate::webcam::CaptureFrame>,
+    floating_selection: Option<&crate::selection::RasterFloatingSelection>,
+    draw_checkerboard: bool,
 ) -> CompositeRenderResult {
     let time = document.current_time;
 
     // Render background to its own scene
     let mut background = Scene::new();
-    render_background(document, &mut background, base_transform);
+    render_background(document, &mut background, base_transform, draw_checkerboard);
 
     // Check if any layers are soloed
     let any_soloed = document.visible_layers().any(|layer| layer.soloed());
@@ -215,6 +256,36 @@ pub fn render_document_for_compositing(
             camera_frame,
         );
         rendered_layers.push(rendered);
+    }
+
+    // Insert the floating raster selection immediately above its parent layer.
+    // This ensures it composites at the correct z-position in both edit and export.
+    if let Some(float_sel) = floating_selection {
+        if let Some(pos) = rendered_layers.iter().position(|l| l.layer_id == float_sel.layer_id) {
+            // Inherit the parent layer's transform so the float follows it into
+            // any transformed clip context.
+            let parent_transform = match &rendered_layers[pos].layer_type {
+                RenderedLayerType::Raster { transform, .. } => *transform,
+                _ => Affine::IDENTITY,
+            };
+            let float_entry = RenderedLayer {
+                layer_id: Uuid::nil(), // sentinel — not a real document layer
+                scene: Scene::new(),
+                opacity: 1.0,
+                blend_mode: crate::gpu::BlendMode::Normal,
+                has_content: !float_sel.pixels.is_empty(),
+                layer_type: RenderedLayerType::Float {
+                    canvas_id: float_sel.canvas_id,
+                    x: float_sel.x,
+                    y: float_sel.y,
+                    width: float_sel.width,
+                    height: float_sel.height,
+                    transform: parent_transform,
+                    pixels: std::sync::Arc::clone(&float_sel.pixels),
+                },
+            };
+            rendered_layers.insert(pos + 1, float_entry);
+        }
     }
 
     CompositeRenderResult {
@@ -269,21 +340,74 @@ pub fn render_layer_isolated(
             rendered.has_content = false;
         }
         AnyLayer::Video(video_layer) => {
+            use crate::animation::TransformProperty;
+            let layer_opacity = layer.opacity();
             let mut video_mgr = video_manager.lock().unwrap();
-            // Only pass camera_frame for the layer that has camera enabled
-            let layer_camera_frame = if video_layer.camera_enabled { camera_frame } else { None };
-            render_video_layer_to_scene(
-                document,
-                time,
-                video_layer,
-                &mut rendered.scene,
-                base_transform,
-                1.0, // Full opacity - layer opacity handled in compositing
-                &mut video_mgr,
-                layer_camera_frame,
-            );
-            rendered.has_content = !video_layer.clip_instances.is_empty()
-                || (video_layer.camera_enabled && camera_frame.is_some());
+            let mut instances = Vec::new();
+
+            for clip_instance in &video_layer.clip_instances {
+                let Some(video_clip) = document.video_clips.get(&clip_instance.clip_id) else { continue };
+                let Some(clip_time) = clip_instance.remap_time(time, video_clip.duration) else { continue };
+                let Some(frame) = video_mgr.get_frame(&clip_instance.clip_id, clip_time) else { continue };
+
+                // Evaluate animated transform properties.
+                let anim = &video_layer.layer.animation_data;
+                let id = clip_instance.id;
+                let t = &clip_instance.transform;
+                let x        = anim.eval(&crate::animation::AnimationTarget::Object { id, property: TransformProperty::X        }, time, t.x);
+                let y        = anim.eval(&crate::animation::AnimationTarget::Object { id, property: TransformProperty::Y        }, time, t.y);
+                let rotation = anim.eval(&crate::animation::AnimationTarget::Object { id, property: TransformProperty::Rotation }, time, t.rotation);
+                let scale_x  = anim.eval(&crate::animation::AnimationTarget::Object { id, property: TransformProperty::ScaleX  }, time, t.scale_x);
+                let scale_y  = anim.eval(&crate::animation::AnimationTarget::Object { id, property: TransformProperty::ScaleY  }, time, t.scale_y);
+                let skew_x   = anim.eval(&crate::animation::AnimationTarget::Object { id, property: TransformProperty::SkewX   }, time, t.skew_x);
+                let skew_y   = anim.eval(&crate::animation::AnimationTarget::Object { id, property: TransformProperty::SkewY   }, time, t.skew_y);
+                let inst_opacity = anim.eval(&crate::animation::AnimationTarget::Object { id, property: TransformProperty::Opacity }, time, clip_instance.opacity);
+
+                let cx = video_clip.width  / 2.0;
+                let cy = video_clip.height / 2.0;
+                let skew_transform = if skew_x != 0.0 || skew_y != 0.0 {
+                    let sx = if skew_x != 0.0 { Affine::new([1.0, 0.0, skew_x.to_radians().tan(), 1.0, 0.0, 0.0]) } else { Affine::IDENTITY };
+                    let sy = if skew_y != 0.0 { Affine::new([1.0, skew_y.to_radians().tan(), 0.0, 1.0, 0.0, 0.0]) } else { Affine::IDENTITY };
+                    Affine::translate((cx, cy)) * sx * sy * Affine::translate((-cx, -cy))
+                } else { Affine::IDENTITY };
+
+                let clip_transform = Affine::translate((x, y))
+                    * Affine::rotate(rotation.to_radians())
+                    * Affine::scale_non_uniform(scale_x, scale_y)
+                    * skew_transform;
+
+                instances.push(VideoRenderInstance {
+                    rgba_data: frame.rgba_data.clone(),
+                    width: frame.width,
+                    height: frame.height,
+                    transform: base_transform * clip_transform,
+                    opacity: (layer_opacity * inst_opacity) as f32,
+                });
+            }
+
+            // Camera / webcam frame.
+            if instances.is_empty() && video_layer.camera_enabled {
+                if let Some(frame) = camera_frame {
+                    let vw = frame.width as f64;
+                    let vh = frame.height as f64;
+                    let scale = (document.width / vw).min(document.height / vh);
+                    let ox = (document.width  - vw * scale) / 2.0;
+                    let oy = (document.height - vh * scale) / 2.0;
+                    let cam_transform = base_transform
+                        * Affine::translate((ox, oy))
+                        * Affine::scale(scale);
+                    instances.push(VideoRenderInstance {
+                        rgba_data: frame.rgba_data.clone(),
+                        width: frame.width,
+                        height: frame.height,
+                        transform: cam_transform,
+                        opacity: layer_opacity as f32,
+                    });
+                }
+            }
+
+            rendered.has_content = !instances.is_empty();
+            rendered.layer_type = RenderedLayerType::Video { instances };
         }
         AnyLayer::Effect(effect_layer) => {
             // Effect layers are processed during compositing, not rendered to scene
@@ -307,9 +431,16 @@ pub fn render_layer_isolated(
             rendered.has_content = !group_layer.children.is_empty();
         }
         AnyLayer::Raster(raster_layer) => {
-            render_raster_layer_to_scene(raster_layer, time, &mut rendered.scene, base_transform);
-            rendered.has_content = raster_layer.keyframe_at(time)
-                .map_or(false, |kf| kf.has_pixels());
+            if let Some(kf) = raster_layer.keyframe_at(time) {
+                rendered.has_content = kf.has_pixels();
+                rendered.layer_type = RenderedLayerType::Raster {
+                    kf_id: kf.id,
+                    width: kf.width,
+                    height: kf.height,
+                    dirty: kf.texture_dirty,
+                    transform: base_transform,
+                };
+            }
         }
     }
 
@@ -368,30 +499,6 @@ fn render_raster_layer_to_scene(
     scene.fill(Fill::NonZero, base_transform, &brush, None, &canvas_rect);
 }
 
-/// Render a video layer to an isolated scene (for compositing pipeline)
-fn render_video_layer_to_scene(
-    document: &Document,
-    time: f64,
-    layer: &crate::layer::VideoLayer,
-    scene: &mut Scene,
-    base_transform: Affine,
-    parent_opacity: f64,
-    video_manager: &mut crate::video::VideoManager,
-    camera_frame: Option<&crate::webcam::CaptureFrame>,
-) {
-    // Render using the existing function but to this isolated scene
-    render_video_layer(
-        document,
-        time,
-        layer,
-        scene,
-        base_transform,
-        parent_opacity,
-        video_manager,
-        camera_frame,
-    );
-}
-
 // ============================================================================
 // Legacy Single-Scene Rendering (kept for backwards compatibility)
 // ============================================================================
@@ -415,8 +522,8 @@ pub fn render_document_with_transform(
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
 ) {
-    // 1. Draw background
-    render_background(document, scene, base_transform);
+    // 1. Draw background (with checkerboard for transparent backgrounds — UI path)
+    render_background(document, scene, base_transform, true);
 
     // 2. Recursively render the root graphics object at current time
     let time = document.current_time;
@@ -436,12 +543,12 @@ pub fn render_document_with_transform(
 }
 
 /// Draw the document background
-fn render_background(document: &Document, scene: &mut Scene, base_transform: Affine) {
+fn render_background(document: &Document, scene: &mut Scene, base_transform: Affine, draw_checkerboard: bool) {
     let background_rect = Rect::new(0.0, 0.0, document.width, document.height);
     let bg = &document.background_color;
 
-    // Draw checkerboard behind transparent backgrounds
-    if bg.a < 255 {
+    // Draw checkerboard behind transparent backgrounds (UI-only; skip in export)
+    if draw_checkerboard && bg.a < 255 {
         use vello::peniko::{Blob, Color, Extend, ImageAlphaType, ImageData, ImageQuality};
         // 2x2 pixel checkerboard pattern: light/dark alternating
         let light: [u8; 4] = [204, 204, 204, 255];

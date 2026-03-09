@@ -1720,18 +1720,64 @@ pub struct CanvasBlitPipeline {
     pub mask_sampler: wgpu::Sampler,
 }
 
-/// Camera parameters uniform for canvas_blit.wgsl.
+/// General affine blit transform for canvas_blit.wgsl.
+///
+/// Encodes the combined `viewport_uv → canvas_uv` mapping as a column-major 3×3
+/// matrix packed into three `vec4` uniforms (std140 padding).
+///
+/// Build with [`BlitTransform::new`] by supplying:
+/// * `layer_transform` — affine that maps **canvas pixels → viewport pixels**
+///   (= `base_transform` from the renderer; includes camera pan/zoom and any
+///   parent-clip affine for nested layers).
+/// * `canvas_w`, `canvas_h` — canvas dimensions in pixels.
+/// * `vp_w`, `vp_h` — viewport dimensions in pixels.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct CameraParams {
-    pub pan_x:      f32,
-    pub pan_y:      f32,
-    pub zoom:       f32,
-    pub canvas_w:   f32,
-    pub canvas_h:   f32,
-    pub viewport_w: f32,
-    pub viewport_h: f32,
-    pub _pad:       f32,
+pub struct BlitTransform {
+    /// Column 0 of the matrix (+ 1 padding float).
+    pub col0: [f32; 4],
+    /// Column 1 of the matrix (+ 1 padding float).
+    pub col1: [f32; 4],
+    /// Column 2 — translation column: `[tx, ty, 1.0, 0.0]`.
+    pub col2: [f32; 4],
+}
+
+impl BlitTransform {
+    /// Build from a `canvas_px → viewport_px` affine transform.
+    ///
+    /// The resulting uniform maps **viewport UV [0,1]² → canvas UV [0,1]²** so
+    /// the fragment shader only needs a single `mat3x3 * vec3` multiply.
+    pub fn new(
+        layer_transform: kurbo::Affine,
+        canvas_w: u32,
+        canvas_h: u32,
+        vp_w: u32,
+        vp_h: u32,
+    ) -> Self {
+        // Combined transform: viewport_uv → canvas_uv
+        //   = scale_canvas_inv  *  layer_transform.inverse()  *  scale_vp
+        //
+        // scale_vp:          viewport UV  → viewport px
+        // layer_transform⁻¹: viewport px  → canvas px
+        // scale_canvas_inv:  canvas px    → canvas UV
+        let scale_vp  = kurbo::Affine::scale_non_uniform(vp_w as f64, vp_h as f64);
+        let scale_uv  = kurbo::Affine::scale_non_uniform(
+            1.0 / canvas_w as f64,
+            1.0 / canvas_h as f64,
+        );
+        let combined  = scale_uv * layer_transform.inverse() * scale_vp;
+
+        // kurbo::Affine coefficients: [a, b, c, d, e, f]
+        //   x' = a*x + c*y + e
+        //   y' = b*x + d*y + f
+        // Column-major 3×3: col0=(a,b,0), col1=(c,d,0), col2=(e,f,1)
+        let [a, b, c, d, e, f] = combined.as_coeffs();
+        Self {
+            col0: [a as f32, b as f32, 0.0, 0.0],
+            col1: [c as f32, d as f32, 0.0, 0.0],
+            col2: [e as f32, f as f32, 1.0, 0.0],
+        }
+    }
 }
 
 impl CanvasBlitPipeline {
@@ -1870,7 +1916,7 @@ impl CanvasBlitPipeline {
         queue:       &wgpu::Queue,
         canvas_view: &wgpu::TextureView,
         target_view: &wgpu::TextureView,
-        camera:      &CameraParams,
+        transform:   &BlitTransform,
         mask_view:   Option<&wgpu::TextureView>,
     ) {
         // When no mask is provided, create a temporary 1×1 all-white texture.
@@ -1905,14 +1951,14 @@ impl CanvasBlitPipeline {
                 &tmp_mask_view
             }
         };
-        // Upload camera params
+        // Upload blit transform
         let cam_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label:              Some("canvas_blit_cam_buf"),
-            size:               std::mem::size_of::<CameraParams>() as u64,
+            size:               std::mem::size_of::<BlitTransform>() as u64,
             usage:              wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&cam_buf, 0, bytemuck::bytes_of(camera));
+        queue.write_buffer(&cam_buf, 0, bytemuck::bytes_of(transform));
 
         let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:  Some("canvas_blit_bg"),

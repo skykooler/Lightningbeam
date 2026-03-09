@@ -81,6 +81,9 @@ pub struct ExportDialog {
 
     /// Export type used the last time the user actually clicked Export for `current_project`.
     last_export_type: Option<ExportType>,
+
+    /// Full path of the most recent successful export. Restored as the default on next open.
+    last_exported_path: Option<PathBuf>,
 }
 
 impl Default for ExportDialog {
@@ -107,6 +110,7 @@ impl Default for ExportDialog {
             output_filename: String::new(),
             current_project: String::new(),
             last_export_type: None,
+            last_exported_path: None,
             output_dir: music_dir,
         }
     }
@@ -139,8 +143,11 @@ impl ExportDialog {
         };
         self.current_project = project_name.to_owned();
 
-        // Pre-populate filename from project name if not already set.
-        if self.output_filename.is_empty() || !self.output_filename.contains(project_name) {
+        // Restore the last exported path if available; otherwise default to project name.
+        if let Some(ref last) = self.last_exported_path.clone() {
+            if let Some(dir) = last.parent() { self.output_dir = dir.to_path_buf(); }
+            if let Some(name) = last.file_name() { self.output_filename = name.to_string_lossy().into_owned(); }
+        } else if self.output_filename.is_empty() || !self.output_filename.contains(project_name) {
             self.output_filename = format!("{}.{}", project_name, self.current_extension());
         }
     }
@@ -596,8 +603,9 @@ impl ExportDialog {
 
         let output_path = self.output_path.clone().unwrap();
 
-        // Remember this export type for next time this file is opened.
+        // Remember this export type and path for next time the dialog is opened.
         self.last_export_type = Some(self.export_type);
+        self.last_exported_path = Some(output_path.clone());
 
         let result = match self.export_type {
             ExportType::Image => {

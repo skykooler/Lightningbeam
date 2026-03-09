@@ -1999,7 +1999,8 @@ impl EditorApp {
 
         let action = RasterStrokeAction::new(
             float.layer_id, float.time,
-            float.canvas_before, canvas_after,
+            std::sync::Arc::try_unwrap(float.canvas_before).unwrap_or_else(|a| (*a).clone()),
+            canvas_after,
             w, h,
         );
         if let Err(e) = self.action_executor.execute(Box::new(action)) {
@@ -2018,7 +2019,7 @@ impl EditorApp {
         let document = self.action_executor.document_mut();
         let Some(AnyLayer::Raster(rl)) = document.get_layer_mut(&float.layer_id) else { return };
         let Some(kf) = rl.keyframe_at_mut(float.time) else { return };
-        kf.raw_pixels = float.canvas_before;
+        kf.raw_pixels = std::sync::Arc::try_unwrap(float.canvas_before).unwrap_or_else(|a| (*a).clone());
     }
 
     /// Drop (discard) the floating selection keeping the hole punched in the
@@ -2038,7 +2039,8 @@ impl EditorApp {
         let (w, h) = (kf.width, kf.height);
         let action = RasterStrokeAction::new(
             float.layer_id, float.time,
-            float.canvas_before, canvas_after,
+            std::sync::Arc::try_unwrap(float.canvas_before).unwrap_or_else(|a| (*a).clone()),
+            canvas_after,
             w, h,
         );
         if let Err(e) = self.action_executor.execute(Box::new(action)) {
@@ -2059,7 +2061,7 @@ impl EditorApp {
             if matches!(document.get_layer(&layer_id), Some(AnyLayer::Raster(_))) {
                 if let Some(float) = &self.selection.raster_floating {
                     self.clipboard_manager.copy(ClipboardContent::RasterPixels {
-                        pixels: float.pixels.clone(),
+                        pixels: (*float.pixels).clone(),
                         width: float.width,
                         height: float.height,
                     });
@@ -2443,14 +2445,14 @@ impl EditorApp {
 
                 use lightningbeam_core::selection::{RasterFloatingSelection, RasterSelection};
                 self.selection.raster_floating = Some(RasterFloatingSelection {
-                    pixels,
+                    pixels: std::sync::Arc::new(pixels),
                     width,
                     height,
                     x: paste_x,
                     y: paste_y,
                     layer_id,
                     time: self.playback_time,
-                    canvas_before,
+                    canvas_before: std::sync::Arc::new(canvas_before),
                     canvas_id: uuid::Uuid::new_v4(),
                 });
                 // Update the marquee to show the floating selection bounds.
@@ -5351,6 +5353,7 @@ impl eframe::App for EditorApp {
                             renderer,
                             &mut temp_image_cache,
                             &self.video_manager,
+                            self.selection.raster_floating.as_ref(),
                         ) {
                             Ok(false) => { ctx.request_repaint(); } // readback pending
                             Ok(true)  => {}                          // done or cancelled

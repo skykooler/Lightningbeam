@@ -104,7 +104,9 @@ fn point_in_polygon(px: i32, py: i32, polygon: &[(i32, i32)]) -> bool {
 #[derive(Clone, Debug)]
 pub struct RasterFloatingSelection {
     /// sRGB-encoded premultiplied RGBA, width × height × 4 bytes.
-    pub pixels: Vec<u8>,
+    /// Wrapped in Arc so the renderer can clone a reference each frame (O(1))
+    /// instead of copying megabytes of pixel data.
+    pub pixels: std::sync::Arc<Vec<u8>>,
     pub width: u32,
     pub height: u32,
     /// Top-left position in canvas pixel coordinates.
@@ -116,7 +118,7 @@ pub struct RasterFloatingSelection {
     /// Snapshot of `raw_pixels` before the cut/paste was initiated, used for
     /// undo (via `RasterStrokeAction`) when the float is committed, and for
     /// Cancel (Escape) to restore the canvas without creating an undo entry.
-    pub canvas_before: Vec<u8>,
+    pub canvas_before: std::sync::Arc<Vec<u8>>,
     /// Key for this float's GPU canvas in `GpuBrushEngine::canvases`.
     /// Allows painting strokes directly onto the float buffer (B) without
     /// touching the layer canvas (A).

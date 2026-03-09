@@ -514,6 +514,7 @@ impl ExportOrchestrator {
         renderer: &mut vello::Renderer,
         image_cache: &mut ImageCache,
         video_manager: &Arc<std::sync::Mutex<VideoManager>>,
+        floating_selection: Option<&lightningbeam_core::selection::RasterFloatingSelection>,
     ) -> Result<bool, String> {
         if self.cancel_flag.load(Ordering::Relaxed) {
             self.image_state = None;
@@ -559,6 +560,8 @@ impl ExportOrchestrator {
                 device, queue, renderer, image_cache, video_manager,
                 gpu,
                 output_view,
+                floating_selection,
+                state.settings.allow_transparency,
             )?;
             queue.submit(Some(encoder.finish()));
 
@@ -1106,6 +1109,8 @@ impl ExportOrchestrator {
                     document, timestamp, width, height,
                     device, queue, renderer, image_cache, video_manager,
                     gpu_resources, &acquired.rgba_texture_view,
+                    None,  // No floating selection during video export
+                    false, // Video export is never transparent
                 )?;
                 let render_end = Instant::now();
 

@@ -79,6 +79,10 @@ pub struct ExportGpuResources {
     pub linear_to_srgb_bind_group_layout: wgpu::BindGroupLayout,
     /// Sampler for linear to sRGB conversion
     pub linear_to_srgb_sampler: wgpu::Sampler,
+    /// Canvas blit pipeline for raster/video/float layers (bypasses Vello).
+    pub canvas_blit: crate::gpu_brush::CanvasBlitPipeline,
+    /// Per-keyframe GPU texture cache for raster layers during export.
+    pub raster_cache: std::collections::HashMap<uuid::Uuid, crate::gpu_brush::CanvasPair>,
 }
 
 impl ExportGpuResources {
@@ -235,6 +239,8 @@ impl ExportGpuResources {
             ..Default::default()
         });
 
+        let canvas_blit = crate::gpu_brush::CanvasBlitPipeline::new(device);
+
         Self {
             buffer_pool,
             compositor,
@@ -251,6 +257,8 @@ impl ExportGpuResources {
             linear_to_srgb_pipeline,
             linear_to_srgb_bind_group_layout,
             linear_to_srgb_sampler,
+            canvas_blit,
+            raster_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -702,6 +710,233 @@ pub fn render_frame_to_rgba(
     Ok(())
 }
 
+/// Composite all layers from `composite_result` into `gpu_resources.hdr_texture_view`.
+///
+/// Shared by both export functions. Handles every layer type:
+/// - Vector/Group: Vello scene → sRGB → linear → composite
+/// - Raster: upload pixels to `raster_cache` (if needed) → GPU blit → composite
+/// - Video: sRGB straight-alpha → linear premultiplied → transient GPU texture → blit → composite
+/// - Float: sRGB-premultiplied → linear → transient GPU texture → blit → composite
+/// - Effect: apply post-process on the HDR accumulator
+fn composite_document_to_hdr(
+    composite_result: &lightningbeam_core::renderer::CompositeRenderResult,
+    document: &Document,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut vello::Renderer,
+    gpu_resources: &mut ExportGpuResources,
+    width: u32,
+    height: u32,
+    allow_transparency: bool,
+) -> Result<(), String> {
+    use vello::kurbo::Affine;
+
+    let layer_spec = BufferSpec::new(width, height, BufferFormat::Rgba8Srgb);
+    let hdr_spec = BufferSpec::new(width, height, BufferFormat::Rgba16Float);
+    let layer_render_params = vello::RenderParams {
+        base_color: vello::peniko::Color::TRANSPARENT,
+        width, height,
+        antialiasing_method: vello::AaConfig::Area,
+    };
+
+    // --- Background ---
+    let bg_srgb = gpu_resources.buffer_pool.acquire(device, layer_spec);
+    let bg_hdr  = gpu_resources.buffer_pool.acquire(device, hdr_spec);
+    if let (Some(bg_srgb_view), Some(bg_hdr_view)) = (
+        gpu_resources.buffer_pool.get_view(bg_srgb),
+        gpu_resources.buffer_pool.get_view(bg_hdr),
+    ) {
+        renderer.render_to_texture(device, queue, &composite_result.background, bg_srgb_view, &layer_render_params)
+            .map_err(|e| format!("Failed to render background: {e}"))?;
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_bg_srgb_to_linear") });
+        gpu_resources.srgb_to_linear.convert(device, &mut enc, bg_srgb_view, bg_hdr_view);
+        queue.submit(Some(enc.finish()));
+        let bg_layer = CompositorLayer::normal(bg_hdr, 1.0);
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_bg_composite") });
+        // When transparency is allowed, start from transparent black so the background's
+        // native alpha is preserved. Otherwise force an opaque black underlay.
+        let clear = if allow_transparency { [0.0, 0.0, 0.0, 0.0] } else { [0.0, 0.0, 0.0, 1.0] };
+        gpu_resources.compositor.composite(device, queue, &mut enc, &[bg_layer],
+            &gpu_resources.buffer_pool, &gpu_resources.hdr_texture_view, Some(clear));
+        queue.submit(Some(enc.finish()));
+    }
+    gpu_resources.buffer_pool.release(bg_srgb);
+    gpu_resources.buffer_pool.release(bg_hdr);
+
+    // --- Layers ---
+    for rendered_layer in &composite_result.layers {
+        if !rendered_layer.has_content { continue; }
+
+        match &rendered_layer.layer_type {
+            RenderedLayerType::Vector => {
+                let srgb_handle = gpu_resources.buffer_pool.acquire(device, layer_spec);
+                let hdr_layer_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
+                if let (Some(srgb_view), Some(hdr_layer_view)) = (
+                    gpu_resources.buffer_pool.get_view(srgb_handle),
+                    gpu_resources.buffer_pool.get_view(hdr_layer_handle),
+                ) {
+                    renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params)
+                        .map_err(|e| format!("Failed to render layer: {e}"))?;
+                    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_layer_srgb_to_linear") });
+                    gpu_resources.srgb_to_linear.convert(device, &mut enc, srgb_view, hdr_layer_view);
+                    queue.submit(Some(enc.finish()));
+                    let compositor_layer = CompositorLayer::new(hdr_layer_handle, rendered_layer.opacity, rendered_layer.blend_mode);
+                    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_layer_composite") });
+                    gpu_resources.compositor.composite(device, queue, &mut enc, &[compositor_layer], &gpu_resources.buffer_pool, &gpu_resources.hdr_texture_view, None);
+                    queue.submit(Some(enc.finish()));
+                }
+                gpu_resources.buffer_pool.release(srgb_handle);
+                gpu_resources.buffer_pool.release(hdr_layer_handle);
+            }
+            RenderedLayerType::Raster { kf_id, width: cw, height: ch, transform: layer_transform, dirty: _ } => {
+                let raw_pixels = document.get_layer(&rendered_layer.layer_id)
+                    .and_then(|l| match l {
+                        lightningbeam_core::layer::AnyLayer::Raster(rl) => rl.keyframe_at(document.current_time),
+                        _ => None,
+                    })
+                    .filter(|kf| !kf.raw_pixels.is_empty())
+                    .map(|kf| kf.raw_pixels.clone());
+                if let Some(pixels) = raw_pixels {
+                    if !gpu_resources.raster_cache.contains_key(kf_id) {
+                        let canvas = crate::gpu_brush::CanvasPair::new(device, *cw, *ch);
+                        canvas.upload(queue, &pixels);
+                        gpu_resources.raster_cache.insert(*kf_id, canvas);
+                    }
+                    if let Some(canvas) = gpu_resources.raster_cache.get(kf_id) {
+                        let hdr_layer_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
+                        if let Some(hdr_layer_view) = gpu_resources.buffer_pool.get_view(hdr_layer_handle) {
+                            let bt = crate::gpu_brush::BlitTransform::new(*layer_transform, *cw, *ch, width, height);
+                            gpu_resources.canvas_blit.blit(device, queue, canvas.src_view(), hdr_layer_view, &bt, None);
+                            let compositor_layer = CompositorLayer::new(hdr_layer_handle, rendered_layer.opacity, rendered_layer.blend_mode);
+                            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_raster_composite") });
+                            gpu_resources.compositor.composite(device, queue, &mut enc, &[compositor_layer], &gpu_resources.buffer_pool, &gpu_resources.hdr_texture_view, None);
+                            queue.submit(Some(enc.finish()));
+                        }
+                        gpu_resources.buffer_pool.release(hdr_layer_handle);
+                    }
+                }
+            }
+            RenderedLayerType::Video { instances } => {
+                for inst in instances {
+                    if inst.rgba_data.is_empty() { continue; }
+                    let hdr_layer_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
+                    if let Some(hdr_layer_view) = gpu_resources.buffer_pool.get_view(hdr_layer_handle) {
+                        // sRGB straight-alpha → linear premultiplied
+                        let linear: Vec<u8> = inst.rgba_data.chunks_exact(4).flat_map(|p| {
+                            let a = p[3] as f32 / 255.0;
+                            let lin = |c: u8| -> f32 {
+                                let f = c as f32 / 255.0;
+                                if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+                            };
+                            let r = (lin(p[0]) * a * 255.0 + 0.5) as u8;
+                            let g = (lin(p[1]) * a * 255.0 + 0.5) as u8;
+                            let b = (lin(p[2]) * a * 255.0 + 0.5) as u8;
+                            [r, g, b, p[3]]
+                        }).collect();
+                        let tex = upload_transient_texture(device, queue, &linear, inst.width, inst.height, Some("export_video_frame_tex"));
+                        let tex_view = tex.create_view(&Default::default());
+                        let bt = crate::gpu_brush::BlitTransform::new(inst.transform, inst.width, inst.height, width, height);
+                        gpu_resources.canvas_blit.blit(device, queue, &tex_view, hdr_layer_view, &bt, None);
+                        let compositor_layer = CompositorLayer::new(hdr_layer_handle, inst.opacity, lightningbeam_core::gpu::BlendMode::Normal);
+                        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_video_composite") });
+                        gpu_resources.compositor.composite(device, queue, &mut enc, &[compositor_layer], &gpu_resources.buffer_pool, &gpu_resources.hdr_texture_view, None);
+                        queue.submit(Some(enc.finish()));
+                    }
+                    gpu_resources.buffer_pool.release(hdr_layer_handle);
+                }
+            }
+            RenderedLayerType::Float { x: float_x, y: float_y, width: fw, height: fh, transform: layer_transform, pixels, .. } => {
+                if !pixels.is_empty() {
+                    // sRGB-premultiplied → linear-premultiplied
+                    let linear: Vec<u8> = pixels.chunks_exact(4).flat_map(|p| {
+                        let lin = |c: u8| -> u8 {
+                            let f = c as f32 / 255.0;
+                            let l = if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) };
+                            (l * 255.0 + 0.5) as u8
+                        };
+                        [lin(p[0]), lin(p[1]), lin(p[2]), p[3]]
+                    }).collect();
+                    let tex = upload_transient_texture(device, queue, &linear, *fw, *fh, Some("export_float_tex"));
+                    let tex_view = tex.create_view(&Default::default());
+                    let hdr_layer_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
+                    if let Some(hdr_layer_view) = gpu_resources.buffer_pool.get_view(hdr_layer_handle) {
+                        let float_to_vp = *layer_transform * Affine::translate((*float_x as f64, *float_y as f64));
+                        let bt = crate::gpu_brush::BlitTransform::new(float_to_vp, *fw, *fh, width, height);
+                        gpu_resources.canvas_blit.blit(device, queue, &tex_view, hdr_layer_view, &bt, None);
+                        let compositor_layer = CompositorLayer::normal(hdr_layer_handle, 1.0);
+                        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_float_composite") });
+                        gpu_resources.compositor.composite(device, queue, &mut enc, &[compositor_layer], &gpu_resources.buffer_pool, &gpu_resources.hdr_texture_view, None);
+                        queue.submit(Some(enc.finish()));
+                    }
+                    gpu_resources.buffer_pool.release(hdr_layer_handle);
+                }
+            }
+            RenderedLayerType::Effect { effect_instances } => {
+                let current_time = document.current_time;
+                for effect_instance in effect_instances {
+                    let Some(effect_def) = document.get_effect_definition(&effect_instance.clip_id) else { continue; };
+                    if !gpu_resources.effect_processor.is_compiled(&effect_def.id) {
+                        let success = gpu_resources.effect_processor.compile_effect(device, effect_def);
+                        if !success { eprintln!("Failed to compile effect: {}", effect_def.name); continue; }
+                    }
+                    let effect_inst = lightningbeam_core::effect::EffectInstance::new(
+                        effect_def,
+                        effect_instance.timeline_start,
+                        effect_instance.timeline_start + effect_instance.effective_duration(lightningbeam_core::effect::EFFECT_DURATION),
+                    );
+                    let effect_output_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
+                    if let Some(effect_output_view) = gpu_resources.buffer_pool.get_view(effect_output_handle) {
+                        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_effect") });
+                        let applied = gpu_resources.effect_processor.apply_effect(
+                            device, queue, &mut enc, effect_def, &effect_inst,
+                            &gpu_resources.hdr_texture_view, effect_output_view, width, height, current_time,
+                        );
+                        if applied {
+                            queue.submit(Some(enc.finish()));
+                            let effect_layer = CompositorLayer::normal(effect_output_handle, rendered_layer.opacity);
+                            let mut copy_enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_effect_copy") });
+                            // Replace the accumulator with the processed result.
+                            gpu_resources.compositor.composite(device, queue, &mut copy_enc, &[effect_layer], &gpu_resources.buffer_pool, &gpu_resources.hdr_texture_view, Some([0.0, 0.0, 0.0, 0.0]));
+                            queue.submit(Some(copy_enc.finish()));
+                        }
+                    }
+                    gpu_resources.buffer_pool.release(effect_output_handle);
+                }
+            }
+        }
+    }
+
+    gpu_resources.buffer_pool.next_frame();
+    Ok(())
+}
+
+/// Upload `pixels` to a transient `Rgba8Unorm` GPU texture (TEXTURE_BINDING | COPY_DST).
+fn upload_transient_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    label: Option<&'static str>,
+) -> wgpu::Texture {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label,
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        pixels,
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * 4), rows_per_image: Some(height) },
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+    );
+    tex
+}
+
 /// Render a document frame using the HDR compositing pipeline with effects
 ///
 /// This function uses the same rendering pipeline as the stage preview,
@@ -748,193 +983,12 @@ pub fn render_frame_to_rgba_hdr(
         image_cache,
         video_manager,
         None, // No webcam during export
+        None, // No floating selection during export
+        false, // No checkerboard in export
     );
 
-    // Buffer specs for layer rendering
-    let layer_spec = BufferSpec::new(width, height, BufferFormat::Rgba8Srgb);
-    let hdr_spec = BufferSpec::new(width, height, BufferFormat::Rgba16Float);
-
-    // Render parameters for Vello (transparent background for layers)
-    let layer_render_params = vello::RenderParams {
-        base_color: vello::peniko::Color::TRANSPARENT,
-        width,
-        height,
-        antialiasing_method: vello::AaConfig::Area,
-    };
-
-    // First, render background and composite it
-    let bg_srgb_handle = gpu_resources.buffer_pool.acquire(device, layer_spec);
-    let bg_hdr_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
-
-    if let (Some(bg_srgb_view), Some(bg_hdr_view)) = (
-        gpu_resources.buffer_pool.get_view(bg_srgb_handle),
-        gpu_resources.buffer_pool.get_view(bg_hdr_handle),
-    ) {
-        // Render background scene
-        renderer.render_to_texture(device, queue, &composite_result.background, bg_srgb_view, &layer_render_params)
-            .map_err(|e| format!("Failed to render background: {}", e))?;
-
-        // Convert sRGB to linear HDR
-        let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("export_bg_srgb_to_linear_encoder"),
-        });
-        gpu_resources.srgb_to_linear.convert(device, &mut convert_encoder, bg_srgb_view, bg_hdr_view);
-        queue.submit(Some(convert_encoder.finish()));
-
-        // Composite background onto HDR texture (first layer, clears to black for export)
-        let bg_compositor_layer = CompositorLayer::normal(bg_hdr_handle, 1.0);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("export_bg_composite_encoder"),
-        });
-        // Clear to black for export (unlike stage preview which has gray background)
-        gpu_resources.compositor.composite(
-            device,
-            queue,
-            &mut encoder,
-            &[bg_compositor_layer],
-            &gpu_resources.buffer_pool,
-            &gpu_resources.hdr_texture_view,
-            Some([0.0, 0.0, 0.0, 1.0]),
-        );
-        queue.submit(Some(encoder.finish()));
-    }
-    gpu_resources.buffer_pool.release(bg_srgb_handle);
-    gpu_resources.buffer_pool.release(bg_hdr_handle);
-
-    // Now render and composite each layer incrementally
-    for rendered_layer in &composite_result.layers {
-        if !rendered_layer.has_content {
-            continue;
-        }
-
-        match &rendered_layer.layer_type {
-            RenderedLayerType::Content => {
-                // Regular content layer - render to sRGB, convert to linear, then composite
-                let srgb_handle = gpu_resources.buffer_pool.acquire(device, layer_spec);
-                let hdr_layer_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
-
-                if let (Some(srgb_view), Some(hdr_layer_view)) = (
-                    gpu_resources.buffer_pool.get_view(srgb_handle),
-                    gpu_resources.buffer_pool.get_view(hdr_layer_handle),
-                ) {
-                    // Render layer scene to sRGB buffer
-                    renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params)
-                        .map_err(|e| format!("Failed to render layer: {}", e))?;
-
-                    // Convert sRGB to linear HDR
-                    let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("export_layer_srgb_to_linear_encoder"),
-                    });
-                    gpu_resources.srgb_to_linear.convert(device, &mut convert_encoder, srgb_view, hdr_layer_view);
-                    queue.submit(Some(convert_encoder.finish()));
-
-                    // Composite this layer onto the HDR accumulator with its opacity
-                    let compositor_layer = CompositorLayer::new(
-                        hdr_layer_handle,
-                        rendered_layer.opacity,
-                        rendered_layer.blend_mode,
-                    );
-
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("export_layer_composite_encoder"),
-                    });
-                    gpu_resources.compositor.composite(
-                        device,
-                        queue,
-                        &mut encoder,
-                        &[compositor_layer],
-                        &gpu_resources.buffer_pool,
-                        &gpu_resources.hdr_texture_view,
-                        None, // Don't clear - blend onto existing content
-                    );
-                    queue.submit(Some(encoder.finish()));
-                }
-
-                gpu_resources.buffer_pool.release(srgb_handle);
-                gpu_resources.buffer_pool.release(hdr_layer_handle);
-            }
-            RenderedLayerType::Effect { effect_instances } => {
-                // Effect layer - apply effects to the current HDR accumulator
-                let current_time = document.current_time;
-
-                for effect_instance in effect_instances {
-                    // Get effect definition from document
-                    let Some(effect_def) = document.get_effect_definition(&effect_instance.clip_id) else {
-                        continue;
-                    };
-
-                    // Compile effect if needed
-                    if !gpu_resources.effect_processor.is_compiled(&effect_def.id) {
-                        let success = gpu_resources.effect_processor.compile_effect(device, effect_def);
-                        if !success {
-                            eprintln!("Failed to compile effect: {}", effect_def.name);
-                            continue;
-                        }
-                    }
-
-                    // Create EffectInstance from ClipInstance for the processor
-                    let effect_inst = lightningbeam_core::effect::EffectInstance::new(
-                        effect_def,
-                        effect_instance.timeline_start,
-                        effect_instance.timeline_start + effect_instance.effective_duration(lightningbeam_core::effect::EFFECT_DURATION),
-                    );
-
-                    // Acquire temp buffer for effect output (HDR format)
-                    let effect_output_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
-
-                    if let Some(effect_output_view) = gpu_resources.buffer_pool.get_view(effect_output_handle) {
-                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("export_effect_encoder"),
-                        });
-
-                        // Apply effect: HDR accumulator → effect output buffer
-                        let applied = gpu_resources.effect_processor.apply_effect(
-                            device,
-                            queue,
-                            &mut encoder,
-                            effect_def,
-                            &effect_inst,
-                            &gpu_resources.hdr_texture_view,
-                            effect_output_view,
-                            width,
-                            height,
-                            current_time,
-                        );
-
-                        if applied {
-                            queue.submit(Some(encoder.finish()));
-
-                            // Copy effect output back to HDR accumulator
-                            let mut copy_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                label: Some("export_effect_copy_encoder"),
-                            });
-
-                            // Use compositor to copy (replacing content)
-                            let effect_layer = CompositorLayer::normal(
-                                effect_output_handle,
-                                rendered_layer.opacity, // Apply effect layer opacity
-                            );
-                            gpu_resources.compositor.composite(
-                                device,
-                                queue,
-                                &mut copy_encoder,
-                                &[effect_layer],
-                                &gpu_resources.buffer_pool,
-                                &gpu_resources.hdr_texture_view,
-                                Some([0.0, 0.0, 0.0, 0.0]), // Clear with transparent (we're replacing)
-                            );
-                            queue.submit(Some(copy_encoder.finish()));
-                        }
-                    }
-
-                    gpu_resources.buffer_pool.release(effect_output_handle);
-                }
-            }
-        }
-    }
-
-    // Advance frame counter for buffer cleanup
-    gpu_resources.buffer_pool.next_frame();
+    // Video export is never transparent.
+    composite_document_to_hdr(&composite_result, document, device, queue, renderer, gpu_resources, width, height, false)?;
 
     // Use persistent output texture (already created in ExportGpuResources)
     let output_view = &gpu_resources.output_texture_view;
@@ -1118,6 +1172,8 @@ pub fn render_frame_to_gpu_rgba(
     video_manager: &Arc<std::sync::Mutex<VideoManager>>,
     gpu_resources: &mut ExportGpuResources,
     rgba_texture_view: &wgpu::TextureView,
+    floating_selection: Option<&lightningbeam_core::selection::RasterFloatingSelection>,
+    allow_transparency: bool,
 ) -> Result<wgpu::CommandEncoder, String> {
     use vello::kurbo::Affine;
 
@@ -1134,176 +1190,11 @@ pub fn render_frame_to_gpu_rgba(
         image_cache,
         video_manager,
         None, // No webcam during export
+        floating_selection,
+        false, // No checkerboard in export
     );
 
-    // Buffer specs for layer rendering
-    let layer_spec = BufferSpec::new(width, height, BufferFormat::Rgba8Srgb);
-    let hdr_spec = BufferSpec::new(width, height, BufferFormat::Rgba16Float);
-
-    // Render parameters for Vello (transparent background for layers)
-    let layer_render_params = vello::RenderParams {
-        base_color: vello::peniko::Color::TRANSPARENT,
-        width,
-        height,
-        antialiasing_method: vello::AaConfig::Area,
-    };
-
-    // Render background and composite it
-    let bg_srgb_handle = gpu_resources.buffer_pool.acquire(device, layer_spec);
-    let bg_hdr_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
-
-    if let (Some(bg_srgb_view), Some(bg_hdr_view)) = (
-        gpu_resources.buffer_pool.get_view(bg_srgb_handle),
-        gpu_resources.buffer_pool.get_view(bg_hdr_handle),
-    ) {
-        renderer.render_to_texture(device, queue, &composite_result.background, bg_srgb_view, &layer_render_params)
-            .map_err(|e| format!("Failed to render background: {}", e))?;
-
-        let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("export_bg_srgb_to_linear_encoder"),
-        });
-        gpu_resources.srgb_to_linear.convert(device, &mut convert_encoder, bg_srgb_view, bg_hdr_view);
-        queue.submit(Some(convert_encoder.finish()));
-
-        let bg_compositor_layer = CompositorLayer::normal(bg_hdr_handle, 1.0);
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("export_bg_composite_encoder"),
-        });
-        gpu_resources.compositor.composite(
-            device,
-            queue,
-            &mut encoder,
-            &[bg_compositor_layer],
-            &gpu_resources.buffer_pool,
-            &gpu_resources.hdr_texture_view,
-            Some([0.0, 0.0, 0.0, 1.0]),
-        );
-        queue.submit(Some(encoder.finish()));
-    }
-    gpu_resources.buffer_pool.release(bg_srgb_handle);
-    gpu_resources.buffer_pool.release(bg_hdr_handle);
-
-    // Render and composite each layer incrementally
-    for rendered_layer in &composite_result.layers {
-        if !rendered_layer.has_content {
-            continue;
-        }
-
-        match &rendered_layer.layer_type {
-            RenderedLayerType::Content => {
-                let srgb_handle = gpu_resources.buffer_pool.acquire(device, layer_spec);
-                let hdr_layer_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
-
-                if let (Some(srgb_view), Some(hdr_layer_view)) = (
-                    gpu_resources.buffer_pool.get_view(srgb_handle),
-                    gpu_resources.buffer_pool.get_view(hdr_layer_handle),
-                ) {
-                    renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params)
-                        .map_err(|e| format!("Failed to render layer: {}", e))?;
-
-                    let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("export_layer_srgb_to_linear_encoder"),
-                    });
-                    gpu_resources.srgb_to_linear.convert(device, &mut convert_encoder, srgb_view, hdr_layer_view);
-                    queue.submit(Some(convert_encoder.finish()));
-
-                    let compositor_layer = CompositorLayer::normal(hdr_layer_handle, rendered_layer.opacity);
-                    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("export_layer_composite_encoder"),
-                    });
-                    gpu_resources.compositor.composite(
-                        device,
-                        queue,
-                        &mut encoder,
-                        &[compositor_layer],
-                        &gpu_resources.buffer_pool,
-                        &gpu_resources.hdr_texture_view,
-                        None,
-                    );
-                    queue.submit(Some(encoder.finish()));
-                }
-                gpu_resources.buffer_pool.release(srgb_handle);
-                gpu_resources.buffer_pool.release(hdr_layer_handle);
-            }
-            RenderedLayerType::Effect { effect_instances } => {
-                // Effect layer - apply effects to the current HDR accumulator
-                let current_time = document.current_time;
-
-                for effect_instance in effect_instances {
-                    // Get effect definition from document
-                    let Some(effect_def) = document.get_effect_definition(&effect_instance.clip_id) else {
-                        continue;
-                    };
-
-                    // Compile effect if needed
-                    if !gpu_resources.effect_processor.is_compiled(&effect_def.id) {
-                        let success = gpu_resources.effect_processor.compile_effect(device, effect_def);
-                        if !success {
-                            eprintln!("Failed to compile effect: {}", effect_def.name);
-                            continue;
-                        }
-                    }
-
-                    // Create EffectInstance from ClipInstance for the processor
-                    let effect_inst = lightningbeam_core::effect::EffectInstance::new(
-                        effect_def,
-                        effect_instance.timeline_start,
-                        effect_instance.timeline_start + effect_instance.effective_duration(lightningbeam_core::effect::EFFECT_DURATION),
-                    );
-
-                    // Acquire temp buffer for effect output (HDR format)
-                    let effect_output_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
-
-                    if let Some(effect_output_view) = gpu_resources.buffer_pool.get_view(effect_output_handle) {
-                        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("export_effect_encoder"),
-                        });
-
-                        // Apply effect: HDR accumulator → effect output buffer
-                        let applied = gpu_resources.effect_processor.apply_effect(
-                            device,
-                            queue,
-                            &mut encoder,
-                            effect_def,
-                            &effect_inst,
-                            &gpu_resources.hdr_texture_view,
-                            effect_output_view,
-                            width,
-                            height,
-                            current_time,
-                        );
-
-                        if applied {
-                            // Copy effect output back to HDR accumulator
-                            encoder.copy_texture_to_texture(
-                                wgpu::TexelCopyTextureInfo {
-                                    texture: gpu_resources.buffer_pool.get_texture(effect_output_handle).unwrap(),
-                                    mip_level: 0,
-                                    origin: wgpu::Origin3d::ZERO,
-                                    aspect: wgpu::TextureAspect::All,
-                                },
-                                wgpu::TexelCopyTextureInfo {
-                                    texture: &gpu_resources.hdr_texture,
-                                    mip_level: 0,
-                                    origin: wgpu::Origin3d::ZERO,
-                                    aspect: wgpu::TextureAspect::All,
-                                },
-                                wgpu::Extent3d {
-                                    width,
-                                    height,
-                                    depth_or_array_layers: 1,
-                                },
-                            );
-                        }
-
-                        queue.submit(Some(encoder.finish()));
-                    }
-
-                    gpu_resources.buffer_pool.release(effect_output_handle);
-                }
-            }
-        }
-    }
+    composite_document_to_hdr(&composite_result, document, device, queue, renderer, gpu_resources, width, height, allow_transparency)?;
 
     // Convert HDR to sRGB (linear → sRGB), render directly to external RGBA texture
     let output_view = rgba_texture_view;
