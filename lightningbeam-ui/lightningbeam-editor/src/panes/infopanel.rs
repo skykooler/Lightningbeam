@@ -540,15 +540,17 @@ impl InfopanelPane {
                         });
                     }
 
-                    Tool::Gradient if active_is_raster => {
-                        ui.horizontal(|ui| {
-                            ui.label("Opacity:");
-                            ui.add(egui::Slider::new(
-                                &mut shared.raster_settings.gradient_opacity,
-                                0.0_f32..=1.0,
-                            ).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-                        });
-                        ui.add_space(4.0);
+                    Tool::Gradient => {
+                        if active_is_raster {
+                            ui.horizontal(|ui| {
+                                ui.label("Opacity:");
+                                ui.add(egui::Slider::new(
+                                    &mut shared.raster_settings.gradient_opacity,
+                                    0.0_f32..=1.0,
+                                ).custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                            });
+                            ui.add_space(4.0);
+                        }
                         gradient_stop_editor(
                             ui,
                             &mut shared.raster_settings.gradient,

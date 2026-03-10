@@ -1773,7 +1773,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         // Stipple faces with visible fill
                         for (i, face) in sel_dcel.faces.iter().enumerate() {
                             if face.deleted || i == 0 { continue; }
-                            if face.fill_color.is_none() && face.image_fill.is_none() { continue; }
+                            if face.fill_color.is_none() && face.image_fill.is_none() && face.gradient_fill.is_none() { continue; }
                             let face_id = DcelFaceId(i as u32);
                             let path = sel_dcel.face_to_bezpath_with_holes(face_id);
                             scene.fill(
@@ -2748,8 +2748,10 @@ pub struct StagePane {
     warp_state: Option<WarpState>,
     /// Live state for the Liquify tool.
     liquify_state: Option<LiquifyState>,
-    /// Live state for the Gradient fill tool.
+    /// Live state for the Gradient fill tool (raster layers).
     gradient_state: Option<GradientState>,
+    /// Live state for the Gradient fill tool (vector layers).
+    vector_gradient_state: Option<VectorGradientState>,
     /// GPU gradient fill dispatch to run next prepare() frame.
     pending_gradient_op: Option<PendingGradientOp>,
     /// GPU ops for Warp/Liquify to dispatch in prepare().
@@ -2871,6 +2873,15 @@ struct GradientState {
     is_float: bool,
     /// World-space top-left of the float in canvas pixels (None for non-float).
     float_offset: Option<(f32, f32)>,
+}
+
+/// Live state for an ongoing vector-layer Gradient fill drag.
+struct VectorGradientState {
+    layer_id: uuid::Uuid,
+    time: f64,
+    face_ids: Vec<lightningbeam_core::dcel2::FaceId>,
+    start: egui::Vec2,  // World-space drag start
+    end:   egui::Vec2,  // World-space drag end
 }
 
 /// GPU ops queued by the Warp/Liquify handlers for `prepare()`.
@@ -3162,6 +3173,7 @@ impl StagePane {
             warp_state: None,
             liquify_state: None,
             gradient_state: None,
+            vector_gradient_state: None,
             pending_gradient_op: None,
             pending_warp_ops: Vec::new(),
             active_raster_tool: None,
@@ -8747,6 +8759,11 @@ impl StagePane {
             None => return,
         };
 
+        // Delegate to the vector handler when the active layer is a vector layer.
+        if let Some(AnyLayer::Vector(_)) = shared.action_executor.document().get_layer(&active_layer_id) {
+            return self.handle_vector_gradient_tool(ui, response, world_pos, shared, response.rect);
+        }
+
         let drag_started = response.drag_started();
         let dragged      = response.dragged();
         let drag_stopped = response.drag_stopped();
@@ -9075,7 +9092,100 @@ impl StagePane {
         out
     }
 
-    /// Compute gradient pixels and queue upload to the preview GPU canvas for next prepare().
+    /// Handle the Gradient tool when the active layer is a vector layer.
+    ///
+    /// Drag start→end across a face to set its gradient angle. On release the
+    /// current gradient settings (stops, kind, extend) are applied via
+    /// `SetFillPaintAction`, which records an undo entry.
+    fn handle_vector_gradient_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+        rect: egui::Rect,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::dcel2::FaceId;
+
+        let Some(layer_id) = *shared.active_layer_id else { return };
+
+        // ── Drag started: pick the face under the click origin ───────────────
+        if response.drag_started() {
+            let click_world = ui
+                .input(|i| i.pointer.press_origin())
+                .map(|p| {
+                    let rel = p - rect.min - self.pan_offset;
+                    egui::Vec2::new(rel.x / self.zoom, rel.y / self.zoom)
+                })
+                .unwrap_or(world_pos);
+
+            let doc = shared.action_executor.document();
+            let Some(AnyLayer::Vector(vl)) = doc.get_layer(&layer_id) else { return };
+            let Some(kf) = vl.keyframe_at(*shared.playback_time) else { return };
+
+            let point = vello::kurbo::Point::new(click_world.x as f64, click_world.y as f64);
+            let face_id = kf.dcel.find_face_containing_point(point);
+
+            // Face 0 is the unbounded background face — nothing to fill.
+            if face_id == FaceId(0) || kf.dcel.face(face_id).deleted { return; }
+
+            // If the clicked face is already selected, apply to all selected faces;
+            // otherwise apply only to the clicked face.
+            let face_ids: Vec<FaceId> = if shared.selection.selected_faces().contains(&face_id) {
+                shared.selection.selected_faces().iter().cloned().collect()
+            } else {
+                vec![face_id]
+            };
+
+            self.vector_gradient_state = Some(VectorGradientState {
+                layer_id,
+                time: *shared.playback_time,
+                face_ids,
+                start: click_world,
+                end:   click_world,
+            });
+        }
+
+        // ── Dragged: update end point ─────────────────────────────────────────
+        if let Some(ref mut gs) = self.vector_gradient_state {
+            if response.dragged() {
+                gs.end = world_pos;
+            }
+        }
+
+        // ── Drag stopped: commit gradient ─────────────────────────────────────
+        if response.drag_stopped() {
+            if let Some(gs) = self.vector_gradient_state.take() {
+                let dx = gs.end.x - gs.start.x;
+                let dy = gs.end.y - gs.start.y;
+                // Tiny / no drag → keep the angle stored in the current gradient settings.
+                let angle = if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                    shared.raster_settings.gradient.angle
+                } else {
+                    dy.atan2(dx).to_degrees()
+                };
+
+                let gradient = lightningbeam_core::gradient::ShapeGradient {
+                    kind:   shared.raster_settings.gradient.kind,
+                    stops:  shared.raster_settings.gradient.stops.clone(),
+                    angle,
+                    extend: shared.raster_settings.gradient.extend,
+                    start_world: Some((gs.start.x as f64, gs.start.y as f64)),
+                    end_world:   Some((gs.end.x as f64, gs.end.y as f64)),
+                };
+
+                use lightningbeam_core::actions::SetFillPaintAction;
+                let action = SetFillPaintAction::gradient(
+                    gs.layer_id, gs.time, gs.face_ids, Some(gradient),
+                );
+                if let Err(e) = shared.action_executor.execute(Box::new(action)) {
+                    eprintln!("Vector gradient fill: {e}");
+                }
+            }
+        }
+    }
+
     fn handle_transform_tool(
         &mut self,
         ui: &mut egui::Ui,
@@ -11704,6 +11814,25 @@ impl PaneRenderer for StagePane {
         );
 
         ui.painter().add(cb);
+
+        // Gradient direction arrow overlay for vector gradient drags.
+        if matches!(*shared.selected_tool, lightningbeam_core::tool::Tool::Gradient) {
+            if let Some(ref gs) = self.vector_gradient_state {
+                let mut painter = ui.ctx().layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("vgrad_arrow"),
+                ));
+                painter.set_clip_rect(rect);
+                let w2s = |w: egui::Vec2| -> egui::Pos2 {
+                    rect.min + self.pan_offset + w * self.zoom
+                };
+                let p0 = w2s(gs.start);
+                let p1 = w2s(gs.end);
+                painter.line_segment([p0, p1], egui::Stroke::new(2.0, egui::Color32::WHITE));
+                painter.circle_stroke(p0, 5.0, egui::Stroke::new(1.5, egui::Color32::WHITE));
+                painter.circle_filled(p1, 4.0, egui::Color32::WHITE);
+            }
+        }
 
         // Show camera info overlay
         let info_color = shared.theme.text_color(&["#stage", ".text-secondary"], ui.ctx(), egui::Color32::from_gray(200));

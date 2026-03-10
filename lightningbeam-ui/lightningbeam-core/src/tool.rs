@@ -366,6 +366,7 @@ impl Tool {
             Tool::Rectangle,
             Tool::Ellipse,
             Tool::PaintBucket,
+            Tool::Gradient,
             Tool::Eyedropper,
             Tool::Line,
             Tool::Polygon,

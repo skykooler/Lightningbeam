@@ -94,7 +94,7 @@ pub fn hit_test_layer(
         if face.deleted || i == 0 {
             continue; // skip unbounded face
         }
-        if face.fill_color.is_none() && face.image_fill.is_none() {
+        if face.fill_color.is_none() && face.image_fill.is_none() && face.gradient_fill.is_none() {
             continue;
         }
         if face.outer_half_edge.is_none() {
@@ -472,7 +472,7 @@ pub fn hit_test_vector_editing(
         if face.deleted || i == 0 {
             continue;
         }
-        if face.fill_color.is_none() && face.image_fill.is_none() {
+        if face.fill_color.is_none() && face.image_fill.is_none() && face.gradient_fill.is_none() {
             continue;
         }
         if face.outer_half_edge.is_none() {

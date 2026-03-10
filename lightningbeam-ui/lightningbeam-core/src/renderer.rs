@@ -1092,8 +1092,24 @@ pub fn render_dcel(
         if !filled {
             if let Some(ref grad) = face.gradient_fill {
                 use kurbo::Rect;
+                use crate::gradient::GradientType;
                 let bbox: Rect = vello::kurbo::Shape::bounding_box(&path);
-                let (start, end) = gradient_bbox_endpoints(grad.angle, bbox);
+                let (start, end) = match (grad.start_world, grad.end_world) {
+                    (Some((sx, sy)), Some((ex, ey))) => match grad.kind {
+                        GradientType::Linear => {
+                            (kurbo::Point::new(sx, sy), kurbo::Point::new(ex, ey))
+                        }
+                        GradientType::Radial => {
+                            // start_world = center, end_world = edge point.
+                            // to_peniko_brush uses midpoint(start, end) as center,
+                            // so reflect the edge through the center to get the
+                            // opposing diameter endpoint.
+                            let opp = kurbo::Point::new(2.0 * sx - ex, 2.0 * sy - ey);
+                            (opp, kurbo::Point::new(ex, ey))
+                        }
+                    },
+                    _ => gradient_bbox_endpoints(grad.angle, bbox),
+                };
                 let brush = grad.to_peniko_brush(start, end, opacity_f32);
                 scene.fill(fill_rule, base_transform, &brush, None, &path);
                 filled = true;

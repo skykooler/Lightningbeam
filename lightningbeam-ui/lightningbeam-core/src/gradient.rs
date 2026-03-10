@@ -66,6 +66,18 @@ pub struct ShapeGradient {
     /// Ignored for Radial.
     pub angle:  f32,
     pub extend: GradientExtend,
+    /// Explicit world-space start point set by the gradient drag tool.
+    /// For Linear: the start of the gradient axis.
+    /// For Radial: the center of the gradient circle.
+    /// When `None`, the renderer falls back to bbox-based computation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_world: Option<(f64, f64)>,
+    /// Explicit world-space end point set by the gradient drag tool.
+    /// For Linear: the end of the gradient axis.
+    /// For Radial: a point on the edge of the gradient circle (defines radius).
+    /// When `None`, the renderer falls back to bbox-based computation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_world: Option<(f64, f64)>,
 }
 
 impl Default for ShapeGradient {
@@ -73,11 +85,13 @@ impl Default for ShapeGradient {
         Self {
             kind:   GradientType::Linear,
             stops:  vec![
-                GradientStop { position: 0.0, color: ShapeColor::rgba(0, 0, 0, 255) },
-                GradientStop { position: 1.0, color: ShapeColor::rgba(0, 0, 0, 0) },
+                GradientStop { position: 0.0, color: ShapeColor::rgba(255, 255, 255, 255) },
+                GradientStop { position: 1.0, color: ShapeColor::rgba(0,   0,   0,   255) },
             ],
             angle:  0.0,
             extend: GradientExtend::Pad,
+            start_world: None,
+            end_world:   None,
         }
     }
 }
