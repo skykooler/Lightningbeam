@@ -192,6 +192,12 @@ pub struct SharedPaneState<'a> {
     pub raster_settings: &'a mut crate::tools::RasterToolSettings,
     /// Audio engine controller for playback control (wrapped in Arc<Mutex<>> for thread safety)
     pub audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
+    /// Opener for the microphone/line-in stream — consumed on first use.
+    pub audio_input_opener: &'a mut Option<daw_backend::InputStreamOpener>,
+    /// Live input stream handle; kept alive while recording is active.
+    pub audio_input_stream: &'a mut Option<cpal::Stream>,
+    /// Buffer size (frames) used for the output stream, passed to the input stream opener.
+    pub audio_buffer_size: u32,
     /// Video manager for video decoding and frame caching
     pub video_manager: &'a std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
     /// Mapping from Document layer UUIDs to daw-backend TrackIds

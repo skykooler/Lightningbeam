@@ -796,6 +796,13 @@ struct EditorApp {
     #[allow(dead_code)] // Must be kept alive to maintain audio output
     audio_stream: Option<cpal::Stream>,
     audio_controller: Option<std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
+    /// Holds `input_tx` and device info needed to open the microphone stream on
+    /// demand (when the user selects an audio input track).
+    audio_input: Option<daw_backend::InputStreamOpener>,
+    /// Active microphone/line-in stream; kept alive while an audio input track is selected.
+    #[allow(dead_code)]
+    audio_input_stream: Option<cpal::Stream>,
+    audio_buffer_size: u32,
     audio_event_rx: Option<rtrb::Consumer<daw_backend::AudioEvent>>,
     audio_events_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Count of in-flight graph preset loads — keeps the repaint loop alive
@@ -1004,13 +1011,16 @@ impl EditorApp {
         let action_executor = lightningbeam_core::action::ActionExecutor::new(document);
 
         // Initialize audio system and destructure it for sharing
-        let (audio_stream, audio_controller, audio_event_rx, audio_sample_rate, audio_channels, file_command_tx, recording_mirror_rx) =
+        let (audio_stream, audio_controller, audio_event_rx, audio_sample_rate, audio_channels, file_command_tx, recording_mirror_rx, audio_input) =
             match daw_backend::AudioSystem::new(None, config.audio_buffer_size) {
                 Ok(mut audio_system) => {
                     println!("✅ Audio engine initialized successfully");
 
                     // Extract components
                     let mirror_rx = audio_system.take_recording_mirror_rx();
+                    // take_input_opener pulls out input_tx + sample_rate/channels into
+                    // a self-contained struct that can open the stream on demand.
+                    let input_opener = audio_system.take_input_opener();
                     let stream = audio_system.stream;
                     let sample_rate = audio_system.sample_rate;
                     let channels = audio_system.channels;
@@ -1022,7 +1032,7 @@ impl EditorApp {
                     // Spawn file operations worker
                     let file_command_tx = FileOperationsWorker::spawn(controller.clone());
 
-                    (Some(stream), Some(controller), event_rx, sample_rate, channels, file_command_tx, mirror_rx)
+                    (Some(stream), Some(controller), event_rx, sample_rate, channels, file_command_tx, mirror_rx, input_opener)
                 }
                 Err(e) => {
                     eprintln!("❌ Failed to initialize audio engine: {}", e);
@@ -1030,7 +1040,7 @@ impl EditorApp {
 
                     // Create a dummy channel for file operations (won't be used)
                     let (tx, _rx) = std::sync::mpsc::channel();
-                    (None, None, None, 48000, 2, tx, None)
+                    (None, None, None, 48000, 2, tx, None, None)
                 }
             };
 
@@ -1078,6 +1088,9 @@ impl EditorApp {
             audio_stream,
             audio_controller,
             audio_event_rx,
+            audio_input,
+            audio_input_stream: None,
+            audio_buffer_size: config.audio_buffer_size,
             audio_events_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_graph_loads: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             commit_raster_floating_if_any: false,
@@ -5679,6 +5692,9 @@ impl eframe::App for EditorApp {
                     schneider_max_error: &mut self.schneider_max_error,
                     raster_settings: &mut self.raster_settings,
                     audio_controller: self.audio_controller.as_ref(),
+                    audio_input_opener: &mut self.audio_input,
+                    audio_input_stream: &mut self.audio_input_stream,
+                    audio_buffer_size: self.audio_buffer_size,
                     video_manager: &self.video_manager,
                     playback_time: &mut self.playback_time,
                     is_playing: &mut self.is_playing,

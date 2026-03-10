@@ -657,6 +657,15 @@ impl TimelinePane {
                 }
                 RecordCandidate::AudioSampled => {
                     if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                        // Open the input stream now if it hasn't been opened yet.
+                        if shared.audio_input_stream.is_none() {
+                            if let Some(opener) = shared.audio_input_opener.take() {
+                                match opener.open(shared.audio_buffer_size) {
+                                    Ok(stream) => *shared.audio_input_stream = Some(stream),
+                                    Err(e) => eprintln!("⚠️  Could not open input stream: {e}"),
+                                }
+                            }
+                        }
                         if let Some(controller_arc) = shared.audio_controller {
                             let mut controller = controller_arc.lock().unwrap();
                             controller.start_recording(track_id, start_time);
