@@ -137,6 +137,7 @@ enum ClipDragType {
 enum TimeDisplayFormat {
     Seconds,
     Measures,
+    Frames,
 }
 
 /// State for an in-progress layer header drag-to-reorder operation.
@@ -1025,9 +1026,21 @@ impl TimelinePane {
             .unwrap_or(1.0)
     }
 
+    /// Calculate appropriate interval for frames ruler based on zoom level
+    fn calculate_ruler_interval_frames(&self, framerate: f64) -> i64 {
+        let target_px = 75.0;
+        let px_per_frame = self.pixels_per_second / framerate as f32;
+        let target_frames = (target_px / px_per_frame).round() as i64;
+        let intervals = [1i64, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
+        intervals.iter()
+            .min_by_key(|&&i| (i - target_frames).abs())
+            .copied()
+            .unwrap_or(1)
+    }
+
     /// Render the time ruler at the top
     fn render_ruler(&self, ui: &mut egui::Ui, rect: egui::Rect, theme: &crate::theme::Theme,
-                    bpm: f64, time_sig: &lightningbeam_core::document::TimeSignature) {
+                    bpm: f64, time_sig: &lightningbeam_core::document::TimeSignature, framerate: f64) {
         let painter = ui.painter();
 
         // Background
@@ -1123,6 +1136,44 @@ impl TimelinePane {
                             egui::FontId::proportional(10.0), text_color.gamma_multiply(alpha),
                         );
                     }
+                }
+            }
+            TimeDisplayFormat::Frames => {
+                let interval = self.calculate_ruler_interval_frames(framerate);
+                let start_frame = (self.viewport_start_time.max(0.0) * framerate).floor() as i64;
+                let end_frame = (self.x_to_time(rect.width()) * framerate).ceil() as i64;
+                // Align so labels fall on display multiples of interval (5, 10, 15...)
+                let start_frame = ((start_frame + interval) / interval) * interval - 1;
+
+                let mut frame = start_frame;
+                while frame <= end_frame {
+                    let x = self.time_to_x(frame as f64 / framerate);
+                    if x >= 0.0 && x <= rect.width() {
+                        painter.line_segment(
+                            [rect.min + egui::vec2(x, rect.height() - 10.0),
+                             rect.min + egui::vec2(x, rect.height())],
+                            egui::Stroke::new(1.0, theme.text_color(&["#timeline", ".ruler-tick"], ui.ctx(), egui::Color32::from_gray(100))),
+                        );
+                        painter.text(
+                            rect.min + egui::vec2(x + 2.0, 5.0), egui::Align2::LEFT_TOP,
+                            format!("{}", frame + 1),
+                            egui::FontId::proportional(12.0), text_color,
+                        );
+                    }
+                    let sub = interval / 5;
+                    if sub >= 1 {
+                        for i in 1..5i64 {
+                            let minor_x = self.time_to_x((frame + sub * i) as f64 / framerate);
+                            if minor_x >= 0.0 && minor_x <= rect.width() {
+                                painter.line_segment(
+                                    [rect.min + egui::vec2(minor_x, rect.height() - 5.0),
+                                     rect.min + egui::vec2(minor_x, rect.height())],
+                                    egui::Stroke::new(1.0, theme.text_color(&["#timeline", ".ruler-tick-minor"], ui.ctx(), egui::Color32::from_gray(60))),
+                                );
+                            }
+                        }
+                    }
+                    frame += interval;
                 }
             }
         }
@@ -2045,6 +2096,54 @@ impl TimelinePane {
                              egui::pos2(rect.min.x + x, y + LAYER_HEIGHT)],
                             egui::Stroke::new(if is_measure_boundary { 1.5 } else { 1.0 }, theme.border_color(&["#timeline", ".grid-line"], ui.ctx(), egui::Color32::from_gray(gray))),
                         );
+                    }
+                }
+                TimeDisplayFormat::Frames => {
+                    let framerate = document.framerate;
+                    let px_per_frame = self.pixels_per_second / framerate as f32;
+
+                    // Per-frame column shading when frames are wide enough to see
+                    if px_per_frame >= 3.0 {
+                        let shade_color = egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8);
+                        let start_frame = (self.viewport_start_time.max(0.0) * framerate).floor() as i64;
+                        let end_frame = (self.x_to_time(rect.width()) * framerate).ceil() as i64;
+                        for frame in start_frame..=end_frame {
+                            if (frame + 1) % 5 == 0 {
+                                let x0 = self.time_to_x(frame as f64 / framerate);
+                                let x1 = self.time_to_x((frame + 1) as f64 / framerate);
+                                if x1 >= 0.0 && x0 <= rect.width() {
+                                    let x0 = x0.max(0.0);
+                                    let x1 = x1.min(rect.width());
+                                    painter.rect_filled(
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(rect.min.x + x0, y),
+                                            egui::pos2(rect.min.x + x1, y + LAYER_HEIGHT),
+                                        ),
+                                        0.0,
+                                        shade_color,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Grid lines at ruler interval
+                    let interval = self.calculate_ruler_interval_frames(framerate);
+                    let start_frame = (self.viewport_start_time.max(0.0) * framerate).floor() as i64;
+                    let end_frame = (self.x_to_time(rect.width()) * framerate).ceil() as i64;
+                    // Align so grid lines fall on display multiples of interval (5, 10, 15...)
+                    let start_frame = ((start_frame + interval) / interval) * interval - 1;
+                    let mut frame = start_frame;
+                    while frame <= end_frame {
+                        let x = self.time_to_x(frame as f64 / framerate);
+                        if x >= 0.0 && x <= rect.width() {
+                            painter.line_segment(
+                                [egui::pos2(rect.min.x + x, y),
+                                 egui::pos2(rect.min.x + x, y + LAYER_HEIGHT)],
+                                egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".grid-line"], ui.ctx(), egui::Color32::from_gray(30))),
+                            );
+                        }
+                        frame += interval;
                     }
                 }
             }
@@ -4165,9 +4264,9 @@ impl PaneRenderer for TimelinePane {
 
         // Time display (format-dependent)
         {
-            let (bpm, time_sig_num, time_sig_den) = {
+            let (bpm, time_sig_num, time_sig_den, framerate) = {
                 let doc = shared.action_executor.document();
-                (doc.bpm, doc.time_signature.numerator, doc.time_signature.denominator)
+                (doc.bpm, doc.time_signature.numerator, doc.time_signature.denominator, doc.framerate)
             };
 
             match self.time_display_format {
@@ -4185,6 +4284,13 @@ impl PaneRenderer for TimelinePane {
                         time_sig_num, time_sig_den,
                     ));
                 }
+                TimeDisplayFormat::Frames => {
+                    let current_frame = (*shared.playback_time * framerate).floor() as i64 + 1;
+                    let total_frames = (self.duration * framerate).ceil() as i64;
+                    ui.colored_label(text_color, format!(
+                        "Frame: {} / {}  |  {:.0} FPS", current_frame, total_frames, framerate
+                    ));
+                }
             }
 
             ui.separator();
@@ -4199,11 +4305,13 @@ impl PaneRenderer for TimelinePane {
                 .selected_text(match self.time_display_format {
                     TimeDisplayFormat::Seconds => "Seconds",
                     TimeDisplayFormat::Measures => "Measures",
+                    TimeDisplayFormat::Frames => "Frames",
                 })
                 .width(80.0)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.time_display_format, TimeDisplayFormat::Seconds, "Seconds");
                     ui.selectable_value(&mut self.time_display_format, TimeDisplayFormat::Measures, "Measures");
+                    ui.selectable_value(&mut self.time_display_format, TimeDisplayFormat::Frames, "Frames");
                 });
 
             ui.separator();
@@ -4387,7 +4495,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
-        self.render_ruler(ui, ruler_rect, shared.theme, document.bpm, &document.time_signature);
+        self.render_ruler(ui, ruler_rect, shared.theme, document.bpm, &document.time_signature, document.framerate);
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
