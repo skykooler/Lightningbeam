@@ -63,11 +63,8 @@ mod platform_impl {
         for &mime in preferred {
             let ns_type = NSString::from_str(mime);
             if let Some(ns_data) = pb.dataForType(&ns_type) {
-                let len = ns_data.length();
-                // SAFETY: bytes() is valid for length() bytes per NSData contract.
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(ns_data.bytes() as *const u8, len).to_vec()
-                };
+                // NSData: Deref<Target=[u8]> — auto-deref resolves to [u8]::to_vec().
+                let bytes = ns_data.to_vec();
                 return Some((mime.to_string(), bytes));
             }
         }
