@@ -804,7 +804,7 @@ struct EditorApp {
     audio_input_stream: Option<cpal::Stream>,
     audio_buffer_size: u32,
     audio_event_rx: Option<rtrb::Consumer<daw_backend::AudioEvent>>,
-    audio_events_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    last_input_monitoring: bool,
     /// Count of in-flight graph preset loads — keeps the repaint loop alive
     /// until the audio thread sends GraphPresetLoaded events for all of them
     pending_graph_loads: std::sync::Arc<std::sync::atomic::AtomicU32>,
@@ -1088,10 +1088,10 @@ impl EditorApp {
             audio_stream,
             audio_controller,
             audio_event_rx,
+            last_input_monitoring: false,
             audio_input,
             audio_input_stream: None,
             audio_buffer_size: config.audio_buffer_size,
-            audio_events_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             pending_graph_loads: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             commit_raster_floating_if_any: false,
             pending_node_group: false,
@@ -4818,10 +4818,6 @@ impl eframe::App for EditorApp {
         }
 
         let _pre_events_ms = _frame_start.elapsed().as_secs_f64() * 1000.0;
-        // Check if audio events are pending and request repaint if needed
-        if self.audio_events_pending.load(std::sync::atomic::Ordering::Relaxed) {
-            ctx.request_repaint();
-        }
         // Keep repainting while waiting for graph preset loads to complete
         if self.pending_graph_loads.load(std::sync::atomic::Ordering::Relaxed) > 0 {
             ctx.request_repaint();
@@ -4847,9 +4843,7 @@ impl eframe::App for EditorApp {
 
         // Poll audio events from the audio engine
         if let Some(event_rx) = &mut self.audio_event_rx {
-            let mut polled_events = false;
             while let Ok(event) = event_rx.pop() {
-                polled_events = true;
                     use daw_backend::AudioEvent;
                     match event {
                         AudioEvent::PlaybackPosition(time) => {
@@ -5262,19 +5256,11 @@ impl eframe::App for EditorApp {
                     }
                 }
 
-            // If we polled events, set the flag to trigger another update
-            // (in case more events arrive before the next frame)
-            if polled_events {
-                self.audio_events_pending.store(true, std::sync::atomic::Ordering::Relaxed);
-            } else {
-                // No events this frame, clear the flag
-                self.audio_events_pending.store(false, std::sync::atomic::Ordering::Relaxed);
-            }
         }
 
-        // Update input monitoring based on active layer
-        if let Some(controller) = &self.audio_controller {
-            let should_monitor = self.active_layer_id.map_or(false, |layer_id| {
+        // Update input monitoring based on active layer (only send command when changed)
+        {
+            let should_monitor = self.audio_controller.is_some() && self.active_layer_id.map_or(false, |layer_id| {
                 let doc = self.action_executor.document();
                 if let Some(layer) = doc.get_layer(&layer_id) {
                     matches!(layer, lightningbeam_core::layer::AnyLayer::Audio(a) if a.audio_layer_type == lightningbeam_core::layer::AudioLayerType::Sampled)
@@ -5282,8 +5268,13 @@ impl eframe::App for EditorApp {
                     false
                 }
             });
-            if let Ok(mut ctrl) = controller.try_lock() {
-                ctrl.set_input_monitoring(should_monitor);
+            if should_monitor != self.last_input_monitoring {
+                self.last_input_monitoring = should_monitor;
+                if let Some(controller) = &self.audio_controller {
+                    if let Ok(mut ctrl) = controller.try_lock() {
+                        ctrl.set_input_monitoring(should_monitor);
+                    }
+                }
             }
         }
 
