@@ -253,6 +253,18 @@ impl MidiRecordingState {
         self.completed_notes.len()
     }
 
+    /// Get all completed notes plus currently-held notes with a provisional duration.
+    /// Used for live preview during recording so held notes appear immediately.
+    pub fn get_notes_with_active(&self, current_time: f64) -> Vec<(f64, u8, u8, f64)> {
+        let mut notes = self.completed_notes.clone();
+        for active in self.active_notes.values() {
+            let time_offset = active.start_time - self.start_time;
+            let provisional_dur = (current_time - active.start_time).max(0.0);
+            notes.push((time_offset, active.note, active.velocity, provisional_dur));
+        }
+        notes
+    }
+
     /// Get the note numbers of all currently held (active) notes
     pub fn active_note_numbers(&self) -> Vec<u8> {
         self.active_notes.keys().copied().collect()

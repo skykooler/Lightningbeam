@@ -416,13 +416,23 @@ impl Engine {
                 if let Some(recording) = &self.midi_recording_state {
                     let current_time = self.playhead as f64 / self.sample_rate as f64;
                     let duration = current_time - recording.start_time;
-                    let notes = recording.get_notes().to_vec();
+                    let notes = recording.get_notes_with_active(current_time);
                     let _ = self.event_tx.push(AudioEvent::MidiRecordingProgress(
                         recording.track_id,
                         recording.clip_id,
                         duration,
                         notes,
                     ));
+                    // Keep the snapshot up to date so the UI can display a growing clip bar.
+                    let track_id = recording.track_id;
+                    let clip_id = recording.clip_id;
+                    if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
+                        if let Some(instance) = track.clip_instances.iter_mut().find(|i| i.clip_id == clip_id) {
+                            instance.internal_end = duration;
+                            instance.external_duration = duration;
+                        }
+                    }
+                    self.refresh_clip_snapshot();
                 }
             }
         } else {

@@ -5164,6 +5164,29 @@ impl eframe::App for EditorApp {
                                 .filter(|lid| self.recording_layer_ids.contains(lid))
                                 .copied();
                             if let Some(layer_id) = midi_layer_id {
+                                // Lazily create the doc clip + instance on the first progress event
+                                // (there is no MidiRecordingStarted event from the backend).
+                                let already_exists = self.clip_instance_to_backend_map.values().any(|v| {
+                                    matches!(v, lightningbeam_core::action::BackendClipInstanceId::Midi(id) if *id == clip_id)
+                                });
+                                if !already_exists {
+                                    use lightningbeam_core::clip::{AudioClip, ClipInstance};
+                                    let clip = AudioClip::new_recording("Recording...");
+                                    let doc_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
+                                    let clip_instance = ClipInstance::new(doc_clip_id)
+                                        .with_timeline_start(self.recording_start_time);
+                                    let clip_instance_id = clip_instance.id;
+                                    if let Some(layer) = self.action_executor.document_mut().get_layer_mut(&layer_id) {
+                                        if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                                            audio_layer.clip_instances.push(clip_instance);
+                                        }
+                                    }
+                                    self.clip_instance_to_backend_map.insert(
+                                        clip_instance_id,
+                                        lightningbeam_core::action::BackendClipInstanceId::Midi(clip_id),
+                                    );
+                                }
+
                                 let doc_clip_id = {
                                     let document = self.action_executor.document();
                                     document.get_layer(&layer_id)
