@@ -4998,6 +4998,8 @@ impl eframe::App for EditorApp {
                                     let clip_instance = ClipInstance::new(doc_clip_id)
                                         .with_timeline_start(self.recording_start_time);
 
+                                    let clip_instance_id = clip_instance.id;
+
                                     // Add instance to layer (works for root and inside movie clips)
                                     if let Some(layer) = self.action_executor.document_mut().get_layer_mut(&layer_id) {
                                         if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
@@ -5005,6 +5007,12 @@ impl eframe::App for EditorApp {
                                             println!("✅ Created recording clip instance on layer {}", layer_id);
                                         }
                                     }
+
+                                    // Insert mapping so the snapshot cache assigns the doc UUID to this recording clip
+                                    self.clip_instance_to_backend_map.insert(
+                                        clip_instance_id,
+                                        lightningbeam_core::action::BackendClipInstanceId::Audio(backend_clip_id),
+                                    );
 
                                     // Store mapping for later updates
                                     self.recording_clips.insert(layer_id, backend_clip_id);
@@ -5117,41 +5125,16 @@ impl eframe::App for EditorApp {
                                         }
                                     }
 
-                                    // Sync the clip instance to backend for playback
-                                    if let Some(backend_track_id) = self.layer_to_track_map.get(&layer_id) {
-                                        if let Some(ref controller_arc) = self.audio_controller {
-                                            let mut controller = controller_arc.lock().unwrap();
-                                            use daw_backend::command::{Query, QueryResponse};
-
-                                            let query = Query::AddAudioClipSync(
-                                                *backend_track_id,
-                                                pool_index,
-                                                timeline_start,
-                                                duration,
-                                                trim_start
-                                            );
-
-                                            match controller.send_query(query) {
-                                                Ok(QueryResponse::AudioClipInstanceAdded(Ok(backend_instance_id))) => {
-                                                    // Store the mapping
-                                                    self.clip_instance_to_backend_map.insert(
-                                                        instance_id,
-                                                        lightningbeam_core::action::BackendClipInstanceId::Audio(backend_instance_id)
-                                                    );
-                                                    println!("✅ Synced recording to backend: instance_id={}", backend_instance_id);
-                                                }
-                                                Ok(QueryResponse::AudioClipInstanceAdded(Err(e))) => {
-                                                    eprintln!("❌ Failed to sync recording to backend: {}", e);
-                                                }
-                                                Ok(_) => {
-                                                    eprintln!("❌ Unexpected query response when syncing recording");
-                                                }
-                                                Err(e) => {
-                                                    eprintln!("❌ Failed to send query to backend: {}", e);
-                                                }
-                                            }
-                                        }
-                                    }
+                                    // The backend already has the clip at _backend_clip_id (created
+                                    // during handle_start_recording and finalized in handle_stop_recording).
+                                    // Map the document instance_id → the existing backend clip so that
+                                    // delete/move/trim actions can reference it correctly.
+                                    // DO NOT call AddAudioClipSync — that would create a duplicate clip.
+                                    self.clip_instance_to_backend_map.insert(
+                                        instance_id,
+                                        lightningbeam_core::action::BackendClipInstanceId::Audio(_backend_clip_id),
+                                    );
+                                    eprintln!("[AUDIO] Mapped doc instance {} → backend clip {}", instance_id, _backend_clip_id);
                                 }
                             }
 
@@ -5775,6 +5758,9 @@ impl eframe::App for EditorApp {
                     schneider_max_error: &mut self.schneider_max_error,
                     raster_settings: &mut self.raster_settings,
                     audio_controller: self.audio_controller.as_ref(),
+                    clip_snapshot: self.audio_controller.as_ref().map(|arc| {
+                        arc.lock().unwrap().clip_snapshot()
+                    }),
                     audio_input_opener: &mut self.audio_input,
                     audio_input_stream: &mut self.audio_input_stream,
                     audio_buffer_size: self.audio_buffer_size,
@@ -5792,6 +5778,7 @@ impl eframe::App for EditorApp {
                     paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
                     polygon_sides: &mut self.polygon_sides,
                     layer_to_track_map: &self.layer_to_track_map,
+                    clip_instance_to_backend_map: &self.clip_instance_to_backend_map,
                     midi_event_cache: &mut self.midi_event_cache,
                     audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
                     raw_audio_cache: &self.raw_audio_cache,

@@ -10,8 +10,17 @@ use crate::audio::track::{Track, TrackId, TrackNode};
 use crate::command::{AudioEvent, Command, Query, QueryResponse};
 use crate::io::MidiInputManager;
 use petgraph::stable_graph::NodeIndex;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
+
+/// Read-only snapshot of all clip instances, updated after every clip mutation.
+/// Shared between the audio thread (writer) and the UI thread (reader).
+#[derive(Default, Clone)]
+pub struct AudioClipSnapshot {
+    pub audio: HashMap<TrackId, Vec<AudioClipInstance>>,
+    pub midi:  HashMap<TrackId, Vec<MidiClipInstance>>,
+}
 
 /// Audio engine for Phase 6: hierarchical tracks with groups
 pub struct Engine {
@@ -34,11 +43,17 @@ pub struct Engine {
     chunk_generation_rx: std::sync::mpsc::Receiver<AudioEvent>,
     chunk_generation_tx: std::sync::mpsc::Sender<AudioEvent>,
 
+    // Shared clip snapshot for UI reads
+    clip_snapshot: Arc<RwLock<AudioClipSnapshot>>,
+
     // Shared playhead for UI reads
     playhead_atomic: Arc<AtomicU64>,
 
     // Shared MIDI clip ID counter for synchronous access
     next_midi_clip_id_atomic: Arc<AtomicU32>,
+
+    // Shared audio clip ID counter (shared with EngineController for pre-assigned IDs)
+    next_audio_clip_id_atomic: Arc<AtomicU32>,
 
     // Event counter for periodic position updates
     frames_since_last_event: usize,
@@ -47,8 +62,8 @@ pub struct Engine {
     // Mix buffer for output
     mix_buffer: Vec<f32>,
 
-    // ID counters
-    next_clip_id: ClipId,
+    // ID counters (legacy, unused — kept for potential future use)
+    // Audio clip IDs are now generated via next_audio_clip_id_atomic
 
     // Recording state
     recording_state: Option<RecordingState>,
@@ -133,12 +148,13 @@ impl Engine {
             query_response_tx,
             chunk_generation_rx,
             chunk_generation_tx,
+            clip_snapshot: Arc::new(RwLock::new(AudioClipSnapshot::default())),
             playhead_atomic,
             next_midi_clip_id_atomic: Arc::new(AtomicU32::new(0)),
+            next_audio_clip_id_atomic: Arc::new(AtomicU32::new(0)),
             frames_since_last_event: 0,
             event_interval_frames,
             mix_buffer: Vec::new(),
-            next_clip_id: 0,
             recording_state: None,
             input_rx: None,
             recording_mirror_tx: None,
@@ -240,6 +256,25 @@ impl Engine {
         &self.audio_pool
     }
 
+    /// Rebuild the clip snapshot from the current project state.
+    /// Call this after any command that adds, removes, or modifies clip instances.
+    fn refresh_clip_snapshot(&self) {
+        let mut snap = self.clip_snapshot.write().unwrap();
+        snap.audio.clear();
+        snap.midi.clear();
+        for (track_id, node) in self.project.track_iter() {
+            match node {
+                crate::audio::track::TrackNode::Audio(t) => {
+                    snap.audio.insert(track_id, t.clips.clone());
+                }
+                crate::audio::track::TrackNode::Midi(t) => {
+                    snap.midi.insert(track_id, t.clip_instances.clone());
+                }
+                crate::audio::track::TrackNode::Group(_) => {}
+            }
+        }
+    }
+
     /// Get a handle for controlling playback from the UI thread
     pub fn get_controller(
         &self,
@@ -253,6 +288,8 @@ impl Engine {
             query_response_rx,
             playhead: Arc::clone(&self.playhead_atomic),
             next_midi_clip_id: Arc::clone(&self.next_midi_clip_id_atomic),
+            next_audio_clip_id: Arc::clone(&self.next_audio_clip_id_atomic),
+            clip_snapshot: Arc::clone(&self.clip_snapshot),
             sample_rate: self.sample_rate,
             channels: self.channels,
             cached_export_response: None,
@@ -689,6 +726,7 @@ impl Engine {
                     }
                     _ => {}
                 }
+                self.refresh_clip_snapshot();
             }
             Command::TrimClip(track_id, clip_id, new_internal_start, new_internal_end) => {
                 // Trim changes which portion of the source content is used
@@ -713,6 +751,7 @@ impl Engine {
                     }
                     _ => {}
                 }
+                self.refresh_clip_snapshot();
             }
             Command::ExtendClip(track_id, clip_id, new_external_duration) => {
                 // Extend changes the external duration (enables looping if > internal duration)
@@ -730,6 +769,7 @@ impl Engine {
                     }
                     _ => {}
                 }
+                self.refresh_clip_snapshot();
             }
             Command::CreateMetatrack(name, parent_id) => {
                 let track_id = self.project.add_group_track(name.clone(), parent_id);
@@ -841,23 +881,8 @@ impl Engine {
                 // Notify UI about the new audio file
                 let _ = self.event_tx.push(AudioEvent::AudioFileAdded(pool_index, path));
             }
-            Command::AddAudioClip(track_id, pool_index, start_time, duration, offset) => {
-                eprintln!("[Engine] AddAudioClip: track_id={}, pool_index={}, start_time={}, duration={}",
-                    track_id, pool_index, start_time, duration);
-
-                // Check if pool index is valid
-                let pool_size = self.audio_pool.len();
-                if pool_index >= pool_size {
-                    eprintln!("[Engine] ERROR: pool_index {} is out of bounds (pool size: {})",
-                        pool_index, pool_size);
-                } else {
-                    eprintln!("[Engine] Pool index {} is valid, pool has {} files",
-                        pool_index, pool_size);
-                }
-
-                // Create a new clip instance with unique ID using legacy parameters
-                let clip_id = self.next_clip_id;
-                self.next_clip_id += 1;
+            Command::AddAudioClip(track_id, clip_id, pool_index, start_time, duration, offset) => {
+                // Create a new clip instance with the pre-assigned clip_id
                 let clip = AudioClipInstance::from_legacy(
                     clip_id,
                     pool_index,
@@ -869,12 +894,9 @@ impl Engine {
                 // Add clip to track
                 if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
                     track.clips.push(clip);
-                    eprintln!("[Engine] Clip {} added to track {} successfully", clip_id, track_id);
-                    // Notify UI about the new clip
                     let _ = self.event_tx.push(AudioEvent::ClipAdded(track_id, clip_id));
-                } else {
-                    eprintln!("[Engine] ERROR: Track {} not found or is not an audio track", track_id);
                 }
+                self.refresh_clip_snapshot();
             }
             Command::CreateMidiTrack(name, parent_id) => {
                 let track_id = self.project.add_midi_track(name.clone(), parent_id);
@@ -903,6 +925,7 @@ impl Engine {
 
                 // Notify UI about the new clip with its ID (using clip_id for now)
                 let _ = self.event_tx.push(AudioEvent::ClipAdded(track_id, clip_id));
+                self.refresh_clip_snapshot();
             }
             Command::AddMidiNote(track_id, clip_id, time_offset, note, velocity, duration) => {
                 // Add a MIDI note event to the specified clip in the pool
@@ -935,6 +958,7 @@ impl Engine {
             Command::AddLoadedMidiClip(track_id, clip, start_time) => {
                 // Add a pre-loaded MIDI clip to the track with the given start time
                 let _ = self.project.add_midi_clip_at(track_id, clip, start_time);
+                self.refresh_clip_snapshot();
             }
             Command::UpdateMidiClipNotes(_track_id, clip_id, notes) => {
                 // Update all notes in a MIDI clip (directly in the pool)
@@ -961,6 +985,7 @@ impl Engine {
             Command::RemoveMidiClip(track_id, instance_id) => {
                 // Remove a MIDI clip instance from a track (for undo/redo support)
                 let _ = self.project.remove_midi_clip(track_id, instance_id);
+                self.refresh_clip_snapshot();
             }
             Command::RemoveAudioClip(track_id, instance_id) => {
                 // Deactivate the per-clip disk reader before removing
@@ -971,6 +996,7 @@ impl Engine {
                 }
                 // Remove an audio clip instance from a track (for undo/redo support)
                 let _ = self.project.remove_audio_clip(track_id, instance_id);
+                self.refresh_clip_snapshot();
             }
             Command::RequestBufferPoolStats => {
                 // Send buffer pool statistics back to UI
@@ -1153,7 +1179,7 @@ impl Engine {
 
                 // Reset ID counters
                 self.next_midi_clip_id_atomic.store(0, Ordering::Relaxed);
-                self.next_clip_id = 0;
+                self.next_audio_clip_id_atomic.store(0, Ordering::Relaxed);
 
                 // Clear mix buffer
                 self.mix_buffer.clear();
@@ -2562,10 +2588,12 @@ impl Engine {
             }
             Query::AddMidiClipSync(track_id, clip, start_time) => {
                 // Add MIDI clip to track and return the instance ID
-                match self.project.add_midi_clip_at(track_id, clip, start_time) {
+                let result = match self.project.add_midi_clip_at(track_id, clip, start_time) {
                     Ok(instance_id) => QueryResponse::MidiClipInstanceAdded(Ok(instance_id)),
                     Err(e) => QueryResponse::MidiClipInstanceAdded(Err(e.to_string())),
-                }
+                };
+                self.refresh_clip_snapshot();
+                result
             }
             Query::AddMidiClipInstanceSync(track_id, mut instance) => {
                 // Add MIDI clip instance to track (clip must already be in pool)
@@ -2573,54 +2601,12 @@ impl Engine {
                 let instance_id = self.project.next_midi_clip_instance_id();
                 instance.id = instance_id;
 
-                match self.project.add_midi_clip_instance(track_id, instance) {
+                let result = match self.project.add_midi_clip_instance(track_id, instance) {
                     Ok(_) => QueryResponse::MidiClipInstanceAdded(Ok(instance_id)),
                     Err(e) => QueryResponse::MidiClipInstanceAdded(Err(e.to_string())),
-                }
-            }
-            Query::AddAudioClipSync(track_id, pool_index, start_time, duration, offset) => {
-                // Add audio clip to track and return the instance ID
-                // Create audio clip instance
-                let instance_id = self.next_clip_id;
-                self.next_clip_id += 1;
-
-                // For compressed files, create a per-clip read-ahead buffer
-                let read_ahead = if let Some(file) = self.audio_pool.get_file(pool_index) {
-                    if matches!(file.storage, crate::audio::pool::AudioStorage::Compressed { .. }) {
-                        let buffer = crate::audio::disk_reader::DiskReader::create_buffer(
-                            file.sample_rate,
-                            file.channels,
-                        );
-                        if let Some(ref mut dr) = self.disk_reader {
-                            dr.send(crate::audio::disk_reader::DiskReaderCommand::ActivateFile {
-                                reader_id: instance_id as u64,
-                                path: file.path.clone(),
-                                buffer: buffer.clone(),
-                            });
-                        }
-                        Some(buffer)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
                 };
-
-                let clip = AudioClipInstance {
-                    id: instance_id,
-                    audio_pool_index: pool_index,
-                    internal_start: offset,
-                    internal_end: offset + duration,
-                    external_start: start_time,
-                    external_duration: duration,
-                    gain: 1.0,
-                    read_ahead,
-                };
-
-                match self.project.add_clip(track_id, clip) {
-                    Ok(instance_id) => QueryResponse::AudioClipInstanceAdded(Ok(instance_id)),
-                    Err(e) => QueryResponse::AudioClipInstanceAdded(Err(e.to_string())),
-                }
+                self.refresh_clip_snapshot();
+                result
             }
             Query::AddAudioFileSync(path, data, channels, sample_rate) => {
                 // Add audio file to pool and return the pool index
@@ -2764,9 +2750,8 @@ impl Engine {
             // Create WAV writer
             match WavWriter::create(&temp_file_path, self.sample_rate, self.channels) {
                 Ok(writer) => {
-                    // Create intermediate clip
-                    let clip_id = self.next_clip_id;
-                    self.next_clip_id += 1;
+                    // Create intermediate clip with a unique ID
+                    let clip_id = self.next_audio_clip_id_atomic.fetch_add(1, Ordering::Relaxed);
 
                     let clip = crate::audio::clip::Clip::new(
                         clip_id,
@@ -2780,6 +2765,7 @@ impl Engine {
                     // Add clip to track
                     if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
                         track.clips.push(clip);
+                        self.refresh_clip_snapshot();
                     }
 
                     // Create recording state
@@ -2878,6 +2864,7 @@ impl Engine {
                             eprintln!("[STOP_RECORDING] Updated clip {} with pool_index {}", clip_id, pool_index);
                         }
                     }
+                    self.refresh_clip_snapshot();
 
                     // Delete temp file
                     let _ = std::fs::remove_file(&temp_file_path);
@@ -2984,6 +2971,8 @@ impl Engine {
                 eprintln!("[MIDI_RECORDING] ERROR: Clip {} not found in pool!", clip_id);
             }
 
+            self.refresh_clip_snapshot();
+
             // Send event to UI
             eprintln!("[MIDI_RECORDING] Pushing MidiRecordingStopped event to event_tx...");
             match self.event_tx.push(AudioEvent::MidiRecordingStopped(track_id, clip_id, note_count)) {
@@ -3018,6 +3007,8 @@ pub struct EngineController {
     query_response_rx: rtrb::Consumer<QueryResponse>,
     playhead: Arc<AtomicU64>,
     next_midi_clip_id: Arc<AtomicU32>,
+    next_audio_clip_id: Arc<AtomicU32>,
+    clip_snapshot: Arc<RwLock<AudioClipSnapshot>>,
     sample_rate: u32,
     #[allow(dead_code)] // Used in public getter method
     channels: u32,
@@ -3112,6 +3103,12 @@ impl EngineController {
         frames as f64 / self.sample_rate as f64
     }
 
+    /// Get the shared clip snapshot. The UI can read this each frame to display
+    /// the authoritative clip state from the backend.
+    pub fn clip_snapshot(&self) -> Arc<RwLock<AudioClipSnapshot>> {
+        Arc::clone(&self.clip_snapshot)
+    }
+
     /// Create a new metatrack
     pub fn create_metatrack(&mut self, name: String) {
         let _ = self.command_tx.push(Command::CreateMetatrack(name, None));
@@ -3199,9 +3196,22 @@ impl EngineController {
         }
     }
 
-    /// Add a clip to an audio track
-    pub fn add_audio_clip(&mut self, track_id: TrackId, pool_index: usize, start_time: f64, duration: f64, offset: f64) {
-        let _ = self.command_tx.push(Command::AddAudioClip(track_id, pool_index, start_time, duration, offset));
+    /// Generate the next unique audio clip instance ID (atomic, thread-safe)
+    pub fn next_audio_clip_id(&self) -> AudioClipInstanceId {
+        self.next_audio_clip_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Add a clip to an audio track (async, fire-and-forget)
+    /// Returns the pre-assigned clip instance ID so callers can track the clip without a sync round-trip
+    pub fn add_audio_clip(&mut self, track_id: TrackId, pool_index: usize, start_time: f64, duration: f64, offset: f64) -> AudioClipInstanceId {
+        let clip_id = self.next_audio_clip_id.fetch_add(1, Ordering::Relaxed);
+        let _ = self.command_tx.push(Command::AddAudioClip(track_id, clip_id, pool_index, start_time, duration, offset));
+        clip_id
+    }
+
+    /// Add a clip to an audio track with a pre-assigned ID (for undo/redo, restoring deleted clips)
+    pub fn add_audio_clip_with_id(&mut self, track_id: TrackId, clip_id: AudioClipInstanceId, pool_index: usize, start_time: f64, duration: f64, offset: f64) {
+        let _ = self.command_tx.push(Command::AddAudioClip(track_id, clip_id, pool_index, start_time, duration, offset));
     }
 
     /// Create a new MIDI track

@@ -67,8 +67,9 @@ pub enum Command {
     /// Add an audio file to the pool (path, data, channels, sample_rate)
     /// Returns the pool index via an AudioEvent
     AddAudioFile(String, Vec<f32>, u32, u32),
-    /// Add a clip to an audio track (track_id, pool_index, start_time, duration, offset)
-    AddAudioClip(TrackId, usize, f64, f64, f64),
+    /// Add a clip to an audio track (track_id, clip_id, pool_index, start_time, duration, offset)
+    /// The clip_id is pre-assigned by the caller (via EngineController::next_audio_clip_id())
+    AddAudioClip(TrackId, AudioClipInstanceId, usize, f64, f64, f64),
 
     // MIDI commands
     /// Create a new MIDI track with a name and optional parent group
@@ -418,8 +419,6 @@ pub enum Query {
     /// Add a MIDI clip instance to a track synchronously (track_id, instance) - returns instance ID
     /// The clip must already exist in the MidiClipPool
     AddMidiClipInstanceSync(TrackId, crate::audio::midi::MidiClipInstance),
-    /// Add an audio clip to a track synchronously (track_id, pool_index, start_time, duration, offset) - returns instance ID
-    AddAudioClipSync(TrackId, usize, f64, f64, f64),
     /// Add an audio file to the pool synchronously (path, data, channels, sample_rate) - returns pool index
     AddAudioFileSync(String, Vec<f32>, u32, u32),
     /// Import an audio file synchronously (path) - returns pool index.
@@ -501,8 +500,6 @@ pub enum QueryResponse {
     AudioExported(Result<(), String>),
     /// MIDI clip instance added (returns instance ID)
     MidiClipInstanceAdded(Result<MidiClipInstanceId, String>),
-    /// Audio clip instance added (returns instance ID)
-    AudioClipInstanceAdded(Result<AudioClipInstanceId, String>),
     /// Audio file added to pool (returns pool index)
     AudioFileAddedSync(Result<usize, String>),
     /// Audio file imported to pool (returns pool index)

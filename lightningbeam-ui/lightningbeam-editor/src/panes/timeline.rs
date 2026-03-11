@@ -7,9 +7,12 @@
 /// - Basic layer visualization
 
 use eframe::egui;
-use lightningbeam_core::clip::ClipInstance;
+use lightningbeam_core::clip::{
+    ClipInstance, audio_backend_uuid, midi_backend_uuid,
+};
 use lightningbeam_core::layer::{AnyLayer, AudioLayerType, GroupLayer, LayerTrait};
 use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
+use std::collections::HashMap;
 
 const RULER_HEIGHT: f32 = 30.0;
 const LAYER_HEIGHT: f32 = 60.0;
@@ -402,26 +405,147 @@ fn shift_toggle_layer(
     *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
 }
 
+/// Build a per-audio-layer clip instance cache from the backend snapshot.
+///
+/// Audio layers read clip instances from the backend snapshot (source of truth) rather
+/// than from `AudioLayer::clip_instances`. The cache maps layer_id → Vec<ClipInstance>.
+///
+/// Clip instance UUIDs in the cache are doc UUIDs when available (via reverse lookup of
+/// `clip_instance_to_backend_map`), falling back to synthetic `audio_backend_uuid` /
+/// `midi_backend_uuid` values for clips not yet in the map.
+fn build_audio_clip_cache(
+    snap: &daw_backend::AudioClipSnapshot,
+    layer_to_track_map: &HashMap<uuid::Uuid, daw_backend::TrackId>,
+    document: &lightningbeam_core::document::Document,
+    clip_map: &HashMap<uuid::Uuid, lightningbeam_core::action::BackendClipInstanceId>,
+) -> HashMap<uuid::Uuid, Vec<ClipInstance>> {
+    use lightningbeam_core::action::BackendClipInstanceId;
+
+    // Build reverse maps: backend_id → doc_instance_uuid
+    let mut audio_id_to_doc: HashMap<u32, uuid::Uuid> = HashMap::new();
+    let mut midi_id_to_doc: HashMap<u32, uuid::Uuid> = HashMap::new();
+    for (&doc_uuid, backend_id) in clip_map {
+        match backend_id {
+            BackendClipInstanceId::Audio(id) => { audio_id_to_doc.insert(*id, doc_uuid); }
+            BackendClipInstanceId::Midi(id)  => { midi_id_to_doc.insert(*id, doc_uuid); }
+        }
+    }
+
+    let mut cache: HashMap<uuid::Uuid, Vec<ClipInstance>> = HashMap::new();
+
+    for (&layer_id, &track_id) in layer_to_track_map {
+        // Only process audio layers
+        match document.get_layer(&layer_id) {
+            Some(AnyLayer::Audio(_)) => {}
+            _ => continue,
+        }
+
+        let mut instances = Vec::new();
+
+        // Sampled audio clips
+        if let Some(audio_clips) = snap.audio.get(&track_id) {
+            for ac in audio_clips {
+                if let Some((clip_id, _)) = document.audio_clip_by_pool_index(ac.audio_pool_index) {
+                    // Use doc UUID if we have it; otherwise fall back to synthetic UUID
+                    let instance_id = audio_id_to_doc.get(&ac.id)
+                        .copied()
+                        .unwrap_or_else(|| audio_backend_uuid(ac.id));
+                    let mut ci = ClipInstance::new(clip_id);
+                    ci.id = instance_id;
+                    ci.timeline_start = ac.external_start;
+                    ci.trim_start = ac.internal_start;
+                    ci.trim_end = Some(ac.internal_end);
+                    let internal_dur = ac.internal_end - ac.internal_start;
+                    if (ac.external_duration - internal_dur).abs() > 1e-9 {
+                        ci.timeline_duration = Some(ac.external_duration);
+                    }
+                    ci.gain = ac.gain;
+                    instances.push(ci);
+                }
+            }
+        }
+
+        // MIDI clips
+        if let Some(midi_clips) = snap.midi.get(&track_id) {
+            for mc in midi_clips {
+                if let Some((clip_id, _)) = document.audio_clip_by_midi_clip_id(mc.clip_id) {
+                    let instance_id = midi_id_to_doc.get(&mc.id)
+                        .copied()
+                        .unwrap_or_else(|| midi_backend_uuid(mc.id));
+                    let mut ci = ClipInstance::new(clip_id);
+                    ci.id = instance_id;
+                    ci.timeline_start = mc.external_start;
+                    ci.trim_start = mc.internal_start;
+                    ci.trim_end = Some(mc.internal_end);
+                    let internal_dur = mc.internal_end - mc.internal_start;
+                    if (mc.external_duration - internal_dur).abs() > 1e-9 {
+                        ci.timeline_duration = Some(mc.external_duration);
+                    }
+                    instances.push(ci);
+                }
+            }
+        }
+
+        // Only insert if we found clips (so layer_clips() can fall back to al.clip_instances
+        // for layers where the snapshot has no clips yet, e.g. during recording setup)
+        if !instances.is_empty() {
+            cache.insert(layer_id, instances);
+        }
+    }
+
+    cache
+}
+
+/// Get clip instances for a layer, using the snapshot-based cache for audio layers
+/// and falling back to the doc's `clip_instances` if the cache has no entry OR is empty
+/// while the doc has clips (e.g., a recording clip not yet reflected in the snapshot).
+fn layer_clips<'a>(
+    layer: &'a AnyLayer,
+    audio_cache: &'a HashMap<uuid::Uuid, Vec<ClipInstance>>,
+) -> &'a [ClipInstance] {
+    match layer {
+        AnyLayer::Audio(al) => {
+            match audio_cache.get(&al.layer.id) {
+                Some(cached) if !cached.is_empty() => cached.as_slice(),
+                // Cache empty or missing: fall back to doc (covers recording-in-progress)
+                _ => &al.clip_instances,
+            }
+        }
+        AnyLayer::Vector(l) => &l.clip_instances,
+        AnyLayer::Video(l) => &l.clip_instances,
+        AnyLayer::Effect(l) => &l.clip_instances,
+        AnyLayer::Group(_) => &[],
+        AnyLayer::Raster(_) => &[],
+    }
+}
+
 /// Collect all (layer_ref, clip_instances) tuples from context_layers,
 /// recursively descending into group children.
 /// Returns (&AnyLayer, &[ClipInstance]) so callers have access to both layer info and clips.
-fn all_layer_clip_instances<'a>(context_layers: &[&'a AnyLayer]) -> Vec<(&'a AnyLayer, &'a [ClipInstance])> {
+fn all_layer_clip_instances<'a>(
+    context_layers: &[&'a AnyLayer],
+    audio_cache: &'a HashMap<uuid::Uuid, Vec<ClipInstance>>,
+) -> Vec<(&'a AnyLayer, &'a [ClipInstance])> {
     let mut result = Vec::new();
     for &layer in context_layers {
-        collect_clip_instances(layer, &mut result);
+        collect_clip_instances(layer, audio_cache, &mut result);
     }
     result
 }
 
-fn collect_clip_instances<'a>(layer: &'a AnyLayer, result: &mut Vec<(&'a AnyLayer, &'a [ClipInstance])>) {
+fn collect_clip_instances<'a>(
+    layer: &'a AnyLayer,
+    audio_cache: &'a HashMap<uuid::Uuid, Vec<ClipInstance>>,
+    result: &mut Vec<(&'a AnyLayer, &'a [ClipInstance])>,
+) {
     match layer {
+        AnyLayer::Audio(_) => result.push((layer, layer_clips(layer, audio_cache))),
         AnyLayer::Vector(l) => result.push((layer, &l.clip_instances)),
-        AnyLayer::Audio(l) => result.push((layer, &l.clip_instances)),
         AnyLayer::Video(l) => result.push((layer, &l.clip_instances)),
         AnyLayer::Effect(l) => result.push((layer, &l.clip_instances)),
         AnyLayer::Group(g) => {
             for child in &g.children {
-                collect_clip_instances(child, result);
+                collect_clip_instances(child, audio_cache, result);
             }
         }
         AnyLayer::Raster(_) => {}
@@ -798,6 +922,7 @@ impl TimelinePane {
         content_rect: egui::Rect,
         header_rect: egui::Rect,
         editing_clip_id: Option<&uuid::Uuid>,
+        audio_cache: &HashMap<uuid::Uuid, Vec<ClipInstance>>,
     ) -> Option<(ClipDragType, uuid::Uuid)> {
         let context_layers = document.context_layers(editing_clip_id);
         let rows = build_timeline_rows(&context_layers);
@@ -827,14 +952,7 @@ impl TimelinePane {
         };
         let _layer_data = layer.layer();
 
-        let clip_instances: &[ClipInstance] = match layer {
-            lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
-            lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
-            lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
-            lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
-            lightningbeam_core::layer::AnyLayer::Group(_) => &[],
-            lightningbeam_core::layer::AnyLayer::Raster(_) => &[],
-        };
+        let clip_instances = layer_clips(layer, audio_cache);
 
         // Check each clip instance
         let stacking = compute_clip_stacking(document, layer, clip_instances);
@@ -1947,6 +2065,7 @@ impl TimelinePane {
         waveform_stereo: bool,
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
         video_manager: &std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
+        audio_cache: &HashMap<uuid::Uuid, Vec<ClipInstance>>,
     ) -> Vec<(egui::Rect, uuid::Uuid, f64, f64)> {
         let painter = ui.painter();
 
@@ -2330,8 +2449,8 @@ impl TimelinePane {
                         bright_teal.a() as f32 / 255.0,
                     ];
                     for child in &g.children {
-                        if let AnyLayer::Audio(al) = child {
-                            for ci in &al.clip_instances {
+                        if let AnyLayer::Audio(_) = child {
+                            for ci in layer_clips(child, &audio_cache) {
                                 let audio_clip = match document.get_audio_clip(&ci.clip_id) {
                                     Some(c) => c,
                                     None => continue,
@@ -2441,14 +2560,7 @@ impl TimelinePane {
             };
 
             // Draw clip instances for this layer
-            let clip_instances: &[ClipInstance] = match layer {
-                lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
-                lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
-                lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
-                lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
-                lightningbeam_core::layer::AnyLayer::Group(_) => &[],
-                lightningbeam_core::layer::AnyLayer::Raster(_) => &[],
-            };
+            let clip_instances = layer_clips(layer, &audio_cache);
 
             // For moves, precompute the clamped offset so all selected clips move uniformly
             let group_move_offset = if self.clip_drag_state == Some(ClipDragType::Move) {
@@ -3248,6 +3360,7 @@ impl TimelinePane {
         audio_controller: Option<&std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
         editing_clip_id: Option<&uuid::Uuid>,
+        audio_cache: &HashMap<uuid::Uuid, Vec<ClipInstance>>,
     ) {
         // Only allocate content area (ruler + layers) with click and drag
         let content_response = ui.allocate_rect(
@@ -3317,14 +3430,7 @@ impl TimelinePane {
                             let _layer_data = layer.layer();
 
                             // Get clip instances for this layer
-                            let clip_instances: &[ClipInstance] = match layer {
-                                lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
-                                lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
-                                lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
-                                lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
-                                lightningbeam_core::layer::AnyLayer::Group(_) => &[],
-                                lightningbeam_core::layer::AnyLayer::Raster(_) => &[],
-                            };
+                            let clip_instances = layer_clips(layer, &audio_cache);
 
                             // Check if click is within any clip instance
                             let click_stacking = compute_clip_stacking(document, layer, clip_instances);
@@ -3610,6 +3716,7 @@ impl TimelinePane {
                         content_rect,
                         header_rect,
                         editing_clip_id,
+                        &audio_cache,
                     ) {
                         // If this clip is not selected, select it (respecting shift key)
                         if !selection.contains_clip_instance(&clip_id) {
@@ -3663,7 +3770,7 @@ impl TimelinePane {
                     HashMap::new();
 
                 // Iterate through all layers (including group children) to find selected clip instances
-                for (layer, clip_instances) in all_layer_clip_instances(context_layers) {
+                for (layer, clip_instances) in all_layer_clip_instances(context_layers, &audio_cache) {
                     let layer_id = layer.id();
                     // Find selected clip instances in this layer
                     for clip_instance in clip_instances {
@@ -3705,7 +3812,7 @@ impl TimelinePane {
                             > = HashMap::new();
 
                             // Iterate through all layers (including group children) to find selected clip instances
-                            for (layer, clip_instances) in all_layer_clip_instances(context_layers) {
+                            for (layer, clip_instances) in all_layer_clip_instances(context_layers, &audio_cache) {
                                 let layer_id = layer.id();
 
                                 // Find selected clip instances in this layer
@@ -3830,7 +3937,7 @@ impl TimelinePane {
                         ClipDragType::LoopExtendRight => {
                             let mut layer_loops: HashMap<uuid::Uuid, Vec<lightningbeam_core::actions::loop_clip_instances::LoopEntry>> = HashMap::new();
 
-                            for (layer, clip_instances) in all_layer_clip_instances(context_layers) {
+                            for (layer, clip_instances) in all_layer_clip_instances(context_layers, &audio_cache) {
                                 let layer_id = layer.id();
 
                                 for clip_instance in clip_instances {
@@ -3896,7 +4003,7 @@ impl TimelinePane {
                             // Extend loop_before (pre-loop region)
                             let mut layer_loops: HashMap<uuid::Uuid, Vec<lightningbeam_core::actions::loop_clip_instances::LoopEntry>> = HashMap::new();
 
-                            for (layer, clip_instances) in all_layer_clip_instances(context_layers) {
+                            for (layer, clip_instances) in all_layer_clip_instances(context_layers, &audio_cache) {
                                 let layer_id = layer.id();
 
                                 for clip_instance in clip_instances {
@@ -4140,6 +4247,7 @@ impl TimelinePane {
                     content_rect,
                     header_rect,
                     editing_clip_id,
+                    &audio_cache,
                 ) {
                     match drag_type {
                         ClipDragType::TrimLeft | ClipDragType::TrimRight => {
@@ -4420,17 +4528,31 @@ impl PaneRenderer for TimelinePane {
         // Use virtual row count (includes expanded group children) for height calculations
         let layer_count = build_timeline_rows(&context_layers).len();
 
+        // Build audio clip cache from backend snapshot (backend-as-source-of-truth for audio).
+        // Uses doc UUIDs via reverse lookup of clip_instance_to_backend_map so that selection
+        // and action dispatch continue to work with doc UUIDs.
+        // Falls back to AudioLayer::clip_instances for layers with no snapshot data yet
+        // (e.g., layers where recording is in progress but not yet finalized).
+        let audio_cache: HashMap<uuid::Uuid, Vec<ClipInstance>> =
+            if let Some(snap_arc) = shared.clip_snapshot.as_ref() {
+                if let Ok(snap) = snap_arc.read() {
+                    build_audio_clip_cache(
+                        &snap,
+                        shared.layer_to_track_map,
+                        document,
+                        shared.clip_instance_to_backend_map,
+                    )
+                } else {
+                    HashMap::new()
+                }
+            } else {
+                HashMap::new()
+            };
+
         // Calculate project duration from last clip endpoint across all layers
         let mut max_endpoint: f64 = 10.0; // Default minimum duration
         for &layer in &context_layers {
-            let clip_instances: &[ClipInstance] = match layer {
-                lightningbeam_core::layer::AnyLayer::Vector(vl) => &vl.clip_instances,
-                lightningbeam_core::layer::AnyLayer::Audio(al) => &al.clip_instances,
-                lightningbeam_core::layer::AnyLayer::Video(vl) => &vl.clip_instances,
-                lightningbeam_core::layer::AnyLayer::Effect(el) => &el.clip_instances,
-                lightningbeam_core::layer::AnyLayer::Group(_) => &[],
-                lightningbeam_core::layer::AnyLayer::Raster(_) => &[],
-            };
+            let clip_instances = layer_clips(layer, &audio_cache);
 
             for clip_instance in clip_instances {
                 let clip_duration = effective_clip_duration(document, layer, clip_instance);
@@ -4499,7 +4621,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager);
+        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager, &audio_cache);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));
@@ -4526,6 +4648,7 @@ impl PaneRenderer for TimelinePane {
             shared.audio_controller,
             &context_layers,
             editing_clip_id.as_ref(),
+            &audio_cache,
         );
 
         // Context menu: detect right-click on clips or empty timeline space
@@ -4534,7 +4657,7 @@ impl PaneRenderer for TimelinePane {
         if secondary_clicked {
             if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
                 if content_rect.contains(pos) {
-                    if let Some((_drag_type, clip_id)) = self.detect_clip_at_pointer(pos, document, content_rect, layer_headers_rect, editing_clip_id.as_ref()) {
+                    if let Some((_drag_type, clip_id)) = self.detect_clip_at_pointer(pos, document, content_rect, layer_headers_rect, editing_clip_id.as_ref(), &audio_cache) {
                         // Right-clicked on a clip
                         if !shared.selection.contains_clip_instance(&clip_id) {
                             shared.selection.select_only_clip_instance(clip_id);
@@ -4562,14 +4685,7 @@ impl PaneRenderer for TimelinePane {
                 let mut enabled = false;
                 if let Some(layer_id) = *shared.active_layer_id {
                     if let Some(layer) = document.get_layer(&layer_id) {
-                        let instances: &[ClipInstance] = match layer {
-                            AnyLayer::Vector(vl) => &vl.clip_instances,
-                            AnyLayer::Audio(al) => &al.clip_instances,
-                            AnyLayer::Video(vl) => &vl.clip_instances,
-                            AnyLayer::Effect(el) => &el.clip_instances,
-                            AnyLayer::Group(_) => &[],
-                            AnyLayer::Raster(_) => &[],
-                        };
+                        let instances = layer_clips(layer, &audio_cache);
                         for inst in instances {
                             if !shared.selection.contains_clip_instance(&inst.id) { continue; }
                             if let Some(dur) = document.get_clip_duration(&inst.clip_id) {
@@ -4593,14 +4709,7 @@ impl PaneRenderer for TimelinePane {
                 let mut enabled = false;
                 if let Some(layer_id) = *shared.active_layer_id {
                     if let Some(layer) = document.get_layer(&layer_id) {
-                        let instances: &[ClipInstance] = match layer {
-                            AnyLayer::Vector(vl) => &vl.clip_instances,
-                            AnyLayer::Audio(al) => &al.clip_instances,
-                            AnyLayer::Video(vl) => &vl.clip_instances,
-                            AnyLayer::Effect(el) => &el.clip_instances,
-                            AnyLayer::Group(_) => &[],
-                            AnyLayer::Raster(_) => &[],
-                        };
+                        let instances = layer_clips(layer, &audio_cache);
                         // Check each selected clip
                         enabled = instances.iter()
                             .filter(|ci| shared.selection.contains_clip_instance(&ci.id))

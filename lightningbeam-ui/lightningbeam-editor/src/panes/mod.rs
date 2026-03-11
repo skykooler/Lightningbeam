@@ -192,6 +192,9 @@ pub struct SharedPaneState<'a> {
     pub raster_settings: &'a mut crate::tools::RasterToolSettings,
     /// Audio engine controller for playback control (wrapped in Arc<Mutex<>> for thread safety)
     pub audio_controller: Option<&'a std::sync::Arc<std::sync::Mutex<daw_backend::EngineController>>>,
+    /// Snapshot of all audio/MIDI clip instances from the backend (for timeline rendering).
+    /// Updated by the audio thread after each mutation; UI reads it each frame.
+    pub clip_snapshot: Option<std::sync::Arc<std::sync::RwLock<daw_backend::AudioClipSnapshot>>>,
     /// Opener for the microphone/line-in stream — consumed on first use.
     pub audio_input_opener: &'a mut Option<daw_backend::InputStreamOpener>,
     /// Live input stream handle; kept alive while recording is active.
@@ -202,6 +205,8 @@ pub struct SharedPaneState<'a> {
     pub video_manager: &'a std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
     /// Maps all layer/group/clip UUIDs to backend track IDs (audio, MIDI, and metatracks)
     pub layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
+    /// Maps document clip instance UUIDs to backend clip instance IDs (for action dispatch)
+    pub clip_instance_to_backend_map: &'a std::collections::HashMap<Uuid, lightningbeam_core::action::BackendClipInstanceId>,
     /// Global playback state
     pub playback_time: &'a mut f64,  // Current playback position in seconds
     pub is_playing: &'a mut bool,    // Whether playback is currently active

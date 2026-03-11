@@ -19,7 +19,7 @@ pub mod waveform_cache;
 pub use automation::{AutomationLane, AutomationLaneId, AutomationPoint, CurveType, ParameterId};
 pub use buffer_pool::BufferPool;
 pub use clip::{AudioClipInstance, AudioClipInstanceId, Clip, ClipId};
-pub use engine::{Engine, EngineController};
+pub use engine::{AudioClipSnapshot, Engine, EngineController};
 pub use export::{export_audio, ExportFormat, ExportSettings};
 pub use metronome::Metronome;
 pub use midi::{MidiClip, MidiClipId, MidiClipInstance, MidiClipInstanceId, MidiEvent};

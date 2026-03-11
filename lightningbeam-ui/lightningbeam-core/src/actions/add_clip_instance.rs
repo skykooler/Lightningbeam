@@ -235,34 +235,30 @@ impl Action for AddClipInstanceAction {
                 }
             }
             AudioClipType::Sampled { audio_pool_index } => {
-                // For sampled audio, send AddAudioClipSync query
-                use daw_backend::command::{Query, QueryResponse};
-
                 let internal_start = self.clip_instance.trim_start;
                 let internal_end = self.clip_instance.trim_end.unwrap_or(clip.duration);
                 let effective_duration = self.clip_instance.timeline_duration
                     .unwrap_or(internal_end - internal_start);
                 let start_time = self.clip_instance.timeline_start;
 
-                let query =
-                    Query::AddAudioClipSync(*backend_track_id, *audio_pool_index, start_time, effective_duration, internal_start);
+                let instance_id = controller.add_audio_clip(
+                    *backend_track_id,
+                    *audio_pool_index,
+                    start_time,
+                    effective_duration,
+                    internal_start,
+                );
 
-                match controller.send_query(query)? {
-                    QueryResponse::AudioClipInstanceAdded(Ok(instance_id)) => {
-                        self.backend_track_id = Some(*backend_track_id);
-                        self.backend_audio_instance_id = Some(instance_id);
+                self.backend_track_id = Some(*backend_track_id);
+                self.backend_audio_instance_id = Some(instance_id);
 
-                        // Add to global clip instance mapping
-                        backend.clip_instance_to_backend_map.insert(
-                            self.clip_instance.id,
-                            crate::action::BackendClipInstanceId::Audio(instance_id)
-                        );
+                // Add to global clip instance mapping
+                backend.clip_instance_to_backend_map.insert(
+                    self.clip_instance.id,
+                    crate::action::BackendClipInstanceId::Audio(instance_id)
+                );
 
-                        Ok(())
-                    }
-                    QueryResponse::AudioClipInstanceAdded(Err(e)) => Err(e),
-                    _ => Err("Unexpected query response".to_string()),
-                }
+                Ok(())
             }
             AudioClipType::Recording => {
                 // Recording clips are not synced to backend until finalized

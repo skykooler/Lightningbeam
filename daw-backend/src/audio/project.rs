@@ -211,6 +211,11 @@ impl Project {
         self.tracks.get_mut(&track_id)
     }
 
+    /// Iterate over all tracks in the project.
+    pub fn track_iter(&self) -> impl Iterator<Item = (TrackId, &TrackNode)> {
+        self.tracks.iter().map(|(&id, node)| (id, node))
+    }
+
     /// Get oscilloscope data from a node in a track's graph
     pub fn get_oscilloscope_data(&self, track_id: TrackId, node_id: u32, sample_count: usize) -> Option<(Vec<f32>, Vec<f32>)> {
         if let Some(TrackNode::Midi(track)) = self.tracks.get(&track_id) {

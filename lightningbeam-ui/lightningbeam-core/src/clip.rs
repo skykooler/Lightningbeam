@@ -646,6 +646,46 @@ pub struct ClipInstance {
     pub loop_before: Option<f64>,
 }
 
+/// High 64-bit sentinel used to identify UUIDs that encode a backend audio clip instance ID.
+/// Using a sentinel that would never appear in a v4 random UUID (which has specific version bits).
+const AUDIO_BACKEND_UUID_HIGH: u64 = 0xDEAD_BEEF_CAFE_BABE;
+
+/// Convert a backend `AudioClipInstanceId` (u32) to a synthetic UUID for use in selection/hit-testing.
+/// These UUIDs are distinct from real document UUIDs and can be round-tripped via `audio_backend_id_from_uuid`.
+pub fn audio_backend_uuid(backend_id: u32) -> Uuid {
+    Uuid::from_u64_pair(AUDIO_BACKEND_UUID_HIGH, backend_id as u64)
+}
+
+/// Extract a backend `AudioClipInstanceId` from a synthetic UUID created by `audio_backend_uuid`.
+/// Returns `None` if this is a regular document UUID.
+pub fn audio_backend_id_from_uuid(uuid: Uuid) -> Option<u32> {
+    let (high, low) = uuid.as_u64_pair();
+    if high == AUDIO_BACKEND_UUID_HIGH {
+        Some(low as u32)
+    } else {
+        None
+    }
+}
+
+/// High 64-bit sentinel used to identify UUIDs that encode a backend MIDI clip instance ID.
+const MIDI_BACKEND_UUID_HIGH: u64 = 0xDEAD_BEEF_CAFE_BEEF;
+
+/// Convert a backend `MidiClipInstanceId` (u32) to a synthetic UUID for use in selection/hit-testing.
+pub fn midi_backend_uuid(backend_id: u32) -> Uuid {
+    Uuid::from_u64_pair(MIDI_BACKEND_UUID_HIGH, backend_id as u64)
+}
+
+/// Extract a backend `MidiClipInstanceId` from a synthetic UUID created by `midi_backend_uuid`.
+/// Returns `None` if this is a regular document UUID.
+pub fn midi_backend_id_from_uuid(uuid: Uuid) -> Option<u32> {
+    let (high, low) = uuid.as_u64_pair();
+    if high == MIDI_BACKEND_UUID_HIGH {
+        Some(low as u32)
+    } else {
+        None
+    }
+}
+
 impl ClipInstance {
     /// Create a new clip instance
     pub fn new(clip_id: Uuid) -> Self {
