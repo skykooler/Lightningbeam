@@ -1,6 +1,7 @@
 mod amp_sim;
 pub mod bundled_models;
 mod adsr;
+mod subtrack_inputs;
 mod arpeggiator;
 mod audio_input;
 mod audio_to_cv;
@@ -96,6 +97,7 @@ pub use vibrato::VibratoNode;
 pub use vocoder::VocoderNode;
 pub use voice_allocator::VoiceAllocatorNode;
 pub use wavetable_oscillator::WavetableOscillatorNode;
+pub use subtrack_inputs::SubtrackInputsNode;
 
 /// Create a node instance by type name string.
 ///
@@ -152,6 +154,7 @@ pub fn create_node(node_type: &str, sample_rate: u32, buffer_size: usize) -> Opt
         "Vibrato" => Box::new(VibratoNode::new("Vibrato")),
         "AmpSim" => Box::new(AmpSimNode::new("Amp Sim")),
         "AudioOutput" => Box::new(AudioOutputNode::new("Output")),
+        "SubtrackInputs" => Box::new(SubtrackInputsNode::new("Subtrack Inputs", vec![])),
         _ => return None,
     })
 }

@@ -180,6 +180,7 @@ pub fn render_to_memory(
             playhead,
             settings.sample_rate,
             settings.channels,
+            false,
         );
 
         // Calculate how many samples we actually need from this chunk
@@ -397,6 +398,7 @@ fn export_mp3<P: AsRef<Path>>(
             playhead,
             settings.sample_rate,
             settings.channels,
+            false,
         );
 
         // Calculate how many samples we need from this chunk
@@ -564,6 +566,7 @@ fn export_aac<P: AsRef<Path>>(
             playhead,
             settings.sample_rate,
             settings.channels,
+            false,
         );
 
         // Calculate how many samples we need from this chunk

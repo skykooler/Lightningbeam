@@ -131,6 +131,16 @@ pub struct SerializedNode {
     /// For AmpSim nodes: path to the .nam model file
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nam_model_path: Option<String>,
+
+    /// For dynamic-port nodes (Mixer, SubtrackInputs): saved port count so ports
+    /// round-trip correctly through save/load independent of connection order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_ports: Option<u32>,
+
+    /// For SubtrackInputs: ordered port names (one per subtrack slot).
+    /// Allows the UI to display actual track names on the node's output ports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_names: Vec<String>,
 }
 
 /// Serialized group definition (frontend-only visual grouping, stored opaquely by backend)
@@ -227,6 +237,8 @@ impl SerializedNode {
             sample_data: None,
             script_source: None,
             nam_model_path: None,
+            num_ports: None,
+            port_names: Vec::new(),
         }
     }
 

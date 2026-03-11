@@ -200,7 +200,7 @@ pub struct SharedPaneState<'a> {
     pub audio_buffer_size: u32,
     /// Video manager for video decoding and frame caching
     pub video_manager: &'a std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
-    /// Mapping from Document layer UUIDs to daw-backend TrackIds
+    /// Maps all layer/group/clip UUIDs to backend track IDs (audio, MIDI, and metatracks)
     pub layer_to_track_map: &'a std::collections::HashMap<Uuid, daw_backend::TrackId>,
     /// Global playback state
     pub playback_time: &'a mut f64,  // Current playback position in seconds

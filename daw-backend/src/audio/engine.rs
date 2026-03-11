@@ -259,12 +259,6 @@ impl Engine {
         }
     }
 
-    /// Process live MIDI input from all MIDI tracks
-    fn process_live_midi(&mut self, output: &mut [f32]) {
-        // Process all MIDI tracks to handle live input
-        self.project.process_live_midi(output, self.sample_rate, self.channels);
-    }
-
     /// Process audio callback - called from the audio thread
     pub fn process(&mut self, output: &mut [f32]) {
         let t_start = if self.debug_audio { Some(std::time::Instant::now()) } else { None };
@@ -349,6 +343,7 @@ impl Engine {
                 playhead_seconds,
                 self.sample_rate,
                 self.channels,
+                false,
             );
 
             // Copy mix to output
@@ -394,8 +389,25 @@ impl Engine {
                 }
             }
         } else {
-            // Not playing, but process live MIDI input
-            self.process_live_midi(output);
+            // Not playing: render live MIDI (keyboard input + note-off tails) through the
+            // normal group hierarchy so mixer gain is correctly applied.
+            let playhead_seconds = self.playhead as f64 / self.sample_rate as f64;
+            if self.mix_buffer.len() != output.len() {
+                self.mix_buffer.resize(output.len(), 0.0);
+            }
+            if self.buffer_pool.buffer_size() != output.len() {
+                self.buffer_pool = BufferPool::new(8, output.len());
+            }
+            self.project.render(
+                &mut self.mix_buffer,
+                &self.audio_pool,
+                &mut self.buffer_pool,
+                playhead_seconds,
+                self.sample_rate,
+                self.channels,
+                true, // live_only
+            );
+            output.copy_from_slice(&self.mix_buffer);
         }
 
         // Compute stereo output peaks for master VU meter (independent of playback state)
@@ -1224,6 +1236,9 @@ impl Engine {
                         eprintln!("[DEBUG] Found Audio track, using effects_graph");
                         Some(&mut track.effects_graph)
                     },
+                    Some(TrackNode::Group(track)) => {
+                        Some(&mut track.audio_graph)
+                    },
                     _ => {
                         eprintln!("[DEBUG] Track not found or invalid type!");
                         None
@@ -1266,6 +1281,7 @@ impl Engine {
                     eprintln!("[DEBUG] Emitting GraphNodeAdded event: track_id={}, node_id={}, node_type={}", track_id, node_id, node_type);
                     // Emit success event
                     let _ = self.event_tx.push(AudioEvent::GraphNodeAdded(track_id, node_id, node_type.clone()));
+                    self.set_track_graph_is_default(track_id, false);
                 } else {
                     eprintln!("[DEBUG] Graph was None, node not added!");
                 }
@@ -1312,6 +1328,7 @@ impl Engine {
                 let graph = match self.project.get_track_mut(track_id) {
                     Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
                     Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    Some(TrackNode::Group(track)) => Some(&mut track.audio_graph),
                     _ => None,
                 };
                 if let Some(graph) = graph {
@@ -1319,6 +1336,7 @@ impl Engine {
                     graph.remove_node(node_idx);
                     let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
                 }
+                self.set_track_graph_is_default(track_id, false);
             }
 
             Command::GraphConnect(track_id, from, from_port, to, to_port) => {
@@ -1332,6 +1350,9 @@ impl Engine {
                     Some(TrackNode::Audio(track)) => {
                         eprintln!("[DEBUG] Found Audio track for connection");
                         Some(&mut track.effects_graph)
+                    },
+                    Some(TrackNode::Group(track)) => {
+                        Some(&mut track.audio_graph)
                     },
                     _ => {
                         eprintln!("[DEBUG] Track not found for connection!");
@@ -1347,6 +1368,7 @@ impl Engine {
                         Ok(()) => {
                             eprintln!("[DEBUG] Connection successful!");
                             let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                            self.set_track_graph_is_default(track_id, false);
                         }
                         Err(e) => {
                             eprintln!("[DEBUG] Connection failed: {:?}", e);
@@ -1443,6 +1465,7 @@ impl Engine {
                         eprintln!("[AUDIO ENGINE] Found audio track, disconnecting in effects_graph");
                         Some(&mut track.effects_graph)
                     }
+                    Some(TrackNode::Group(track)) => Some(&mut track.audio_graph),
                     _ => {
                         eprintln!("[AUDIO ENGINE] Track not found!");
                         None
@@ -1455,12 +1478,14 @@ impl Engine {
                     eprintln!("[AUDIO ENGINE] Disconnect completed");
                     let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
                 }
+                self.set_track_graph_is_default(track_id, false);
             }
 
             Command::GraphSetParameter(track_id, node_index, param_id, value) => {
                 let graph = match self.project.get_track_mut(track_id) {
                     Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
                     Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    Some(TrackNode::Group(track)) => Some(&mut track.audio_graph),
                     _ => None,
                 };
                 if let Some(graph) = graph {
@@ -1469,12 +1494,14 @@ impl Engine {
                         graph_node.node.set_parameter(param_id, value);
                     }
                 }
+                self.set_track_graph_is_default(track_id, false);
             }
 
             Command::GraphSetNodePosition(track_id, node_index, x, y) => {
                 let graph = match self.project.get_track_mut(track_id) {
                     Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
                     Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    Some(TrackNode::Group(track)) => Some(&mut track.audio_graph),
                     _ => None,
                 };
                 if let Some(graph) = graph {
@@ -1505,6 +1532,7 @@ impl Engine {
                 let graph = match self.project.get_track_mut(track_id) {
                     Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
                     Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    Some(TrackNode::Group(track)) => Some(&mut track.audio_graph),
                     _ => None,
                 };
                 if let Some(graph) = graph {
@@ -1517,6 +1545,7 @@ impl Engine {
                 let graph = match self.project.get_track_mut(track_id) {
                     Some(TrackNode::Midi(track)) => Some(&mut track.instrument_graph),
                     Some(TrackNode::Audio(track)) => Some(&mut track.effects_graph),
+                    Some(TrackNode::Group(track)) => Some(&mut track.audio_graph),
                     _ => None,
                 };
                 if let Some(graph) = graph {
@@ -1545,6 +1574,7 @@ impl Engine {
                 let graph = match self.project.get_track(track_id) {
                     Some(TrackNode::Midi(track)) => Some(&track.instrument_graph),
                     Some(TrackNode::Audio(track)) => Some(&track.effects_graph),
+                    Some(TrackNode::Group(track)) => Some(&track.audio_graph),
                     _ => None,
                 };
                 if let Some(graph) = graph {
@@ -1595,11 +1625,19 @@ impl Engine {
                                         match self.project.get_track_mut(track_id) {
                                             Some(TrackNode::Midi(track)) => {
                                                 track.instrument_graph = graph;
+                                                track.graph_is_default = true;
                                                 let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
                                                 let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
                                             }
                                             Some(TrackNode::Audio(track)) => {
                                                 track.effects_graph = graph;
+                                                track.graph_is_default = true;
+                                                let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                                                let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                            }
+                                            Some(TrackNode::Group(track)) => {
+                                                track.audio_graph = graph;
+                                                track.graph_is_default = true;
                                                 let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
                                                 let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
                                             }
@@ -1653,6 +1691,82 @@ impl Engine {
                         }
                     }
                 }
+            }
+
+            Command::SetMetatrackSubtrackGraph(track_id, subtracks) => {
+                let buffer_size = self.buffer_pool.buffer_size();
+                if let Some(TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
+                    let current = metatrack.current_subtracks();
+
+                    // No-op if subtrack list is unchanged (prevents every-frame graph rebuilds)
+                    if current == subtracks {
+                        return;
+                    }
+
+                    if metatrack.graph_is_default {
+                        // Default graph: full rebuild with new subtrack layout
+                        metatrack.set_subtrack_graph(subtracks.clone(), self.sample_rate, buffer_size);
+                    } else {
+                        // User-modified graph: incremental port changes only
+                        let current_ids: std::collections::HashSet<TrackId> =
+                            current.iter().map(|&(id, _)| id).collect();
+                        let new_ids: std::collections::HashSet<TrackId> =
+                            subtracks.iter().map(|&(id, _)| id).collect();
+                        for (id, name) in &subtracks {
+                            if !current_ids.contains(id) {
+                                metatrack.add_subtrack_to_graph(*id, name.clone(), buffer_size);
+                            }
+                        }
+                        for &(id, _) in &current {
+                            if !new_ids.contains(&id) {
+                                metatrack.remove_subtrack_from_graph(id, buffer_size);
+                            }
+                        }
+                    }
+                    // Sync the group's children list so they render through the mixer graph.
+                    // `move_to_group` removes each child from root_tracks (or another parent)
+                    // and registers it under this group — idempotent if already there.
+                    let new_child_ids: Vec<TrackId> = subtracks.iter().map(|&(id, _)| id).collect();
+                    for &child_id in &new_child_ids {
+                        // Only move if not already a child of this group
+                        let already_child = self.project.get_track(track_id)
+                            .and_then(|t| if let TrackNode::Group(g) = t { Some(g) } else { None })
+                            .map(|g| g.children.contains(&child_id))
+                            .unwrap_or(false);
+                        if !already_child {
+                            self.project.move_to_group(child_id, track_id);
+                        }
+                    }
+
+                    let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                }
+            }
+
+            Command::AddMetatrackSubtrack(track_id, subtrack_id, name) => {
+                let buffer_size = self.buffer_pool.buffer_size();
+                if let Some(TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
+                    metatrack.add_subtrack_to_graph(subtrack_id, name, buffer_size);
+                    let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                }
+            }
+
+            Command::RemoveMetatrackSubtrack(track_id, subtrack_id) => {
+                let buffer_size = self.buffer_pool.buffer_size();
+                if let Some(TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
+                    metatrack.remove_subtrack_from_graph(subtrack_id, buffer_size);
+                    let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                }
+            }
+
+            Command::UpdateMetatrackSubtrackIds(track_id, subtracks) => {
+                let buffer_size = self.buffer_pool.buffer_size();
+                if let Some(TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
+                    metatrack.update_subtrack_ids(subtracks, buffer_size);
+                }
+            }
+
+            Command::SetGraphIsDefault(track_id, value) => {
+                self.set_track_graph_is_default(track_id, value);
             }
 
             Command::GraphSetScript(track_id, node_id, source) => {
@@ -2169,6 +2283,14 @@ impl Engine {
                             Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize graph: {:?}", e))),
                         }
                     }
+                    Some(TrackNode::Group(track)) => {
+                        let graph = &track.audio_graph;
+                        let preset = graph.to_preset("temp");
+                        match preset.to_json() {
+                            Ok(json) => QueryResponse::GraphState(Ok(json)),
+                            Err(e) => QueryResponse::GraphState(Err(format!("Failed to serialize graph: {:?}", e))),
+                        }
+                    }
                     _ => {
                         QueryResponse::GraphState(Err(format!("Track {} not found", track_id)))
                     }
@@ -2596,12 +2718,31 @@ impl Engine {
                     None => QueryResponse::MidiClipDuplicated(Err(format!("MIDI clip {} not found", clip_id))),
                 }
             }
+            Query::GetGraphIsDefault(track_id) => {
+                let is_default = match self.project.get_track(track_id) {
+                    Some(TrackNode::Midi(track)) => track.graph_is_default,
+                    Some(TrackNode::Audio(track)) => track.graph_is_default,
+                    Some(TrackNode::Group(track)) => track.graph_is_default,
+                    _ => false,
+                };
+                QueryResponse::GraphIsDefault(is_default)
+            }
         };
 
         // Send response back
         match self.query_response_tx.push(response) {
             Ok(_) => {},
             Err(_) => eprintln!("❌ [ENGINE] FAILED to send query response - queue full!"),
+        }
+    }
+
+    /// Set graph_is_default on any track type.
+    fn set_track_graph_is_default(&mut self, track_id: TrackId, value: bool) {
+        match self.project.get_track_mut(track_id) {
+            Some(TrackNode::Midi(track)) => track.graph_is_default = value,
+            Some(TrackNode::Audio(track)) => track.graph_is_default = value,
+            Some(TrackNode::Group(track)) => track.graph_is_default = value,
+            _ => {}
         }
     }
 
@@ -3429,6 +3570,47 @@ impl EngineController {
     /// Clear all layers from a MultiSampler node
     pub fn multi_sampler_clear_layers(&mut self, track_id: TrackId, node_id: u32) {
         let _ = self.command_tx.push(Command::MultiSamplerClearLayers(track_id, node_id));
+    }
+
+    /// Set the full subtrack list for a metatrack's mixing graph (rebuilds the graph)
+    pub fn set_metatrack_subtrack_graph(&mut self, track_id: TrackId, subtracks: Vec<(TrackId, String)>) {
+        let _ = self.command_tx.push(Command::SetMetatrackSubtrackGraph(track_id, subtracks));
+    }
+
+    /// Add a subtrack port to a metatrack's mixing graph
+    pub fn add_metatrack_subtrack(&mut self, track_id: TrackId, subtrack_id: TrackId, name: String) {
+        let _ = self.command_tx.push(Command::AddMetatrackSubtrack(track_id, subtrack_id, name));
+    }
+
+    /// Remove a subtrack port from a metatrack's mixing graph
+    pub fn remove_metatrack_subtrack(&mut self, track_id: TrackId, subtrack_id: TrackId) {
+        let _ = self.command_tx.push(Command::RemoveMetatrackSubtrack(track_id, subtrack_id));
+    }
+
+    /// Re-associate backend TrackIds with SubtrackInputsNode slots (called after project load)
+    pub fn update_metatrack_subtrack_ids(&mut self, track_id: TrackId, subtracks: Vec<(TrackId, String)>) {
+        let _ = self.command_tx.push(Command::UpdateMetatrackSubtrackIds(track_id, subtracks));
+    }
+
+    /// Set the graph_is_default flag on a track (command, processed async)
+    pub fn set_graph_is_default(&mut self, track_id: TrackId, value: bool) {
+        let _ = self.command_tx.push(Command::SetGraphIsDefault(track_id, value));
+    }
+
+    /// Query whether a track's graph is the auto-generated default (synchronous)
+    pub fn get_graph_is_default(&mut self, track_id: TrackId) -> bool {
+        if let Err(_) = self.query_tx.push(Query::GetGraphIsDefault(track_id)) {
+            return false;
+        }
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(500);
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::GraphIsDefault(v)) = self.query_response_rx.pop() {
+                return v;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(100));
+        }
+        false
     }
 
     /// Send a synchronous query and wait for the response

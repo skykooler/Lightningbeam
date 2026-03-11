@@ -837,10 +837,15 @@ impl PaneRenderer for VirtualPianoPane {
                 self.release_all_keyboard_notes(shared);
             }
 
-            // Show message if no active MIDI track
-            ui.centered_and_justified(|ui| {
-                ui.label("No MIDI track selected. Create a MIDI track to use the virtual piano.");
-            });
+            // Draw message centered in rect using painter — avoids allocating in the full
+            // parent UI (which could block header interactions in other panes).
+            ui.painter_at(rect).text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "No MIDI track selected. Create a MIDI track to use the virtual piano.",
+                egui::FontId::proportional(16.0),
+                egui::Color32::from_gray(150),
+            );
             return;
         }
 

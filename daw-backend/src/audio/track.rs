@@ -35,6 +35,10 @@ pub struct RenderContext {
     pub buffer_size: usize,
     /// Accumulated time stretch factor (1.0 = normal, 0.5 = half speed, 2.0 = double speed)
     pub time_stretch: f32,
+    /// When true: skip clip event collection; only render instrument state and live MIDI queue.
+    /// Used after pause/stop to route note-off tails through the normal group hierarchy
+    /// without re-triggering notes from clips at the paused position.
+    pub live_only: bool,
 }
 
 impl RenderContext {
@@ -51,6 +55,7 @@ impl RenderContext {
             channels,
             buffer_size,
             time_stretch: 1.0,
+            live_only: false,
         }
     }
 
@@ -181,6 +186,10 @@ pub struct Metatrack {
     pub audio_graph: AudioGraph,
     /// Saved graph preset for serialization
     audio_graph_preset: Option<GraphPreset>,
+    /// True while the mixing graph is still the auto-generated default (no user edits).
+    /// Used to auto-connect new subtracks and to prompt before loading a preset.
+    #[serde(default)]
+    pub graph_is_default: bool,
 }
 
 impl Clone for Metatrack {
@@ -201,15 +210,17 @@ impl Clone for Metatrack {
             next_automation_id: self.next_automation_id,
             audio_graph: default_audio_graph(), // Create fresh graph, not cloned
             audio_graph_preset: self.audio_graph_preset.clone(),
+            graph_is_default: self.graph_is_default,
         }
     }
 }
 
 impl Metatrack {
-    /// Create a new metatrack with an audio graph (input → output)
+    /// Create a new metatrack. The mixing graph is set up later via `set_subtrack_graph`
+    /// once the child track list is known.
     pub fn new(id: TrackId, name: String, sample_rate: u32) -> Self {
         let default_buffer_size = 8192;
-        let audio_graph = Self::create_default_graph(sample_rate, default_buffer_size);
+        let audio_graph = Self::create_empty_graph(sample_rate, default_buffer_size);
 
         Self {
             id,
@@ -227,25 +238,192 @@ impl Metatrack {
             next_automation_id: 0,
             audio_graph,
             audio_graph_preset: None,
+            graph_is_default: true,
         }
     }
 
-    /// Create a default audio graph with AudioInput -> AudioOutput
-    fn create_default_graph(sample_rate: u32, buffer_size: usize) -> AudioGraph {
+    /// Minimal graph used before subtracks are known (just an AudioOutput node).
+    fn create_empty_graph(sample_rate: u32, buffer_size: usize) -> AudioGraph {
         let mut graph = AudioGraph::new(sample_rate, buffer_size);
-
-        let input_node = Box::new(AudioInputNode::new("Audio Input"));
-        let input_id = graph.add_node(input_node);
-        graph.set_node_position(input_id, 100.0, 150.0);
-
         let output_node = Box::new(AudioOutputNode::new("Audio Output"));
         let output_id = graph.add_node(output_node);
         graph.set_node_position(output_id, 500.0, 150.0);
+        graph.set_output_node(Some(output_id));
+        graph
+    }
 
-        let _ = graph.connect(input_id, 0, output_id, 0);
+    /// Build the explicit subtrack mixing graph: SubtrackInputs → Mixer → AudioOutput.
+    ///
+    /// `subtracks` is an ordered list of (backend TrackId, display name) for each child.
+    /// Replaces the current graph and marks `graph_is_default = true`.
+    pub fn set_subtrack_graph(
+        &mut self,
+        subtracks: Vec<(TrackId, String)>,
+        sample_rate: u32,
+        buffer_size: usize,
+    ) {
+        use super::node_graph::nodes::{SubtrackInputsNode, MixerNode};
+
+        let n = subtracks.len();
+        let mut graph = AudioGraph::new(sample_rate, buffer_size);
+
+        // SubtrackInputs node (N outputs, one per child)
+        // NOTE: `new()` initialises buffers as zero-length; call `update_subtracks` immediately
+        // to allocate stereo interleaved buffers (buffer_size * 2 samples each).
+        let mut inputs_node = SubtrackInputsNode::new("Subtrack Inputs", subtracks);
+        let subtracks_copy = inputs_node.subtracks().to_vec();
+        inputs_node.update_subtracks(subtracks_copy, buffer_size);
+        let inputs_id = graph.add_node(Box::new(inputs_node));
+        graph.set_node_position(inputs_id, 100.0, 150.0);
+
+        // Mixer node (starts with 1 spare; grows as connections are made)
+        let mixer_node = Box::new(MixerNode::new("Mixer"));
+        let mixer_id = graph.add_node(mixer_node);
+        graph.set_node_position(mixer_id, 350.0, 150.0);
+
+        // AudioOutput node
+        let output_node = Box::new(AudioOutputNode::new("Audio Output"));
+        let output_id = graph.add_node(output_node);
+        graph.set_node_position(output_id, 600.0, 150.0);
+
+        // Connect SubtrackInputs[i] → Mixer[i] for each subtrack
+        for i in 0..n {
+            let _ = graph.connect(inputs_id, i, mixer_id, i);
+        }
+        let _ = graph.connect(mixer_id, 0, output_id, 0);
         graph.set_output_node(Some(output_id));
 
-        graph
+        self.audio_graph = graph;
+        self.audio_graph_preset = None;
+        self.graph_is_default = true;
+    }
+
+    /// Add a new subtrack port to the existing graph.
+    ///
+    /// If `graph_is_default`: also connects the new port to a new Mixer input.
+    /// If the user has modified the graph: just adds the port (unconnected).
+    pub fn add_subtrack_to_graph(&mut self, track_id: TrackId, name: String, buffer_size: usize) {
+        use super::node_graph::nodes::SubtrackInputsNode;
+
+        // Find SubtrackInputs node index
+        let si_idx = self.audio_graph.node_indices()
+            .find(|&idx| self.audio_graph.get_graph_node(idx)
+                .map(|n| n.node.node_type() == "SubtrackInputs")
+                .unwrap_or(false));
+
+        let si_idx = match si_idx {
+            Some(idx) => idx,
+            None => return, // No subtrack graph set up yet
+        };
+
+        // Get current subtrack count (= new port index after adding)
+        let new_slot = {
+            let gn = self.audio_graph.get_graph_node_mut(si_idx).unwrap();
+            let si = gn.node.as_any_mut().downcast_mut::<SubtrackInputsNode>().unwrap();
+            let mut subtracks = si.subtracks().to_vec();
+            subtracks.push((track_id, name));
+            let n = subtracks.len();
+            si.update_subtracks(subtracks, buffer_size);
+            // Rebuild output buffers for the new port count
+            n - 1 // index of the newly added slot
+        };
+        // Reallocate GraphNode output buffers to match new port count
+        self.audio_graph.reallocate_node_output_buffers(si_idx, buffer_size);
+
+        if self.graph_is_default {
+            // Find the Mixer node and connect the new subtrack port to a new Mixer input
+            let mixer_idx = self.audio_graph.node_indices()
+                .find(|&idx| self.audio_graph.get_graph_node(idx)
+                    .map(|n| n.node.node_type() == "Mixer")
+                    .unwrap_or(false));
+
+            if let Some(mixer_idx) = mixer_idx {
+                // n_incoming after connecting = new_slot + 1; auto-grow handled by connect()
+                let _ = self.audio_graph.connect(si_idx, new_slot, mixer_idx, new_slot);
+            }
+        }
+    }
+
+    /// Remove a subtrack from the graph (by TrackId).
+    ///
+    /// Always disconnects any connections from the removed port and removes the port.
+    /// If `graph_is_default`: also reshuffles Mixer connections to stay compact.
+    pub fn remove_subtrack_from_graph(&mut self, track_id: TrackId, buffer_size: usize) {
+        use super::node_graph::nodes::SubtrackInputsNode;
+
+        let si_idx = self.audio_graph.node_indices()
+            .find(|&idx| self.audio_graph.get_graph_node(idx)
+                .map(|n| n.node.node_type() == "SubtrackInputs")
+                .unwrap_or(false));
+
+        let si_idx = match si_idx {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        // Find the slot index for this track
+        let slot = {
+            let gn = self.audio_graph.get_graph_node(si_idx).unwrap();
+            let si = gn.node.as_any().downcast_ref::<SubtrackInputsNode>().unwrap();
+            si.subtrack_index_for(track_id)
+        };
+        let slot = match slot {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Remove all connections from this output port
+        self.audio_graph.disconnect_output_port(si_idx, slot);
+
+        // Update the SubtrackInputsNode's subtrack list
+        {
+            let gn = self.audio_graph.get_graph_node_mut(si_idx).unwrap();
+            let si = gn.node.as_any_mut().downcast_mut::<SubtrackInputsNode>().unwrap();
+            let mut subtracks = si.subtracks().to_vec();
+            subtracks.remove(slot);
+            si.update_subtracks(subtracks, buffer_size);
+        }
+        self.audio_graph.reallocate_node_output_buffers(si_idx, buffer_size);
+
+        if self.graph_is_default {
+            // Rebuild default Mixer connections (they've shifted after removal)
+            let mixer_idx = self.audio_graph.node_indices()
+                .find(|&idx| self.audio_graph.get_graph_node(idx)
+                    .map(|n| n.node.node_type() == "Mixer")
+                    .unwrap_or(false));
+
+            if let Some(mixer_idx) = mixer_idx {
+                // Clear all connections TO mixer
+                self.audio_graph.disconnect_all_inputs(mixer_idx);
+                // Get new subtrack count
+                let n = {
+                    let gn = self.audio_graph.get_graph_node(si_idx).unwrap();
+                    gn.node.as_any().downcast_ref::<SubtrackInputsNode>().unwrap().num_subtracks()
+                };
+                // Resize mixer and reconnect
+                {
+                    let gn = self.audio_graph.get_graph_node_mut(mixer_idx).unwrap();
+                    let mixer = gn.node.as_any_mut().downcast_mut::<super::node_graph::nodes::MixerNode>().unwrap();
+                    mixer.resize(n + 1);
+                }
+                for i in 0..n {
+                    let _ = self.audio_graph.connect(si_idx, i, mixer_idx, i);
+                }
+            }
+        }
+    }
+
+    /// Return the current ordered subtrack list from SubtrackInputsNode, or empty vec if none.
+    pub fn current_subtracks(&self) -> Vec<(TrackId, String)> {
+        use super::node_graph::nodes::SubtrackInputsNode;
+        for idx in self.audio_graph.node_indices().collect::<Vec<_>>() {
+            if let Some(gn) = self.audio_graph.get_graph_node(idx) {
+                if let Some(si) = gn.node.as_any().downcast_ref::<SubtrackInputsNode>() {
+                    return si.subtracks().to_vec();
+                }
+            }
+        }
+        Vec::new()
     }
 
     /// Prepare for serialization by saving the audio graph as a preset
@@ -253,18 +431,40 @@ impl Metatrack {
         self.audio_graph_preset = Some(self.audio_graph.to_preset("Metatrack Graph"));
     }
 
-    /// Rebuild the audio graph from preset after deserialization
+    /// Rebuild the audio graph from preset after deserialization.
+    ///
+    /// After loading, the caller must call `update_subtrack_ids` to re-associate
+    /// backend TrackIds with the SubtrackInputsNode's port slots.
     pub fn rebuild_audio_graph(&mut self, sample_rate: u32, buffer_size: usize) -> Result<(), String> {
         if let Some(preset) = &self.audio_graph_preset {
             if !preset.nodes.is_empty() && preset.output_node.is_some() {
                 self.audio_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None)?;
+                // graph_is_default remains as serialized (false for user-modified graphs)
             } else {
-                self.audio_graph = Self::create_default_graph(sample_rate, buffer_size);
+                self.audio_graph = Self::create_empty_graph(sample_rate, buffer_size);
+                self.graph_is_default = true;
             }
         } else {
-            self.audio_graph = Self::create_default_graph(sample_rate, buffer_size);
+            self.audio_graph = Self::create_empty_graph(sample_rate, buffer_size);
+            self.graph_is_default = true;
         }
         Ok(())
+    }
+
+    /// Re-associate backend TrackIds with the SubtrackInputsNode's port slots after reload.
+    ///
+    /// The preset stores placeholder TrackId=0 entries; this call fills in the real IDs.
+    pub fn update_subtrack_ids(&mut self, subtracks: Vec<(TrackId, String)>, buffer_size: usize) {
+        use super::node_graph::nodes::SubtrackInputsNode;
+
+        for idx in self.audio_graph.node_indices().collect::<Vec<_>>() {
+            if let Some(gn) = self.audio_graph.get_graph_node_mut(idx) {
+                if let Some(si) = gn.node.as_any_mut().downcast_mut::<SubtrackInputsNode>() {
+                    si.update_subtracks(subtracks, buffer_size);
+                    return;
+                }
+            }
+        }
     }
 
     /// Add an automation lane to this metatrack
@@ -439,6 +639,11 @@ pub struct MidiTrack {
     /// Peak level of last render() call (for VU metering)
     #[serde(skip, default)]
     pub peak_level: f32,
+
+    /// True while the instrument graph is still the auto-generated default (no user edits).
+    /// Used to prompt before loading a preset.
+    #[serde(default)]
+    pub graph_is_default: bool,
 }
 
 impl Clone for MidiTrack {
@@ -457,6 +662,7 @@ impl Clone for MidiTrack {
             live_midi_queue: Vec::new(), // Don't clone live MIDI queue
             prev_active_instances: HashSet::new(),
             peak_level: 0.0,
+            graph_is_default: self.graph_is_default,
         }
     }
 }
@@ -485,6 +691,7 @@ impl MidiTrack {
             live_midi_queue: Vec::new(),
             prev_active_instances: HashSet::new(),
             peak_level: 0.0,
+            graph_is_default: true,
         }
     }
 
@@ -584,77 +791,55 @@ impl MidiTrack {
         self.live_midi_queue.clear();
     }
 
-    /// Process only live MIDI input (queued events) without rendering clips
-    /// This is used when playback is stopped but we want to hear live input
-    pub fn process_live_input(
-        &mut self,
-        output: &mut [f32],
-        _sample_rate: u32,
-        _channels: u32,
-    ) {
-        // Generate audio using instrument graph with live MIDI events
-        self.instrument_graph.process(output, &self.live_midi_queue, 0.0);
-
-        // Clear the queue after processing
-        self.live_midi_queue.clear();
-
-        // Apply track volume (no automation during live input)
-        for sample in output.iter_mut() {
-            *sample *= self.volume;
-        }
-    }
-
-    /// Render this MIDI track into the output buffer
+    /// Render this MIDI track into the output buffer.
+    ///
+    /// When `ctx.live_only` is true, clip event collection is skipped and only the live MIDI
+    /// queue is processed. This lets note-off tails (and live keyboard input) route through
+    /// the normal group hierarchy without re-triggering notes from clips at the paused position.
     pub fn render(
         &mut self,
         output: &mut [f32],
         midi_pool: &MidiClipPool,
-        playhead_seconds: f64,
-        sample_rate: u32,
-        channels: u32,
+        ctx: RenderContext,
     ) {
-        let buffer_duration_seconds = output.len() as f64 / (sample_rate as f64 * channels as f64);
-        let buffer_end_seconds = playhead_seconds + buffer_duration_seconds;
-
-        // Collect MIDI events from all clip instances that overlap with current time range
         let mut midi_events = Vec::new();
-        let mut currently_active = HashSet::new();
-        for instance in &self.clip_instances {
-            if instance.overlaps_range(playhead_seconds, buffer_end_seconds) {
-                currently_active.insert(instance.id);
-            }
-            // Get the clip content from the pool
-            if let Some(clip) = midi_pool.get_clip(instance.clip_id) {
-                let events = instance.get_events_in_range(
-                    clip,
-                    playhead_seconds,
-                    buffer_end_seconds,
-                );
-                midi_events.extend(events);
-            }
-        }
 
-        // Send all-notes-off for clip instances that just became inactive
-        // (playhead exited the clip). This prevents stuck notes from malformed clips.
-        for prev_id in &self.prev_active_instances {
-            if !currently_active.contains(prev_id) {
-                for note in 0..128u8 {
-                    midi_events.push(MidiEvent::note_off(playhead_seconds, 0, note, 0));
+        if !ctx.live_only {
+            let buffer_duration_seconds = output.len() as f64 / (ctx.sample_rate as f64 * ctx.channels as f64);
+            let buffer_end_seconds = ctx.playhead_seconds + buffer_duration_seconds;
+
+            // Collect MIDI events from all clip instances that overlap with current time range
+            let mut currently_active = HashSet::new();
+            for instance in &self.clip_instances {
+                if instance.overlaps_range(ctx.playhead_seconds, buffer_end_seconds) {
+                    currently_active.insert(instance.id);
                 }
-                break; // One round of all-notes-off is enough
+                if let Some(clip) = midi_pool.get_clip(instance.clip_id) {
+                    let events = instance.get_events_in_range(clip, ctx.playhead_seconds, buffer_end_seconds);
+                    midi_events.extend(events);
+                }
             }
+
+            // Send all-notes-off for clip instances that just became inactive
+            for prev_id in &self.prev_active_instances {
+                if !currently_active.contains(prev_id) {
+                    for note in 0..128u8 {
+                        midi_events.push(MidiEvent::note_off(ctx.playhead_seconds, 0, note, 0));
+                    }
+                    break;
+                }
+            }
+            self.prev_active_instances = currently_active;
         }
-        self.prev_active_instances = currently_active;
 
         // Add live MIDI events (from virtual keyboard or MIDI controllers)
-        // This allows real-time input to be heard during playback/recording
         midi_events.extend(self.live_midi_queue.drain(..));
 
         // Generate audio using instrument graph
-        self.instrument_graph.process(output, &midi_events, playhead_seconds);
+        self.instrument_graph.process(output, &midi_events, ctx.playhead_seconds);
 
-        // Evaluate and apply automation
-        let effective_volume = self.evaluate_automation_at_time(playhead_seconds);
+        // Evaluate and apply automation (skip automation in live_only mode — no playhead to evaluate at)
+        let effective_volume = if ctx.live_only { self.volume } else { self.evaluate_automation_at_time(ctx.playhead_seconds) };
 
         // Apply track volume
         for sample in output.iter_mut() {
@@ -715,6 +900,11 @@ pub struct AudioTrack {
     /// Peak level of last render() call (for VU metering)
     #[serde(skip, default)]
     pub peak_level: f32,
+
+    /// True while the effects graph is still the auto-generated default (no user edits).
+    /// Used to prompt before loading a preset.
+    #[serde(default)]
+    pub graph_is_default: bool,
 }
 
 impl Clone for AudioTrack {
@@ -732,6 +922,7 @@ impl Clone for AudioTrack {
             effects_graph: default_audio_graph(), // Create fresh graph, not cloned
             clip_render_buffer: Vec::new(),
             peak_level: 0.0,
+            graph_is_default: self.graph_is_default,
         }
     }
 }
@@ -776,6 +967,7 @@ impl AudioTrack {
             effects_graph,
             clip_render_buffer: Vec::new(),
             peak_level: 0.0,
+            graph_is_default: true,
         }
     }
 

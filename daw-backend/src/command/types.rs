@@ -180,6 +180,22 @@ pub enum Command {
     GraphSavePreset(TrackId, String, String, String, Vec<String>),
     /// Load a preset into a track's graph (track_id, preset_path)
     GraphLoadPreset(TrackId, String),
+
+    // Metatrack subtrack graph commands
+    /// Replace a metatrack's mixing graph with the default SubtrackInputs→Mixer→Output layout.
+    /// (metatrack_id, ordered list of (child_track_id, display_name))
+    SetMetatrackSubtrackGraph(TrackId, Vec<(TrackId, String)>),
+    /// Add a new subtrack port to a metatrack's SubtrackInputsNode.
+    /// (metatrack_id, child_track_id, display_name)
+    AddMetatrackSubtrack(TrackId, TrackId, String),
+    /// Remove a subtrack port from a metatrack's SubtrackInputsNode.
+    /// (metatrack_id, child_track_id)
+    RemoveMetatrackSubtrack(TrackId, TrackId),
+    /// Re-associate backend TrackIds with SubtrackInputsNode slots after project reload.
+    /// (metatrack_id, ordered list of (child_track_id, display_name))
+    UpdateMetatrackSubtrackIds(TrackId, Vec<(TrackId, String)>),
+    /// Set or clear the graph_is_default flag on any track (track_id, value)
+    SetGraphIsDefault(TrackId, bool),
     /// Save a VoiceAllocator's template graph as a preset (track_id, voice_allocator_id, preset_path, preset_name)
     GraphSaveTemplatePreset(TrackId, u32, String, String),
 
@@ -422,6 +438,8 @@ pub enum Query {
     SetProject(Box<crate::audio::project::Project>),
     /// Duplicate a MIDI clip in the pool, returning the new clip's ID
     DuplicateMidiClipSync(MidiClipId),
+    /// Get whether a track's graph is still the auto-generated default
+    GetGraphIsDefault(TrackId),
 }
 
 /// Oscilloscope data from a node
@@ -497,4 +515,6 @@ pub enum QueryResponse {
     ProjectSet(Result<(), String>),
     /// MIDI clip duplicated (returns new clip ID)
     MidiClipDuplicated(Result<MidiClipId, String>),
+    /// Whether a track's graph is the auto-generated default
+    GraphIsDefault(bool),
 }

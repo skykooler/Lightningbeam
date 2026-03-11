@@ -193,6 +193,15 @@ impl AudioGraph {
         self.graph.add_edge(from, to, Connection { from_port, to_port });
         self.topo_cache = None;
 
+        // Auto-grow MixerNode: always keep one spare port beyond the connected count
+        let n_incoming = self.graph.edges_directed(to, petgraph::Direction::Incoming).count();
+        if let Some(graph_node) = self.graph.node_weight_mut(to) {
+            use crate::audio::node_graph::nodes::MixerNode;
+            if let Some(mixer) = graph_node.node.as_any_mut().downcast_mut::<MixerNode>() {
+                mixer.ensure_min_ports(n_incoming + 1);
+            }
+        }
+
         Ok(())
     }
 
@@ -204,12 +213,24 @@ impl AudioGraph {
         to: NodeIndex,
         to_port: usize,
     ) {
-        // Find and remove the edge
+        let mut did_remove = false;
         if let Some(edge_idx) = self.graph.find_edge(from, to) {
             let conn = &self.graph[edge_idx];
             if conn.from_port == from_port && conn.to_port == to_port {
                 self.graph.remove_edge(edge_idx);
                 self.topo_cache = None;
+                did_remove = true;
+            }
+        }
+
+        // Shrink MixerNode back to n_remaining + 1 spare after a disconnect
+        if did_remove {
+            let n_remaining = self.graph.edges_directed(to, petgraph::Direction::Incoming).count();
+            if let Some(graph_node) = self.graph.node_weight_mut(to) {
+                use crate::audio::node_graph::nodes::MixerNode;
+                if let Some(mixer) = graph_node.node.as_any_mut().downcast_mut::<MixerNode>() {
+                    mixer.resize(n_remaining + 1);
+                }
             }
         }
     }
@@ -716,6 +737,50 @@ impl AudioGraph {
         self.graph.node_indices()
     }
 
+    /// Reallocate a node's output buffers to match its current port list.
+    ///
+    /// Must be called after `SubtrackInputsNode::update_subtracks` changes the port count,
+    /// since `GraphNode.output_buffers` was allocated at `add_node` time.
+    pub fn reallocate_node_output_buffers(&mut self, idx: NodeIndex, buffer_size: usize) {
+        if let Some(graph_node) = self.graph.node_weight_mut(idx) {
+            let outputs = graph_node.node.outputs();
+            graph_node.output_buffers.clear();
+            for port in outputs.iter() {
+                match port.signal_type {
+                    super::types::SignalType::Audio => graph_node.output_buffers.push(vec![0.0; buffer_size * 2]),
+                    super::types::SignalType::CV    => graph_node.output_buffers.push(vec![0.0; buffer_size]),
+                    super::types::SignalType::Midi  => graph_node.output_buffers.push(vec![]),
+                }
+            }
+            self.topo_cache = None;
+        }
+    }
+
+    /// Remove all edges going OUT of a specific output port of a node.
+    pub fn disconnect_output_port(&mut self, node: NodeIndex, port: usize) {
+        let edges: Vec<_> = self.graph
+            .edges_directed(node, petgraph::Direction::Outgoing)
+            .filter(|e| e.weight().from_port == port)
+            .map(|e| e.id())
+            .collect();
+        for edge_id in edges {
+            self.graph.remove_edge(edge_id);
+        }
+        self.topo_cache = None;
+    }
+
+    /// Remove all edges going INTO a node (all input connections).
+    pub fn disconnect_all_inputs(&mut self, node: NodeIndex) {
+        let edges: Vec<_> = self.graph
+            .edges_directed(node, petgraph::Direction::Incoming)
+            .map(|e| e.id())
+            .collect();
+        for edge_id in edges {
+            self.graph.remove_edge(edge_id);
+        }
+        self.topo_cache = None;
+    }
+
     /// Get all connections
     pub fn connections(&self) -> impl Iterator<Item = (NodeIndex, NodeIndex, &Connection)> + '_ {
         self.graph.edge_references().map(|e| (e.source(), e.target(), e.weight()))
@@ -787,7 +852,7 @@ impl AudioGraph {
     /// Serialize the graph to a preset
     pub fn to_preset(&self, name: impl Into<String>) -> crate::audio::node_graph::preset::GraphPreset {
         use crate::audio::node_graph::preset::{GraphPreset, SerializedConnection, SerializedNode};
-        use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+        use crate::audio::node_graph::nodes::{VoiceAllocatorNode, MixerNode, SubtrackInputsNode};
 
         let mut preset = GraphPreset::new(name);
 
@@ -803,6 +868,19 @@ impl AudioGraph {
                 for param in node.parameters() {
                     let value = node.get_parameter(param.id);
                     serialized.set_parameter(param.id, value);
+                }
+
+                // Save port count for dynamic-port nodes so they round-trip correctly
+                if node.node_type() == "Mixer" {
+                    if let Some(mixer) = node.as_any().downcast_ref::<MixerNode>() {
+                        serialized.num_ports = Some(mixer.num_inputs() as u32);
+                    }
+                }
+                if node.node_type() == "SubtrackInputs" {
+                    if let Some(si) = node.as_any().downcast_ref::<SubtrackInputsNode>() {
+                        serialized.num_ports = Some(si.num_subtracks() as u32);
+                        serialized.port_names = si.subtracks().iter().map(|(_, name)| name.clone()).collect();
+                    }
                 }
 
                 // For VoiceAllocator nodes, serialize the template graph
@@ -1002,11 +1080,45 @@ impl AudioGraph {
         let mut graph = Self::new(sample_rate, buffer_size);
         let mut index_map: HashMap<u32, NodeIndex> = HashMap::new();
 
+        // Pre-pass: compute required min port count for dynamic-port nodes from the connection list.
+        // This ensures old presets (without num_ports) still size correctly regardless of
+        // connection-restoration order.
+        let mut required_ports: HashMap<u32, usize> = HashMap::new();
+        for conn in &preset.connections {
+            let entry = required_ports.entry(conn.to_node).or_insert(0);
+            *entry = (*entry).max(conn.to_port + 2); // port N + 1 spare
+        }
+
         // Create all nodes
         for serialized_node in &preset.nodes {
             // Create the node based on type
             let mut node = crate::audio::node_graph::nodes::create_node(&serialized_node.node_type, sample_rate, buffer_size)
                 .ok_or_else(|| format!("Unknown node type: {}", serialized_node.node_type))?;
+
+            // Pre-size dynamic-port nodes before graph.add_node() so output buffers are
+            // allocated at the correct size. num_ports takes priority; fall back to
+            // connection-count inference so old presets without num_ports still work.
+            if serialized_node.node_type == "Mixer" {
+                use crate::audio::node_graph::nodes::MixerNode;
+                if let Some(mixer) = node.as_any_mut().downcast_mut::<MixerNode>() {
+                    let from_conns = required_ports.get(&serialized_node.id).copied().unwrap_or(1);
+                    let target = serialized_node.num_ports.map(|n| n as usize).unwrap_or(0).max(from_conns).max(1);
+                    mixer.resize(target);
+                }
+            }
+            if serialized_node.node_type == "SubtrackInputs" {
+                use crate::audio::node_graph::nodes::SubtrackInputsNode;
+                if let Some(si) = node.as_any_mut().downcast_mut::<SubtrackInputsNode>() {
+                    let from_conns = required_ports.get(&serialized_node.id).copied().unwrap_or(0);
+                    let target = serialized_node.num_ports.map(|n| n as usize).unwrap_or(0).max(from_conns);
+                    if target > 0 {
+                        let subtracks = (0..target)
+                            .map(|i| (0u32, format!("Subtrack {}", i + 1)))
+                            .collect();
+                        si.update_subtracks(subtracks, buffer_size);
+                    }
+                }
+            }
 
             // VoiceAllocator needs its template graph deserialized and set
             if serialized_node.node_type == "VoiceAllocator" {

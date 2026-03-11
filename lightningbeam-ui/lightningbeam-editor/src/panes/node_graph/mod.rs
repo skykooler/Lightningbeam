@@ -515,6 +515,28 @@ impl NodeGraphPane {
                                         )
                                     ));
                                     self.pending_action = Some(action);
+
+                                    // If disconnecting from a Mixer, shrink it by removing the
+                                    // last (spare) audio input and its corresponding gain param.
+                                    // The spare is always last; removing it keeps N+1 invariant.
+                                    {
+                                        let to_frontend_id = to_node_id;
+                                        let is_mixer = self.state.graph.nodes.get(to_frontend_id)
+                                            .map(|n| n.user_data.template == NodeTemplate::Mixer)
+                                            .unwrap_or(false);
+                                        if is_mixer {
+                                            let ids: Vec<_> = self.state.graph.nodes
+                                                .get(to_frontend_id)
+                                                .map(|n| n.inputs.iter().map(|(_, id)| *id).collect())
+                                                .unwrap_or_default();
+                                            let n = ids.len() / 2; // audio count = total / 2
+                                            if n > 1 {
+                                                // Remove last gain param first (index 2n-1), then last audio (index n-1)
+                                                self.state.graph.remove_input_param(ids[2 * n - 1]);
+                                                self.state.graph.remove_input_param(ids[n - 1]);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -650,12 +672,10 @@ impl NodeGraphPane {
                 let mut controller = audio_controller.lock().unwrap();
                 // Node graph actions don't use clip instances, so we use an empty map
                 let mut empty_clip_map = std::collections::HashMap::new();
-                let empty_metatrack_map = std::collections::HashMap::new();
                 let mut backend_context = lightningbeam_core::action::BackendContext {
                     audio_controller: Some(&mut *controller),
                     layer_to_track_map: shared.layer_to_track_map,
                     clip_instance_to_backend_map: &mut empty_clip_map,
-                    clip_to_metatrack_map: &empty_metatrack_map,
                 };
 
                 if let Err(e) = shared.action_executor.execute_with_backend(action, &mut backend_context) {
@@ -1421,7 +1441,7 @@ impl NodeGraphPane {
                 }
             };
 
-            let frontend_id = self.add_node_to_editor(node_template, &node.node_type, node.position, node.id, &node.parameters);
+            let frontend_id = self.add_node_to_editor(node_template, &node.node_type, node.position, node.id, &node.parameters, node.num_ports, &node.port_names);
 
             // For Script nodes: rebuild ports now (before connections), defer script_id resolution
             if node.node_type == "Script" {
@@ -1872,7 +1892,7 @@ impl NodeGraphPane {
                 }
             };
 
-            self.add_node_to_editor(node_template, &node.node_type, node.position, node.id, &node.parameters);
+            self.add_node_to_editor(node_template, &node.node_type, node.position, node.id, &node.parameters, node.num_ports, &node.port_names);
         }
 
         // Add sub-group placeholder nodes
@@ -2129,7 +2149,9 @@ impl NodeGraphPane {
         }
     }
 
-    /// Helper: add a node to the editor state and return its frontend ID
+    /// Helper: add a node to the editor state and return its frontend ID.
+    /// `num_ports` overrides the static port count for dynamic-port nodes (Mixer, SubtrackInputs).
+    /// `port_names` provides per-port display names for SubtrackInputs nodes.
     fn add_node_to_editor(
         &mut self,
         node_template: NodeTemplate,
@@ -2137,6 +2159,8 @@ impl NodeGraphPane {
         position: (f32, f32),
         backend_node_id: u32,
         parameters: &std::collections::HashMap<u32, f32>,
+        num_ports: Option<u32>,
+        port_names: &[String],
     ) -> Option<NodeId> {
         let frontend_id = self.state.graph.nodes.insert(egui_node_graph2::Node {
             id: NodeId::default(),
@@ -2147,6 +2171,54 @@ impl NodeGraphPane {
         });
 
         node_template.build_node(&mut self.state.graph, &mut self.user_state, frontend_id);
+
+        // For dynamic-port nodes loaded from backend state, resize to the serialized port count.
+        if let Some(n) = num_ports {
+            let n = n as usize;
+            match node_template {
+                NodeTemplate::SubtrackInputs => {
+                    // build_node created 0 outputs; add n audio outputs using actual track names
+                    for i in 0..n {
+                        let name = port_names.get(i)
+                            .cloned()
+                            .unwrap_or_else(|| format!("Subtrack {}", i + 1));
+                        self.state.graph.add_output_param(frontend_id, name, DataType::Audio);
+                    }
+                }
+                NodeTemplate::Mixer => {
+                    // build_node added static inputs; remove them all and add n dynamic inputs
+                    let input_ids: Vec<InputId> = self.state.graph.nodes.get(frontend_id)
+                        .map(|node| node.inputs.iter().map(|(_, id)| *id).collect())
+                        .unwrap_or_default();
+                    for id in input_ids {
+                        self.state.graph.remove_input_param(id);
+                    }
+                    // Audio inputs
+                    for i in 0..n {
+                        self.state.graph.add_input_param(
+                            frontend_id,
+                            format!("Input {}", i + 1),
+                            DataType::Audio,
+                            ValueType::float(0.0),
+                            InputParamKind::ConnectionOnly,
+                            true,
+                        );
+                    }
+                    // Level/gain parameters
+                    for i in 0..n {
+                        self.state.graph.add_input_param(
+                            frontend_id,
+                            format!("Level {}", i + 1),
+                            DataType::CV,
+                            ValueType::float_param(1.0, 0.0, 1.0, "", i as u32, None),
+                            InputParamKind::ConstantOnly,
+                            true,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
 
         self.state.node_positions.insert(frontend_id, egui::pos2(position.0, position.1));
         self.state.node_order.push(frontend_id);
@@ -2227,8 +2299,9 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
         // If selected track changed or project was reloaded, reload the graph
         if self.track_id != current_track || (generation_changed && current_track.is_some()) {
             if let Some(new_track_id) = current_track {
-                // Get backend track ID
-                if let Some(&backend_track_id) = shared.layer_to_track_map.get(&new_track_id) {
+                // Get backend track ID — check audio/MIDI layers first, then group/metatrack layers
+                if let Some(&backend_track_id) = shared.layer_to_track_map.get(&new_track_id)
+                     {
                     // Check if track is MIDI or Audio
                     if let Some(audio_controller) = &shared.audio_controller {
                         let is_valid_track = {
@@ -2272,7 +2345,7 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             let bg_color = shared.theme.bg_color(&["#node-editor", ".pane-content"], ui.ctx(), egui::Color32::from_gray(30));
             painter.rect_filled(rect, 0.0, bg_color);
 
-            let text = "Select a MIDI or Audio track to view its node graph";
+            let text = "Select a track to view its node graph";
             let font_id = egui::FontId::proportional(16.0);
             let text_color = shared.theme.text_color(&["#node-editor", ".text-secondary"], ui.ctx(), egui::Color32::from_gray(150));
 

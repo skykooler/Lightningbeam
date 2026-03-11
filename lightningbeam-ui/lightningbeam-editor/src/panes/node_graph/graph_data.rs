@@ -149,6 +149,8 @@ node_templates! {
     // Subgraph I/O
     TemplateInput,      "TemplateInput",      "Template Input",      "Subgraph I/O", false;
     TemplateOutput,     "TemplateOutput",     "Template Output",     "Subgraph I/O", false;
+    // Auto-generated (not user-addable)
+    SubtrackInputs,     "SubtrackInputs",     "Subtrack Inputs",     "Inputs",       false;
     // Outputs
     AudioOutput,        "AudioOutput",        "Audio Output",        "Outputs",      true;
 }
@@ -935,6 +937,10 @@ impl NodeTemplateTrait for NodeTemplate {
                 // Ports will be rebuilt when a script is compiled
                 graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
                 graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
+            }
+            NodeTemplate::SubtrackInputs => {
+                // Ports are dynamic — populated from backend graph state when loaded.
+                // No static ports at construction time.
             }
         }
     }

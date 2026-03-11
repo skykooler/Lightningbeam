@@ -479,7 +479,6 @@ enum FileCommand {
         path: std::path::PathBuf,
         document: lightningbeam_core::document::Document,
         layer_to_track_map: std::collections::HashMap<uuid::Uuid, u32>,
-        clip_to_metatrack_map: std::collections::HashMap<uuid::Uuid, u32>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     },
     Load {
@@ -554,8 +553,8 @@ impl FileOperationsWorker {
     fn run(self) {
         while let Ok(command) = self.command_rx.recv() {
             match command {
-                FileCommand::Save { path, document, layer_to_track_map, clip_to_metatrack_map, progress_tx } => {
-                    self.handle_save(path, document, &layer_to_track_map, &clip_to_metatrack_map, progress_tx);
+                FileCommand::Save { path, document, layer_to_track_map, progress_tx } => {
+                    self.handle_save(path, document, &layer_to_track_map, progress_tx);
                 }
                 FileCommand::Load { path, progress_tx } => {
                     self.handle_load(path, progress_tx);
@@ -570,7 +569,6 @@ impl FileOperationsWorker {
         path: std::path::PathBuf,
         document: lightningbeam_core::document::Document,
         layer_to_track_map: &std::collections::HashMap<uuid::Uuid, u32>,
-        clip_to_metatrack_map: &std::collections::HashMap<uuid::Uuid, u32>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     ) {
         use lightningbeam_core::file_io::{save_beam, SaveSettings};
@@ -613,7 +611,7 @@ impl FileOperationsWorker {
         let step3_start = std::time::Instant::now();
 
         let settings = SaveSettings::default();
-        match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, clip_to_metatrack_map, &settings) {
+        match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, &settings) {
             Ok(()) => {
                 eprintln!("📊 [SAVE] Step 3: save_beam() took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
                 eprintln!("📊 [SAVE] ✅ Total save time: {:.2}ms", save_start.elapsed().as_secs_f64() * 1000.0);
@@ -829,8 +827,6 @@ struct EditorApp {
     // Track ID mapping (Document layer UUIDs <-> daw-backend TrackIds)
     layer_to_track_map: HashMap<Uuid, daw_backend::TrackId>,
     track_to_layer_map: HashMap<daw_backend::TrackId, Uuid>,
-    // Movie clip ID -> backend metatrack (group track) mapping
-    clip_to_metatrack_map: HashMap<Uuid, daw_backend::TrackId>,
     /// Generation counter - incremented on project load to force UI components to reload
     project_generation: u64,
     // Clip instance ID mapping (Document clip instance UUIDs <-> backend clip instance IDs)
@@ -1106,7 +1102,6 @@ impl EditorApp {
             webcam_record_command: None,
             layer_to_track_map: HashMap::new(),
             track_to_layer_map: HashMap::new(),
-            clip_to_metatrack_map: HashMap::new(),
             project_generation: 0,
             clip_instance_to_backend_map: HashMap::new(),
             playback_time: 0.0, // Start at beginning
@@ -1623,13 +1618,103 @@ impl EditorApp {
                 }
             }
         }
+
+        // After all tracks are created, push subtrack mixing graph commands for group metatracks
+        self.update_metatrack_subtrack_graphs();
+    }
+
+    /// Collect all group layers (depth-first) and push their subtrack graph to the backend.
+    /// Also creates metatracks for any groups that don't have one yet (e.g., empty groups).
+    /// Called at the end of sync_audio_layers_to_backend, after all child tracks exist.
+    fn update_metatrack_subtrack_graphs(&mut self) {
+        use lightningbeam_core::layer::AnyLayer;
+
+        // Collect (group_layer_id, group_name, children snapshot) for every group.
+        // Snapshot the name too so we can create metatracks for groups not yet in the map.
+        let mut group_snapshots: Vec<(uuid::Uuid, String, Vec<AnyLayer>)> = Vec::new();
+
+        fn collect_groups(layers: &[AnyLayer], out: &mut Vec<(uuid::Uuid, String, Vec<AnyLayer>)>) {
+            for layer in layers {
+                if let AnyLayer::Group(g) = layer {
+                    out.push((g.layer.id, g.layer.name.clone(), g.children.clone()));
+                    collect_groups(&g.children, out);
+                }
+            }
+        }
+        collect_groups(
+            &self.action_executor.document().root.children,
+            &mut group_snapshots,
+        );
+
+        // Ensure metatracks exist for ALL groups, not just those with audio children.
+        // This allows the node graph pane to open for empty group layers too.
+        if let Some(ref controller_arc) = self.audio_controller {
+            for (group_id, group_name, _) in &group_snapshots {
+                if !self.layer_to_track_map.contains_key(group_id) {
+                    let track_id_result = {
+                        let mut controller = controller_arc.lock().unwrap();
+                        controller.create_group_track_sync(format!("[{}]", group_name), None)
+                    };
+                    match track_id_result {
+                        Ok(track_id) => {
+                            self.layer_to_track_map.insert(*group_id, track_id);
+                            println!("✅ Created metatrack for group '{}' (TrackId: {})", group_name, track_id);
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️  Failed to create metatrack for group '{}': {}", group_name, e);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Push subtrack graph commands for every group that now has a metatrack.
+        if let Some(ref controller_arc) = self.audio_controller {
+            let mut controller = controller_arc.lock().unwrap();
+            for (group_id, _, children) in &group_snapshots {
+                if let Some(&metatrack_id) = self.layer_to_track_map.get(group_id) {
+                    let subtracks = self.build_subtrack_list_for_group(children);
+                    controller.set_metatrack_subtrack_graph(metatrack_id, subtracks);
+                }
+            }
+        }
+    }
+
+    /// Build the ordered subtrack list for a group layer's direct children.
+    /// Audio child layers → looked up via layer_to_track_map.
+    /// Nested group children → looked up via layer_to_track_map.
+    fn build_subtrack_list_for_group(
+        &self,
+        children: &[lightningbeam_core::layer::AnyLayer],
+    ) -> Vec<(daw_backend::TrackId, String)> {
+        use lightningbeam_core::layer::AnyLayer;
+        let mut subtracks = Vec::new();
+        // Iterate in reverse so the top timeline layer maps to port 0 (top of node).
+        // Timeline layers are stored top-to-bottom (index 0 = topmost), and node ports
+        // are displayed top-to-bottom, so reversing aligns them.
+        for child in children.iter().rev() {
+            match child {
+                AnyLayer::Audio(audio_layer) => {
+                    if let Some(&track_id) = self.layer_to_track_map.get(&audio_layer.layer.id) {
+                        subtracks.push((track_id, audio_layer.layer.name.clone()));
+                    }
+                }
+                AnyLayer::Group(group_layer) => {
+                    if let Some(&meta_id) = self.layer_to_track_map.get(&group_layer.layer.id) {
+                        subtracks.push((meta_id, group_layer.layer.name.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        subtracks
     }
 
     /// Ensure a backend metatrack exists for a parent container (VectorClip or GroupLayer).
     /// Checks if the ID belongs to a GroupLayer first, then falls back to VectorClip.
     fn ensure_metatrack_for_parent(&mut self, parent_id: Uuid) -> Option<daw_backend::TrackId> {
         // Return existing metatrack if already mapped
-        if let Some(&track_id) = self.clip_to_metatrack_map.get(&parent_id) {
+        if let Some(&track_id) = self.layer_to_track_map.get(&parent_id) {
             return Some(track_id);
         }
 
@@ -1647,7 +1732,7 @@ impl EditorApp {
 
     /// Ensure a backend metatrack (group track) exists for a GroupLayer.
     fn ensure_metatrack_for_group(&mut self, group_layer_id: Uuid) -> Option<daw_backend::TrackId> {
-        if let Some(&track_id) = self.clip_to_metatrack_map.get(&group_layer_id) {
+        if let Some(&track_id) = self.layer_to_track_map.get(&group_layer_id) {
             return Some(track_id);
         }
 
@@ -1660,7 +1745,7 @@ impl EditorApp {
             let mut controller = controller_arc.lock().unwrap();
             match controller.create_group_track_sync(format!("[{}]", group_name), None) {
                 Ok(track_id) => {
-                    self.clip_to_metatrack_map.insert(group_layer_id, track_id);
+                    self.layer_to_track_map.insert(group_layer_id, track_id);
                     println!("✅ Created metatrack for group '{}' (TrackId: {})", group_name, track_id);
                     return Some(track_id);
                 }
@@ -1676,7 +1761,7 @@ impl EditorApp {
     /// Returns the metatrack's TrackId, creating one if needed.
     fn ensure_metatrack_for_clip(&mut self, clip_id: Uuid) -> Option<daw_backend::TrackId> {
         // Return existing metatrack if already mapped
-        if let Some(&track_id) = self.clip_to_metatrack_map.get(&clip_id) {
+        if let Some(&track_id) = self.layer_to_track_map.get(&clip_id) {
             return Some(track_id);
         }
 
@@ -1690,7 +1775,7 @@ impl EditorApp {
             let mut controller = controller_arc.lock().unwrap();
             match controller.create_group_track_sync(format!("[{}]", clip_name), None) {
                 Ok(track_id) => {
-                    self.clip_to_metatrack_map.insert(clip_id, track_id);
+                    self.layer_to_track_map.insert(clip_id, track_id);
                     println!("✅ Created metatrack for clip '{}' (TrackId: {})", clip_name, track_id);
                     return Some(track_id);
                 }
@@ -1817,7 +1902,6 @@ impl EditorApp {
                     audio_controller: Some(&mut *controller),
                     layer_to_track_map: &self.layer_to_track_map,
                     clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
-                    clip_to_metatrack_map: &self.clip_to_metatrack_map,
                 };
 
                 if let Err(e) = self.action_executor.execute_with_backend(Box::new(action), &mut backend_context) {
@@ -2269,7 +2353,6 @@ impl EditorApp {
                     audio_controller: Some(&mut *controller),
                     layer_to_track_map: &self.layer_to_track_map,
                     clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
-                    clip_to_metatrack_map: &self.clip_to_metatrack_map,
                 };
                 if let Err(e) = self
                     .action_executor
@@ -2457,7 +2540,6 @@ impl EditorApp {
                             audio_controller: Some(&mut *controller),
                             layer_to_track_map: &self.layer_to_track_map,
                             clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
-                            clip_to_metatrack_map: &self.clip_to_metatrack_map,
                         };
                         if let Err(e) = self
                             .action_executor
@@ -2689,7 +2771,6 @@ impl EditorApp {
                     audio_controller: Some(&mut *controller),
                     layer_to_track_map: &self.layer_to_track_map,
                     clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
-                    clip_to_metatrack_map: &self.clip_to_metatrack_map,
                 };
                 if let Err(e) = self.action_executor.execute_with_backend(Box::new(action), &mut backend_context) {
                     eprintln!("Duplicate clip failed: {}", e);
@@ -2788,7 +2869,7 @@ impl EditorApp {
                 // Reset state and return to start screen
                 self.layer_to_track_map.clear();
                 self.track_to_layer_map.clear();
-                self.clip_to_metatrack_map.clear();
+                self.layer_to_track_map.clear();
                 self.clip_instance_to_backend_map.clear();
                 self.current_file_path = None;
                 self.selection.clear();
@@ -3037,7 +3118,6 @@ impl EditorApp {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                         clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
-                        clip_to_metatrack_map: &self.clip_to_metatrack_map,
                     };
                     match self.action_executor.undo_with_backend(&mut backend_context) {
                         Ok(true) => {
@@ -3076,7 +3156,6 @@ impl EditorApp {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                         clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
-                        clip_to_metatrack_map: &self.clip_to_metatrack_map,
                     };
                     match self.action_executor.redo_with_backend(&mut backend_context) {
                         Ok(true) => {
@@ -3555,7 +3634,6 @@ impl EditorApp {
             path: path.clone(),
             document,
             layer_to_track_map: self.layer_to_track_map.clone(),
-            clip_to_metatrack_map: self.clip_to_metatrack_map.clone(),
             progress_tx,
         };
 
@@ -3710,15 +3788,6 @@ impl EditorApp {
                 loaded_project.layer_to_track_map.len(), step5_start.elapsed().as_secs_f64() * 1000.0);
         } else {
             eprintln!("📊 [APPLY] Step 5: No saved track mappings (old file format)");
-        }
-
-        // Restore clip-to-metatrack mappings
-        if !loaded_project.clip_to_metatrack_map.is_empty() {
-            for (&clip_id, &track_id) in &loaded_project.clip_to_metatrack_map {
-                self.clip_to_metatrack_map.insert(clip_id, track_id);
-            }
-            eprintln!("📊 [APPLY] Step 5b: Restored {} clip-to-metatrack mappings",
-                loaded_project.clip_to_metatrack_map.len());
         }
 
         // Sync any audio layers that don't have a mapping yet (new layers, or old file format)
@@ -4357,7 +4426,6 @@ impl EditorApp {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                         clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
-                        clip_to_metatrack_map: &self.clip_to_metatrack_map,
                     };
 
                     if let Err(e) = self.action_executor.execute_with_backend(Box::new(action), &mut backend_context) {
@@ -4403,7 +4471,6 @@ impl EditorApp {
                             audio_controller: Some(&mut *controller),
                             layer_to_track_map: &self.layer_to_track_map,
                             clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
-                            clip_to_metatrack_map: &self.clip_to_metatrack_map,
                         };
 
                         if let Err(e) = self.action_executor.execute_with_backend(Box::new(audio_action), &mut backend_context) {
@@ -4521,7 +4588,6 @@ impl EditorApp {
                     audio_controller: Some(&mut *controller),
                     layer_to_track_map: &self.layer_to_track_map,
                     clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
-                    clip_to_metatrack_map: &self.clip_to_metatrack_map,
                 };
 
                 if let Err(e) = self.action_executor.execute_with_backend(Box::new(audio_action), &mut backend_context) {
@@ -5797,7 +5863,6 @@ impl eframe::App for EditorApp {
                         audio_controller: Some(&mut *controller),
                         layer_to_track_map: &self.layer_to_track_map,
                         clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
-                        clip_to_metatrack_map: &self.clip_to_metatrack_map,
                     };
 
                     // Execute action with backend synchronization
