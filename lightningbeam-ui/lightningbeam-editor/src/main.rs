@@ -68,6 +68,11 @@ struct Args {
     /// Use dark theme
     #[arg(long, conflicts_with = "light")]
     dark: bool,
+
+    /// Force Vello to use its CPU renderer instead of the GPU.
+    /// Useful for testing the CPU fallback path or working around GPU driver issues.
+    #[arg(long)]
+    cpu_renderer: bool,
 }
 
 fn main() -> eframe::Result {
@@ -88,6 +93,11 @@ fn main() -> eframe::Result {
 
     // Parse command line arguments
     let args = Args::parse();
+
+    if args.cpu_renderer {
+        panes::stage::FORCE_CPU_RENDERER.store(true, std::sync::atomic::Ordering::Relaxed);
+        println!("⚠️  CPU renderer forced via --cpu-renderer");
+    }
 
     // Load config to get theme preference
     let config = AppConfig::load();

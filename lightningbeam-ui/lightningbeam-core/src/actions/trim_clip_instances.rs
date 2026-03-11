@@ -369,7 +369,7 @@ impl Action for TrimClipInstancesAction {
             if let AnyLayer::Vector(vl) = layer {
                 for (instance_id, _trim_type, _old, _new) in trims {
                     if let Some(instance) = vl.clip_instances.iter().find(|ci| ci.id == *instance_id) {
-                        if let Some(&metatrack_id) = backend.clip_to_metatrack_map.get(&instance.clip_id) {
+                        if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             // Instance already has new values after execute()
                             controller.set_offset(metatrack_id, instance.timeline_start);
                             controller.set_trim_start(metatrack_id, instance.trim_start);
@@ -459,7 +459,7 @@ impl Action for TrimClipInstancesAction {
             if let AnyLayer::Vector(vl) = layer {
                 for (instance_id, _trim_type, _old, _new) in trims {
                     if let Some(instance) = vl.clip_instances.iter().find(|ci| ci.id == *instance_id) {
-                        if let Some(&metatrack_id) = backend.clip_to_metatrack_map.get(&instance.clip_id) {
+                        if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             // Instance already has old values after rollback()
                             controller.set_offset(metatrack_id, instance.timeline_start);
                             controller.set_trim_start(metatrack_id, instance.trim_start);

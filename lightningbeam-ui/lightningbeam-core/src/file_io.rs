@@ -61,9 +61,6 @@ pub struct SerializedAudioBackend {
     #[serde(default)]
     pub layer_to_track_map: std::collections::HashMap<uuid::Uuid, u32>,
 
-    /// Mapping from movie clip UUIDs to backend metatrack (group track) TrackIds
-    #[serde(default)]
-    pub clip_to_metatrack_map: std::collections::HashMap<uuid::Uuid, u32>,
 }
 
 /// Settings for saving a project
@@ -99,9 +96,6 @@ pub struct LoadedProject {
 
     /// Mapping from UI layer UUIDs to backend TrackIds (empty for old files)
     pub layer_to_track_map: std::collections::HashMap<uuid::Uuid, u32>,
-
-    /// Mapping from movie clip UUIDs to backend metatrack TrackIds (empty for old files)
-    pub clip_to_metatrack_map: std::collections::HashMap<uuid::Uuid, u32>,
 
     /// Loaded audio pool entries
     pub audio_pool_entries: Vec<AudioPoolEntry>,
@@ -154,7 +148,6 @@ pub fn save_beam(
     audio_project: &mut AudioProject,
     audio_pool_entries: Vec<AudioPoolEntry>,
     layer_to_track_map: &std::collections::HashMap<uuid::Uuid, u32>,
-    clip_to_metatrack_map: &std::collections::HashMap<uuid::Uuid, u32>,
     _settings: &SaveSettings,
 ) -> Result<(), String> {
     let fn_start = std::time::Instant::now();
@@ -414,7 +407,6 @@ pub fn save_beam(
             project: audio_project.clone(),
             audio_pool_entries: modified_entries,
             layer_to_track_map: layer_to_track_map.clone(),
-            clip_to_metatrack_map: clip_to_metatrack_map.clone(),
         },
     };
     eprintln!("📊 [SAVE_BEAM] Step 5: Build BeamProject structure took {:.2}ms", step5_start.elapsed().as_secs_f64() * 1000.0);
@@ -502,7 +494,6 @@ pub fn load_beam(path: &Path) -> Result<LoadedProject, String> {
     let mut audio_project = beam_project.audio_backend.project;
     let audio_pool_entries = beam_project.audio_backend.audio_pool_entries;
     let layer_to_track_map = beam_project.audio_backend.layer_to_track_map;
-    let clip_to_metatrack_map = beam_project.audio_backend.clip_to_metatrack_map;
     eprintln!("📊 [LOAD_BEAM] Step 5: Extract document and audio state took {:.2}ms", step5_start.elapsed().as_secs_f64() * 1000.0);
 
     // 6. Rebuild AudioGraphs from presets
@@ -679,7 +670,6 @@ pub fn load_beam(path: &Path) -> Result<LoadedProject, String> {
         document,
         audio_project,
         layer_to_track_map,
-        clip_to_metatrack_map,
         audio_pool_entries: restored_entries,
         missing_files,
     })

@@ -37,14 +37,12 @@ pub struct BackendContext<'a> {
     /// Audio engine controller (optional - may not be initialized)
     pub audio_controller: Option<&'a mut daw_backend::EngineController>,
 
-    /// Mapping from document layer UUIDs to backend track IDs
+    /// Mapping from all document layer/clip/group UUIDs to backend track IDs.
+    /// Covers audio layers, MIDI layers, group layers, and vector clip metatracks.
     pub layer_to_track_map: &'a HashMap<Uuid, daw_backend::TrackId>,
 
     /// Mapping from document clip instance UUIDs to backend clip instance IDs
     pub clip_instance_to_backend_map: &'a mut HashMap<Uuid, BackendClipInstanceId>,
-
-    /// Mapping from movie clip UUIDs to backend metatrack (group track) TrackIds
-    pub clip_to_metatrack_map: &'a HashMap<Uuid, daw_backend::TrackId>,
 
     // Future: pub video_controller: Option<&'a mut VideoController>,
 }

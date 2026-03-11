@@ -11,6 +11,11 @@ use lightningbeam_core::layer::{AnyLayer, AudioLayer};
 use lightningbeam_core::renderer::RenderedLayerType;
 use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// When set to `true` (via `--cpu-renderer`), forces Vello to use its CPU
+/// rendering path regardless of GPU capability.
+pub static FORCE_CPU_RENDERER: AtomicBool = AtomicBool::new(false);
 
 /// Enable HDR compositing pipeline (per-layer rendering with proper opacity)
 /// Set to true to use the new pipeline, false for legacy single-scene rendering
@@ -63,15 +68,51 @@ pub struct VelloResourcesMap {
 
 impl SharedVelloResources {
     pub fn new(device: &wgpu::Device, video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>, target_format: wgpu::TextureFormat) -> Result<Self, String> {
-        let renderer = vello::Renderer::new(
-            device,
-            vello::RendererOptions {
-                use_cpu: false,
-                antialiasing_support: vello::AaSupport::all(),
-                num_init_threads: std::num::NonZeroUsize::new(1),
-                pipeline_cache: None,
-            },
-        ).map_err(|e| format!("Failed to create Vello renderer: {}", e))?;
+        let use_cpu = FORCE_CPU_RENDERER.load(Ordering::Relaxed);
+
+        // wgpu panics (rather than returning Err) when shader validation fails, so we
+        // catch panics here and fall back to Vello's CPU renderer.  This commonly
+        // happens on old GPUs lacking SHADER_FLOAT16_IN_FLOAT32 (required by Vello's
+        // flatten shader via unpack2x16float).  The CPU path uses pre-compiled Rust
+        // implementations of the same compute shaders, so no GPU shader compilation
+        // occurs and the capability check is bypassed entirely.
+        let gpu_result = if use_cpu {
+            // Skip GPU attempt entirely when forced via --cpu-renderer.
+            Err(Box::new("cpu-renderer flag set") as Box<dyn std::any::Any + Send>)
+        } else {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                vello::Renderer::new(
+                    device,
+                    vello::RendererOptions {
+                        use_cpu: false,
+                        antialiasing_support: vello::AaSupport::all(),
+                        num_init_threads: std::num::NonZeroUsize::new(1),
+                        pipeline_cache: None,
+                    },
+                )
+            }))
+        };
+        let renderer = match gpu_result {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(format!("Failed to create Vello renderer: {e}")),
+            Err(_) => {
+                if !use_cpu {
+                    eprintln!(
+                        "WARNING: GPU Vello renderer failed to initialise (missing shader \
+                         capability). Falling back to CPU renderer — performance may be reduced."
+                    );
+                }
+                vello::Renderer::new(
+                    device,
+                    vello::RendererOptions {
+                        use_cpu: true,
+                        antialiasing_support: vello::AaSupport::all(),
+                        num_init_threads: std::num::NonZeroUsize::new(1),
+                        pipeline_cache: None,
+                    },
+                ).map_err(|e| format!("CPU fallback renderer also failed: {e}"))?
+            }
+        };
 
         // Create blit shader for rendering texture to screen
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -480,7 +521,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
         // Initialize shared resources if not yet created (only happens once for first Stage pane)
         if map.shared.is_none() {
             map.shared = Some(Arc::new(
-                SharedVelloResources::new(device, self.ctx.video_manager.clone(), self.ctx.target_format).expect("Failed to initialize shared Vello resources")
+                SharedVelloResources::new(device, self.ctx.video_manager.clone(), self.ctx.target_format)
+                    .unwrap_or_else(|e| panic!("{}", e))
             ));
         }
 
