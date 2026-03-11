@@ -1,3 +1,13 @@
+# 1.0.3-alpha:
+Changes:
+- Add gradient support to vector graphics
+- Add "frames" timeline mode
+- Reduce CPU usage at idle
+- Allow group tracks' audio node graphs to be edited
+
+Bugfixes:
+- Support Vello CPU fallback on systems with older GPUs
+
 # 1.0.2-alpha:
 Changes:
 - All vector shapes on a layer go into a unified shape rather than separate shapes
