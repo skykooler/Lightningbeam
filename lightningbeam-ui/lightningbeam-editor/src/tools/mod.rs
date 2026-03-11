@@ -109,6 +109,10 @@ pub struct RasterToolSettings {
     // --- Gradient ---
     pub gradient: lightningbeam_core::gradient::ShapeGradient,
     pub gradient_opacity: f32,
+    // --- Brush rotation offset ---
+    /// User-controlled angle offset added to the brush's elliptical_dab_angle (degrees).
+    /// Lets the user re-orient stock .myb brushes without editing the file.
+    pub brush_angle_offset: f32,
 }
 
 /// Brush mode for the Liquify tool.
@@ -208,6 +212,7 @@ impl Default for RasterToolSettings {
             liquify_strength: 0.5,
             gradient:         lightningbeam_core::gradient::ShapeGradient::default(),
             gradient_opacity: 1.0,
+            brush_angle_offset: 0.0,
         }
     }
 }

@@ -48,6 +48,7 @@ mod effect_thumbnails;
 use effect_thumbnails::EffectThumbnailGenerator;
 
 mod custom_cursor;
+mod tablet;
 mod debug_overlay;
 
 #[cfg(debug_assertions)]
@@ -926,6 +927,8 @@ struct EditorApp {
 
     /// Custom cursor cache for SVG cursors
     cursor_cache: custom_cursor::CursorCache,
+    /// Cross-platform graphics tablet (pen/stylus) input state
+    tablet: tablet::TabletInput,
     /// Debug test mode (F5) — input recording, panic capture & visual replay
     #[cfg(debug_assertions)]
     test_mode: test_mode::TestModeState,
@@ -1165,6 +1168,7 @@ impl EditorApp {
 
             // Debug overlay (F3)
             cursor_cache: custom_cursor::CursorCache::new(),
+            tablet: tablet::TabletInput::new(cc),
             debug_overlay_visible: false,
             debug_stats_collector: debug_overlay::DebugStatsCollector::new(),
             gpu_info,
@@ -4674,8 +4678,20 @@ impl EditorApp {
 }
 
 impl eframe::App for EditorApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.tablet.poll(ctx, raw_input, self.selected_tool);
+
+        // Pressure and tilt are now in the global AtomicU32 cells (tablet::current_pressure /
+        // current_tilt) and will be picked up by make_stroke_point on the next stroke tick.
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _frame_start = std::time::Instant::now();
+
+        // Consume any pending tool switch from the tablet (eraser in/out).
+        if let Some(tool) = self.tablet.pending_tool_switch.take() {
+            self.selected_tool = tool;
+        }
 
         // Force continuous repaint if we have pending waveform updates
         // This ensures thumbnails update immediately when waveform data arrives

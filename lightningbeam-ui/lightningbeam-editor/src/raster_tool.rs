@@ -299,12 +299,14 @@ impl BrushRasterTool {
     }
 
     fn make_stroke_point(pos: egui::Vec2, off_x: i32, off_y: i32) -> StrokePoint {
+        let pressure = crate::tablet::current_pressure();
+        let (tilt_x, tilt_y) = crate::tablet::current_tilt();
         StrokePoint {
             x:         pos.x - off_x as f32,
             y:         pos.y - off_y as f32,
-            pressure:  1.0,
-            tilt_x:    0.0,
-            tilt_y:    0.0,
+            pressure,
+            tilt_x,
+            tilt_y,
             timestamp: 0.0,
         }
     }

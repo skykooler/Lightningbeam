@@ -612,6 +612,16 @@ impl InfopanelPane {
                 .logarithmic(true)
                 .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
         });
+
+        let bs = if is_eraser { &rs.active_eraser_settings } else { &rs.active_brush_settings };
+        if bs.elliptical_dab_ratio > 1.001 {
+            ui.horizontal(|ui| {
+                ui.label("Angle:");
+                ui.add(egui::Slider::new(&mut rs.brush_angle_offset, -180.0_f32..=180.0)
+                    .suffix("°")
+                    .custom_formatter(|v, _| format!("{:.0}°", v)));
+            });
+        }
     }
 
     /// Render the brush preset thumbnail grid (collapsible).

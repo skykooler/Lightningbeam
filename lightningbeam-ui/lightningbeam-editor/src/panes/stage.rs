@@ -5756,17 +5756,19 @@ impl StagePane {
         if w == 0 || h == 0 { return; }
 
         let mut float_pixels = vec![0u8; (w * h * 4) as usize];
-        for row in 0..h {
-            let sy = y0 + row as i32;
-            if sy < 0 || sy >= kf.height as i32 { continue; }
-            for col in 0..w {
-                let sx = x0 + col as i32;
-                if sx < 0 || sx >= kf.width as i32 { continue; }
-                if !sel.contains_pixel(sx, sy) { continue; }
-                let si = ((sy as u32 * kf.width + sx as u32) * 4) as usize;
-                let di = ((row * w + col) * 4) as usize;
-                float_pixels[di..di + 4].copy_from_slice(&kf.raw_pixels[si..si + 4]);
-                kf.raw_pixels[si..si + 4].fill(0);
+        if !kf.raw_pixels.is_empty() {
+            for row in 0..h {
+                let sy = y0 + row as i32;
+                if sy < 0 || sy >= kf.height as i32 { continue; }
+                for col in 0..w {
+                    let sx = x0 + col as i32;
+                    if sx < 0 || sx >= kf.width as i32 { continue; }
+                    if !sel.contains_pixel(sx, sy) { continue; }
+                    let si = ((sy as u32 * kf.width + sx as u32) * 4) as usize;
+                    let di = ((row * w + col) * 4) as usize;
+                    float_pixels[di..di + 4].copy_from_slice(&kf.raw_pixels[si..si + 4]);
+                    kf.raw_pixels[si..si + 4].fill(0);
+                }
             }
         }
 
@@ -5919,10 +5921,13 @@ impl StagePane {
                 // Compute first dab (same arithmetic as the layer case).
                 let mut stroke_state = StrokeState::new();
                 // Convert to float-local space: dabs must be in canvas pixel coords.
+                let (tilt_x, tilt_y) = crate::tablet::current_tilt();
                 let first_pt = StrokePoint {
                     x: world_pos.x - float_x as f32,
                     y: world_pos.y - float_y as f32,
-                    pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0,
+                    pressure: crate::tablet::current_pressure(),
+                    tilt_x, tilt_y,
+                    timestamp: 0.0,
                 };
                 let single = StrokeRecord {
                     brush_settings: brush.clone(),
@@ -6009,9 +6014,12 @@ impl StagePane {
                 // Compute the first dab (single-point tap)
                 let mut stroke_state = StrokeState::new();
 
+                let (tilt_x, tilt_y) = crate::tablet::current_tilt();
                 let first_pt = StrokePoint {
                     x: world_pos.x, y: world_pos.y,
-                    pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0,
+                    pressure: crate::tablet::current_pressure(),
+                    tilt_x, tilt_y,
+                    timestamp: 0.0,
                 };
                 let single = StrokeRecord {
                     brush_settings: brush.clone(),
@@ -6083,9 +6091,12 @@ impl StagePane {
                     };
 
                     // Convert current world position to canvas-local space.
+                    let (tilt_x, tilt_y) = crate::tablet::current_tilt();
                     let curr_local = StrokePoint {
                         x: world_pos.x - cx, y: world_pos.y - cy,
-                        pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0,
+                        pressure: crate::tablet::current_pressure(),
+                        tilt_x, tilt_y,
+                        timestamp: 0.0,
                     };
 
                     const MIN_DIST_SQ: f32 = 1.5 * 1.5;
@@ -6156,10 +6167,13 @@ impl StagePane {
                     };
 
                     if let Some((canvas_id, cw, ch, cx, cy)) = canvas_info {
+                        let (tilt_x, tilt_y) = crate::tablet::current_tilt();
                         let pt = StrokePoint {
                             x: world_pos.x - cx,
                             y: world_pos.y - cy,
-                            pressure: 1.0, tilt_x: 0.0, tilt_y: 0.0, timestamp: 0.0,
+                            pressure: crate::tablet::current_pressure(),
+                            tilt_x, tilt_y,
+                            timestamp: 0.0,
                         };
                         let single = StrokeRecord {
                             brush_settings: brush.clone(),
@@ -11081,7 +11095,8 @@ impl StagePane {
                 let bs = &shared.raster_settings.active_brush_settings;
                 let ratio = bs.elliptical_dab_ratio.max(1.0);
                 let expand = 1.0 + bs.offset_by_random;
-                (r * expand, r * expand / ratio, bs.elliptical_dab_angle.to_radians())
+                let angle = (bs.elliptical_dab_angle + shared.raster_settings.brush_angle_offset).to_radians();
+                (r * expand, r * expand / ratio, angle)
             } else {
                 (r, r, 0.0_f32)
             }
@@ -11090,7 +11105,8 @@ impl StagePane {
             let r = shared.raster_settings.brush_radius;
             let ratio = bs.elliptical_dab_ratio.max(1.0);
             let expand = 1.0 + bs.offset_by_random;
-            (r * expand, r * expand / ratio, bs.elliptical_dab_angle.to_radians())
+            let angle = (bs.elliptical_dab_angle + shared.raster_settings.brush_angle_offset).to_radians();
+            (r * expand, r * expand / ratio, angle)
         };
 
         let a = a_world * self.zoom; // major semi-axis in screen pixels

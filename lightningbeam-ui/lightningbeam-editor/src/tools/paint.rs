@@ -9,8 +9,10 @@ impl RasterToolDef for PaintTool {
     fn blend_mode(&self) -> RasterBlendMode { RasterBlendMode::Normal }
     fn header_label(&self) -> &'static str { "Brush" }
     fn brush_params(&self, s: &RasterToolSettings) -> BrushParams {
+        let mut base_settings = s.active_brush_settings.clone();
+        base_settings.elliptical_dab_angle += s.brush_angle_offset;
         BrushParams {
-            base_settings: s.active_brush_settings.clone(),
+            base_settings,
             radius: s.brush_radius,
             opacity: s.brush_opacity,
             hardness: s.brush_hardness,

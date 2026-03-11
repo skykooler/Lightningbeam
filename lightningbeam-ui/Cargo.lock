@@ -3468,7 +3468,7 @@ dependencies = [
 
 [[package]]
 name = "lightningbeam-editor"
-version = "1.0.2-alpha"
+version = "1.0.3-alpha"
 dependencies = [
  "beamdsp",
  "bytemuck",
@@ -3502,8 +3502,13 @@ dependencies = [
  "tiny-skia",
  "uuid",
  "vello",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-sys",
  "wgpu",
  "winit",
+ "x11rb",
 ]
 
 [[package]]

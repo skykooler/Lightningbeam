@@ -63,6 +63,13 @@ notify-rust = { workspace = true }
 # Debug overlay - memory tracking
 memory-stats = "1.1"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client   = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-backend  = { version = "0.3", features = ["client_system"] }
+wayland-sys      = { version = "0.31", features = ["client"] }
+x11rb            = { version = "0.13", features = ["xinput"] }
+
 [package.metadata.deb]
 name = "lightningbeam-editor"
 maintainer = "Skyler"
