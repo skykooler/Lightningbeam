@@ -139,12 +139,25 @@ fn find_intersections_recursive(
                 t2 = (t2 + dt2).clamp(0.0, 1.0);
             }
             // If Newton diverged far from the initial estimate, it may have
-            // jumped to a different crossing. Reject and fall back.
+            // jumped to a different crossing. Check if the refined result is
+            // actually better than the original before rejecting.
+            let p1_refined = orig_curve1.eval(t1);
+            let p2_refined = orig_curve2.eval(t2);
+            let err_refined = (p1_refined.x - p2_refined.x).powi(2)
+                + (p1_refined.y - p2_refined.y).powi(2);
+
             if (t1 - t1_orig).abs() > (t1_end - t1_start) * 2.0
                 || (t2 - t2_orig).abs() > (t2_end - t2_start) * 2.0
             {
-                t1 = t1_orig;
-                t2 = t2_orig;
+                let p1_orig = orig_curve1.eval(t1_orig);
+                let p2_orig = orig_curve2.eval(t2_orig);
+                let err_orig = (p1_orig.x - p2_orig.x).powi(2)
+                    + (p1_orig.y - p2_orig.y).powi(2);
+                // Only fall back if the original is actually closer
+                if err_orig < err_refined {
+                    t1 = t1_orig;
+                    t2 = t2_orig;
+                }
             }
 
             let p1 = orig_curve1.eval(t1);
