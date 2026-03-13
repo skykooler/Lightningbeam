@@ -665,6 +665,20 @@ impl Document {
         self.audio_clips.get(id)
     }
 
+    /// Find the document audio clip (UUID + ref) that owns the given backend pool index.
+    pub fn audio_clip_by_pool_index(&self, pool_index: usize) -> Option<(Uuid, &AudioClip)> {
+        self.audio_clips.iter()
+            .find(|(_, c)| c.audio_pool_index() == Some(pool_index))
+            .map(|(&id, c)| (id, c))
+    }
+
+    /// Find the document audio clip (UUID + ref) that owns the given backend MIDI clip ID.
+    pub fn audio_clip_by_midi_clip_id(&self, midi_clip_id: u32) -> Option<(Uuid, &AudioClip)> {
+        self.audio_clips.iter()
+            .find(|(_, c)| c.midi_clip_id() == Some(midi_clip_id))
+            .map(|(&id, c)| (id, c))
+    }
+
     /// Get a mutable vector clip by ID
     pub fn get_vector_clip_mut(&mut self, id: &Uuid) -> Option<&mut VectorClip> {
         self.vector_clips.get_mut(id)

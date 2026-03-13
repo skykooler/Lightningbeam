@@ -194,29 +194,23 @@ impl Action for RemoveClipInstancesAction {
                     }
                 }
                 AudioClipType::Sampled { audio_pool_index } => {
-                    use daw_backend::command::{Query, QueryResponse};
-
                     let internal_start = instance.trim_start;
                     let internal_end = instance.trim_end.unwrap_or(clip.duration);
                     let effective_duration = instance.timeline_duration
                         .unwrap_or(internal_end - internal_start);
                     let start_time = instance.timeline_start;
 
-                    let query = Query::AddAudioClipSync(
+                    let new_id = controller.add_audio_clip(
                         track_id,
                         *audio_pool_index,
                         start_time,
                         effective_duration,
                         internal_start,
                     );
-                    if let Ok(QueryResponse::AudioClipInstanceAdded(Ok(new_id))) =
-                        controller.send_query(query)
-                    {
-                        backend.clip_instance_to_backend_map.insert(
-                            instance.id,
-                            BackendClipInstanceId::Audio(new_id),
-                        );
-                    }
+                    backend.clip_instance_to_backend_map.insert(
+                        instance.id,
+                        BackendClipInstanceId::Audio(new_id),
+                    );
                 }
                 AudioClipType::Recording => {}
             }

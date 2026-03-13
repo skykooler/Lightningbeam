@@ -143,8 +143,11 @@ pub enum RenderedLayerType {
 pub struct RenderedLayer {
     /// The layer's unique identifier
     pub layer_id: Uuid,
-    /// Vello scene — only populated for `RenderedLayerType::Vector`.
+    /// Vello scene — only populated for `RenderedLayerType::Vector` in GPU mode.
     pub scene: Scene,
+    /// CPU-rendered pixmap — `Some` for `RenderedLayerType::Vector` in CPU mode, `None` otherwise.
+    /// When `Some`, `scene` is empty; the pixmap is uploaded directly to the GPU texture.
+    pub cpu_pixmap: Option<tiny_skia::Pixmap>,
     /// Layer opacity (0.0 to 1.0)
     pub opacity: f32,
     /// Blend mode for compositing
@@ -161,6 +164,7 @@ impl RenderedLayer {
         Self {
             layer_id,
             scene: Scene::new(),
+            cpu_pixmap: None,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             has_content: false,
@@ -173,6 +177,7 @@ impl RenderedLayer {
         Self {
             layer_id,
             scene: Scene::new(),
+            cpu_pixmap: None,
             opacity,
             blend_mode,
             has_content: false,
@@ -186,6 +191,7 @@ impl RenderedLayer {
         Self {
             layer_id,
             scene: Scene::new(),
+            cpu_pixmap: None,
             opacity,
             blend_mode: BlendMode::Normal,
             has_content,
@@ -196,8 +202,10 @@ impl RenderedLayer {
 
 /// Result of rendering a document for compositing
 pub struct CompositeRenderResult {
-    /// Background scene (rendered separately for potential optimization)
+    /// Background scene — GPU mode only; empty in CPU mode.
     pub background: Scene,
+    /// CPU-rendered background pixmap — `Some` in CPU mode, `None` in GPU mode.
+    pub background_cpu: Option<tiny_skia::Pixmap>,
     /// Rendered layers in bottom-to-top order
     pub layers: Vec<RenderedLayer>,
     /// Document dimensions
@@ -271,6 +279,7 @@ pub fn render_document_for_compositing(
             let float_entry = RenderedLayer {
                 layer_id: Uuid::nil(), // sentinel — not a real document layer
                 scene: Scene::new(),
+                cpu_pixmap: None,
                 opacity: 1.0,
                 blend_mode: crate::gpu::BlendMode::Normal,
                 has_content: !float_sel.pixels.is_empty(),
@@ -290,6 +299,7 @@ pub fn render_document_for_compositing(
 
     CompositeRenderResult {
         background,
+        background_cpu: None,
         layers: rendered_layers,
         width: document.width,
         height: document.height,
@@ -1188,6 +1198,480 @@ fn render_vector_layer(
     // Render DCEL from active keyframe
     if let Some(dcel) = layer.dcel_at_time(time) {
         render_dcel(dcel, scene, base_transform, layer_opacity, document, image_cache);
+    }
+}
+
+// ============================================================================
+// CPU Render Path (tiny-skia)
+// ============================================================================
+//
+// When Vello's CPU renderer is too slow (fixed per-call overhead), we render
+// vector layers to `tiny_skia::Pixmap` and upload via `queue.write_texture`.
+// The GPU compositor pipeline (sRGB→linear, blend modes) is unchanged.
+
+/// Convert a kurbo `Affine` to a tiny-skia `Transform`.
+///
+/// kurbo `as_coeffs()` → `[a, b, c, d, e, f]` where the matrix is:
+/// ```text
+/// | a  c  e |
+/// | b  d  f |
+/// | 0  0  1 |
+/// ```
+/// tiny-skia `from_row(sx, ky, kx, sy, tx, ty)` fills the same layout.
+fn affine_to_ts(affine: Affine) -> tiny_skia::Transform {
+    let [a, b, c, d, e, f] = affine.as_coeffs();
+    tiny_skia::Transform::from_row(a as f32, b as f32, c as f32, d as f32, e as f32, f as f32)
+}
+
+/// Convert a kurbo `BezPath` to a tiny-skia `Path`. Returns `None` if the path
+/// produces no segments (tiny-skia requires at least one segment).
+fn bezpath_to_ts(path: &kurbo::BezPath) -> Option<tiny_skia::Path> {
+    use kurbo::PathEl;
+    let mut pb = tiny_skia::PathBuilder::new();
+    for el in path.iter() {
+        match el {
+            PathEl::MoveTo(p) => pb.move_to(p.x as f32, p.y as f32),
+            PathEl::LineTo(p) => pb.line_to(p.x as f32, p.y as f32),
+            PathEl::QuadTo(p1, p2) => {
+                pb.quad_to(p1.x as f32, p1.y as f32, p2.x as f32, p2.y as f32)
+            }
+            PathEl::CurveTo(p1, p2, p3) => pb.cubic_to(
+                p1.x as f32, p1.y as f32,
+                p2.x as f32, p2.y as f32,
+                p3.x as f32, p3.y as f32,
+            ),
+            PathEl::ClosePath => pb.close(),
+        }
+    }
+    pb.finish()
+}
+
+/// Build a tiny-skia `Paint` with a solid colour and optional opacity.
+fn solid_paint(r: u8, g: u8, b: u8, a: u8, opacity: f32) -> tiny_skia::Paint<'static> {
+    let alpha = ((a as f32 / 255.0) * opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+    let mut paint = tiny_skia::Paint::default();
+    paint.set_color_rgba8(r, g, b, alpha);
+    paint.anti_alias = true;
+    paint
+}
+
+/// Build a tiny-skia `Paint` with a gradient shader.
+fn gradient_paint<'a>(
+    grad: &crate::gradient::ShapeGradient,
+    start: kurbo::Point,
+    end: kurbo::Point,
+    opacity: f32,
+) -> Option<tiny_skia::Paint<'a>> {
+    use crate::gradient::GradientType;
+    use tiny_skia::{Color, GradientStop, SpreadMode};
+
+    let spread_mode = match grad.extend {
+        crate::gradient::GradientExtend::Pad => SpreadMode::Pad,
+        crate::gradient::GradientExtend::Reflect => SpreadMode::Reflect,
+        crate::gradient::GradientExtend::Repeat => SpreadMode::Repeat,
+    };
+
+    let stops: Vec<GradientStop> = grad.stops.iter().map(|s| {
+        let a = ((s.color.a as f32 / 255.0) * opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+        GradientStop::new(s.position, Color::from_rgba8(s.color.r, s.color.g, s.color.b, a))
+    }).collect();
+
+    let shader = match grad.kind {
+        GradientType::Linear => {
+            tiny_skia::LinearGradient::new(
+                tiny_skia::Point { x: start.x as f32, y: start.y as f32 },
+                tiny_skia::Point { x: end.x as f32, y: end.y as f32 },
+                stops,
+                spread_mode,
+                tiny_skia::Transform::identity(),
+            )?
+        }
+        GradientType::Radial => {
+            let mid = kurbo::Point::new((start.x + end.x) * 0.5, (start.y + end.y) * 0.5);
+            let dx = end.x - start.x;
+            let dy = end.y - start.y;
+            let radius = ((dx * dx + dy * dy).sqrt() * 0.5) as f32;
+            tiny_skia::RadialGradient::new(
+                tiny_skia::Point { x: mid.x as f32, y: mid.y as f32 },
+                tiny_skia::Point { x: mid.x as f32, y: mid.y as f32 },
+                radius,
+                stops,
+                spread_mode,
+                tiny_skia::Transform::identity(),
+            )?
+        }
+    };
+
+    let mut paint = tiny_skia::Paint::default();
+    paint.shader = shader;
+    paint.anti_alias = true;
+    Some(paint)
+}
+
+/// Render the document background to a CPU pixmap.
+fn render_background_cpu(
+    document: &Document,
+    pixmap: &mut tiny_skia::PixmapMut<'_>,
+    base_transform: Affine,
+    draw_checkerboard: bool,
+) {
+    let ts_transform = affine_to_ts(base_transform);
+    let bg_rect = tiny_skia::Rect::from_xywh(
+        0.0, 0.0, document.width as f32, document.height as f32,
+    );
+    let Some(bg_rect) = bg_rect else { return };
+
+    let bg = &document.background_color;
+
+    // Draw checkerboard behind transparent backgrounds
+    if draw_checkerboard && bg.a < 255 {
+        // Build a 32×32 checkerboard pixmap (16×16 px light/dark squares)
+        // in document space — each square = 16 document units.
+        if let Some(mut checker) = tiny_skia::Pixmap::new(32, 32) {
+            let light = tiny_skia::Color::from_rgba8(204, 204, 204, 255);
+            let dark  = tiny_skia::Color::from_rgba8(170, 170, 170, 255);
+            for py in 0u32..32 {
+                for px in 0u32..32 {
+                    let is_light = ((px / 16) + (py / 16)) % 2 == 0;
+                    let color = if is_light { light } else { dark };
+                    checker.pixels_mut()[(py * 32 + px) as usize] =
+                        tiny_skia::PremultipliedColorU8::from_rgba(
+                            (color.red()   * 255.0) as u8,
+                            (color.green() * 255.0) as u8,
+                            (color.blue()  * 255.0) as u8,
+                            (color.alpha() * 255.0) as u8,
+                        ).unwrap();
+                }
+            }
+            let pattern = tiny_skia::Pattern::new(
+                checker.as_ref(),
+                tiny_skia::SpreadMode::Repeat,
+                tiny_skia::FilterQuality::Nearest,
+                1.0,
+                tiny_skia::Transform::identity(),
+            );
+            let mut paint = tiny_skia::Paint::default();
+            paint.shader = pattern;
+            pixmap.fill_rect(bg_rect, &paint, ts_transform, None);
+        }
+    }
+
+    // Draw the background colour
+    let alpha = bg.a;
+    let paint = solid_paint(bg.r, bg.g, bg.b, alpha, 1.0);
+    pixmap.fill_rect(bg_rect, &paint, ts_transform, None);
+}
+
+/// Render a DCEL to a CPU pixmap.
+fn render_dcel_cpu(
+    dcel: &crate::dcel::Dcel,
+    pixmap: &mut tiny_skia::PixmapMut<'_>,
+    transform: tiny_skia::Transform,
+    opacity: f32,
+    _document: &Document,
+    _image_cache: &mut ImageCache,
+) {
+    // 1. Faces (fills)
+    for (i, face) in dcel.faces.iter().enumerate() {
+        if face.deleted || i == 0 {
+            continue;
+        }
+        if face.fill_color.is_none() && face.image_fill.is_none() && face.gradient_fill.is_none() {
+            continue;
+        }
+
+        let face_id = crate::dcel::FaceId(i as u32);
+        let path = dcel.face_to_bezpath_with_holes(face_id);
+        let Some(ts_path) = bezpath_to_ts(&path) else { continue };
+
+        let fill_type = match face.fill_rule {
+            crate::shape::FillRule::NonZero => tiny_skia::FillRule::Winding,
+            crate::shape::FillRule::EvenOdd => tiny_skia::FillRule::EvenOdd,
+        };
+
+        let mut filled = false;
+
+        // Gradient fill (takes priority over solid)
+        if let Some(ref grad) = face.gradient_fill {
+            let bbox: kurbo::Rect = vello::kurbo::Shape::bounding_box(&path);
+            let (start, end) = match (grad.start_world, grad.end_world) {
+                (Some((sx, sy)), Some((ex, ey))) => match grad.kind {
+                    crate::gradient::GradientType::Linear => {
+                        (kurbo::Point::new(sx, sy), kurbo::Point::new(ex, ey))
+                    }
+                    crate::gradient::GradientType::Radial => {
+                        let opp = kurbo::Point::new(2.0 * sx - ex, 2.0 * sy - ey);
+                        (opp, kurbo::Point::new(ex, ey))
+                    }
+                },
+                _ => gradient_bbox_endpoints(grad.angle, bbox),
+            };
+            if let Some(paint) = gradient_paint(grad, start, end, opacity) {
+                pixmap.fill_path(&ts_path, &paint, fill_type, transform, None);
+                filled = true;
+            }
+        }
+
+        // Image fill — not yet implemented for CPU renderer; fall through to solid or skip
+        // TODO: decode image to Pixmap and use as Pattern shader
+
+        // Solid colour fill
+        if !filled {
+            if let Some(fc) = &face.fill_color {
+                let paint = solid_paint(fc.r, fc.g, fc.b, fc.a, opacity);
+                pixmap.fill_path(&ts_path, &paint, fill_type, transform, None);
+            }
+        }
+    }
+
+    // 2. Edges (strokes)
+    for edge in &dcel.edges {
+        if edge.deleted {
+            continue;
+        }
+        if let (Some(stroke_color), Some(stroke_style)) = (&edge.stroke_color, &edge.stroke_style) {
+            let mut path = kurbo::BezPath::new();
+            path.move_to(edge.curve.p0);
+            path.curve_to(edge.curve.p1, edge.curve.p2, edge.curve.p3);
+            let Some(ts_path) = bezpath_to_ts(&path) else { continue };
+
+            let paint = solid_paint(stroke_color.r, stroke_color.g, stroke_color.b, stroke_color.a, opacity);
+            let stroke = tiny_skia::Stroke {
+                width: stroke_style.width as f32,
+                line_cap: match stroke_style.cap {
+                    crate::shape::Cap::Butt   => tiny_skia::LineCap::Butt,
+                    crate::shape::Cap::Round  => tiny_skia::LineCap::Round,
+                    crate::shape::Cap::Square => tiny_skia::LineCap::Square,
+                },
+                line_join: match stroke_style.join {
+                    crate::shape::Join::Miter => tiny_skia::LineJoin::Miter,
+                    crate::shape::Join::Round => tiny_skia::LineJoin::Round,
+                    crate::shape::Join::Bevel => tiny_skia::LineJoin::Bevel,
+                },
+                miter_limit: stroke_style.miter_limit as f32,
+                ..Default::default()
+            };
+            pixmap.stroke_path(&ts_path, &paint, &stroke, transform, None);
+        }
+    }
+}
+
+/// Render a vector layer to a CPU pixmap.
+fn render_vector_layer_cpu(
+    document: &Document,
+    time: f64,
+    layer: &crate::layer::VectorLayer,
+    pixmap: &mut tiny_skia::PixmapMut<'_>,
+    base_transform: Affine,
+    parent_opacity: f64,
+    image_cache: &mut ImageCache,
+) {
+    let layer_opacity = parent_opacity * layer.layer.opacity;
+
+    for clip_instance in &layer.clip_instances {
+        let group_end_time = document.vector_clips.get(&clip_instance.clip_id)
+            .filter(|vc| vc.is_group)
+            .map(|_| {
+                let frame_duration = 1.0 / document.framerate;
+                layer.group_visibility_end(&clip_instance.id, clip_instance.timeline_start, frame_duration)
+            });
+        render_clip_instance_cpu(
+            document, time, clip_instance, layer_opacity, pixmap, base_transform,
+            &layer.layer.animation_data, image_cache, group_end_time,
+        );
+    }
+
+    if let Some(dcel) = layer.dcel_at_time(time) {
+        render_dcel_cpu(dcel, pixmap, affine_to_ts(base_transform), layer_opacity as f32, document, image_cache);
+    }
+}
+
+/// Render a clip instance (and its nested layers) to a CPU pixmap.
+fn render_clip_instance_cpu(
+    document: &Document,
+    time: f64,
+    clip_instance: &crate::clip::ClipInstance,
+    parent_opacity: f64,
+    pixmap: &mut tiny_skia::PixmapMut<'_>,
+    base_transform: Affine,
+    animation_data: &crate::animation::AnimationData,
+    image_cache: &mut ImageCache,
+    group_end_time: Option<f64>,
+) {
+    let Some(vector_clip) = document.vector_clips.get(&clip_instance.clip_id) else { return };
+
+    let clip_time = if vector_clip.is_group {
+        let end = group_end_time.unwrap_or(clip_instance.timeline_start);
+        if time < clip_instance.timeline_start || time >= end { return; }
+        0.0
+    } else {
+        let clip_dur = document.get_clip_duration(&vector_clip.id).unwrap_or(vector_clip.duration);
+        let Some(t) = clip_instance.remap_time(time, clip_dur) else { return };
+        t
+    };
+
+    let transform = &clip_instance.transform;
+    let x = animation_data.eval(&crate::animation::AnimationTarget::Object { id: clip_instance.id, property: TransformProperty::X }, time, transform.x);
+    let y = animation_data.eval(&crate::animation::AnimationTarget::Object { id: clip_instance.id, property: TransformProperty::Y }, time, transform.y);
+    let rotation = animation_data.eval(&crate::animation::AnimationTarget::Object { id: clip_instance.id, property: TransformProperty::Rotation }, time, transform.rotation);
+    let scale_x = animation_data.eval(&crate::animation::AnimationTarget::Object { id: clip_instance.id, property: TransformProperty::ScaleX }, time, transform.scale_x);
+    let scale_y = animation_data.eval(&crate::animation::AnimationTarget::Object { id: clip_instance.id, property: TransformProperty::ScaleY }, time, transform.scale_y);
+    let skew_x = animation_data.eval(&crate::animation::AnimationTarget::Object { id: clip_instance.id, property: TransformProperty::SkewX }, time, transform.skew_x);
+    let skew_y = animation_data.eval(&crate::animation::AnimationTarget::Object { id: clip_instance.id, property: TransformProperty::SkewY }, time, transform.skew_y);
+    let opacity = animation_data.eval(&crate::animation::AnimationTarget::Object { id: clip_instance.id, property: TransformProperty::Opacity }, time, clip_instance.opacity);
+
+    let center_x = vector_clip.width / 2.0;
+    let center_y = vector_clip.height / 2.0;
+    let skew_transform = if skew_x != 0.0 || skew_y != 0.0 {
+        let sx = if skew_x != 0.0 { Affine::new([1.0, 0.0, skew_x.to_radians().tan(), 1.0, 0.0, 0.0]) } else { Affine::IDENTITY };
+        let sy = if skew_y != 0.0 { Affine::new([1.0, skew_y.to_radians().tan(), 0.0, 1.0, 0.0, 0.0]) } else { Affine::IDENTITY };
+        Affine::translate((center_x, center_y)) * sx * sy * Affine::translate((-center_x, -center_y))
+    } else { Affine::IDENTITY };
+
+    let clip_transform = Affine::translate((x, y)) * Affine::rotate(rotation.to_radians()) * Affine::scale_non_uniform(scale_x, scale_y) * skew_transform;
+    let instance_transform = base_transform * clip_transform;
+    let clip_opacity = parent_opacity * opacity;
+
+    for layer_node in vector_clip.layers.iter() {
+        if !layer_node.data.visible() { continue; }
+        render_vector_content_cpu(document, clip_time, &layer_node.data, pixmap, instance_transform, clip_opacity, image_cache);
+    }
+}
+
+/// Render only vector/group content from a layer to a CPU pixmap.
+/// Video, Audio, Effect, and Raster variants are intentionally skipped —
+/// they are handled by the compositor via other paths.
+fn render_vector_content_cpu(
+    document: &Document,
+    time: f64,
+    layer: &AnyLayer,
+    pixmap: &mut tiny_skia::PixmapMut<'_>,
+    base_transform: Affine,
+    parent_opacity: f64,
+    image_cache: &mut ImageCache,
+) {
+    match layer {
+        AnyLayer::Vector(vector_layer) => {
+            render_vector_layer_cpu(document, time, vector_layer, pixmap, base_transform, parent_opacity, image_cache);
+        }
+        AnyLayer::Group(group_layer) => {
+            for child in &group_layer.children {
+                render_vector_content_cpu(document, time, child, pixmap, base_transform, parent_opacity, image_cache);
+            }
+        }
+        AnyLayer::Audio(_) | AnyLayer::Video(_) | AnyLayer::Effect(_) | AnyLayer::Raster(_) => {}
+    }
+}
+
+/// Render a single layer to its own isolated CPU pixmap.
+fn render_layer_isolated_cpu(
+    document: &Document,
+    time: f64,
+    layer: &AnyLayer,
+    base_transform: Affine,
+    width: u32,
+    height: u32,
+    image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    camera_frame: Option<&crate::webcam::CaptureFrame>,
+) -> RenderedLayer {
+    // Reuse the GPU path for non-vector layer types (they don't use the Vello scene anyway)
+    let mut rendered = render_layer_isolated(document, time, layer, base_transform, image_cache, video_manager, camera_frame);
+
+    // For vector layers, replace the empty scene with a CPU pixmap
+    if matches!(rendered.layer_type, RenderedLayerType::Vector) {
+        let opacity = layer.opacity() as f64;
+        if let Some(mut pixmap) = tiny_skia::Pixmap::new(width.max(1), height.max(1)) {
+            {
+                let mut pm = pixmap.as_mut();
+                render_vector_content_cpu(document, time, layer, &mut pm, base_transform, opacity, image_cache);
+            }
+            rendered.has_content = true;
+            rendered.cpu_pixmap = Some(pixmap);
+        }
+    }
+
+    rendered
+}
+
+/// Render a document for compositing using the CPU (tiny-skia) path.
+///
+/// Produces the same `CompositeRenderResult` shape as `render_document_for_compositing`,
+/// but vector layers are rendered to `Pixmap`s instead of Vello `Scene`s.
+/// `viewport_width` / `viewport_height` set the pixmap dimensions (should match
+/// the wgpu render buffer size).
+pub fn render_document_for_compositing_cpu(
+    document: &Document,
+    base_transform: Affine,
+    viewport_width: u32,
+    viewport_height: u32,
+    image_cache: &mut ImageCache,
+    video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    camera_frame: Option<&crate::webcam::CaptureFrame>,
+    floating_selection: Option<&crate::selection::RasterFloatingSelection>,
+    draw_checkerboard: bool,
+) -> CompositeRenderResult {
+    let time = document.current_time;
+    let w = viewport_width.max(1);
+    let h = viewport_height.max(1);
+
+    // Render background
+    let background_cpu = tiny_skia::Pixmap::new(w, h).map(|mut pixmap| {
+        render_background_cpu(document, &mut pixmap.as_mut(), base_transform, draw_checkerboard);
+        pixmap
+    });
+
+    // Solo check
+    let any_soloed = document.visible_layers().any(|layer| layer.soloed());
+
+    let layers_to_render: Vec<_> = document
+        .visible_layers()
+        .filter(|layer| if any_soloed { layer.soloed() } else { true })
+        .collect();
+
+    let mut rendered_layers = Vec::with_capacity(layers_to_render.len());
+    for layer in layers_to_render {
+        let rendered = render_layer_isolated_cpu(
+            document, time, layer, base_transform, w, h,
+            image_cache, video_manager, camera_frame,
+        );
+        rendered_layers.push(rendered);
+    }
+
+    // Insert floating raster selection at the correct z-position (same logic as GPU path)
+    if let Some(float_sel) = floating_selection {
+        if let Some(pos) = rendered_layers.iter().position(|l| l.layer_id == float_sel.layer_id) {
+            let parent_transform = match &rendered_layers[pos].layer_type {
+                RenderedLayerType::Raster { transform, .. } => *transform,
+                _ => Affine::IDENTITY,
+            };
+            let float_entry = RenderedLayer {
+                layer_id: Uuid::nil(),
+                scene: Scene::new(),
+                cpu_pixmap: None,
+                opacity: 1.0,
+                blend_mode: crate::gpu::BlendMode::Normal,
+                has_content: !float_sel.pixels.is_empty(),
+                layer_type: RenderedLayerType::Float {
+                    canvas_id: float_sel.canvas_id,
+                    x: float_sel.x,
+                    y: float_sel.y,
+                    width: float_sel.width,
+                    height: float_sel.height,
+                    transform: parent_transform,
+                    pixels: std::sync::Arc::clone(&float_sel.pixels),
+                },
+            };
+            rendered_layers.insert(pos + 1, float_entry);
+        }
+    }
+
+    CompositeRenderResult {
+        background: Scene::new(),
+        background_cpu,
+        layers: rendered_layers,
+        width: document.width,
+        height: document.height,
     }
 }
 

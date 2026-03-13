@@ -415,8 +415,6 @@ impl Action for SplitClipInstanceAction {
                 }
             }
             AudioClipType::Sampled { audio_pool_index } => {
-                use daw_backend::command::{Query, QueryResponse};
-
                 // 1. Trim the original (left) instance
                 let orig_internal_start = original_instance.trim_start;
                 let orig_internal_end = original_instance.trim_end.unwrap_or(clip.duration);
@@ -435,7 +433,7 @@ impl Action for SplitClipInstanceAction {
                     .unwrap_or(internal_end - internal_start);
                 let start_time = new_instance.timeline_start;
 
-                let query = Query::AddAudioClipSync(
+                let instance_id = controller.add_audio_clip(
                     *backend_track_id,
                     *audio_pool_index,
                     start_time,
@@ -443,21 +441,15 @@ impl Action for SplitClipInstanceAction {
                     internal_start,
                 );
 
-                match controller.send_query(query)? {
-                    QueryResponse::AudioClipInstanceAdded(Ok(instance_id)) => {
-                        self.backend_track_id = Some(*backend_track_id);
-                        self.backend_audio_instance_id = Some(instance_id);
+                self.backend_track_id = Some(*backend_track_id);
+                self.backend_audio_instance_id = Some(instance_id);
 
-                        backend.clip_instance_to_backend_map.insert(
-                            new_instance_id,
-                            crate::action::BackendClipInstanceId::Audio(instance_id),
-                        );
+                backend.clip_instance_to_backend_map.insert(
+                    new_instance_id,
+                    crate::action::BackendClipInstanceId::Audio(instance_id),
+                );
 
-                        Ok(())
-                    }
-                    QueryResponse::AudioClipInstanceAdded(Err(e)) => Err(e),
-                    _ => Err("Unexpected query response".to_string()),
-                }
+                Ok(())
             }
             AudioClipType::Recording => {
                 // Recording clips cannot be split
