@@ -17,6 +17,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// rendering path regardless of GPU capability.
 pub static FORCE_CPU_RENDERER: AtomicBool = AtomicBool::new(false);
 
+/// Upload a tiny-skia `Pixmap` directly to a wgpu texture (no Vello involved).
+/// Used by the CPU render path to bypass `render_to_texture` overhead.
+fn upload_pixmap_to_texture(queue: &wgpu::Queue, texture: &wgpu::Texture, pixmap: &tiny_skia::Pixmap) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        pixmap.data(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * pixmap.width()),
+            rows_per_image: None,
+        },
+        wgpu::Extent3d {
+            width: pixmap.width(),
+            height: pixmap.height(),
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
 /// Enable HDR compositing pipeline (per-layer rendering with proper opacity)
 /// Set to true to use the new pipeline, false for legacy single-scene rendering
 const USE_HDR_COMPOSITING: bool = true; // Enabled for testing
@@ -45,6 +69,9 @@ struct SharedVelloResources {
     gpu_brush: Mutex<crate::gpu_brush::GpuBrushEngine>,
     /// Canvas blit pipeline (renders GPU canvas to layer sRGB buffer)
     canvas_blit: crate::gpu_brush::CanvasBlitPipeline,
+    /// True when Vello is running its CPU software renderer (either forced or GPU fallback).
+    /// Used to select cheaper antialiasing — Msaa16 on CPU costs 16× as much as Area.
+    is_cpu_renderer: bool,
 }
 
 /// Per-instance Vello resources (created for each Stage pane)
@@ -92,8 +119,8 @@ impl SharedVelloResources {
                 )
             }))
         };
-        let renderer = match gpu_result {
-            Ok(Ok(r)) => r,
+        let (renderer, is_cpu_renderer) = match gpu_result {
+            Ok(Ok(r)) => (r, false),
             Ok(Err(e)) => return Err(format!("Failed to create Vello renderer: {e}")),
             Err(_) => {
                 if !use_cpu {
@@ -102,7 +129,7 @@ impl SharedVelloResources {
                          capability). Falling back to CPU renderer — performance may be reduced."
                     );
                 }
-                vello::Renderer::new(
+                let r = vello::Renderer::new(
                     device,
                     vello::RendererOptions {
                         use_cpu: true,
@@ -110,7 +137,8 @@ impl SharedVelloResources {
                         num_init_threads: std::num::NonZeroUsize::new(1),
                         pipeline_cache: None,
                     },
-                ).map_err(|e| format!("CPU fallback renderer also failed: {e}"))?
+                ).map_err(|e| format!("CPU fallback renderer also failed: {e}"))?;
+                (r, true)
             }
         };
 
@@ -271,6 +299,7 @@ impl SharedVelloResources {
             srgb_to_linear,
             gpu_brush: Mutex::new(gpu_brush),
             canvas_blit,
+            is_cpu_renderer: use_cpu || is_cpu_renderer,
         })
     }
 }
@@ -569,6 +598,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
         // Timing instrumentation: track where frame budget is spent.
         // Prints to stderr when any section exceeds 2 ms, or total > 8 ms.
         let _t_prepare_start = std::time::Instant::now();
+
+        // On the CPU renderer Msaa16 runs the rasterizer 16× per frame; use Area instead.
+        let aa_method = if shared.is_cpu_renderer { vello::AaConfig::Area } else { vello::AaConfig::Msaa16 };
 
         // Choose rendering path based on HDR compositing flag
         let mut scene = if USE_HDR_COMPOSITING {
@@ -934,15 +966,29 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
             let mut image_cache = shared.image_cache.lock().unwrap();
 
-            let composite_result = lightningbeam_core::renderer::render_document_for_compositing(
-                &self.ctx.document,
-                camera_transform,
-                &mut image_cache,
-                &shared.video_manager,
-                self.ctx.webcam_frame.as_ref(),
-                self.ctx.selection.raster_floating.as_ref(),
-                true, // Draw checkerboard for transparent backgrounds in the UI
-            );
+            let composite_result = if shared.is_cpu_renderer {
+                lightningbeam_core::renderer::render_document_for_compositing_cpu(
+                    &self.ctx.document,
+                    camera_transform,
+                    width,
+                    height,
+                    &mut image_cache,
+                    &shared.video_manager,
+                    self.ctx.webcam_frame.as_ref(),
+                    self.ctx.selection.raster_floating.as_ref(),
+                    true,
+                )
+            } else {
+                lightningbeam_core::renderer::render_document_for_compositing(
+                    &self.ctx.document,
+                    camera_transform,
+                    &mut image_cache,
+                    &shared.video_manager,
+                    self.ctx.webcam_frame.as_ref(),
+                    self.ctx.selection.raster_floating.as_ref(),
+                    true, // Draw checkerboard for transparent backgrounds in the UI
+                )
+            };
             drop(image_cache);
             let _t_after_scene_build = std::time::Instant::now();
 
@@ -961,7 +1007,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 base_color: vello::peniko::Color::TRANSPARENT,
                 width,
                 height,
-                antialiasing_method: vello::AaConfig::Msaa16,
+                antialiasing_method: aa_method,
             };
 
             // HDR buffer spec for linear buffers
@@ -982,10 +1028,14 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     base_color: vello::peniko::Color::TRANSPARENT,
                     width,
                     height,
-                    antialiasing_method: vello::AaConfig::Msaa16,
+                    antialiasing_method: aa_method,
                 };
 
-                if let Ok(mut renderer) = shared.renderer.lock() {
+                if let Some(pixmap) = &composite_result.background_cpu {
+                    if let Some(tex) = buffer_pool.get_texture(bg_srgb_handle) {
+                        upload_pixmap_to_texture(queue, tex, pixmap);
+                    }
+                } else if let Ok(mut renderer) = shared.renderer.lock() {
                     renderer.render_to_texture(device, queue, &composite_result.background, bg_srgb_view, &bg_render_params).ok();
                 }
 
@@ -1184,7 +1234,11 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             buffer_pool.get_view(hdr_layer_handle),
                             &instance_resources.hdr_texture_view,
                         ) {
-                            if let Ok(mut renderer) = shared.renderer.lock() {
+                            if let Some(pixmap) = &rendered_layer.cpu_pixmap {
+                                if let Some(tex) = buffer_pool.get_texture(srgb_handle) {
+                                    upload_pixmap_to_texture(queue, tex, pixmap);
+                                }
+                            } else if let Ok(mut renderer) = shared.renderer.lock() {
                                 renderer.render_to_texture(device, queue, &rendered_layer.scene, srgb_view, &layer_render_params).ok();
                             }
                             let mut convert_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1473,7 +1527,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     let dim_params = vello::RenderParams {
                         base_color: vello::peniko::Color::TRANSPARENT,
                         width, height,
-                        antialiasing_method: vello::AaConfig::Msaa16,
+                        antialiasing_method: aa_method,
                     };
                     if let Ok(mut renderer) = shared.renderer.lock() {
                         renderer.render_to_texture(device, queue, &dim_scene, dim_srgb_view, &dim_params).ok();
@@ -1514,7 +1568,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     let clip_params = vello::RenderParams {
                         base_color: vello::peniko::Color::TRANSPARENT,
                         width, height,
-                        antialiasing_method: vello::AaConfig::Msaa16,
+                        antialiasing_method: aa_method,
                     };
                     if let Ok(mut renderer) = shared.renderer.lock() {
                         renderer.render_to_texture(device, queue, &clip_scene, clip_srgb_view, &clip_params).ok();
@@ -2520,7 +2574,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             base_color: vello::peniko::Color::TRANSPARENT,
                             width,
                             height,
-                            antialiasing_method: vello::AaConfig::Msaa16,
+                            antialiasing_method: aa_method,
                         };
 
                         if let Ok(mut renderer) = shared.renderer.lock() {
@@ -2592,7 +2646,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     base_color: vello::peniko::Color::from_rgb8(45, 45, 48), // Dark background
                     width,
                     height,
-                    antialiasing_method: vello::AaConfig::Msaa16,
+                    antialiasing_method: aa_method,
                 };
 
                 if let Ok(mut renderer) = shared.renderer.lock() {
