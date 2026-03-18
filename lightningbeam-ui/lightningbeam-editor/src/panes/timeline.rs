@@ -22,6 +22,7 @@ const MAX_PIXELS_PER_SECOND: f32 = 500.0;
 const EDGE_DETECTION_PIXELS: f32 = 8.0; // Distance from edge to detect trim handles
 const LOOP_CORNER_SIZE: f32 = 12.0; // Size of loop corner hotzone at top-right of clip
 const MIN_CLIP_WIDTH_PX: f32 = 8.0; // Minimum visible width for very short clips (e.g. groups)
+const AUTOMATION_LANE_HEIGHT: f32 = 40.0;
 
 /// Compute stacking row assignments for clip instances on a vector layer.
 /// Only clips that overlap in time are stacked; non-overlapping clips share row 0.
@@ -207,6 +208,18 @@ pub struct TimelinePane {
 
     /// Cached mousedown position in header area (for drag threshold detection)
     header_mousedown_pos: Option<egui::Pos2>,
+    /// Which audio/MIDI layers have automation lanes expanded
+    automation_expanded: std::collections::HashSet<uuid::Uuid>,
+    /// Cached automation lane info per layer_id
+    automation_cache: std::collections::HashMap<uuid::Uuid, Vec<AutomationLaneInfo>>,
+    /// Drag state per (layer_id, node_id) for in-progress keyframe moves
+    automation_drag: std::collections::HashMap<(uuid::Uuid, u32), Option<crate::curve_editor::CurveDragState>>,
+    /// Pending automation actions to process after render
+    pending_automation_actions: Vec<AutomationLaneAction>,
+    /// Last seen project_generation; used to detect node graph changes and invalidate automation cache
+    automation_cache_generation: u64,
+    /// Last seen graph_topology_generation; used to detect node additions/removals
+    automation_topology_generation: u64,
 }
 
 /// Check if a clip type can be dropped on a layer type
@@ -323,6 +336,35 @@ fn flatten_layer<'a>(
             }
         }
     }
+}
+
+/// Cached automation lane data for timeline rendering
+struct AutomationLaneInfo {
+    node_id: u32,
+    name: String,
+    keyframes: Vec<crate::curve_editor::CurvePoint>,
+    value_min: f32,
+    value_max: f32,
+}
+
+/// Data collected during render_layers for a single automation lane, used to call
+/// render_curve_lane *after* handle_input so our widget registers last and wins priority.
+struct AutomationLaneRender {
+    layer_id: uuid::Uuid,
+    node_id: u32,
+    lane_rect: egui::Rect,
+    keyframes: Vec<crate::curve_editor::CurvePoint>,
+    value_min: f32,
+    value_max: f32,
+    accent_color: egui::Color32,
+    playback_time: f64,
+}
+
+/// Pending automation keyframe edit action from curve lane interaction
+enum AutomationLaneAction {
+    AddKeyframe { layer_id: uuid::Uuid, node_id: u32, time: f64, value: f32 },
+    MoveKeyframe { layer_id: uuid::Uuid, node_id: u32, old_time: f64, new_time: f64, new_value: f32, interpolation: String, ease_out: (f32, f32), ease_in: (f32, f32) },
+    DeleteKeyframe { layer_id: uuid::Uuid, node_id: u32, time: f64 },
 }
 
 /// Paint a soft drop shadow around a rect using gradient meshes (bottom + right + corner).
@@ -622,6 +664,12 @@ impl TimelinePane {
             video_thumbnail_textures: std::collections::HashMap::new(),
             layer_drag: None,
             header_mousedown_pos: None,
+            automation_expanded: std::collections::HashSet::new(),
+            automation_cache: std::collections::HashMap::new(),
+            automation_drag: std::collections::HashMap::new(),
+            pending_automation_actions: Vec::new(),
+            automation_cache_generation: u64::MAX,
+            automation_topology_generation: u64::MAX,
         }
     }
 
@@ -637,6 +685,95 @@ impl TimelinePane {
             MenuAction::RecenterView => self.recenter(),
             _ => {} // Not a view action we handle
         }
+    }
+
+    /// Extra height added to a layer row when automation lanes are expanded
+    fn automation_lanes_height(&self, layer_id: uuid::Uuid) -> f32 {
+        if !self.automation_expanded.contains(&layer_id) {
+            return 0.0;
+        }
+        let n = self.automation_cache.get(&layer_id).map_or(0, |v| v.len());
+        n as f32 * AUTOMATION_LANE_HEIGHT
+    }
+
+    /// Total height of a timeline row (LAYER_HEIGHT + automation lanes if expanded)
+    fn row_height(&self, row: &TimelineRow) -> f32 {
+        LAYER_HEIGHT + self.automation_lanes_height(row.layer_id())
+    }
+
+    /// Cumulative Y offset from top of rows area to the start of row at `idx`
+    fn cumulative_row_y(&self, rows: &[TimelineRow], idx: usize) -> f32 {
+        rows[..idx].iter().map(|r| self.row_height(r)).sum()
+    }
+
+    /// Find which row contains `relative_y` (measured from top of rows area).
+    /// Returns (row_index, y_within_row).
+    fn row_at_y(&self, rows: &[TimelineRow], relative_y: f32) -> Option<(usize, f32)> {
+        let mut y = 0.0f32;
+        for (i, row) in rows.iter().enumerate() {
+            let h = self.row_height(row);
+            if relative_y >= y && relative_y < y + h {
+                return Some((i, relative_y - y));
+            }
+            y += h;
+        }
+        None
+    }
+
+    /// Refresh the automation lane cache for a layer by querying the backend.
+    fn refresh_automation_cache(
+        &mut self,
+        layer_id: uuid::Uuid,
+        controller: &mut daw_backend::EngineController,
+        layer_to_track_map: &std::collections::HashMap<uuid::Uuid, daw_backend::TrackId>,
+    ) {
+        let track_id = match layer_to_track_map.get(&layer_id) {
+            Some(t) => *t,
+            None => return,
+        };
+
+        // Query the graph state JSON
+        let json = match controller.query_graph_state(track_id) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+
+        let preset: daw_backend::GraphPreset = match serde_json::from_str(&json) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        let mut lanes = Vec::new();
+        for node in &preset.nodes {
+            if node.node_type != "AutomationInput" {
+                continue;
+            }
+            let name = controller
+                .query_automation_name(track_id, node.id)
+                .unwrap_or_else(|_| "Automation".to_string());
+            let keyframes = controller
+                .query_automation_keyframes(track_id, node.id)
+                .unwrap_or_default()
+                .iter()
+                .map(|k| crate::curve_editor::CurvePoint {
+                    time: k.time,
+                    value: k.value,
+                    interpolation: match k.interpolation.as_str() {
+                        "bezier" => crate::curve_editor::CurveInterpolation::Bezier,
+                        "step" => crate::curve_editor::CurveInterpolation::Step,
+                        "hold" => crate::curve_editor::CurveInterpolation::Hold,
+                        _ => crate::curve_editor::CurveInterpolation::Linear,
+                    },
+                    ease_out: k.ease_out,
+                    ease_in: k.ease_in,
+                })
+                .collect();
+            let (value_min, value_max) = controller
+                .query_automation_range(track_id, node.id)
+                .unwrap_or((-1.0, 1.0));
+            lanes.push(AutomationLaneInfo { node_id: node.id, name, keyframes, value_min, value_max });
+        }
+        self.automation_cache.insert(layer_id, lanes);
     }
 
     /// Toggle recording on/off
@@ -937,11 +1074,11 @@ impl TimelinePane {
         }
 
         let relative_y = pointer_pos.y - header_rect.min.y + self.viewport_scroll_y;
-        let hovered_layer_index = (relative_y / LAYER_HEIGHT) as usize;
-
-        if hovered_layer_index >= layer_count {
-            return None;
-        }
+        let (hovered_layer_index, _y_within_row) = match self.row_at_y(&rows, relative_y) {
+            Some(v) => v,
+            None => return None,
+        };
+        let _ = layer_count; // suppress unused warning
 
         let row = &rows[hovered_layer_index];
         // Collapsed groups have no directly clickable clips
@@ -969,7 +1106,7 @@ impl TimelinePane {
 
             if mouse_x >= start_x && mouse_x <= end_x {
                 // Check vertical bounds for stacked vector layer clips
-                let layer_top = header_rect.min.y + (hovered_layer_index as f32 * LAYER_HEIGHT) - self.viewport_scroll_y;
+                let layer_top = header_rect.min.y + self.cumulative_row_y(&rows, hovered_layer_index) - self.viewport_scroll_y;
                 let (row, total_rows) = stacking[ci_idx];
                 let (cy_min, cy_max) = clip_instance_y_bounds(row, total_rows);
                 let mouse_rel_y = pointer_pos.y - layer_top;
@@ -1027,10 +1164,10 @@ impl TimelinePane {
         }
 
         let relative_y = pointer_pos.y - header_rect.min.y + self.viewport_scroll_y;
-        let hovered_index = (relative_y / LAYER_HEIGHT) as usize;
-        if hovered_index >= rows.len() {
-            return None;
-        }
+        let (hovered_index, _) = match self.row_at_y(&rows, relative_y) {
+            Some(v) => v,
+            None => return None,
+        };
 
         let TimelineRow::CollapsedGroup { group, .. } = &rows[hovered_index] else {
             return None;
@@ -1491,21 +1628,24 @@ impl TimelinePane {
         let gap_row_index = self.layer_drag.as_ref().map(|d| d.gap_row_index);
 
         // Build filtered row list (excluding dragged layers)
-        let rows: Vec<&TimelineRow> = all_rows.iter()
+        let rows: Vec<TimelineRow> = all_rows.iter()
             .filter(|r| !drag_layer_ids.contains(&r.layer_id()))
+            .copied()
             .collect();
 
         // Draw layer headers from virtual row list
         for (filtered_i, row) in rows.iter().enumerate() {
-            // Compute Y with gap offset: rows at or after the gap shift down by drag_count * LAYER_HEIGHT
-            let visual_i = match gap_row_index {
-                Some(gap) if filtered_i >= gap => filtered_i + drag_count,
-                _ => filtered_i,
+            // Compute Y using cumulative heights (supports variable-height rows with automation lanes)
+            let base_y = self.cumulative_row_y(&rows, filtered_i);
+            let gap_shift = match gap_row_index {
+                Some(gap) if filtered_i >= gap => drag_count as f32 * LAYER_HEIGHT,
+                _ => 0.0,
             };
-            let y = rect.min.y + visual_i as f32 * LAYER_HEIGHT - self.viewport_scroll_y;
+            let y = rect.min.y + base_y + gap_shift - self.viewport_scroll_y;
+            let row_total_height = self.row_height(row);
 
-            // Skip if layer is outside visible area
-            if y + LAYER_HEIGHT < rect.min.y || y > rect.max.y {
+            // Skip if row is outside visible area
+            if y + row_total_height < rect.min.y || y > rect.max.y {
                 continue;
             }
 
@@ -1959,6 +2099,103 @@ impl TimelinePane {
                 ],
                 egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".separator"], ui.ctx(), egui::Color32::from_gray(20))),
             );
+
+            // Automation expand/collapse button for Audio/MIDI layers
+            let is_audio_or_midi = matches!(
+                row,
+                TimelineRow::Normal(AnyLayer::Audio(_))
+                    | TimelineRow::GroupChild { child: AnyLayer::Audio(_), .. }
+            );
+            if is_audio_or_midi {
+                let btn_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.min.x + 4.0, y + LAYER_HEIGHT - 18.0),
+                    egui::vec2(16.0, 14.0),
+                );
+                let expanded = self.automation_expanded.contains(&layer_id);
+                let btn_label = if expanded { "▼" } else { "▶" };
+                let btn_response = ui.scope_builder(egui::UiBuilder::new().max_rect(btn_rect), |ui| {
+                    ui.allocate_rect(btn_rect, egui::Sense::click())
+                }).inner;
+                ui.painter().text(
+                    btn_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    btn_label,
+                    egui::FontId::proportional(9.0),
+                    secondary_text_color,
+                );
+                if btn_response.clicked() {
+                    self.layer_control_clicked = true;
+                    if expanded {
+                        self.automation_expanded.remove(&layer_id);
+                    } else {
+                        self.automation_expanded.insert(layer_id);
+                        // Trigger cache refresh
+                        // We can't call refresh_automation_cache here (needs controller),
+                        // so mark it as needing refresh via empty cache entry
+                        self.automation_cache.remove(&layer_id);
+                    }
+                }
+            }
+
+            // Draw automation lane sub-headers below this row
+            if self.automation_expanded.contains(&layer_id) {
+                if let Some(lanes) = self.automation_cache.get(&layer_id) {
+                    let lane_count = lanes.len();
+                    // Collect lane info to avoid borrow conflict
+                    let lane_names: Vec<String> = lanes.iter().map(|l| l.name.clone()).collect();
+                    for (lane_idx, lane_name) in lane_names.iter().enumerate() {
+                        let lane_y = y + LAYER_HEIGHT + lane_idx as f32 * AUTOMATION_LANE_HEIGHT;
+                        if lane_y + AUTOMATION_LANE_HEIGHT < rect.min.y || lane_y > rect.max.y {
+                            continue;
+                        }
+                        let lane_rect = egui::Rect::from_min_size(
+                            egui::pos2(rect.min.x, lane_y),
+                            egui::vec2(LAYER_HEADER_WIDTH, AUTOMATION_LANE_HEIGHT),
+                        );
+                        ui.painter().rect_filled(
+                            lane_rect,
+                            0.0,
+                            egui::Color32::from_rgb(25, 25, 30),
+                        );
+                        // Indent line
+                        let indent_rect = egui::Rect::from_min_size(
+                            lane_rect.min,
+                            egui::vec2(20.0, AUTOMATION_LANE_HEIGHT),
+                        );
+                        ui.painter().rect_filled(
+                            indent_rect,
+                            0.0,
+                            egui::Color32::from_rgb(15, 15, 20),
+                        );
+                        // Curve icon (small ≈ symbol)
+                        ui.painter().text(
+                            egui::pos2(lane_rect.min.x + 10.0, lane_y + AUTOMATION_LANE_HEIGHT * 0.5),
+                            egui::Align2::CENTER_CENTER,
+                            "~",
+                            egui::FontId::proportional(11.0),
+                            secondary_text_color,
+                        );
+                        // Lane name
+                        let display_name = if lane_name.is_empty() { "Automation" } else { lane_name.as_str() };
+                        ui.painter().text(
+                            egui::pos2(lane_rect.min.x + 22.0, lane_y + AUTOMATION_LANE_HEIGHT * 0.5 - 6.0),
+                            egui::Align2::LEFT_TOP,
+                            display_name,
+                            egui::FontId::proportional(11.0),
+                            text_color,
+                        );
+                        // Bottom separator
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(lane_rect.min.x, lane_y + AUTOMATION_LANE_HEIGHT - 1.0),
+                                egui::pos2(lane_rect.max.x, lane_y + AUTOMATION_LANE_HEIGHT - 1.0),
+                            ],
+                            egui::Stroke::new(1.0, egui::Color32::from_gray(30)),
+                        );
+                        let _ = lane_count; // suppress warning
+                    }
+                }
+            }
         }
 
         // Draw floating dragged layer headers at mouse position with drop shadow
@@ -2066,8 +2303,10 @@ impl TimelinePane {
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
         video_manager: &std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
         audio_cache: &HashMap<uuid::Uuid, Vec<ClipInstance>>,
-    ) -> Vec<(egui::Rect, uuid::Uuid, f64, f64)> {
-        let painter = ui.painter();
+        playback_time: f64,
+    ) -> (Vec<(egui::Rect, uuid::Uuid, f64, f64)>, Vec<AutomationLaneRender>) {
+        let painter = ui.painter().clone();
+        let mut pending_lane_renders: Vec<AutomationLaneRender> = Vec::new();
 
         // Collect video clip rects for hover detection (to avoid borrow conflicts)
         let mut video_clip_hovers: Vec<(egui::Rect, uuid::Uuid, f64, f64)> = Vec::new();
@@ -2106,6 +2345,12 @@ impl TimelinePane {
         let drag_float_top_y: Option<f32> = self.layer_drag.as_ref()
             .map(|d| d.current_mouse_y - d.grab_offset_y);
 
+        // Pre-collect non-dragged rows for cumulative height calculation
+        let non_dragged_rows: Vec<TimelineRow> = all_rows.iter()
+            .filter(|r| !drag_layer_ids_content.contains(&r.layer_id()))
+            .copied()
+            .collect();
+
         let row_y_positions: Vec<f32> = {
             let mut positions = Vec::with_capacity(all_rows.len());
             let mut filtered_i = 0usize;
@@ -2117,12 +2362,16 @@ impl TimelinePane {
                     positions.push(base_y + drag_offset as f32 * LAYER_HEIGHT);
                     drag_offset += 1;
                 } else {
-                    // Non-dragged row: discrete position, shifted around gap
-                    let visual = match gap_row_index_content {
-                        Some(gap) if filtered_i >= gap => filtered_i + drag_count_content,
-                        _ => filtered_i,
+                    // Non-dragged row: discrete position using cumulative heights
+                    let base_y: f32 = non_dragged_rows[..filtered_i]
+                        .iter()
+                        .map(|r| self.row_height(r))
+                        .sum();
+                    let gap_shift = match gap_row_index_content {
+                        Some(gap) if filtered_i >= gap => drag_count_content as f32 * LAYER_HEIGHT,
+                        _ => 0.0,
                     };
-                    positions.push(rect.min.y + visual as f32 * LAYER_HEIGHT - self.viewport_scroll_y);
+                    positions.push(rect.min.y + base_y + gap_shift - self.viewport_scroll_y);
                     filtered_i += 1;
                 }
             }
@@ -2161,7 +2410,7 @@ impl TimelinePane {
 
             // Drop shadow for dragged rows
             if is_being_dragged {
-                paint_drop_shadow(painter, layer_rect, 8.0, 60);
+                paint_drop_shadow(&painter, layer_rect, 8.0, 60);
             }
 
             let row_layer_id = row.layer_id();
@@ -2938,7 +3187,7 @@ impl TimelinePane {
                                                     if iter_duration <= 0.0 { continue; }
 
                                                     Self::render_midi_piano_roll(
-                                                        painter,
+                                                        &painter,
                                                         clip_rect,
                                                         rect.min.x,
                                                         events,
@@ -2954,7 +3203,7 @@ impl TimelinePane {
                                                 }
                                             } else {
                                                 Self::render_midi_piano_roll(
-                                                    painter,
+                                                    &painter,
                                                     clip_rect,
                                                     rect.min.x,
                                                     events,
@@ -3332,13 +3581,41 @@ impl TimelinePane {
                 ],
                 egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".separator"], ui.ctx(), egui::Color32::from_gray(20))),
             );
+
+            // Collect automation lane render data — actual render_curve_lane calls happen after
+            // handle_input so our widgets register last and win egui's interaction priority.
+            if self.automation_expanded.contains(&row_layer_id) {
+                if let Some(lanes) = self.automation_cache.get(&row_layer_id) {
+                    let (_, tc) = layer_type_info(layer);
+                    for (lane_idx, lane) in lanes.iter().enumerate() {
+                        let lane_top = y + LAYER_HEIGHT + lane_idx as f32 * AUTOMATION_LANE_HEIGHT;
+                        if lane_top + AUTOMATION_LANE_HEIGHT < rect.min.y || lane_top > rect.max.y {
+                            continue;
+                        }
+                        let lane_rect = egui::Rect::from_min_size(
+                            egui::pos2(rect.min.x, lane_top),
+                            egui::vec2(rect.width(), AUTOMATION_LANE_HEIGHT),
+                        );
+                        pending_lane_renders.push(AutomationLaneRender {
+                            layer_id: row_layer_id,
+                            node_id: lane.node_id,
+                            lane_rect,
+                            keyframes: lane.keyframes.clone(),
+                            value_min: lane.value_min,
+                            value_max: lane.value_max,
+                            accent_color: tc,
+                            playback_time,
+                        });
+                    }
+                }
+            }
         }
 
         // Clean up stale video thumbnail textures for clips no longer visible
         self.video_thumbnail_textures.retain(|&(clip_id, _), _| visible_video_clip_ids.contains(&clip_id));
 
-        // Return video clip hover data for processing after input handling
-        video_clip_hovers
+        // Return video clip hover data and pending lane renders for processing after input handling
+        (video_clip_hovers, pending_lane_renders)
     }
 
     /// Handle mouse input for scrubbing, panning, zooming, layer selection, and clip instance selection
@@ -4621,7 +4898,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        let video_clip_hovers = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager, &audio_cache);
+        let (video_clip_hovers, pending_lane_renders) = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager, &audio_cache, *shared.playback_time);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));
@@ -4629,6 +4906,88 @@ impl PaneRenderer for TimelinePane {
 
         // Restore original clip rect
         ui.set_clip_rect(original_clip_rect);
+
+        // Process pending automation lane edit actions
+        if !self.pending_automation_actions.is_empty() {
+            let actions = std::mem::take(&mut self.pending_automation_actions);
+            if let Some(controller_arc) = shared.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                for action in actions {
+                    match action {
+                        AutomationLaneAction::AddKeyframe { layer_id, node_id, time, value } => {
+                            if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                                controller.automation_add_keyframe(track_id, node_id, time, value, "linear".to_string(), (0.0, 0.0), (0.0, 0.0));
+                                // Optimistic cache update
+                                if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
+                                    if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
+                                        let new_kf = crate::curve_editor::CurvePoint {
+                                            time,
+                                            value,
+                                            interpolation: crate::curve_editor::CurveInterpolation::Linear,
+                                            ease_out: (0.0, 0.0),
+                                            ease_in: (0.0, 0.0),
+                                        };
+                                        lane.keyframes.push(new_kf);
+                                        lane.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+                                    }
+                                }
+                            }
+                        }
+                        AutomationLaneAction::MoveKeyframe { layer_id, node_id, old_time, new_time, new_value, interpolation, ease_out, ease_in } => {
+                            if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                                controller.automation_remove_keyframe(track_id, node_id, old_time);
+                                controller.automation_add_keyframe(track_id, node_id, new_time, new_value, interpolation.clone(), ease_out, ease_in);
+                                // Optimistic cache update
+                                if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
+                                    if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
+                                        if let Some(kf) = lane.keyframes.iter_mut().find(|k| (k.time - old_time).abs() < 0.001) {
+                                            kf.time = new_time;
+                                            kf.value = new_value;
+                                        }
+                                        lane.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+                                    }
+                                }
+                            }
+                        }
+                        AutomationLaneAction::DeleteKeyframe { layer_id, node_id, time } => {
+                            if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                                controller.automation_remove_keyframe(track_id, node_id, time);
+                                // Optimistic cache update
+                                if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
+                                    if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
+                                        lane.keyframes.retain(|k| (k.time - time).abs() >= 0.001);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Invalidate automation cache when the project changes (new node added, etc.)
+        if *shared.project_generation != self.automation_cache_generation {
+            self.automation_cache_generation = *shared.project_generation;
+            self.automation_cache.clear();
+        }
+
+        // Refresh automation cache for expanded layers.
+        // Clears all caches when the project is reloaded (project_generation) or when the node
+        // graph topology changes (graph_topology_generation — bumped by the node graph pane on
+        // any successful add/remove/connect action).
+        let topology_changed = *shared.graph_topology_generation != self.automation_topology_generation;
+        if topology_changed {
+            self.automation_topology_generation = *shared.graph_topology_generation;
+            self.automation_cache.clear();
+        }
+        for layer_id in self.automation_expanded.iter().copied().collect::<Vec<_>>() {
+            if !self.automation_cache.contains_key(&layer_id) {
+                if let Some(controller_arc) = shared.audio_controller {
+                    let mut controller = controller_arc.lock().unwrap();
+                    self.refresh_automation_cache(layer_id, &mut controller, shared.layer_to_track_map);
+                }
+            }
+        }
 
         // Handle input (use full rect including header column)
         self.handle_input(
@@ -4650,6 +5009,69 @@ impl PaneRenderer for TimelinePane {
             editing_clip_id.as_ref(),
             &audio_cache,
         );
+
+        // Render automation lanes AFTER handle_input so our ui.interact registers last and wins
+        // egui's interaction priority over handle_input's full-content-area allocation.
+        ui.set_clip_rect(content_rect.intersect(original_clip_rect));
+        for lane in &pending_lane_renders {
+            let drag_key = (lane.layer_id, lane.node_id);
+            let mut drag_state_local = self.automation_drag
+                .get(&drag_key)
+                .and_then(|v| v.clone());
+            let lane_id = egui::Id::new("automation_lane")
+                .with(lane.layer_id)
+                .with(lane.node_id);
+            let lane_min_x = lane.lane_rect.min.x;
+            let action = crate::curve_editor::render_curve_lane(
+                ui,
+                lane.lane_rect,
+                &lane.keyframes,
+                &mut drag_state_local,
+                lane.playback_time,
+                lane.accent_color,
+                lane_id,
+                lane.value_min,
+                lane.value_max,
+                |t| lane_min_x + self.time_to_x(t),
+                |x| self.x_to_time(x - lane_min_x),
+            );
+            self.automation_drag.insert(drag_key, drag_state_local);
+            let layer_id = lane.layer_id;
+            let node_id = lane.node_id;
+            let keyframes = &lane.keyframes;
+            match action {
+                crate::curve_editor::CurveEditAction::AddKeyframe { time, value } => {
+                    self.pending_automation_actions.push(AutomationLaneAction::AddKeyframe {
+                        layer_id, node_id, time, value,
+                    });
+                }
+                crate::curve_editor::CurveEditAction::MoveKeyframe { index, new_time, new_value } => {
+                    if let Some(kf) = keyframes.get(index) {
+                        self.pending_automation_actions.push(AutomationLaneAction::MoveKeyframe {
+                            layer_id, node_id,
+                            old_time: kf.time, new_time, new_value,
+                            interpolation: match kf.interpolation {
+                                crate::curve_editor::CurveInterpolation::Bezier => "bezier".to_string(),
+                                crate::curve_editor::CurveInterpolation::Step => "step".to_string(),
+                                crate::curve_editor::CurveInterpolation::Hold => "hold".to_string(),
+                                _ => "linear".to_string(),
+                            },
+                            ease_out: kf.ease_out,
+                            ease_in: kf.ease_in,
+                        });
+                    }
+                }
+                crate::curve_editor::CurveEditAction::DeleteKeyframe { index } => {
+                    if let Some(kf) = keyframes.get(index) {
+                        self.pending_automation_actions.push(AutomationLaneAction::DeleteKeyframe {
+                            layer_id, node_id, time: kf.time,
+                        });
+                    }
+                }
+                crate::curve_editor::CurveEditAction::None => {}
+            }
+        }
+        ui.set_clip_rect(original_clip_rect);
 
         // Context menu: detect right-click on clips or empty timeline space
         let mut just_opened_menu = false;
@@ -4933,10 +5355,9 @@ impl PaneRenderer for TimelinePane {
                 if content_rect.contains(pointer_pos) {
                     // Calculate which layer the pointer is over
                     let relative_y = pointer_pos.y - content_rect.min.y + self.viewport_scroll_y;
-                    let hovered_layer_index = (relative_y / LAYER_HEIGHT) as usize;
-
                     // Get the layer at this index (using virtual rows for group support)
                     let drop_rows = build_timeline_rows(&context_layers);
+                    let hovered_layer_index = self.row_at_y(&drop_rows, relative_y).map(|(i, _)| i).unwrap_or(usize::MAX);
 
                     let drop_layer = drop_rows.get(hovered_layer_index).and_then(|r| r.as_any_layer());
                     if let Some(layer) = drop_layer {

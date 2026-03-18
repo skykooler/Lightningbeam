@@ -6,6 +6,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use std::fs::File;
+use std::io::Cursor;
 use std::path::Path;
 
 /// Loaded audio sample data
@@ -20,33 +21,36 @@ pub struct SampleData {
 /// Load an audio file and decode it to mono f32 samples
 pub fn load_audio_file(path: impl AsRef<Path>) -> Result<SampleData, String> {
     let path = path.as_ref();
-
-    // Open the file
-    let file = File::open(path)
-        .map_err(|e| format!("Failed to open file: {}", e))?;
-
-    // Create a media source stream
+    let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
-    // Create a hint to help the format registry guess the format
     let mut hint = Hint::new();
-    if let Some(extension) = path.extension() {
-        if let Some(ext_str) = extension.to_str() {
-            hint.with_extension(ext_str);
-        }
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
     }
+    decode_mss(mss, hint)
+}
 
-    // Probe the media source for a format
-    let format_opts = FormatOptions::default();
-    let metadata_opts = MetadataOptions::default();
+/// Load audio from an in-memory byte slice and decode it to mono f32 samples.
+/// Supports WAV, FLAC, MP3, AAC, and any other format Symphonia recognises.
+/// `filename_hint` is used to help Symphonia detect the format (e.g. "kick.wav").
+pub fn load_audio_from_bytes(bytes: &[u8], filename_hint: &str) -> Result<SampleData, String> {
+    let cursor = Cursor::new(bytes.to_vec());
+    let mss = MediaSourceStream::new(Box::new(cursor), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = std::path::Path::new(filename_hint).extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    decode_mss(mss, hint)
+}
 
+/// Shared decode logic: probe `mss`, find the first audio track, decode to mono f32.
+fn decode_mss(mss: MediaSourceStream, hint: Hint) -> Result<SampleData, String> {
     let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &metadata_opts)
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
         .map_err(|e| format!("Failed to probe format: {}", e))?;
 
     let mut format = probed.format;
 
-    // Find the first audio track
     let track = format
         .tracks()
         .iter()
@@ -56,47 +60,33 @@ pub fn load_audio_file(path: impl AsRef<Path>) -> Result<SampleData, String> {
     let track_id = track.id;
     let sample_rate = track.codec_params.sample_rate.unwrap_or(48000);
 
-    // Create a decoder for the track
-    let dec_opts = DecoderOptions::default();
     let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &dec_opts)
+        .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("Failed to create decoder: {}", e))?;
 
-    // Decode all packets
     let mut all_samples = Vec::new();
 
     loop {
-        // Get the next packet
         let packet = match format.next_packet() {
             Ok(packet) => packet,
             Err(SymphoniaError::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // End of stream
                 break;
             }
-            Err(e) => {
-                return Err(format!("Error reading packet: {}", e));
-            }
+            Err(e) => return Err(format!("Error reading packet: {}", e)),
         };
 
-        // Skip packets that don't belong to the selected track
         if packet.track_id() != track_id {
             continue;
         }
 
-        // Decode the packet
         let decoded = decoder
             .decode(&packet)
             .map_err(|e| format!("Failed to decode packet: {}", e))?;
 
-        // Convert to f32 samples and mix to mono
-        let samples = convert_to_mono_f32(&decoded);
-        all_samples.extend_from_slice(&samples);
+        all_samples.extend_from_slice(&convert_to_mono_f32(&decoded));
     }
 
-    Ok(SampleData {
-        samples: all_samples,
-        sample_rate,
-    })
+    Ok(SampleData { samples: all_samples, sample_rate })
 }
 
 /// Convert an audio buffer to mono f32 samples

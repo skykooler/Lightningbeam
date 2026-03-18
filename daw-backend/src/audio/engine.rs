@@ -1655,7 +1655,7 @@ impl Engine {
                                 // Extract the directory path from the preset path for resolving relative sample paths
                                 let preset_base_path = std::path::Path::new(&preset_path).parent();
 
-                                match AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path) {
+                                match AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path, None) {
                                     Ok(graph) => {
                                         // Replace the track's graph
                                         match self.project.get_track_mut(track_id) {
@@ -1701,6 +1701,80 @@ impl Engine {
                             track_id,
                             format!("Failed to read preset file: {}", e)
                         ));
+                    }
+                }
+            }
+
+            Command::GraphLoadLbins(track_id, path) => {
+                match crate::audio::node_graph::lbins::load_lbins(&path) {
+                    Ok((preset, assets)) => {
+                        match AudioGraph::from_preset(&preset, self.sample_rate, 8192, None, Some(&assets)) {
+                            Ok(graph) => {
+                                match self.project.get_track_mut(track_id) {
+                                    Some(TrackNode::Midi(track)) => {
+                                        track.instrument_graph = graph;
+                                        track.graph_is_default = true;
+                                        let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                    }
+                                    Some(TrackNode::Audio(track)) => {
+                                        track.effects_graph = graph;
+                                        track.graph_is_default = true;
+                                        let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                    }
+                                    Some(TrackNode::Group(track)) => {
+                                        track.audio_graph = graph;
+                                        track.graph_is_default = true;
+                                        let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Err(e) => {
+                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                    track_id,
+                                    format!("Failed to load .lbins graph: {}", e),
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                            track_id,
+                            format!("Failed to open .lbins file: {}", e),
+                        ));
+                    }
+                }
+            }
+
+            Command::GraphSaveLbins(track_id, path, preset_name, description, tags) => {
+                let graph = match self.project.get_track(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&track.effects_graph),
+                    Some(TrackNode::Group(track)) => Some(&track.audio_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
+                    let mut preset = graph.to_preset(&preset_name);
+                    preset.metadata.description = description;
+                    preset.metadata.tags = tags;
+                    preset.metadata.author = String::from("User");
+
+                    match crate::audio::node_graph::lbins::save_lbins(&path, &preset, None) {
+                        Ok(()) => {
+                            let _ = self.event_tx.push(AudioEvent::GraphPresetSaved(
+                                track_id,
+                                path.to_string_lossy().to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                track_id,
+                                format!("Failed to save .lbins: {}", e),
+                            ));
+                        }
                     }
                 }
             }
@@ -2456,6 +2530,27 @@ impl Engine {
                 }
             }
 
+            Query::GetAutomationRange(track_id, node_id) => {
+                use crate::audio::node_graph::nodes::AutomationInputNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
+                    let graph = &track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
+
+                    if let Some(graph_node) = graph.get_graph_node(node_idx) {
+                        if let Some(auto_node) = graph_node.node.as_any().downcast_ref::<AutomationInputNode>() {
+                            QueryResponse::AutomationRange(Ok((auto_node.value_min, auto_node.value_max)))
+                        } else {
+                            QueryResponse::AutomationRange(Err(format!("Node {} is not an AutomationInputNode", node_id)))
+                        }
+                    } else {
+                        QueryResponse::AutomationRange(Err(format!("Node {} not found", node_id)))
+                    }
+                } else {
+                    QueryResponse::AutomationRange(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                }
+            }
+
             Query::SerializeAudioPool(project_path) => {
                 QueryResponse::AudioPoolSerialized(self.audio_pool.serialize(&project_path))
             }
@@ -2509,12 +2604,12 @@ impl Engine {
                         match track_node {
                             TrackNode::Audio(track) => {
                                 // Load into effects graph with proper buffer size (8192 to handle any callback size)
-                                track.effects_graph = AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path)?;
+                                track.effects_graph = AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path, None)?;
                                 Ok(())
                             }
                             TrackNode::Midi(track) => {
                                 // Load into instrument graph with proper buffer size (8192 to handle any callback size)
-                                track.instrument_graph = AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path)?;
+                                track.instrument_graph = AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path, None)?;
                                 Ok(())
                             }
                             TrackNode::Group(_) => {
@@ -3396,6 +3491,25 @@ impl EngineController {
         ));
     }
 
+    /// Add a keyframe to an AutomationInput node
+    pub fn automation_add_keyframe(&mut self, track_id: TrackId, node_id: u32,
+        time: f64, value: f32, interpolation: String,
+        ease_out: (f32, f32), ease_in: (f32, f32)) {
+        let _ = self.command_tx.push(Command::AutomationAddKeyframe(
+            track_id, node_id, time, value, interpolation, ease_out, ease_in));
+    }
+
+    /// Remove a keyframe from an AutomationInput node
+    pub fn automation_remove_keyframe(&mut self, track_id: TrackId, node_id: u32, time: f64) {
+        let _ = self.command_tx.push(Command::AutomationRemoveKeyframe(
+            track_id, node_id, time));
+    }
+
+    /// Set the display name of an AutomationInput node
+    pub fn automation_set_name(&mut self, track_id: TrackId, node_id: u32, name: String) {
+        let _ = self.command_tx.push(Command::AutomationSetName(track_id, node_id, name));
+    }
+
     /// Start recording on a track
     pub fn start_recording(&mut self, track_id: TrackId, start_time: f64) {
         let _ = self.command_tx.push(Command::StartRecording(track_id, start_time));
@@ -3540,6 +3654,16 @@ impl EngineController {
     /// Load a preset into a track's graph
     pub fn graph_load_preset(&mut self, track_id: TrackId, preset_path: String) {
         let _ = self.command_tx.push(Command::GraphLoadPreset(track_id, preset_path));
+    }
+
+    /// Load a `.lbins` instrument bundle into a track's graph
+    pub fn graph_load_lbins(&mut self, track_id: TrackId, path: std::path::PathBuf) {
+        let _ = self.command_tx.push(Command::GraphLoadLbins(track_id, path));
+    }
+
+    /// Save a track's graph as a `.lbins` instrument bundle
+    pub fn graph_save_lbins(&mut self, track_id: TrackId, path: std::path::PathBuf, preset_name: String, description: String, tags: Vec<String>) {
+        let _ = self.command_tx.push(Command::GraphSaveLbins(track_id, path, preset_name, description, tags));
     }
 
     /// Save a VoiceAllocator's template graph as a preset
@@ -3803,6 +3927,25 @@ impl EngineController {
                 return result;
             }
             // Small sleep to avoid busy-waiting
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Query automation node value range (min, max)
+    pub fn query_automation_range(&mut self, track_id: TrackId, node_id: u32) -> Result<(f32, f32), String> {
+        if let Err(_) = self.query_tx.push(Query::GetAutomationRange(track_id, node_id)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::AutomationRange(result)) = self.query_response_rx.pop() {
+                return result;
+            }
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
 

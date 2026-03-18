@@ -7,10 +7,18 @@ use eframe::egui;
 use std::path::PathBuf;
 use super::{NodePath, PaneRenderer, SharedPaneState};
 
+/// Format of a preset file
+#[derive(Clone, Copy, PartialEq)]
+enum PresetFormat {
+    Json,
+    Lbins,
+}
+
 /// Metadata extracted from a preset file
 struct PresetInfo {
     name: String,
     path: PathBuf,
+    format: PresetFormat,
     category: String,
     description: String,
     author: String,
@@ -120,19 +128,29 @@ impl PresetBrowserPane {
             let path = entry.path();
             if path.is_dir() {
                 self.scan_directory(&path, base_dir, is_factory);
-            } else if path.extension().is_some_and(|e| e == "json") {
-                if let Some(info) = self.load_preset_info(&path, base_dir, is_factory) {
-                    self.presets.push(info);
+            } else {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext == "json" || ext == "lbins" {
+                    if let Some(info) = self.load_preset_info(&path, base_dir, is_factory) {
+                        self.presets.push(info);
+                    }
                 }
             }
         }
     }
 
-    /// Load metadata from a preset JSON file
+    /// Load metadata from a preset file (.json or .lbins)
     fn load_preset_info(&self, path: &std::path::Path, base_dir: &std::path::Path, is_factory: bool) -> Option<PresetInfo> {
-        let contents = std::fs::read_to_string(path).ok()?;
-        let preset: daw_backend::audio::node_graph::GraphPreset =
-            serde_json::from_str(&contents).ok()?;
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let (preset, format) = if ext == "lbins" {
+            let (p, _assets) = daw_backend::audio::node_graph::lbins::load_lbins(path).ok()?;
+            (p, PresetFormat::Lbins)
+        } else {
+            let contents = std::fs::read_to_string(path).ok()?;
+            let p: daw_backend::audio::node_graph::GraphPreset =
+                serde_json::from_str(&contents).ok()?;
+            (p, PresetFormat::Json)
+        };
 
         // Category = first directory component relative to base_dir
         let relative = path.strip_prefix(base_dir).ok()?;
@@ -144,6 +162,7 @@ impl PresetBrowserPane {
         Some(PresetInfo {
             name: preset.metadata.name,
             path: path.to_path_buf(),
+            format,
             category,
             description: preset.metadata.description,
             author: preset.metadata.author,
@@ -189,7 +208,14 @@ impl PresetBrowserPane {
 
         if let Some(audio_controller) = &shared.audio_controller {
             let mut controller = audio_controller.lock().unwrap();
-            controller.graph_load_preset(track_id, preset.path.to_string_lossy().to_string());
+            match preset.format {
+                PresetFormat::Json => {
+                    controller.graph_load_preset(track_id, preset.path.to_string_lossy().to_string());
+                }
+                PresetFormat::Lbins => {
+                    controller.graph_load_lbins(track_id, preset.path.clone());
+                }
+            }
         }
         // Note: project_generation is incremented by the GraphPresetLoaded event handler
         // in main.rs, which fires after the audio thread has actually processed the load.

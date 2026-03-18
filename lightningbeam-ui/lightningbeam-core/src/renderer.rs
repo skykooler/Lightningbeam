@@ -24,6 +24,8 @@ use vello::Scene;
 /// Cache for decoded image data to avoid re-decoding every frame
 pub struct ImageCache {
     cache: HashMap<Uuid, Arc<ImageBrush>>,
+    /// CPU path: tiny-skia pixmaps decoded from the same assets (premultiplied RGBA8)
+    cpu_cache: HashMap<Uuid, Arc<tiny_skia::Pixmap>>,
 }
 
 impl ImageCache {
@@ -31,6 +33,7 @@ impl ImageCache {
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
+            cpu_cache: HashMap::new(),
         }
     }
 
@@ -47,14 +50,28 @@ impl ImageCache {
         Some(arc_image)
     }
 
+    /// Get or decode an image as a premultiplied tiny-skia Pixmap (CPU render path).
+    pub fn get_or_decode_cpu(&mut self, asset: &ImageAsset) -> Option<Arc<tiny_skia::Pixmap>> {
+        if let Some(cached) = self.cpu_cache.get(&asset.id) {
+            return Some(Arc::clone(cached));
+        }
+
+        let pixmap = decode_image_to_pixmap(asset)?;
+        let arc = Arc::new(pixmap);
+        self.cpu_cache.insert(asset.id, Arc::clone(&arc));
+        Some(arc)
+    }
+
     /// Clear cache entry when an image asset is deleted or modified
     pub fn invalidate(&mut self, id: &Uuid) {
         self.cache.remove(id);
+        self.cpu_cache.remove(id);
     }
 
     /// Clear all cached images
     pub fn clear(&mut self) {
         self.cache.clear();
+        self.cpu_cache.clear();
     }
 }
 
@@ -62,6 +79,25 @@ impl Default for ImageCache {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Decode an image asset to a premultiplied tiny-skia Pixmap (CPU render path).
+fn decode_image_to_pixmap(asset: &ImageAsset) -> Option<tiny_skia::Pixmap> {
+    let data = asset.data.as_ref()?;
+    let img = image::load_from_memory(data).ok()?;
+    let rgba = img.to_rgba8();
+    let mut pixmap = tiny_skia::Pixmap::new(asset.width, asset.height)?;
+    for (dst, src) in pixmap.pixels_mut().iter_mut().zip(rgba.pixels()) {
+        let [r, g, b, a] = src.0;
+        // Convert straight alpha (image crate output) to premultiplied (tiny-skia internal format)
+        let af = a as f32 / 255.0;
+        let pr = (r as f32 * af).round() as u8;
+        let pg = (g as f32 * af).round() as u8;
+        let pb = (b as f32 * af).round() as u8;
+        // from_rgba only fails when channel > alpha; premultiplied values are always ≤ alpha
+        *dst = tiny_skia::PremultipliedColorU8::from_rgba(pr, pg, pb, a).unwrap();
+    }
+    Some(pixmap)
 }
 
 /// Decode an image asset to peniko ImageBrush
@@ -1368,8 +1404,8 @@ fn render_dcel_cpu(
     pixmap: &mut tiny_skia::PixmapMut<'_>,
     transform: tiny_skia::Transform,
     opacity: f32,
-    _document: &Document,
-    _image_cache: &mut ImageCache,
+    document: &Document,
+    image_cache: &mut ImageCache,
 ) {
     // 1. Faces (fills)
     for (i, face) in dcel.faces.iter().enumerate() {
@@ -1412,8 +1448,25 @@ fn render_dcel_cpu(
             }
         }
 
-        // Image fill — not yet implemented for CPU renderer; fall through to solid or skip
-        // TODO: decode image to Pixmap and use as Pattern shader
+        // Image fill — decode to Pixmap and use as a Pattern shader
+        if let Some(image_asset_id) = face.image_fill {
+            if let Some(asset) = document.get_image_asset(&image_asset_id) {
+                if let Some(img_pixmap) = image_cache.get_or_decode_cpu(asset) {
+                    let pattern = tiny_skia::Pattern::new(
+                        tiny_skia::Pixmap::as_ref(&img_pixmap),
+                        tiny_skia::SpreadMode::Pad,
+                        tiny_skia::FilterQuality::Bilinear,
+                        opacity,
+                        tiny_skia::Transform::identity(),
+                    );
+                    let mut paint = tiny_skia::Paint::default();
+                    paint.shader = pattern;
+                    paint.anti_alias = true;
+                    pixmap.fill_path(&ts_path, &paint, fill_type, transform, None);
+                    filled = true;
+                }
+            }
+        }
 
         // Solid colour fill
         if !filled {

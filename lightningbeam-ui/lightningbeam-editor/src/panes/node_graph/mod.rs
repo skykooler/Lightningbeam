@@ -681,6 +681,9 @@ impl NodeGraphPane {
                 if let Err(e) = shared.action_executor.execute_with_backend(action, &mut backend_context) {
                     eprintln!("Failed to execute node graph action: {}", e);
                 } else {
+                    // Notify other panes (e.g. timeline automation cache) that graph topology changed
+                    *shared.graph_topology_generation += 1;
+
                     // If this was a node addition, query backend to get the new node's ID
                     if let Some((frontend_id, node_type, position)) = self.pending_node_addition.take() {
                         if let Some(track_id) = self.track_id {
@@ -1432,6 +1435,7 @@ impl NodeGraphPane {
 
         // Create nodes in frontend
         self.pending_script_resolutions.clear();
+        self.user_state.pending_automation_name_queries.clear();
         for node in &graph_state.nodes {
             let node_template = match NodeTemplate::from_backend_name(&node.node_type) {
                 Some(t) => t,
@@ -1454,6 +1458,13 @@ impl NodeGraphPane {
                         // Defer script_id resolution to render loop (needs document access)
                         self.pending_script_resolutions.push((fid, source.clone()));
                     }
+                }
+            }
+
+            // For AutomationInput nodes: queue a name query to populate the edit buffer
+            if node.node_type == "AutomationInput" {
+                if let Some(fid) = frontend_id {
+                    self.user_state.pending_automation_name_queries.push((fid, node.id));
                 }
             }
         }
@@ -2776,6 +2787,36 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // Populate automation name edit buffers (deferred after load)
+            if !self.user_state.pending_automation_name_queries.is_empty() {
+                let queries: Vec<_> = self.user_state.pending_automation_name_queries.drain(..).collect();
+                if let Some(backend_track_id) = self.track_id.and_then(|tid| shared.layer_to_track_map.get(&tid).copied()) {
+                    if let Some(controller_arc) = &shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        for (node_id, backend_node_id) in queries {
+                            if let Ok(name) = controller.query_automation_name(backend_track_id, backend_node_id) {
+                                self.user_state.automation_name_edits.insert(node_id, name);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Handle pending automation name changes
+            if !self.user_state.pending_automation_name_changes.is_empty() {
+                let changes: Vec<_> = self.user_state.pending_automation_name_changes.drain(..).collect();
+                if let Some(backend_track_id) = self.track_id.and_then(|tid| shared.layer_to_track_map.get(&tid).copied()) {
+                    if let Some(controller_arc) = &shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        for (_node_id, backend_node_id, name) in changes {
+                            controller.automation_set_name(backend_track_id, backend_node_id, name);
+                        }
+                        // Invalidate timeline automation cache so renamed lanes appear immediately
+                        *shared.graph_topology_generation += 1;
                     }
                 }
             }

@@ -268,6 +268,9 @@ pub struct SharedPaneState<'a> {
     pub waveform_stereo: bool,
     /// Generation counter - incremented on project load to force reloads
     pub project_generation: &'a mut u64,
+    /// Incremented whenever node graph topology changes (add/remove node or connection).
+    /// Used by the timeline to know when to refresh automation lane caches.
+    pub graph_topology_generation: &'a mut u64,
     /// Script ID to open in the script editor (set by node graph "Edit Script" action)
     pub script_to_edit: &'a mut Option<Uuid>,
     /// Script ID that was just saved (triggers auto-recompile of nodes using it)

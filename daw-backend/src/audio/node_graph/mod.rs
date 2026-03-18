@@ -1,6 +1,7 @@
 mod graph;
 mod node_trait;
 mod types;
+pub mod lbins;
 pub mod nodes;
 pub mod preset;
 

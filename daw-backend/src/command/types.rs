@@ -181,6 +181,10 @@ pub enum Command {
     GraphSavePreset(TrackId, String, String, String, Vec<String>),
     /// Load a preset into a track's graph (track_id, preset_path)
     GraphLoadPreset(TrackId, String),
+    /// Load a .lbins instrument bundle into a track's graph (track_id, path)
+    GraphLoadLbins(TrackId, std::path::PathBuf),
+    /// Save a track's graph as a .lbins instrument bundle (track_id, path, preset_name, description, tags)
+    GraphSaveLbins(TrackId, std::path::PathBuf, String, String, Vec<String>),
 
     // Metatrack subtrack graph commands
     /// Replace a metatrack's mixing graph with the default SubtrackInputs→Mixer→Output layout.
@@ -392,6 +396,8 @@ pub enum Query {
     GetAutomationKeyframes(TrackId, u32),
     /// Get the display name of an AutomationInput node (track_id, node_id)
     GetAutomationName(TrackId, u32),
+    /// Get the value range (min, max) of an AutomationInput node (track_id, node_id)
+    GetAutomationRange(TrackId, u32),
     /// Serialize audio pool for project saving (project_path)
     SerializeAudioPool(std::path::PathBuf),
     /// Load audio pool from serialized entries (entries, project_path)
@@ -480,6 +486,8 @@ pub enum QueryResponse {
     AutomationKeyframes(Result<Vec<AutomationKeyframeData>, String>),
     /// Automation node name
     AutomationName(Result<String, String>),
+    /// Automation node value range (min, max)
+    AutomationRange(Result<(f32, f32), String>),
     /// Serialized audio pool entries
     AudioPoolSerialized(Result<Vec<crate::audio::pool::AudioPoolEntry>, String>),
     /// Audio pool loaded (returns list of missing pool indices)

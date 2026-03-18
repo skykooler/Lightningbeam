@@ -75,6 +75,21 @@ impl AmpSimNode {
         Ok(())
     }
 
+    /// Load a .nam model from in-memory bytes (used when loading from a .lbins bundle).
+    /// `zip_path` is the ZIP-relative path stored back in `model_path` for serialization.
+    pub fn load_model_from_bytes(&mut self, zip_path: &str, bytes: &[u8]) -> Result<(), String> {
+        let basename = std::path::Path::new(zip_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(zip_path);
+        let mut model = nam_ffi::NamModel::from_bytes(basename, bytes)
+            .map_err(|e| format!("{}", e))?;
+        model.set_max_buffer_size(1024);
+        self.model = Some(model);
+        self.model_path = Some(zip_path.to_string());
+        Ok(())
+    }
+
     /// Get the loaded model path (for preset serialization).
     pub fn model_path(&self) -> Option<&str> {
         self.model_path.as_deref()

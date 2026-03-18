@@ -438,7 +438,7 @@ impl Metatrack {
     pub fn rebuild_audio_graph(&mut self, sample_rate: u32, buffer_size: usize) -> Result<(), String> {
         if let Some(preset) = &self.audio_graph_preset {
             if !preset.nodes.is_empty() && preset.output_node.is_some() {
-                self.audio_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None)?;
+                self.audio_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None, None)?;
                 // graph_is_default remains as serialized (false for user-modified graphs)
             } else {
                 self.audio_graph = Self::create_empty_graph(sample_rate, buffer_size);
@@ -703,7 +703,7 @@ impl MidiTrack {
     /// Rebuild the instrument graph from preset after deserialization
     pub fn rebuild_audio_graph(&mut self, sample_rate: u32, buffer_size: usize) -> Result<(), String> {
         if let Some(preset) = &self.instrument_graph_preset {
-            self.instrument_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None)?;
+            self.instrument_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None, None)?;
         } else {
             // No preset - create default graph
             self.instrument_graph = AudioGraph::new(sample_rate, buffer_size);
@@ -985,7 +985,7 @@ impl AudioTrack {
 
             if has_nodes && has_output {
                 // Valid preset - rebuild from it
-                self.effects_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None)?;
+                self.effects_graph = AudioGraph::from_preset(preset, sample_rate, buffer_size, None, None)?;
             } else {
                 // Empty or invalid preset - create default graph
                 self.effects_graph = Self::create_default_graph(sample_rate, buffer_size);

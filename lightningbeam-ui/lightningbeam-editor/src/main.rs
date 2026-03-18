@@ -57,6 +57,8 @@ mod test_mode;
 mod sample_import;
 mod sample_import_dialog;
 
+mod curve_editor;
+
 /// Lightningbeam Editor - Animation and video editing software
 #[derive(Parser, Debug)]
 #[command(name = "Lightningbeam Editor")]
@@ -840,6 +842,8 @@ struct EditorApp {
     track_to_layer_map: HashMap<daw_backend::TrackId, Uuid>,
     /// Generation counter - incremented on project load to force UI components to reload
     project_generation: u64,
+    /// Incremented whenever node graph topology changes (add/remove node or connection)
+    graph_topology_generation: u64,
     // Clip instance ID mapping (Document clip instance UUIDs <-> backend clip instance IDs)
     clip_instance_to_backend_map: HashMap<Uuid, lightningbeam_core::action::BackendClipInstanceId>,
     // Playback state (global for all panes)
@@ -1116,6 +1120,7 @@ impl EditorApp {
             layer_to_track_map: HashMap::new(),
             track_to_layer_map: HashMap::new(),
             project_generation: 0,
+            graph_topology_generation: 0,
             clip_instance_to_backend_map: HashMap::new(),
             playback_time: 0.0, // Start at beginning
             is_playing: false,  // Start paused
@@ -5823,6 +5828,7 @@ impl eframe::App for EditorApp {
                     track_to_layer_map: &self.track_to_layer_map,
                     waveform_stereo: self.config.waveform_stereo,
                     project_generation: &mut self.project_generation,
+                    graph_topology_generation: &mut self.graph_topology_generation,
                     script_to_edit: &mut self.script_to_edit,
                     script_saved: &mut self.script_saved,
                     region_selection: &mut self.region_selection,
