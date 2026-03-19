@@ -221,6 +221,8 @@ pub struct TimelinePane {
     automation_cache_generation: u64,
     /// Last seen graph_topology_generation; used to detect node additions/removals
     automation_topology_generation: u64,
+    /// Cached metronome icon texture (loaded on first use)
+    metronome_icon: Option<egui::TextureHandle>,
 }
 
 /// Check if a clip type can be dropped on a layer type
@@ -672,6 +674,7 @@ impl TimelinePane {
             pending_automation_actions: Vec::new(),
             automation_cache_generation: u64::MAX,
             automation_topology_generation: u64::MAX,
+            metronome_icon: None,
         }
     }
 
@@ -983,10 +986,14 @@ impl TimelinePane {
             return;
         }
 
-        // Auto-start playback if needed
-        if !*shared.is_playing {
-            if let Some(controller_arc) = shared.audio_controller {
-                let mut controller = controller_arc.lock().unwrap();
+        // Auto-start playback if needed, and enable metronome if requested.
+        // Metronome must be enabled BEFORE play() so beat 0 is not missed.
+        if let Some(controller_arc) = shared.audio_controller {
+            let mut controller = controller_arc.lock().unwrap();
+            if *shared.metronome_enabled {
+                controller.set_metronome_enabled(true);
+            }
+            if !*shared.is_playing {
                 controller.play();
                 *shared.is_playing = true;
                 println!("▶ Auto-started playback for recording");
@@ -1042,6 +1049,8 @@ impl TimelinePane {
                 controller.stop_recording();
                 eprintln!("[STOP] Audio stop command sent at +{:.1}ms", stop_wall.elapsed().as_secs_f64() * 1000.0);
             }
+            // Always disable metronome on recording stop
+            controller.set_metronome_enabled(false);
         }
 
         // Note: Don't clear recording_layer_ids here!
@@ -4737,6 +4746,64 @@ impl PaneRenderer for TimelinePane {
                 // Request repaint while recording for pulse animation
                 if *shared.is_recording {
                     ui.ctx().request_repaint();
+                }
+
+                // Metronome toggle — only visible in Measures mode
+                if self.time_display_format == TimeDisplayFormat::Measures {
+                    ui.add_space(4.0);
+
+                    let metro_tint = if *shared.metronome_enabled {
+                        egui::Color32::from_rgb(100, 180, 255)
+                    } else {
+                        ui.visuals().text_color()
+                    };
+
+                    // Lazy-load the metronome SVG icon
+                    if self.metronome_icon.is_none() {
+                        const METRONOME_SVG: &[u8] = include_bytes!("../../../../src/assets/metronome.svg");
+                        self.metronome_icon = crate::rasterize_svg(METRONOME_SVG, "metronome_icon", 64, ui.ctx());
+                    }
+
+                    let metro_response = if let Some(icon) = &self.metronome_icon {
+                        let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
+                        let bg = if *shared.metronome_enabled {
+                            egui::Color32::from_rgba_unmultiplied(100, 180, 255, 60)
+                        } else if response.hovered() {
+                            ui.visuals().widgets.hovered.bg_fill
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        };
+                        ui.painter().rect_filled(rect, 4.0, bg);
+                        ui.painter().image(
+                            icon.id(),
+                            rect.shrink(4.0),
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            metro_tint,
+                        );
+                        response
+                    } else {
+                        // Fallback if SVG failed to load
+                        ui.add_sized(button_size, egui::Button::new(
+                            egui::RichText::new("♩").color(metro_tint).size(16.0)
+                        ))
+                    };
+
+                    let metro_response = metro_response.on_hover_text(if *shared.metronome_enabled {
+                        "Disable metronome"
+                    } else {
+                        "Enable metronome"
+                    });
+
+                    if metro_response.clicked() {
+                        *shared.metronome_enabled = !*shared.metronome_enabled;
+                        // Sync live state if already recording
+                        if *shared.is_recording {
+                            if let Some(controller_arc) = shared.audio_controller {
+                                let mut controller = controller_arc.lock().unwrap();
+                                controller.set_metronome_enabled(*shared.metronome_enabled);
+                            }
+                        }
+                    }
                 }
             });
         });

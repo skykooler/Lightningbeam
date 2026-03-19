@@ -212,6 +212,7 @@ pub struct SharedPaneState<'a> {
     pub is_playing: &'a mut bool,    // Whether playback is currently active
     /// Recording state
     pub is_recording: &'a mut bool,  // Whether recording is currently active
+    pub metronome_enabled: &'a mut bool,  // Whether metronome clicks during recording
     pub recording_clips: &'a mut std::collections::HashMap<uuid::Uuid, u32>, // layer_id -> clip_id
     pub recording_start_time: &'a mut f64,  // Playback time when recording started
     pub recording_layer_ids: &'a mut Vec<uuid::Uuid>,  // Layers being recorded to

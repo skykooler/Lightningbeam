@@ -296,7 +296,7 @@ enum SplitPreviewMode {
 }
 
 /// Rasterize an embedded SVG and upload it as an egui texture
-fn rasterize_svg(svg_data: &[u8], name: &str, render_size: u32, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+pub(crate) fn rasterize_svg(svg_data: &[u8], name: &str, render_size: u32, ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let tree = resvg::usvg::Tree::from_data(svg_data, &resvg::usvg::Options::default()).ok()?;
     let pixmap_size = tree.size().to_int_size();
     let scale_x = render_size as f32 / pixmap_size.width() as f32;
@@ -855,6 +855,7 @@ struct EditorApp {
     #[allow(dead_code)]
     armed_layers: HashSet<Uuid>,
     is_recording: bool,                   // Whether recording is currently active
+    metronome_enabled: bool,              // Whether metronome clicks during recording
     recording_clips: HashMap<Uuid, u32>,  // layer_id -> backend clip_id during recording
     recording_start_time: f64,            // Playback time when recording started
     recording_layer_ids: Vec<Uuid>,       // Layers being recorded to (for creating clips)
@@ -1126,6 +1127,7 @@ impl EditorApp {
             recording_arm_mode: RecordingArmMode::default(), // Auto mode by default
             armed_layers: HashSet::new(),     // No layers explicitly armed
             is_recording: false,              // Not recording initially
+            metronome_enabled: false,         // Metronome off by default
             recording_clips: HashMap::new(),  // No active recording clips
             recording_start_time: 0.0,        // Will be set when recording starts
             recording_layer_ids: Vec::new(),  // Will be populated when recording starts
@@ -5771,6 +5773,7 @@ impl eframe::App for EditorApp {
                     playback_time: &mut self.playback_time,
                     is_playing: &mut self.is_playing,
                     is_recording: &mut self.is_recording,
+                    metronome_enabled: &mut self.metronome_enabled,
                     recording_clips: &mut self.recording_clips,
                     recording_start_time: &mut self.recording_start_time,
                     recording_layer_ids: &mut self.recording_layer_ids,
