@@ -2,6 +2,7 @@ use crate::audio::{
     AudioClipInstanceId, AutomationLaneId, ClipId, CurveType, MidiClip, MidiClipId,
     MidiClipInstanceId, ParameterId, TrackId,
 };
+use crate::audio::midi::MidiEvent;
 use crate::audio::buffer_pool::BufferPoolStats;
 use crate::audio::node_graph::nodes::LoopMode;
 use crate::io::WaveformPeak;
@@ -85,6 +86,8 @@ pub enum Command {
     /// Update MIDI clip notes (track_id, clip_id, notes: Vec<(start_time, note, velocity, duration)>)
     /// NOTE: May need to switch to individual note operations if this becomes slow on clips with many notes
     UpdateMidiClipNotes(TrackId, MidiClipId, Vec<(f64, u8, u8, f64)>),
+    /// Replace all events in a MIDI clip (track_id, clip_id, events). Used for CC/pitch bend editing.
+    UpdateMidiClipEvents(TrackId, MidiClipId, Vec<MidiEvent>),
     /// Remove a MIDI clip instance from a track (track_id, instance_id) - for undo/redo support
     RemoveMidiClip(TrackId, MidiClipInstanceId),
     /// Remove an audio clip instance from a track (track_id, instance_id) - for undo/redo support
@@ -445,6 +448,9 @@ pub enum Query {
     DuplicateMidiClipSync(MidiClipId),
     /// Get whether a track's graph is still the auto-generated default
     GetGraphIsDefault(TrackId),
+    /// Get the pitch bend range (in semitones) for the instrument on a MIDI track.
+    /// Searches for MidiToCVNode (in VA templates) or MultiSamplerNode (direct).
+    GetPitchBendRange(TrackId),
 }
 
 /// Oscilloscope data from a node
@@ -522,4 +528,6 @@ pub enum QueryResponse {
     MidiClipDuplicated(Result<MidiClipId, String>),
     /// Whether a track's graph is the auto-generated default
     GraphIsDefault(bool),
+    /// Pitch bend range in semitones for the track's instrument
+    PitchBendRange(f32),
 }

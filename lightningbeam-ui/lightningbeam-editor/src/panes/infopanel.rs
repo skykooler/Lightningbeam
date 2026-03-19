@@ -1176,14 +1176,16 @@ impl InfopanelPane {
                 if indices.len() == 1 {
                     // Single note — show details if we can resolve from the event cache
                     if let Some(events) = shared.midi_event_cache.get(&midi_clip_id) {
-                        // Events are (time, note, velocity, is_on) — resolve to notes
-                        let mut notes: Vec<(f64, u8, u8, f64)> = Vec::new(); // (time, note, vel, dur)
+                        // Resolve note-on/off pairs to (time, note, vel, dur) tuples
+                        let mut notes: Vec<(f64, u8, u8, f64)> = Vec::new();
                         let mut pending: std::collections::HashMap<u8, (f64, u8)> = std::collections::HashMap::new();
-                        for &(time, note, vel, is_on) in events {
-                            if is_on {
-                                pending.insert(note, (time, vel));
-                            } else if let Some((start, v)) = pending.remove(&note) {
-                                notes.push((start, note, v, time - start));
+                        for event in events {
+                            if event.is_note_on() {
+                                pending.insert(event.data1, (event.timestamp, event.data2));
+                            } else if event.is_note_off() {
+                                if let Some((start, v)) = pending.remove(&event.data1) {
+                                    notes.push((start, event.data1, v, event.timestamp - start));
+                                }
                             }
                         }
                         notes.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));

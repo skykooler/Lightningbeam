@@ -992,6 +992,13 @@ impl Engine {
                     clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
                 }
             }
+            Command::UpdateMidiClipEvents(_track_id, clip_id, events) => {
+                // Replace all events in a MIDI clip (used for CC/pitch bend editing)
+                if let Some(clip) = self.project.midi_clip_pool.get_clip_mut(clip_id) {
+                    clip.events = events;
+                    clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                }
+            }
             Command::RemoveMidiClip(track_id, instance_id) => {
                 // Remove a MIDI clip instance from a track (for undo/redo support)
                 let _ = self.project.remove_midi_clip(track_id, instance_id);
@@ -2818,6 +2825,40 @@ impl Engine {
                 };
                 QueryResponse::GraphIsDefault(is_default)
             }
+
+            Query::GetPitchBendRange(track_id) => {
+                use crate::audio::node_graph::nodes::{MidiToCVNode, MultiSamplerNode, VoiceAllocatorNode};
+                use crate::audio::node_graph::AudioNode;
+                let range = if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
+                    let graph = &track.instrument_graph;
+                    let mut found = None;
+                    for idx in graph.node_indices() {
+                        if let Some(gn) = graph.get_graph_node(idx) {
+                            if let Some(ms) = gn.node.as_any().downcast_ref::<MultiSamplerNode>() {
+                                found = Some(ms.get_parameter(4)); // PARAM_PITCH_BEND_RANGE
+                                break;
+                            }
+                            // Search inside VoiceAllocator template for MidiToCV
+                            if let Some(va) = gn.node.as_any().downcast_ref::<VoiceAllocatorNode>() {
+                                let tg = va.template_graph();
+                                for tidx in tg.node_indices() {
+                                    if let Some(tgn) = tg.get_graph_node(tidx) {
+                                        if let Some(mc) = tgn.node.as_any().downcast_ref::<MidiToCVNode>() {
+                                            found = Some(mc.get_parameter(0)); // PARAM_PITCH_BEND_RANGE
+                                            break;
+                                        }
+                                    }
+                                }
+                                if found.is_some() { break; }
+                            }
+                        }
+                    }
+                    found.unwrap_or(2.0)
+                } else {
+                    2.0
+                };
+                QueryResponse::PitchBendRange(range)
+            }
         };
 
         // Send response back
@@ -3412,6 +3453,11 @@ impl EngineController {
         let _ = self.command_tx.push(Command::UpdateMidiClipNotes(track_id, clip_id, notes));
     }
 
+    /// Replace all events in a MIDI clip (used for CC/pitch bend editing from the piano roll)
+    pub fn update_midi_clip_events(&mut self, track_id: TrackId, clip_id: MidiClipId, events: Vec<crate::audio::midi::MidiEvent>) {
+        let _ = self.command_tx.push(Command::UpdateMidiClipEvents(track_id, clip_id, events));
+    }
+
     /// Remove a MIDI clip instance from a track (for undo/redo support)
     pub fn remove_midi_clip(&mut self, track_id: TrackId, instance_id: MidiClipInstanceId) {
         let _ = self.command_tx.push(Command::RemoveMidiClip(track_id, instance_id));
@@ -3950,6 +3996,26 @@ impl EngineController {
         }
 
         Err("Query timeout".to_string())
+    }
+
+    /// Query the pitch bend range (semitones) for the instrument on a MIDI track.
+    /// Returns 2.0 (default) if the track or instrument cannot be found.
+    pub fn query_pitch_bend_range(&mut self, track_id: TrackId) -> f32 {
+        if let Err(_) = self.query_tx.push(Query::GetPitchBendRange(track_id)) {
+            return 2.0;
+        }
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::PitchBendRange(range)) = self.query_response_rx.pop() {
+                return range;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+
+        2.0 // default on timeout
     }
 
     /// Serialize the audio pool for project saving

@@ -109,6 +109,17 @@ pub trait Action: Send {
     fn midi_notes_after_rollback(&self) -> Option<(u32, &[(f64, u8, u8, f64)])> {
         None
     }
+
+    /// Return full MIDI event data (CC, pitch bend, etc.) reflecting the state after execute/redo.
+    /// Used to keep the frontend MIDI event cache in sync after undo/redo.
+    fn midi_events_after_execute(&self) -> Option<(u32, &[daw_backend::audio::midi::MidiEvent])> {
+        None
+    }
+
+    /// Return full MIDI event data reflecting the state after rollback/undo.
+    fn midi_events_after_rollback(&self) -> Option<(u32, &[daw_backend::audio::midi::MidiEvent])> {
+        None
+    }
 }
 
 /// Action executor that wraps the document and manages undo/redo
@@ -278,6 +289,16 @@ impl ActionExecutor {
     /// Returns the notes reflecting rollback state.
     pub fn last_redo_midi_notes(&self) -> Option<(u32, &[(f64, u8, u8, f64)])> {
         self.redo_stack.last().and_then(|a| a.midi_notes_after_rollback())
+    }
+
+    /// Get full MIDI event data from the last action on the undo stack (after redo).
+    pub fn last_undo_midi_events(&self) -> Option<(u32, &[daw_backend::audio::midi::MidiEvent])> {
+        self.undo_stack.last().and_then(|a| a.midi_events_after_execute())
+    }
+
+    /// Get full MIDI event data from the last action on the redo stack (after undo).
+    pub fn last_redo_midi_events(&self) -> Option<(u32, &[daw_backend::audio::midi::MidiEvent])> {
+        self.redo_stack.last().and_then(|a| a.midi_events_after_rollback())
     }
 
     /// Get the description of the next action to redo

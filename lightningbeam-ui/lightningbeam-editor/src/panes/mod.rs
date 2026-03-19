@@ -233,7 +233,7 @@ pub struct SharedPaneState<'a> {
     /// NOTE: If an action later fails during execution, the cache may be out of sync with the
     /// backend. This is acceptable because MIDI note edits are simple and unlikely to fail.
     /// Undo/redo rebuilds affected entries from the backend to restore consistency.
-    pub midi_event_cache: &'a mut std::collections::HashMap<u32, Vec<(f64, u8, u8, bool)>>,
+    pub midi_event_cache: &'a mut std::collections::HashMap<u32, Vec<daw_backend::audio::midi::MidiEvent>>,
     /// Audio pool indices that got new raw audio data this frame (for thumbnail invalidation)
     pub audio_pools_with_new_waveforms: &'a std::collections::HashSet<usize>,
     /// Raw audio samples for GPU waveform rendering (pool_index -> (samples, sample_rate, channels))

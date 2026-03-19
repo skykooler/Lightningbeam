@@ -886,10 +886,9 @@ struct EditorApp {
     output_level: (f32, f32),
     track_levels: HashMap<daw_backend::TrackId, f32>,
 
-    /// Cache for MIDI event data (keyed by backend midi_clip_id)
-    /// Prevents repeated backend queries for the same MIDI clip
-    /// Format: (timestamp, note_number, velocity, is_note_on)
-    midi_event_cache: HashMap<u32, Vec<(f64, u8, u8, bool)>>,
+    /// Cache for MIDI event data (keyed by backend midi_clip_id).
+    /// Stores full raw MidiEvents (note on/off, CC, pitch bend, etc.)
+    midi_event_cache: HashMap<u32, Vec<daw_backend::audio::midi::MidiEvent>>,
     /// Cache for audio file durations to avoid repeated queries
     /// Format: pool_index -> duration in seconds
     audio_duration_cache: HashMap<usize, f64>,
@@ -3158,10 +3157,16 @@ impl EditorApp {
                 };
                 // Rebuild MIDI cache after undo (backend_context dropped, borrows released)
                 if undo_succeeded {
-                    let midi_update = self.action_executor.last_redo_midi_notes()
-                        .map(|(id, notes)| (id, notes.to_vec()));
-                    if let Some((clip_id, notes)) = midi_update {
-                        self.rebuild_midi_cache_entry(clip_id, &notes);
+                    if let Some((clip_id, events)) = self.action_executor.last_redo_midi_events()
+                        .map(|(id, ev)| (id, ev.to_vec()))
+                    {
+                        self.midi_event_cache.insert(clip_id, events);
+                    } else {
+                        let midi_update = self.action_executor.last_redo_midi_notes()
+                            .map(|(id, notes)| (id, notes.to_vec()));
+                        if let Some((clip_id, notes)) = midi_update {
+                            self.rebuild_midi_cache_entry(clip_id, &notes);
+                        }
                     }
                     // Stale vertex/edge/face IDs from before the undo would
                     // crash selection rendering on the restored (smaller) DCEL.
@@ -3196,10 +3201,16 @@ impl EditorApp {
                 };
                 // Rebuild MIDI cache after redo (backend_context dropped, borrows released)
                 if redo_succeeded {
-                    let midi_update = self.action_executor.last_undo_midi_notes()
-                        .map(|(id, notes)| (id, notes.to_vec()));
-                    if let Some((clip_id, notes)) = midi_update {
-                        self.rebuild_midi_cache_entry(clip_id, &notes);
+                    if let Some((clip_id, events)) = self.action_executor.last_undo_midi_events()
+                        .map(|(id, ev)| (id, ev.to_vec()))
+                    {
+                        self.midi_event_cache.insert(clip_id, events);
+                    } else {
+                        let midi_update = self.action_executor.last_undo_midi_notes()
+                            .map(|(id, notes)| (id, notes.to_vec()));
+                        if let Some((clip_id, notes)) = midi_update {
+                            self.rebuild_midi_cache_entry(clip_id, &notes);
+                        }
                     }
                     self.selection.clear_dcel_selection();
                 }
@@ -3863,18 +3874,7 @@ impl EditorApp {
                 // track_id is unused by the query, pass 0
                 match controller.query_midi_clip(0, clip_id) {
                     Ok(clip_data) => {
-                        let processed_events: Vec<(f64, u8, u8, bool)> = clip_data.events.iter()
-                            .filter_map(|event| {
-                                let status_type = event.status & 0xF0;
-                                if status_type == 0x90 || status_type == 0x80 {
-                                    let is_note_on = status_type == 0x90 && event.data2 > 0;
-                                    Some((event.timestamp, event.data1, event.data2, is_note_on))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-                        self.midi_event_cache.insert(clip_id, processed_events);
+                        self.midi_event_cache.insert(clip_id, clip_data.events);
                         midi_fetched += 1;
                     }
                     Err(e) => eprintln!("Failed to fetch MIDI clip {}: {}", clip_id, e),
@@ -4013,12 +4013,12 @@ impl EditorApp {
     /// Rebuild a MIDI event cache entry from backend note format.
     /// Called after undo/redo to keep the cache consistent with the backend.
     fn rebuild_midi_cache_entry(&mut self, clip_id: u32, notes: &[(f64, u8, u8, f64)]) {
-        let mut events: Vec<(f64, u8, u8, bool)> = Vec::with_capacity(notes.len() * 2);
+        let mut events: Vec<daw_backend::audio::midi::MidiEvent> = Vec::with_capacity(notes.len() * 2);
         for &(start_time, note, velocity, duration) in notes {
-            events.push((start_time, note, velocity, true));
-            events.push((start_time + duration, note, velocity, false));
+            events.push(daw_backend::audio::midi::MidiEvent::note_on(start_time, 0, note, velocity));
+            events.push(daw_backend::audio::midi::MidiEvent::note_off(start_time + duration, 0, note, 0));
         }
-        events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
         self.midi_event_cache.insert(clip_id, events);
     }
 
@@ -4037,22 +4037,7 @@ impl EditorApp {
                 let duration = midi_clip.duration;
                 let event_count = midi_clip.events.len();
 
-                // Process MIDI events to cache format: (timestamp, note_number, velocity, is_note_on)
-                // Filter to note events only (status 0x90 = note-on, 0x80 = note-off)
-                let processed_events: Vec<(f64, u8, u8, bool)> = midi_clip.events.iter()
-                    .filter_map(|event| {
-                        let status_type = event.status & 0xF0;
-                        if status_type == 0x90 || status_type == 0x80 {
-                            // Note-on is 0x90 with velocity > 0, Note-off is 0x80 or velocity = 0
-                            let is_note_on = status_type == 0x90 && event.data2 > 0;
-                            Some((event.timestamp, event.data1, event.data2, is_note_on))
-                        } else {
-                            None // Ignore non-note events (CC, pitch bend, etc.)
-                        }
-                    })
-                    .collect();
-
-                let note_event_count = processed_events.len();
+                let processed_events = midi_clip.events.clone();
 
                 // Add to backend MIDI clip pool FIRST and get the backend clip ID
                 if let Some(ref controller_arc) = self.audio_controller {
@@ -4067,9 +4052,8 @@ impl EditorApp {
                     let clip = AudioClip::new_midi(&name, backend_clip_id, duration);
                     let frontend_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
 
-                    println!("Imported MIDI '{}' ({:.1}s, {} total events, {} note events) - Frontend ID: {}, Backend ID: {}",
-                        name, duration, event_count, note_event_count, frontend_clip_id, backend_clip_id);
-                    println!("✅ Added MIDI clip to backend pool and cached {} note events", note_event_count);
+                    println!("Imported MIDI '{}' ({:.1}s, {} total events) - Frontend ID: {}, Backend ID: {}",
+                        name, duration, event_count, frontend_clip_id, backend_clip_id);
 
                     Some(ImportedAssetInfo {
                         clip_id: frontend_clip_id,
@@ -5212,15 +5196,14 @@ impl eframe::App for EditorApp {
                             }
 
                             // Update midi_event_cache with notes captured so far
-                            // (inlined instead of calling rebuild_midi_cache_entry to avoid
-                            // conflicting &mut self borrow with event_rx loop)
+                            // (inlined to avoid conflicting &mut self borrow)
                             {
-                                let mut events: Vec<(f64, u8, u8, bool)> = Vec::with_capacity(notes.len() * 2);
+                                let mut events: Vec<daw_backend::audio::midi::MidiEvent> = Vec::with_capacity(notes.len() * 2);
                                 for &(start_time, note, velocity, dur) in &notes {
-                                    events.push((start_time, note, velocity, true));
-                                    events.push((start_time + dur, note, velocity, false));
+                                    events.push(daw_backend::audio::midi::MidiEvent::note_on(start_time, 0, note, velocity));
+                                    events.push(daw_backend::audio::midi::MidiEvent::note_off(start_time + dur, 0, note, 0));
                                 }
-                                events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                                events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
                                 self.midi_event_cache.insert(clip_id, events);
                             }
                             ctx.request_repaint();
@@ -5234,20 +5217,8 @@ impl eframe::App for EditorApp {
                                 let mut controller = controller_arc.lock().unwrap();
                                 match controller.query_midi_clip(track_id, clip_id) {
                                     Ok(midi_clip_data) => {
-                                        // Convert backend MidiEvent format to cache format
-                                        let cache_events: Vec<(f64, u8, u8, bool)> = midi_clip_data.events.iter()
-                                            .filter_map(|event| {
-                                                let status_type = event.status & 0xF0;
-                                                if status_type == 0x90 || status_type == 0x80 {
-                                                    let is_note_on = status_type == 0x90 && event.data2 > 0;
-                                                    Some((event.timestamp, event.data1, event.data2, is_note_on))
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                            .collect();
                                         drop(controller);
-                                        self.midi_event_cache.insert(clip_id, cache_events);
+                                        self.midi_event_cache.insert(clip_id, midi_clip_data.events.clone());
 
                                         // Update document clip with final duration and name
                                         let midi_layer_id = self.track_to_layer_map.get(&track_id)
