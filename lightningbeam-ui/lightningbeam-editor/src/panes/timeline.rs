@@ -181,6 +181,7 @@ pub struct TimelinePane {
     /// Clip drag state (None if not dragging)
     clip_drag_state: Option<ClipDragType>,
     drag_offset: f64,  // Time offset being applied during drag (for preview)
+    drag_anchor_start: f64, // Original timeline_start of earliest selected clip; used for snapped move offset
 
     /// Cached mouse position from mousedown (used for edge detection when drag starts)
     mousedown_pos: Option<egui::Pos2>,
@@ -656,6 +657,7 @@ impl TimelinePane {
             last_pan_pos: None,
             clip_drag_state: None,
             drag_offset: 0.0,
+            drag_anchor_start: 0.0,
             mousedown_pos: None,
             layer_control_clicked: false,
             context_menu_clip: None,
@@ -1263,6 +1265,73 @@ impl TimelinePane {
     /// Convert pixel x-coordinate to time (seconds)
     fn x_to_time(&self, x: f32) -> f64 {
         self.viewport_start_time + (x / self.pixels_per_second) as f64
+    }
+
+    /// Returns the quantization grid size in seconds, or None to disable snapping.
+    /// - Measures mode: zoom-adaptive (coarser when zoomed out, None when very zoomed in)
+    /// - Frames mode: always 1/framerate regardless of zoom
+    /// - Seconds mode: no snapping
+    fn quantize_grid_size(
+        &self,
+        bpm: f64,
+        time_sig: &lightningbeam_core::document::TimeSignature,
+        framerate: f64,
+    ) -> Option<f64> {
+        match self.time_display_format {
+            TimeDisplayFormat::Frames => Some(1.0 / framerate),
+            TimeDisplayFormat::Measures => {
+                use lightningbeam_core::beat_time::{beat_duration, measure_duration};
+                let beat = beat_duration(bpm);
+                let measure = measure_duration(bpm, time_sig);
+                let pps = self.pixels_per_second as f64;
+                // Very zoomed in: 16th note > 40px → no snap
+                if pps * beat / 4.0 > 40.0 { return None; }
+                // Find finest subdivision with >= 15px spacing (finest → coarsest)
+                const MIN_PX: f64 = 15.0;
+                for &sub in &[beat / 4.0, beat / 2.0, beat, beat * 2.0, measure] {
+                    if pps * sub >= MIN_PX { return Some(sub); }
+                }
+                // Very zoomed out: try 2x, 4x, ... multiples of a measure
+                let mut m = measure * 2.0;
+                for _ in 0..10 {
+                    if pps * m >= MIN_PX { return Some(m); }
+                    m *= 2.0;
+                }
+                Some(measure)
+            }
+            TimeDisplayFormat::Seconds => None,
+        }
+    }
+
+    /// Snap a time value to the nearest quantization grid point (or return unchanged).
+    fn snap_to_grid(
+        &self,
+        t: f64,
+        bpm: f64,
+        time_sig: &lightningbeam_core::document::TimeSignature,
+        framerate: f64,
+    ) -> f64 {
+        match self.quantize_grid_size(bpm, time_sig, framerate) {
+            Some(grid) => (t / grid).round() * grid,
+            None => t,
+        }
+    }
+
+    /// Effective drag offset for Move operations.
+    /// Snaps the anchor clip's resulting position to the grid; all selected clips use the same offset.
+    fn snapped_move_offset(
+        &self,
+        bpm: f64,
+        time_sig: &lightningbeam_core::document::TimeSignature,
+        framerate: f64,
+    ) -> f64 {
+        match self.quantize_grid_size(bpm, time_sig, framerate) {
+            Some(grid) => {
+                let snapped = ((self.drag_anchor_start + self.drag_offset) / grid).round() * grid;
+                snapped - self.drag_anchor_start
+            }
+            None => self.drag_offset,
+        }
     }
 
     /// Calculate appropriate interval for time ruler based on zoom level
@@ -2530,7 +2599,7 @@ impl TimelinePane {
                     let dur = ci.total_duration(clip_dur);
                     // Apply drag offset for selected clips during move
                     if is_move_drag && selection.contains_clip_instance(&ci.id) {
-                        start = (start + self.drag_offset).max(0.0);
+                        start = (start + self.snapped_move_offset(document.bpm, &document.time_signature, document.framerate)).max(0.0);
                     }
                     ranges.push((start, start + dur));
                 }
@@ -2600,7 +2669,7 @@ impl TimelinePane {
                                     .unwrap_or_else(|| ci.trim_end.unwrap_or(1.0) - ci.trim_start);
                                 let mut ci_start = ci.effective_start();
                                 if is_move_drag && selection.contains_clip_instance(&ci.id) {
-                                    ci_start = (ci_start + self.drag_offset).max(0.0);
+                                    ci_start = (ci_start + self.snapped_move_offset(document.bpm, &document.time_signature, document.framerate)).max(0.0);
                                 }
                                 let ci_duration = ci.total_duration(clip_dur);
                                 let ci_end = ci_start + ci_duration;
@@ -2719,7 +2788,7 @@ impl TimelinePane {
                                 let clip_dur = audio_clip.duration;
                                 let mut ci_start = ci.effective_start();
                                 if is_move_drag && selection.contains_clip_instance(&ci.id) {
-                                    ci_start = (ci_start + self.drag_offset).max(0.0);
+                                    ci_start = (ci_start + self.snapped_move_offset(document.bpm, &document.time_signature, document.framerate)).max(0.0);
                                 }
                                 let ci_duration = ci.total_duration(clip_dur);
 
@@ -2821,7 +2890,7 @@ impl TimelinePane {
                     })
                     .collect();
                 if !group.is_empty() {
-                    Some(document.clamp_group_move_offset(&layer.id(), &group, self.drag_offset))
+                    Some(document.clamp_group_move_offset(&layer.id(), &group, self.snapped_move_offset(document.bpm, &document.time_signature, document.framerate)))
                 } else {
                     None
                 }
@@ -2854,7 +2923,7 @@ impl TimelinePane {
                                     }
                                 }
                                 ClipDragType::TrimLeft => {
-                                    let new_trim = (ci.trim_start + self.drag_offset).max(0.0).min(clip_dur);
+                                    let new_trim = self.snap_to_grid(ci.trim_start + self.drag_offset, document.bpm, &document.time_signature, document.framerate).max(0.0).min(clip_dur);
                                     let offset = new_trim - ci.trim_start;
                                     start = (ci.timeline_start + offset).max(0.0);
                                     duration = (clip_dur - new_trim).max(0.0);
@@ -2864,14 +2933,16 @@ impl TimelinePane {
                                 }
                                 ClipDragType::TrimRight => {
                                     let old_trim_end = ci.trim_end.unwrap_or(clip_dur);
-                                    let new_trim_end = (old_trim_end + self.drag_offset).max(ci.trim_start).min(clip_dur);
+                                    let new_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, document.bpm, &document.time_signature, document.framerate).max(ci.trim_start).min(clip_dur);
                                     duration = (new_trim_end - ci.trim_start).max(0.0);
                                 }
                                 ClipDragType::LoopExtendRight => {
                                     let trim_end = ci.trim_end.unwrap_or(clip_dur);
                                     let content_window = (trim_end - ci.trim_start).max(0.0);
                                     let current_right = ci.timeline_duration.unwrap_or(content_window);
-                                    let new_right = (current_right + self.drag_offset).max(content_window);
+                                    let right_edge = ci.timeline_start + current_right + self.drag_offset;
+                                    let snapped_edge = self.snap_to_grid(right_edge, document.bpm, &document.time_signature, document.framerate);
+                                    let new_right = (snapped_edge - ci.timeline_start).max(content_window);
                                     let loop_before = ci.loop_before.unwrap_or(0.0);
                                     duration = loop_before + new_right;
                                 }
@@ -2945,7 +3016,7 @@ impl TimelinePane {
                                 }
                                 ClipDragType::TrimLeft => {
                                     // Trim left: calculate new trim_start with snap to adjacent clips
-                                    let desired_trim_start = (clip_instance.trim_start + self.drag_offset)
+                                    let desired_trim_start = self.snap_to_grid(clip_instance.trim_start + self.drag_offset, document.bpm, &document.time_signature, document.framerate)
                                         .max(0.0)
                                         .min(clip_duration);
 
@@ -2985,8 +3056,7 @@ impl TimelinePane {
                                 ClipDragType::TrimRight => {
                                     // Trim right: extend or reduce duration with snap to adjacent clips
                                     let old_trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
-                                    let desired_change = self.drag_offset;
-                                    let desired_trim_end = (old_trim_end + desired_change)
+                                    let desired_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, document.bpm, &document.time_signature, document.framerate)
                                         .max(clip_instance.trim_start)
                                         .min(clip_duration);
 
@@ -3019,7 +3089,9 @@ impl TimelinePane {
                                     let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
                                     let content_window = (trim_end - clip_instance.trim_start).max(0.0);
                                     let current_right = clip_instance.timeline_duration.unwrap_or(content_window);
-                                    let desired_right = (current_right + self.drag_offset).max(content_window);
+                                    let right_edge = clip_instance.timeline_start + current_right + self.drag_offset;
+                                    let snapped_edge = self.snap_to_grid(right_edge, document.bpm, &document.time_signature, document.framerate);
+                                    let desired_right = (snapped_edge - clip_instance.timeline_start).max(content_window);
 
                                     let new_right = if desired_right > current_right {
                                         let max_extend = document.find_max_trim_extend_right(
@@ -4008,6 +4080,18 @@ impl TimelinePane {
                         // Start dragging with the detected drag type
                         self.clip_drag_state = Some(drag_type);
                         self.drag_offset = 0.0;
+                        if drag_type == ClipDragType::Move {
+                            // Find earliest selected clip as snap anchor for quantized moves
+                            let mut earliest = f64::MAX;
+                            for (_, clip_instances) in all_layer_clip_instances(context_layers, &audio_cache) {
+                                for ci in clip_instances {
+                                    if selection.contains_clip_instance(&ci.id) && ci.timeline_start < earliest {
+                                        earliest = ci.timeline_start;
+                                    }
+                                }
+                            }
+                            self.drag_anchor_start = if earliest == f64::MAX { 0.0 } else { earliest };
+                        }
                     } else if let Some(child_ids) = self.detect_collapsed_group_at_pointer(
                         mousedown_pos,
                         document,
@@ -4026,6 +4110,16 @@ impl TimelinePane {
                             *focus = lightningbeam_core::selection::FocusSelection::ClipInstances(selection.clip_instances().to_vec());
                             self.clip_drag_state = Some(ClipDragType::Move);
                             self.drag_offset = 0.0;
+                            // Find earliest selected clip as snap anchor
+                            let mut earliest = f64::MAX;
+                            for (_, clip_instances) in all_layer_clip_instances(context_layers, &audio_cache) {
+                                for ci in clip_instances {
+                                    if selection.contains_clip_instance(&ci.id) && ci.timeline_start < earliest {
+                                        earliest = ci.timeline_start;
+                                    }
+                                }
+                            }
+                            self.drag_anchor_start = if earliest == f64::MAX { 0.0 } else { earliest };
                         }
                     }
                 }
@@ -4046,6 +4140,9 @@ impl TimelinePane {
                 let mut layer_moves: HashMap<uuid::Uuid, Vec<(uuid::Uuid, f64, f64)>> =
                     HashMap::new();
 
+                // Compute snapped offset once for all selected clips (preserves relative spacing)
+                let move_offset = self.snapped_move_offset(document.bpm, &document.time_signature, document.framerate);
+
                 // Iterate through all layers (including group children) to find selected clip instances
                 for (layer, clip_instances) in all_layer_clip_instances(context_layers, &audio_cache) {
                     let layer_id = layer.id();
@@ -4053,7 +4150,7 @@ impl TimelinePane {
                     for clip_instance in clip_instances {
                         if selection.contains_clip_instance(&clip_instance.id) {
                             let old_timeline_start = clip_instance.timeline_start;
-                            let new_timeline_start = old_timeline_start + self.drag_offset;
+                            let new_timeline_start = old_timeline_start + move_offset;
 
                             // Add to layer_moves
                             layer_moves
@@ -4104,11 +4201,11 @@ impl TimelinePane {
                                                     let old_timeline_start =
                                                         clip_instance.timeline_start;
 
-                                                    // New trim_start is clamped to valid range
-                                                    let desired_trim_start = (old_trim_start
-                                                        + self.drag_offset)
-                                                        .max(0.0)
-                                                        .min(clip_duration);
+                                                    // New trim_start is snapped then clamped to valid range
+                                                    let desired_trim_start = self.snap_to_grid(
+                                                        old_trim_start + self.drag_offset,
+                                                        document.bpm, &document.time_signature, document.framerate,
+                                                    ).max(0.0).min(clip_duration);
 
                                                     // Apply overlap prevention when extending left
                                                     let new_trim_start = if desired_trim_start < old_trim_start {
@@ -4152,9 +4249,10 @@ impl TimelinePane {
                                                     let current_duration =
                                                         clip_instance.effective_duration(clip_duration);
                                                     let old_trim_end_val = clip_instance.trim_end.unwrap_or(clip_duration);
-                                                    let desired_trim_end = (old_trim_end_val + self.drag_offset)
-                                                        .max(clip_instance.trim_start)
-                                                        .min(clip_duration);
+                                                    let desired_trim_end = self.snap_to_grid(
+                                                        old_trim_end_val + self.drag_offset,
+                                                        document.bpm, &document.time_signature, document.framerate,
+                                                    ).max(clip_instance.trim_start).min(clip_duration);
 
                                                     // Apply overlap prevention when extending right
                                                     let new_trim_end_val = if desired_trim_end > old_trim_end_val {
@@ -4230,7 +4328,9 @@ impl TimelinePane {
                                             let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
                                             let content_window = (trim_end - clip_instance.trim_start).max(0.0);
                                             let current_right = clip_instance.timeline_duration.unwrap_or(content_window);
-                                            let desired_right = current_right + self.drag_offset;
+                                            let right_edge = clip_instance.timeline_start + current_right + self.drag_offset;
+                                            let snapped_edge = self.snap_to_grid(right_edge, document.bpm, &document.time_signature, document.framerate);
+                                            let desired_right = snapped_edge - clip_instance.timeline_start;
 
                                             let new_right = if desired_right > current_right {
                                                 let max_extend = document.find_max_trim_extend_right(
@@ -4407,7 +4507,7 @@ impl TimelinePane {
         if cursor_over_ruler && !alt_held && (response.clicked() || (response.dragged() && !self.is_panning)) {
             if let Some(pos) = response.interact_pointer_pos() {
                 let x = (pos.x - content_rect.min.x).max(0.0);
-                let new_time = self.x_to_time(x).max(0.0);
+                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.bpm, &document.time_signature, document.framerate);
                 *playback_time = new_time;
                 self.is_scrubbing = true;
                 // Seek immediately so it works while playing
@@ -4421,7 +4521,7 @@ impl TimelinePane {
         else if self.is_scrubbing && response.dragged() && !self.is_panning {
             if let Some(pos) = response.interact_pointer_pos() {
                 let x = (pos.x - content_rect.min.x).max(0.0);
-                let new_time = self.x_to_time(x).max(0.0);
+                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.bpm, &document.time_signature, document.framerate);
                 *playback_time = new_time;
                 if let Some(controller_arc) = audio_controller {
                     let mut controller = controller_arc.lock().unwrap();

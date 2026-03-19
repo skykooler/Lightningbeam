@@ -5155,40 +5155,57 @@ impl eframe::App for EditorApp {
                             if let Some(layer_id) = midi_layer_id {
                                 // Lazily create the doc clip + instance on the first progress event
                                 // (there is no MidiRecordingStarted event from the backend).
-                                let already_exists = self.clip_instance_to_backend_map.values().any(|v| {
-                                    matches!(v, lightningbeam_core::action::BackendClipInstanceId::Midi(id) if *id == clip_id)
-                                });
-                                if !already_exists {
-                                    use lightningbeam_core::clip::{AudioClip, ClipInstance};
-                                    let clip = AudioClip::new_recording("Recording...");
-                                    let doc_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
-                                    let clip_instance = ClipInstance::new(doc_clip_id)
-                                        .with_timeline_start(self.recording_start_time);
-                                    let clip_instance_id = clip_instance.id;
-                                    if let Some(layer) = self.action_executor.document_mut().get_layer_mut(&layer_id) {
-                                        if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
-                                            audio_layer.clip_instances.push(clip_instance);
-                                        }
-                                    }
-                                    self.clip_instance_to_backend_map.insert(
-                                        clip_instance_id,
-                                        lightningbeam_core::action::BackendClipInstanceId::Midi(clip_id),
-                                    );
-                                }
-
-                                let doc_clip_id = {
-                                    let document = self.action_executor.document();
-                                    document.get_layer(&layer_id)
-                                        .and_then(|layer| {
-                                            if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
-                                                audio_layer.clip_instances.last().map(|i| i.clip_id)
-                                            } else {
-                                                None
-                                            }
-                                        })
+                                //
+                                // MidiClipId (clip_id) is the content ID; MidiClipInstanceId is
+                                // the placement ID used in the snapshot and backend operations.
+                                // We need to store the instance ID, not the content ID, so that
+                                // build_audio_clip_cache can correlate mc.id → doc UUID.
+                                // Command::CreateMidiClip has already been processed and the
+                                // snapshot refreshed by the time this event arrives.
+                                let backend_instance_id: u32 = if let Some(ref controller_arc) = self.audio_controller {
+                                    let controller = controller_arc.lock().unwrap();
+                                    let snap = controller.clip_snapshot();
+                                    let snap = snap.read().unwrap();
+                                    snap.midi.get(&_track_id)
+                                        .and_then(|instances| instances.iter().find(|mc| mc.clip_id == clip_id))
+                                        .map(|mc| mc.id)
+                                        .unwrap_or(clip_id)
+                                } else {
+                                    clip_id
                                 };
 
+                                // Find the Midi-typed clip instance the timeline already created.
+                                // Register it in the map (using the correct instance ID, not the
+                                // content ID) so trim/move actions can find it via the snapshot.
+                                let already_mapped = self.clip_instance_to_backend_map.values().any(|v| {
+                                    matches!(v, lightningbeam_core::action::BackendClipInstanceId::Midi(id) if *id == backend_instance_id)
+                                });
+                                let doc_clip_id = {
+                                    let doc = self.action_executor.document();
+                                    doc.audio_clip_by_midi_clip_id(clip_id).map(|(id, _)| id)
+                                };
                                 if let Some(doc_clip_id) = doc_clip_id {
+                                    if !already_mapped {
+                                        // Find the clip instance for this clip on the layer
+                                        let instance_id = {
+                                            let doc = self.action_executor.document();
+                                            doc.get_layer(&layer_id)
+                                                .and_then(|l| {
+                                                    if let lightningbeam_core::layer::AnyLayer::Audio(al) = l {
+                                                        al.clip_instances.iter()
+                                                            .find(|ci| ci.clip_id == doc_clip_id)
+                                                            .map(|ci| ci.id)
+                                                    } else { None }
+                                                })
+                                        };
+                                        if let Some(instance_id) = instance_id {
+                                            self.clip_instance_to_backend_map.insert(
+                                                instance_id,
+                                                lightningbeam_core::action::BackendClipInstanceId::Midi(backend_instance_id),
+                                            );
+                                        }
+                                    }
+                                    // Update the clip's duration so the timeline bar grows
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
                                         clip.duration = duration;
                                     }
@@ -5221,26 +5238,13 @@ impl eframe::App for EditorApp {
                                         self.midi_event_cache.insert(clip_id, midi_clip_data.events.clone());
 
                                         // Update document clip with final duration and name
-                                        let midi_layer_id = self.track_to_layer_map.get(&track_id)
-                                            .filter(|lid| self.recording_layer_ids.contains(lid))
-                                            .copied();
-                                        if let Some(layer_id) = midi_layer_id {
-                                            let doc_clip_id = {
-                                                let document = self.action_executor.document();
-                                                document.get_layer(&layer_id)
-                                                    .and_then(|layer| {
-                                                        if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
-                                                            audio_layer.clip_instances.last().map(|i| i.clip_id)
-                                                        } else {
-                                                            None
-                                                        }
-                                                    })
-                                            };
-                                            if let Some(doc_clip_id) = doc_clip_id {
-                                                if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
-                                                    clip.duration = midi_clip_data.duration;
-                                                    clip.name = format!("MIDI Recording {}", clip_id);
-                                                }
+                                        let doc_clip_id = self.action_executor.document()
+                                            .audio_clip_by_midi_clip_id(clip_id)
+                                            .map(|(id, _)| id);
+                                        if let Some(doc_clip_id) = doc_clip_id {
+                                            if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
+                                                clip.duration = midi_clip_data.duration;
+                                                clip.name = format!("MIDI Recording {}", clip_id);
                                             }
                                         }
 
