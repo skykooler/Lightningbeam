@@ -114,6 +114,10 @@ pub struct PianoRollPane {
     // Spectrogram gamma (power curve for colormap)
     spectrogram_gamma: f32,
 
+    // Header slider values — persist across frames during drag
+    header_vel: f32,
+    header_mod: f32,
+
     // Instrument pitch bend range in semitones (queried from backend when layer changes)
     pitch_bend_range: f32,
     // Layer ID for which pitch_bend_range was last queried
@@ -147,6 +151,8 @@ impl PianoRollPane {
             user_scrolled_since_play: false,
             cached_clip_id: None,
             spectrogram_gamma: 0.8,
+            header_vel: 100.0,
+            header_mod: 0.0,
             pitch_bend_range: 2.0,
             pitch_bend_range_layer: None,
         }
@@ -2122,20 +2128,105 @@ impl PaneRenderer for PianoRollPane {
                 );
             }
 
-            // Velocity display for selected notes
-            if self.selected_note_indices.len() == 1 {
+            // Velocity + modulation sliders for selected note(s)
+            if !self.selected_note_indices.is_empty() {
                 if let Some(clip_id) = self.selected_clip_id {
-                    if let Some(events) = shared.midi_event_cache.get(&clip_id) {
-                        let resolved = Self::resolve_notes(events);
-                        if let Some(&idx) = self.selected_note_indices.iter().next() {
+                    if let Some(events) = shared.midi_event_cache.get(&clip_id).cloned() {
+                        let resolved = Self::resolve_notes(&events);
+                        // Pick the first selected note as the representative value
+                        let first_idx = self.selected_note_indices.iter().copied().next();
+                        if let Some(idx) = first_idx {
                             if idx < resolved.len() {
-                                ui.separator();
                                 let n = &resolved[idx];
-                                ui.label(
-                                    egui::RichText::new(format!("{} vel:{}", Self::note_name(n.note), n.velocity))
-                                        .color(header_secondary)
-                                        .size(10.0),
+
+                                // ── Velocity ──────────────────────────────
+                                ui.separator();
+                                ui.label(egui::RichText::new("Vel").color(header_secondary).size(10.0));
+                                let vel_resp = ui.add(
+                                    egui::DragValue::new(&mut self.header_vel)
+                                        .range(1.0..=127.0)
+                                        .max_decimals(0)
+                                        .speed(1.0),
                                 );
+                                // Commit before syncing so header_vel isn't overwritten first
+                                if vel_resp.drag_stopped() || vel_resp.lost_focus() {
+                                    let new_vel = self.header_vel.round().clamp(1.0, 127.0) as u8;
+                                    if new_vel != n.velocity {
+                                        let old_notes = Self::notes_to_backend_format(&resolved);
+                                        let mut new_resolved = resolved.clone();
+                                        for &i in &self.selected_note_indices {
+                                            if i < new_resolved.len() {
+                                                new_resolved[i].velocity = new_vel;
+                                            }
+                                        }
+                                        let new_notes = Self::notes_to_backend_format(&new_resolved);
+                                        self.push_update_action("Set velocity", clip_id, old_notes, new_notes, shared, &[]);
+                                        // Patch the event cache immediately so next frame sees the new velocity
+                                        if let Some(cached) = shared.midi_event_cache.get_mut(&clip_id) {
+                                            for &i in &self.selected_note_indices {
+                                                if i >= resolved.len() { continue; }
+                                                let sn = &resolved[i];
+                                                for ev in cached.iter_mut() {
+                                                    if ev.is_note_on() && ev.data1 == sn.note
+                                                        && (ev.status & 0x0F) == sn.channel
+                                                        && (ev.timestamp - sn.start_time).abs() < 1e-6
+                                                    {
+                                                        ev.data2 = new_vel;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Sync from note only when idle (not on commit frames)
+                                if !vel_resp.dragged() && !vel_resp.has_focus() && !vel_resp.drag_stopped() && !vel_resp.lost_focus() {
+                                    self.header_vel = n.velocity as f32;
+                                }
+
+                                // ── Modulation (CC1) ──────────────────────
+                                ui.separator();
+                                ui.label(egui::RichText::new("Mod").color(header_secondary).size(10.0));
+                                let current_cc1 = Self::find_cc1_for_note(&events, n.start_time, n.start_time + n.duration, n.channel);
+                                let mod_resp = ui.add(
+                                    egui::DragValue::new(&mut self.header_mod)
+                                        .range(0.0..=127.0)
+                                        .max_decimals(0)
+                                        .speed(1.0),
+                                );
+                                // Commit before syncing
+                                if mod_resp.drag_stopped() || mod_resp.lost_focus() {
+                                    let new_cc1 = self.header_mod.round().clamp(0.0, 127.0) as u8;
+                                    if new_cc1 != current_cc1 {
+                                        let old_events = events.clone();
+                                        let mut new_events = events.clone();
+                                        for &i in &self.selected_note_indices {
+                                            if i >= resolved.len() { continue; }
+                                            let sn = &resolved[i];
+                                            new_events.retain(|ev| {
+                                                let is_cc1 = (ev.status & 0xF0) == 0xB0
+                                                    && (ev.status & 0x0F) == sn.channel
+                                                    && ev.data1 == 1;
+                                                let at_start = (ev.timestamp - sn.start_time).abs() < 0.001;
+                                                !(is_cc1 && at_start)
+                                            });
+                                            if new_cc1 > 0 {
+                                                new_events.push(daw_backend::audio::midi::MidiEvent {
+                                                    timestamp: sn.start_time,
+                                                    status: 0xB0 | sn.channel,
+                                                    data1: 1,
+                                                    data2: new_cc1,
+                                                });
+                                            }
+                                        }
+                                        new_events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
+                                        self.push_events_action("Set modulation", clip_id, old_events, new_events.clone(), shared);
+                                        shared.midi_event_cache.insert(clip_id, new_events);
+                                    }
+                                }
+                                // Sync from note only when idle
+                                if !mod_resp.dragged() && !mod_resp.has_focus() && !mod_resp.drag_stopped() && !mod_resp.lost_focus() {
+                                    self.header_mod = current_cc1 as f32;
+                                }
                             }
                         }
                     }
