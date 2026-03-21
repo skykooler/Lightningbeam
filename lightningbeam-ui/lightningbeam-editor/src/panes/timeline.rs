@@ -136,13 +136,7 @@ enum ClipDragType {
     LoopExtendLeft,
 }
 
-/// How time is displayed in the ruler and header
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum TimeDisplayFormat {
-    Seconds,
-    Measures,
-    Frames,
-}
+use lightningbeam_core::document::TimelineMode;
 
 /// State for an in-progress layer header drag-to-reorder operation.
 struct LayerDragState {
@@ -194,7 +188,7 @@ pub struct TimelinePane {
     context_menu_clip: Option<(Option<uuid::Uuid>, egui::Pos2)>,
 
     /// Whether to display time as seconds or measures
-    time_display_format: TimeDisplayFormat,
+    time_display_format: TimelineMode,
 
     /// Waveform upload progress: pool_index -> frames uploaded so far.
     /// Tracks chunked GPU uploads across frames to avoid hitches.
@@ -673,7 +667,7 @@ impl TimelinePane {
             mousedown_pos: None,
             layer_control_clicked: false,
             context_menu_clip: None,
-            time_display_format: TimeDisplayFormat::Seconds,
+            time_display_format: TimelineMode::Seconds,
             waveform_upload_progress: std::collections::HashMap::new(),
             video_thumbnail_textures: std::collections::HashMap::new(),
             layer_drag: None,
@@ -691,7 +685,7 @@ impl TimelinePane {
 
     /// Returns true if the timeline is currently in Measures display mode.
     pub fn is_measures_mode(&self) -> bool {
-        self.time_display_format == TimeDisplayFormat::Measures
+        self.time_display_format == TimelineMode::Measures
     }
 
     /// Execute a view action with the given parameters
@@ -931,7 +925,7 @@ impl TimelinePane {
         // Must happen before Step 4 so no clips or backend recordings are created yet.
         if *shared.count_in_enabled
             && *shared.metronome_enabled
-            && self.time_display_format == TimeDisplayFormat::Measures
+            && self.time_display_format == TimelineMode::Measures
         {
             let (bpm, beats_per_measure) = {
                 let doc = shared.action_executor.document();
@@ -1358,8 +1352,8 @@ impl TimelinePane {
         framerate: f64,
     ) -> Option<f64> {
         match self.time_display_format {
-            TimeDisplayFormat::Frames => Some(1.0 / framerate),
-            TimeDisplayFormat::Measures => {
+            TimelineMode::Frames => Some(1.0 / framerate),
+            TimelineMode::Measures => {
                 use lightningbeam_core::beat_time::{beat_duration, measure_duration};
                 let beat = beat_duration(bpm);
                 let measure = measure_duration(bpm, time_sig);
@@ -1379,7 +1373,7 @@ impl TimelinePane {
                 }
                 Some(measure)
             }
-            TimeDisplayFormat::Seconds => None,
+            TimelineMode::Seconds => None,
         }
     }
 
@@ -1456,7 +1450,7 @@ impl TimelinePane {
         let text_color = text_style.text_color.unwrap_or(egui::Color32::from_gray(200));
 
         match self.time_display_format {
-            TimeDisplayFormat::Seconds => {
+            TimelineMode::Seconds => {
                 let interval = self.calculate_ruler_interval();
                 let start_time = (self.viewport_start_time / interval).floor() * interval;
                 let end_time = self.x_to_time(rect.width());
@@ -1489,7 +1483,7 @@ impl TimelinePane {
                     time += interval;
                 }
             }
-            TimeDisplayFormat::Measures => {
+            TimelineMode::Measures => {
                 let beats_per_second = bpm / 60.0;
                 let beat_dur = lightningbeam_core::beat_time::beat_duration(bpm);
                 let bpm_count = time_sig.numerator;
@@ -1542,7 +1536,7 @@ impl TimelinePane {
                     }
                 }
             }
-            TimeDisplayFormat::Frames => {
+            TimelineMode::Frames => {
                 let interval = self.calculate_ruler_interval_frames(framerate);
                 let start_frame = (self.viewport_start_time.max(0.0) * framerate).floor() as i64;
                 let end_frame = (self.x_to_time(rect.width()) * framerate).ceil() as i64;
@@ -2580,7 +2574,7 @@ impl TimelinePane {
 
             // Grid lines matching ruler
             match self.time_display_format {
-                TimeDisplayFormat::Seconds => {
+                TimelineMode::Seconds => {
                     let interval = self.calculate_ruler_interval();
                     let start_time = (self.viewport_start_time / interval).floor() * interval;
                     let end_time = self.x_to_time(rect.width());
@@ -2597,7 +2591,7 @@ impl TimelinePane {
                         time += interval;
                     }
                 }
-                TimeDisplayFormat::Measures => {
+                TimelineMode::Measures => {
                     let beats_per_second = document.bpm / 60.0;
                     let bpm_count = document.time_signature.numerator;
                     let start_beat = (self.viewport_start_time.max(0.0) * beats_per_second).floor() as i64;
@@ -2615,7 +2609,7 @@ impl TimelinePane {
                         );
                     }
                 }
-                TimeDisplayFormat::Frames => {
+                TimelineMode::Frames => {
                     let framerate = document.framerate;
                     let px_per_frame = self.pixels_per_second / framerate as f32;
 
@@ -4723,6 +4717,9 @@ impl TimelinePane {
 
 impl PaneRenderer for TimelinePane {
     fn render_header(&mut self, ui: &mut egui::Ui, shared: &mut SharedPaneState) -> bool {
+        // Sync timeline mode from document (document is source of truth)
+        self.time_display_format = shared.action_executor.document().timeline_mode;
+
         // Fire deferred recording commands once count-in pre-roll has elapsed
         self.check_pending_recording_start(shared);
 
@@ -4823,7 +4820,7 @@ impl PaneRenderer for TimelinePane {
                 }
 
                 // Metronome toggle — only visible in Measures mode
-                if self.time_display_format == TimeDisplayFormat::Measures {
+                if self.time_display_format == TimelineMode::Measures {
                     ui.add_space(4.0);
 
                     let metro_tint = if *shared.metronome_enabled {
@@ -4897,10 +4894,10 @@ impl PaneRenderer for TimelinePane {
             };
 
             match self.time_display_format {
-                TimeDisplayFormat::Seconds => {
+                TimelineMode::Seconds => {
                     ui.colored_label(text_color, format!("Time: {:.2}s / {:.2}s", *shared.playback_time, self.duration));
                 }
-                TimeDisplayFormat::Measures => {
+                TimelineMode::Measures => {
                     let time_sig = lightningbeam_core::document::TimeSignature { numerator: time_sig_num, denominator: time_sig_den };
                     let pos = lightningbeam_core::beat_time::time_to_measure(
                         *shared.playback_time, bpm, &time_sig,
@@ -4911,7 +4908,7 @@ impl PaneRenderer for TimelinePane {
                         time_sig_num, time_sig_den,
                     ));
                 }
-                TimeDisplayFormat::Frames => {
+                TimelineMode::Frames => {
                     let current_frame = (*shared.playback_time * framerate).floor() as i64 + 1;
                     let total_frames = (self.duration * framerate).ceil() as i64;
                     ui.colored_label(text_color, format!(
@@ -4930,16 +4927,18 @@ impl PaneRenderer for TimelinePane {
             // Time display format toggle
             egui::ComboBox::from_id_salt("time_format")
                 .selected_text(match self.time_display_format {
-                    TimeDisplayFormat::Seconds => "Seconds",
-                    TimeDisplayFormat::Measures => "Measures",
-                    TimeDisplayFormat::Frames => "Frames",
+                    TimelineMode::Seconds => "Seconds",
+                    TimelineMode::Measures => "Measures",
+                    TimelineMode::Frames => "Frames",
                 })
                 .width(80.0)
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.time_display_format, TimeDisplayFormat::Seconds, "Seconds");
-                    ui.selectable_value(&mut self.time_display_format, TimeDisplayFormat::Measures, "Measures");
-                    ui.selectable_value(&mut self.time_display_format, TimeDisplayFormat::Frames, "Frames");
+                    ui.selectable_value(&mut self.time_display_format, TimelineMode::Seconds, "Seconds");
+                    ui.selectable_value(&mut self.time_display_format, TimelineMode::Measures, "Measures");
+                    ui.selectable_value(&mut self.time_display_format, TimelineMode::Frames, "Frames");
                 });
+            // Write change back to document so it persists and is the source of truth
+            shared.action_executor.document_mut().timeline_mode = self.time_display_format;
 
             ui.separator();
 

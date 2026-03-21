@@ -1490,6 +1490,13 @@ impl EditorApp {
             }
         };
 
+        // Set default timeline mode based on activity
+        document.timeline_mode = match layout_index {
+            2 => lightningbeam_core::document::TimelineMode::Measures, // Music
+            1 => lightningbeam_core::document::TimelineMode::Seconds,  // Video
+            _ => lightningbeam_core::document::TimelineMode::Frames,   // Animation, Painting, etc.
+        };
+
         // Reset action executor with new document
         self.action_executor = lightningbeam_core::action::ActionExecutor::new(document);
 
