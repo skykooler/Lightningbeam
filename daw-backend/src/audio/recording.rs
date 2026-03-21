@@ -213,7 +213,6 @@ impl MidiRecordingState {
 
     /// Handle a MIDI note on event
     pub fn note_on(&mut self, note: u8, velocity: u8, absolute_time: f64) {
-        // Store this note as active
         self.active_notes.insert(note, ActiveMidiNote {
             note,
             velocity,
@@ -225,14 +224,21 @@ impl MidiRecordingState {
     pub fn note_off(&mut self, note: u8, absolute_time: f64) {
         // Find the matching noteOn
         if let Some(active_note) = self.active_notes.remove(&note) {
-            // Calculate relative time offset and duration
-            let time_offset = active_note.start_time - self.start_time;
-            let duration = absolute_time - active_note.start_time;
+            // If the note was fully released before the recording start (e.g. during count-in
+            // pre-roll), discard it — only notes still held at the clip start are kept.
+            if absolute_time <= self.start_time {
+                return;
+            }
+
+            // Clamp note start to clip start: notes held across the recording boundary
+            // are treated as starting at the clip position.
+            let note_start = active_note.start_time.max(self.start_time);
+            let time_offset = note_start - self.start_time;
+            let duration = absolute_time - note_start;
 
             eprintln!("[MIDI_RECORDING_STATE] Completing note {}: note_start={:.3}s, note_end={:.3}s, recording_start={:.3}s, time_offset={:.3}s, duration={:.3}s",
-                      note, active_note.start_time, absolute_time, self.start_time, time_offset, duration);
+                      note, note_start, absolute_time, self.start_time, time_offset, duration);
 
-            // Add to completed notes
             self.completed_notes.push((
                 time_offset,
                 active_note.note,
@@ -258,8 +264,9 @@ impl MidiRecordingState {
     pub fn get_notes_with_active(&self, current_time: f64) -> Vec<(f64, u8, u8, f64)> {
         let mut notes = self.completed_notes.clone();
         for active in self.active_notes.values() {
-            let time_offset = active.start_time - self.start_time;
-            let provisional_dur = (current_time - active.start_time).max(0.0);
+            let note_start = active.start_time.max(self.start_time);
+            let time_offset = note_start - self.start_time;
+            let provisional_dur = (current_time - note_start).max(0.0);
             notes.push((time_offset, active.note, active.velocity, provisional_dur));
         }
         notes
@@ -273,15 +280,13 @@ impl MidiRecordingState {
     /// Close out all active notes at the given time
     /// This should be called when stopping recording to end any held notes
     pub fn close_active_notes(&mut self, end_time: f64) {
-        // Collect all active notes and close them
         let active_notes: Vec<_> = self.active_notes.drain().collect();
 
         for (_note_num, active_note) in active_notes {
-            // Calculate relative time offset and duration
-            let time_offset = active_note.start_time - self.start_time;
-            let duration = end_time - active_note.start_time;
+            let note_start = active_note.start_time.max(self.start_time);
+            let time_offset = note_start - self.start_time;
+            let duration = end_time - note_start;
 
-            // Add to completed notes
             self.completed_notes.push((
                 time_offset,
                 active_note.note,

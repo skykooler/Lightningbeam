@@ -27,7 +27,7 @@ pub struct Engine {
     project: Project,
     audio_pool: AudioClipPool,
     buffer_pool: BufferPool,
-    playhead: u64,          // Playhead position in samples
+    playhead: i64,          // Playhead position in samples (may be negative during count-in pre-roll)
     sample_rate: u32,
     playing: bool,
     channels: u32,
@@ -73,6 +73,10 @@ pub struct Engine {
 
     // MIDI recording state
     midi_recording_state: Option<MidiRecordingState>,
+
+    // Currently held MIDI notes per track (note -> velocity), updated on NoteOn/NoteOff
+    // Used to inject held notes when recording starts mid-press (e.g. after count-in)
+    midi_held_notes: HashMap<TrackId, HashMap<u8, u8>>,
 
     // MIDI input manager for external MIDI devices
     midi_input_manager: Option<MidiInputManager>,
@@ -160,6 +164,7 @@ impl Engine {
             recording_mirror_tx: None,
             recording_progress_counter: 0,
             midi_recording_state: None,
+            midi_held_notes: HashMap::new(),
             midi_input_manager: None,
             metronome: Metronome::new(sample_rate),
             recording_sample_buffer: Vec::with_capacity(4096),
@@ -396,17 +401,18 @@ impl Engine {
             );
 
             // Update playhead (convert total samples to frames)
-            self.playhead += (output.len() / self.channels as usize) as u64;
+            self.playhead += (output.len() / self.channels as usize) as i64;
 
-            // Update atomic playhead for UI reads
+            // Update atomic playhead for UI reads (clamped to 0; negative = count-in pre-roll)
             self.playhead_atomic
-                .store(self.playhead, Ordering::Relaxed);
+                .store(self.playhead.max(0) as u64, Ordering::Relaxed);
 
             // Send periodic position updates
             self.frames_since_last_event += output.len() / self.channels as usize;
             if self.frames_since_last_event >= self.event_interval_frames / self.channels as usize
             {
-                let position_seconds = self.playhead as f64 / self.sample_rate as f64;
+                // Clamp to 0 during count-in pre-roll (negative playhead = before project start)
+                let position_seconds = self.playhead.max(0) as f64 / self.sample_rate as f64;
                 let _ = self
                     .event_tx
                     .push(AudioEvent::PlaybackPosition(position_seconds));
@@ -692,17 +698,17 @@ impl Engine {
                 self.project.stop_all_notes();
             }
             Command::Seek(seconds) => {
-                let frames = (seconds * self.sample_rate as f64) as u64;
-                self.playhead = frames;
-                self.playhead_atomic
-                    .store(self.playhead, Ordering::Relaxed);
+                self.playhead = (seconds * self.sample_rate as f64) as i64;
+                // Clamp to 0 for atomic/disk-reader; negative = count-in pre-roll (no disk reads needed)
+                let clamped = self.playhead.max(0) as u64;
+                self.playhead_atomic.store(clamped, Ordering::Relaxed);
                 // Stop all MIDI notes when seeking to prevent stuck notes
                 self.project.stop_all_notes();
                 // Reset all node graphs to clear effect buffers (echo, reverb, etc.)
                 self.project.reset_all_graphs();
                 // Notify disk reader to refill buffers from new position
                 if let Some(ref mut dr) = self.disk_reader {
-                    dr.send(crate::audio::disk_reader::DiskReaderCommand::Seek { frame: frames });
+                    dr.send(crate::audio::disk_reader::DiskReaderCommand::Seek { frame: clamped });
                 }
             }
             Command::SetTrackVolume(track_id, volume) => {
@@ -1212,6 +1218,9 @@ impl Engine {
                 // Emit event to UI for visual feedback
                 let _ = self.event_tx.push(AudioEvent::NoteOn(note, velocity));
 
+                // Track held notes so count-in recording can inject them at start_time
+                self.midi_held_notes.entry(track_id).or_default().insert(note, velocity);
+
                 // If MIDI recording is active on this track, capture the event
                 if let Some(recording) = &mut self.midi_recording_state {
                     if recording.track_id == track_id {
@@ -1229,6 +1238,11 @@ impl Engine {
 
                 // Emit event to UI for visual feedback
                 let _ = self.event_tx.push(AudioEvent::NoteOff(note));
+
+                // Remove from held notes tracking
+                if let Some(track_notes) = self.midi_held_notes.get_mut(&track_id) {
+                    track_notes.remove(&note);
+                }
 
                 // If MIDI recording is active on this track, capture the event
                 if let Some(recording) = &mut self.midi_recording_state {
@@ -3038,7 +3052,17 @@ impl Engine {
         // Check if track exists and is a MIDI track
         if let Some(crate::audio::track::TrackNode::Midi(_)) = self.project.get_track_mut(track_id) {
             // Create MIDI recording state
-            let recording_state = MidiRecordingState::new(track_id, clip_id, start_time);
+            let mut recording_state = MidiRecordingState::new(track_id, clip_id, start_time);
+
+            // Inject any notes currently held on this track (pressed during count-in pre-roll)
+            // so they start at t=0 of the recording rather than being lost
+            if let Some(held) = self.midi_held_notes.get(&track_id) {
+                for (&note, &velocity) in held {
+                    eprintln!("[MIDI_RECORDING] Injecting held note {} vel {} at start_time {:.3}s", note, velocity, start_time);
+                    recording_state.note_on(note, velocity, start_time);
+                }
+            }
+
             self.midi_recording_state = Some(recording_state);
 
             eprintln!("[MIDI_RECORDING] Started MIDI recording on track {} for clip {}", track_id, clip_id);

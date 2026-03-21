@@ -339,6 +339,7 @@ impl From<MenuAction> for AppAction {
             MenuAction::AddShapeTween => Self::AddShapeTween,
             MenuAction::ReturnToStart => Self::ReturnToStart,
             MenuAction::Play => Self::Play,
+            MenuAction::ToggleCountIn => Self::Play, // not directly mappable to AppAction
             MenuAction::ZoomIn => Self::ZoomIn,
             MenuAction::ZoomOut => Self::ZoomOut,
             MenuAction::ActualSize => Self::ActualSize,

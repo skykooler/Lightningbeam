@@ -223,6 +223,16 @@ pub struct TimelinePane {
     automation_topology_generation: u64,
     /// Cached metronome icon texture (loaded on first use)
     metronome_icon: Option<egui::TextureHandle>,
+    /// Count-in pre-roll state: set when count-in is active, cleared when recording fires
+    pending_recording_start: Option<PendingRecordingStart>,
+}
+
+/// Deferred recording start created during count-in pre-roll
+struct PendingRecordingStart {
+    /// Original playhead position — where clips will be placed in the timeline
+    original_playhead: f64,
+    /// Transport time at which to fire the actual recording commands
+    trigger_time: f64,
 }
 
 /// Check if a clip type can be dropped on a layer type
@@ -675,7 +685,13 @@ impl TimelinePane {
             automation_cache_generation: u64::MAX,
             automation_topology_generation: u64::MAX,
             metronome_icon: None,
+            pending_recording_start: None,
         }
+    }
+
+    /// Returns true if the timeline is currently in Measures display mode.
+    pub fn is_measures_mode(&self) -> bool {
+        self.time_display_format == TimeDisplayFormat::Measures
     }
 
     /// Execute a view action with the given parameters
@@ -910,6 +926,37 @@ impl TimelinePane {
         });
 
         let start_time = *shared.playback_time;
+
+        // Count-in: seek back N beats, start transport + metronome, defer ALL recording commands.
+        // Must happen before Step 4 so no clips or backend recordings are created yet.
+        if *shared.count_in_enabled
+            && *shared.metronome_enabled
+            && self.time_display_format == TimeDisplayFormat::Measures
+        {
+            let (bpm, beats_per_measure) = {
+                let doc = shared.action_executor.document();
+                (doc.bpm, doc.time_signature.numerator as f64)
+            };
+            let count_in_duration = beats_per_measure * (60.0 / bpm);
+            let seek_to = start_time - count_in_duration; // may be negative
+
+            if let Some(controller_arc) = shared.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                controller.seek(seek_to);
+                controller.set_metronome_enabled(true);
+                if !*shared.is_playing {
+                    controller.play();
+                    *shared.is_playing = true;
+                }
+            }
+
+            self.pending_recording_start = Some(PendingRecordingStart {
+                original_playhead: start_time,
+                trigger_time: start_time,
+            });
+            return; // Recording commands are deferred — check_pending_recording_start fires them
+        }
+
         shared.recording_layer_ids.clear();
 
         // Step 4: Dispatch recording for each candidate
@@ -986,8 +1033,8 @@ impl TimelinePane {
             return;
         }
 
-        // Auto-start playback if needed, and enable metronome if requested.
-        // Metronome must be enabled BEFORE play() so beat 0 is not missed.
+        // No count-in (or deferred re-call from check_pending_recording_start):
+        // Start immediately. Metronome must be enabled BEFORE play() so beat 0 is not missed.
         if let Some(controller_arc) = shared.audio_controller {
             let mut controller = controller_arc.lock().unwrap();
             if *shared.metronome_enabled {
@@ -1005,7 +1052,31 @@ impl TimelinePane {
     }
 
     /// Stop all active recordings
+    /// Called every frame; fires deferred recording commands once the count-in pre-roll ends.
+    fn check_pending_recording_start(&mut self, shared: &mut SharedPaneState) {
+        let Some(ref pending) = self.pending_recording_start else { return };
+        if !*shared.is_playing || *shared.playback_time < pending.trigger_time {
+            return;
+        }
+        let original_playhead = pending.original_playhead;
+        self.pending_recording_start = None;
+
+        // Re-run start_recording with playback_time temporarily set to the original playhead
+        // so it captures the correct start_time and places clips at the right position.
+        // Disable count_in_enabled so start_recording takes the immediate path (no re-seek).
+        let saved_time = *shared.playback_time;
+        let saved_count_in = *shared.count_in_enabled;
+        *shared.playback_time = original_playhead;
+        *shared.count_in_enabled = false;
+        self.start_recording(shared);
+        *shared.playback_time = saved_time;
+        *shared.count_in_enabled = saved_count_in;
+    }
+
     fn stop_recording(&mut self, shared: &mut SharedPaneState) {
+        // Cancel any in-progress count-in
+        self.pending_recording_start = None;
+
         let stop_wall = std::time::Instant::now();
         eprintln!("[STOP] stop_recording called at {:?}", stop_wall);
 
@@ -4652,6 +4723,9 @@ impl TimelinePane {
 
 impl PaneRenderer for TimelinePane {
     fn render_header(&mut self, ui: &mut egui::Ui, shared: &mut SharedPaneState) -> bool {
+        // Fire deferred recording commands once count-in pre-roll has elapsed
+        self.check_pending_recording_start(shared);
+
         ui.spacing_mut().item_spacing.x = 2.0; // Small spacing between button groups
 
         // Main playback controls group
@@ -4804,6 +4878,7 @@ impl PaneRenderer for TimelinePane {
                             }
                         }
                     }
+
                 }
             });
         });

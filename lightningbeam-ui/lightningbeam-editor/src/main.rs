@@ -856,6 +856,7 @@ struct EditorApp {
     armed_layers: HashSet<Uuid>,
     is_recording: bool,                   // Whether recording is currently active
     metronome_enabled: bool,              // Whether metronome clicks during recording
+    count_in_enabled: bool,              // Whether count-in fires before recording
     recording_clips: HashMap<Uuid, u32>,  // layer_id -> backend clip_id during recording
     recording_start_time: f64,            // Playback time when recording started
     recording_layer_ids: Vec<Uuid>,       // Layers being recorded to (for creating clips)
@@ -1128,6 +1129,7 @@ impl EditorApp {
             armed_layers: HashSet::new(),     // No layers explicitly armed
             is_recording: false,              // Not recording initially
             metronome_enabled: false,         // Metronome off by default
+            count_in_enabled: false,         // Count-in off by default
             recording_clips: HashMap::new(),  // No active recording clips
             recording_start_time: 0.0,        // Will be set when recording starts
             recording_layer_ids: Vec::new(),  // Will be populated when recording starts
@@ -3577,6 +3579,12 @@ impl EditorApp {
                 println!("Menu: Play");
                 // TODO: Implement play/pause
             }
+            MenuAction::ToggleCountIn => {
+                // Only effective when metronome is enabled (count-in requires a click track)
+                if self.metronome_enabled {
+                    self.count_in_enabled = !self.count_in_enabled;
+                }
+            }
 
             // View menu
             MenuAction::ZoomIn => {
@@ -5632,9 +5640,28 @@ impl eframe::App for EditorApp {
             if let Some(menu_system) = &self.menu_system {
                 let recent_files = self.config.get_recent_files();
                 let layout_names: Vec<String> = self.layouts.iter().map(|l| l.name.clone()).collect();
+
+                // Determine timeline measures mode for conditional menu items
+                let timeline_is_measures = self.pane_instances.values().any(|p| {
+                    if let panes::PaneInstance::Timeline(t) = p { t.is_measures_mode() } else { false }
+                });
+
+                // Checked actions show "✔ Label"; hidden actions are not rendered at all
+                let checked: &[crate::menu::MenuAction] = if self.count_in_enabled && self.metronome_enabled {
+                    &[crate::menu::MenuAction::ToggleCountIn]
+                } else {
+                    &[]
+                };
+                let hidden: &[crate::menu::MenuAction] = if timeline_is_measures && self.metronome_enabled {
+                    &[]
+                } else {
+                    &[crate::menu::MenuAction::ToggleCountIn]
+                };
+
                 if let Some(action) = menu_system.render_egui_menu_bar(
                     ui, &recent_files, Some(&self.keymap),
                     &layout_names, self.current_layout_index,
+                    checked, hidden,
                 ) {
                     self.handle_menu_action(action);
                 }
@@ -5774,6 +5801,7 @@ impl eframe::App for EditorApp {
                     is_playing: &mut self.is_playing,
                     is_recording: &mut self.is_recording,
                     metronome_enabled: &mut self.metronome_enabled,
+                    count_in_enabled: &mut self.count_in_enabled,
                     recording_clips: &mut self.recording_clips,
                     recording_start_time: &mut self.recording_start_time,
                     recording_layer_ids: &mut self.recording_layer_ids,

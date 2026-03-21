@@ -324,6 +324,7 @@ pub enum MenuAction {
     AddShapeTween,
     ReturnToStart,
     Play,
+    ToggleCountIn,
 
     // View menu
     ZoomIn,
@@ -422,6 +423,7 @@ impl MenuItemDef {
     const ADD_SHAPE_TWEEN: Self = Self { label: "Add Shape Tween", action: MenuAction::AddShapeTween, shortcut: None };
     const RETURN_TO_START: Self = Self { label: "Return to start", action: MenuAction::ReturnToStart, shortcut: None };
     const PLAY: Self = Self { label: "Play", action: MenuAction::Play, shortcut: None };
+    const COUNT_IN: Self = Self { label: "Count In", action: MenuAction::ToggleCountIn, shortcut: None };
 
     // View menu items
     const ZOOM_IN: Self = Self { label: "Zoom In", action: MenuAction::ZoomIn, shortcut: Some(Shortcut::new(ShortcutKey::Equals, CTRL, NO_SHIFT, NO_ALT)) };
@@ -548,6 +550,8 @@ impl MenuItemDef {
                     MenuDef::Separator,
                     MenuDef::Item(&Self::RETURN_TO_START),
                     MenuDef::Item(&Self::PLAY),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::COUNT_IN),
                 ],
             },
             // View menu
@@ -805,6 +809,8 @@ impl MenuSystem {
         keymap: Option<&crate::keymap::KeymapManager>,
         layout_names: &[String],
         current_layout_index: usize,
+        checked_actions: &[MenuAction],
+        hidden_actions: &[MenuAction],
     ) -> Option<MenuAction> {
         let mut action = None;
         let ctx = ui.ctx().clone();
@@ -819,7 +825,7 @@ impl MenuSystem {
                     let response = ui.button(*label);
                     let popup_id = egui::Popup::default_response_id(&response);
                     button_entries.push((response, popup_id, menu_def));
-                } else if let Some(a) = self.render_menu_def(ui, menu_def, recent_files, keymap, layout_names, current_layout_index) {
+                } else if let Some(a) = self.render_menu_def(ui, menu_def, recent_files, keymap, layout_names, current_layout_index, checked_actions, hidden_actions) {
                     action = Some(a);
                 }
             }
@@ -847,7 +853,7 @@ impl MenuSystem {
                         ui.set_width(min_width);
                         let mut a = None;
                         for child in *children {
-                            if let Some(result) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index) {
+                            if let Some(result) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index, checked_actions, hidden_actions) {
                                 a = Some(result);
                                 ui.close();
                             }
@@ -875,10 +881,15 @@ impl MenuSystem {
         keymap: Option<&crate::keymap::KeymapManager>,
         layout_names: &[String],
         current_layout_index: usize,
+        checked_actions: &[MenuAction],
+        hidden_actions: &[MenuAction],
     ) -> Option<MenuAction> {
         match def {
             MenuDef::Item(item_def) => {
-                if Self::render_menu_item(ui, item_def, keymap) {
+                if hidden_actions.contains(&item_def.action) {
+                    return None;
+                }
+                if Self::render_menu_item(ui, item_def, keymap, checked_actions) {
                     Some(item_def.action)
                 } else {
                     None
@@ -914,7 +925,7 @@ impl MenuSystem {
                         } else if *label == "Layout" {
                             let mut action = None;
                             for child in *children {
-                                if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index) {
+                                if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index, checked_actions, hidden_actions) {
                                     action = Some(a);
                                     ui.close();
                                 }
@@ -937,7 +948,7 @@ impl MenuSystem {
                         } else {
                             let mut action = None;
                             for child in *children {
-                                if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index) {
+                                if let Some(a) = self.render_menu_def(ui, child, recent_files, keymap, layout_names, current_layout_index, checked_actions, hidden_actions) {
                                     action = Some(a);
                                     ui.close();
                                 }
@@ -951,7 +962,7 @@ impl MenuSystem {
     }
 
     /// Render a single menu item with label and shortcut
-    fn render_menu_item(ui: &mut egui::Ui, def: &MenuItemDef, keymap: Option<&crate::keymap::KeymapManager>) -> bool {
+    fn render_menu_item(ui: &mut egui::Ui, def: &MenuItemDef, keymap: Option<&crate::keymap::KeymapManager>, checked_actions: &[MenuAction]) -> bool {
         // Look up shortcut from keymap if available, otherwise use static default
         let effective_shortcut = if let Some(km) = keymap {
             if let Ok(app_action) = crate::keymap::AppAction::try_from(def.action) {
@@ -987,10 +998,15 @@ impl MenuSystem {
                 ui.visuals().widgets.inactive.text_color()
             };
             let label_pos = rect.min + egui::vec2(4.0, (rect.height() - 14.0) / 2.0);
+            let label = if checked_actions.contains(&def.action) {
+                format!("✔ {}", def.label)
+            } else {
+                def.label.to_owned()
+            };
             ui.painter().text(
                 label_pos,
                 egui::Align2::LEFT_TOP,
-                def.label,
+                label,
                 egui::FontId::proportional(14.0),
                 text_color,
             );
