@@ -49,6 +49,10 @@ pub struct AutomationInputNode {
     parameters: Vec<Parameter>,
     /// Shared playback time (set by the graph before processing)
     playback_time: Arc<RwLock<f64>>,
+    /// Minimum output value (for UI display range)
+    pub value_min: f32,
+    /// Maximum output value (for UI display range)
+    pub value_max: f32,
 }
 
 impl AutomationInputNode {
@@ -62,10 +66,12 @@ impl AutomationInputNode {
         Self {
             name: name.clone(),
             display_name: "Automation".to_string(),
-            keyframes: Vec::new(),
+            keyframes: vec![AutomationKeyframe::new(0.0, 0.0)],
             outputs,
             parameters: Vec::new(),
             playback_time: Arc::new(RwLock::new(0.0)),
+            value_min: -1.0,
+            value_max: 1.0,
         }
     }
 
@@ -275,6 +281,8 @@ impl AudioNode for AutomationInputNode {
             outputs: self.outputs.clone(),
             parameters: self.parameters.clone(),
             playback_time: Arc::new(RwLock::new(0.0)),
+            value_min: self.value_min,
+            value_max: self.value_max,
         })
     }
 

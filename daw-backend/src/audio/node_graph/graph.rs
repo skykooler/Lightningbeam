@@ -1053,7 +1053,7 @@ impl AudioGraph {
     }
 
     /// Deserialize a preset into the graph
-    pub fn from_preset(preset: &crate::audio::node_graph::preset::GraphPreset, sample_rate: u32, buffer_size: usize, preset_base_path: Option<&std::path::Path>) -> Result<Self, String> {
+    pub fn from_preset(preset: &crate::audio::node_graph::preset::GraphPreset, sample_rate: u32, buffer_size: usize, preset_base_path: Option<&std::path::Path>, embedded_assets: Option<&std::collections::HashMap<String, Vec<u8>>>) -> Result<Self, String> {
         use crate::audio::node_graph::nodes::*;
         use petgraph::stable_graph::NodeIndex;
         use std::collections::HashMap;
@@ -1124,7 +1124,7 @@ impl AudioGraph {
             if serialized_node.node_type == "VoiceAllocator" {
                 if let Some(ref template_preset) = serialized_node.template_graph {
                     if let Some(va) = node.as_any_mut().downcast_mut::<VoiceAllocatorNode>() {
-                        let template_graph = Self::from_preset(template_preset, sample_rate, buffer_size, preset_base_path)?;
+                        let template_graph = Self::from_preset(template_preset, sample_rate, buffer_size, preset_base_path, embedded_assets)?;
                         *va.template_graph_mut() = template_graph;
                         va.rebuild_voices();
                     }
@@ -1182,10 +1182,28 @@ impl AudioGraph {
                                         sampler_node.set_sample(samples, embedded.sample_rate as f32);
                                     }
                                 } else if let Some(ref path) = file_path {
-                                    // Fall back to loading from file (resolve path relative to preset)
-                                    let resolved_path = resolve_sample_path(path);
-                                    if let Err(e) = sampler_node.load_sample_from_file(&resolved_path) {
-                                        eprintln!("Failed to load sample from {}: {}", resolved_path, e);
+                                    // Check embedded assets map first (from .lbins bundle)
+                                    let loaded = if let Some(assets) = embedded_assets {
+                                        if let Some(bytes) = assets.get(path.as_str()) {
+                                            match crate::audio::sample_loader::load_audio_from_bytes(bytes, path) {
+                                                Ok(data) => {
+                                                    sampler_node.set_sample(data.samples, data.sample_rate as f32);
+                                                    true
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("Failed to decode bundled sample {}: {}", path, e);
+                                                    false
+                                                }
+                                            }
+                                        } else { false }
+                                    } else { false };
+
+                                    if !loaded {
+                                        // Fall back to loading from filesystem
+                                        let resolved_path = resolve_sample_path(path);
+                                        if let Err(e) = sampler_node.load_sample_from_file(&resolved_path) {
+                                            eprintln!("Failed to load sample from {}: {}", resolved_path, e);
+                                        }
                                     }
                                 }
                             }
@@ -1225,20 +1243,49 @@ impl AudioGraph {
                                             );
                                         }
                                     } else if let Some(ref path) = layer.file_path {
-                                        // Fall back to loading from file (resolve path relative to preset)
-                                        let resolved_path = resolve_sample_path(path);
-                                        if let Err(e) = multi_sampler_node.load_layer_from_file(
-                                            &resolved_path,
-                                            layer.key_min,
-                                            layer.key_max,
-                                            layer.root_key,
-                                            layer.velocity_min,
-                                            layer.velocity_max,
-                                            layer.loop_start,
-                                            layer.loop_end,
-                                            layer.loop_mode,
-                                        ) {
-                                            eprintln!("Failed to load sample layer from {}: {}", resolved_path, e);
+                                        // Check embedded assets map first (from .lbins bundle)
+                                        let loaded = if let Some(assets) = embedded_assets {
+                                            if let Some(bytes) = assets.get(path.as_str()) {
+                                                match crate::audio::sample_loader::load_audio_from_bytes(bytes, path) {
+                                                    Ok(data) => {
+                                                        multi_sampler_node.add_layer(
+                                                            data.samples,
+                                                            data.sample_rate as f32,
+                                                            layer.key_min,
+                                                            layer.key_max,
+                                                            layer.root_key,
+                                                            layer.velocity_min,
+                                                            layer.velocity_max,
+                                                            layer.loop_start,
+                                                            layer.loop_end,
+                                                            layer.loop_mode,
+                                                        );
+                                                        true
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("Failed to decode bundled sample layer {}: {}", path, e);
+                                                        false
+                                                    }
+                                                }
+                                            } else { false }
+                                        } else { false };
+
+                                        if !loaded {
+                                            // Fall back to loading from filesystem
+                                            let resolved_path = resolve_sample_path(path);
+                                            if let Err(e) = multi_sampler_node.load_layer_from_file(
+                                                &resolved_path,
+                                                layer.key_min,
+                                                layer.key_max,
+                                                layer.root_key,
+                                                layer.velocity_min,
+                                                layer.velocity_max,
+                                                layer.loop_start,
+                                                layer.loop_end,
+                                                layer.loop_mode,
+                                            ) {
+                                                eprintln!("Failed to load sample layer from {}: {}", resolved_path, e);
+                                            }
                                         }
                                     }
                                 }
@@ -1258,6 +1305,9 @@ impl AudioGraph {
                             let result = if let Some(bundled_name) = model_path.strip_prefix("bundled:") {
                                 eprintln!("[AmpSim] Preset: loading bundled model {:?}", bundled_name);
                                 amp_sim.load_bundled_model(bundled_name)
+                            } else if let Some(bytes) = embedded_assets.and_then(|a| a.get(model_path.as_str())) {
+                                eprintln!("[AmpSim] Preset: loading from bundle {:?}", model_path);
+                                amp_sim.load_model_from_bytes(model_path, bytes)
                             } else {
                                 let resolved_path = resolve_sample_path(model_path);
                                 eprintln!("[AmpSim] Preset: loading from file {:?}", resolved_path);

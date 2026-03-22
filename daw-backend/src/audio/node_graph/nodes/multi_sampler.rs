@@ -6,6 +6,7 @@ const PARAM_GAIN: u32 = 0;
 const PARAM_ATTACK: u32 = 1;
 const PARAM_RELEASE: u32 = 2;
 const PARAM_TRANSPOSE: u32 = 3;
+const PARAM_PITCH_BEND_RANGE: u32 = 4;
 
 /// Loop playback mode
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -201,6 +202,7 @@ struct Voice {
     layer_index: usize,
     playhead: f32,
     note: u8,
+    channel: u8,  // MIDI channel this voice was activated on
     velocity: u8,
     is_active: bool,
 
@@ -221,11 +223,12 @@ enum EnvelopePhase {
 }
 
 impl Voice {
-    fn new(layer_index: usize, note: u8, velocity: u8) -> Self {
+    fn new(layer_index: usize, note: u8, channel: u8, velocity: u8) -> Self {
         Self {
             layer_index,
             playhead: 0.0,
             note,
+            channel,
             velocity,
             is_active: true,
             envelope_phase: EnvelopePhase::Attack,
@@ -250,9 +253,14 @@ pub struct MultiSamplerNode {
 
     // Parameters
     gain: f32,
-    attack_time: f32,   // seconds
-    release_time: f32,  // seconds
-    transpose: i8,      // semitones
+    attack_time: f32,    // seconds
+    release_time: f32,   // seconds
+    transpose: i8,       // semitones
+    pitch_bend_range: f32, // semitones (default 2.0)
+
+    // Live MIDI state
+    bend_per_channel: [f32; 16], // Pitch bend per MIDI channel; ch0 = global broadcast
+    current_mod: f32,    // MIDI CC1 modulation 0.0..=1.0
 
     inputs: Vec<NodePort>,
     outputs: Vec<NodePort>,
@@ -265,6 +273,8 @@ impl MultiSamplerNode {
 
         let inputs = vec![
             NodePort::new("MIDI In", SignalType::Midi, 0),
+            NodePort::new("Bend CV", SignalType::CV, 0),  // External pitch bend in semitones
+            NodePort::new("Mod CV", SignalType::CV, 1),   // External modulation 0.0..=1.0
         ];
 
         let outputs = vec![
@@ -276,6 +286,7 @@ impl MultiSamplerNode {
             Parameter::new(PARAM_ATTACK, "Attack", 0.001, 1.0, 0.01, ParameterUnit::Time),
             Parameter::new(PARAM_RELEASE, "Release", 0.01, 5.0, 0.1, ParameterUnit::Time),
             Parameter::new(PARAM_TRANSPOSE, "Transpose", -24.0, 24.0, 0.0, ParameterUnit::Generic),
+            Parameter::new(PARAM_PITCH_BEND_RANGE, "Pitch Bend Range", 0.0, 48.0, 2.0, ParameterUnit::Generic),
         ];
 
         Self {
@@ -288,6 +299,9 @@ impl MultiSamplerNode {
             attack_time: 0.01,
             release_time: 0.1,
             transpose: 0,
+            pitch_bend_range: 2.0,
+            bend_per_channel: [0.0; 16],
+            current_mod: 0.0,
             inputs,
             outputs,
             parameters,
@@ -478,7 +492,9 @@ impl MultiSamplerNode {
     }
 
     /// Trigger a note
-    fn note_on(&mut self, note: u8, velocity: u8) {
+    fn note_on(&mut self, note: u8, channel: u8, velocity: u8) {
+        // Reset per-channel bend on note-on so a previous note's bend doesn't bleed in
+        self.bend_per_channel[channel as usize] = 0.0;
         let transposed_note = (note as i16 + self.transpose as i16).clamp(0, 127) as u8;
 
         if let Some(layer_index) = self.find_layer(transposed_note, velocity) {
@@ -496,7 +512,7 @@ impl MultiSamplerNode {
                     }
                 });
 
-            let voice = Voice::new(layer_index, note, velocity);
+            let voice = Voice::new(layer_index, note, channel, velocity);
 
             if voice_index < self.voices.len() {
                 self.voices[voice_index] = voice;
@@ -547,6 +563,9 @@ impl AudioNode for MultiSamplerNode {
             PARAM_TRANSPOSE => {
                 self.transpose = value.clamp(-24.0, 24.0) as i8;
             }
+            PARAM_PITCH_BEND_RANGE => {
+                self.pitch_bend_range = value.clamp(0.0, 48.0);
+            }
             _ => {}
         }
     }
@@ -557,13 +576,14 @@ impl AudioNode for MultiSamplerNode {
             PARAM_ATTACK => self.attack_time,
             PARAM_RELEASE => self.release_time,
             PARAM_TRANSPOSE => self.transpose as f32,
+            PARAM_PITCH_BEND_RANGE => self.pitch_bend_range,
             _ => 0.0,
         }
     }
 
     fn process(
         &mut self,
-        _inputs: &[&[f32]],
+        inputs: &[&[f32]],
         outputs: &mut [&mut [f32]],
         midi_inputs: &[&[MidiEvent]],
         _midi_outputs: &mut [&mut Vec<MidiEvent>],
@@ -582,13 +602,31 @@ impl AudioNode for MultiSamplerNode {
         // Process MIDI events
         if !midi_inputs.is_empty() {
             for event in midi_inputs[0].iter() {
-                if event.is_note_on() {
-                    self.note_on(event.data1, event.data2);
-                } else if event.is_note_off() {
-                    self.note_off(event.data1);
+                let status = event.status & 0xF0;
+                match status {
+                    _ if event.is_note_on() => self.note_on(event.data1, event.status & 0x0F, event.data2),
+                    _ if event.is_note_off() => self.note_off(event.data1),
+                    0xE0 => {
+                        // Pitch bend: 14-bit value, center = 8192; stored per-channel
+                        let bend_raw = ((event.data2 as i16) << 7) | (event.data1 as i16);
+                        let ch = (event.status & 0x0F) as usize;
+                        self.bend_per_channel[ch] = (bend_raw - 8192) as f32 / 8192.0;
+                    }
+                    0xB0 if event.data1 == 1 => {
+                        // CC1 (modulation wheel)
+                        self.current_mod = event.data2 as f32 / 127.0;
+                    }
+                    _ => {}
                 }
             }
         }
+
+        // Read CV inputs. NaN = unconnected port → treat as 0.
+        let bend_cv = inputs.get(0).and_then(|b| b.first().copied())
+            .filter(|v| v.is_finite()).unwrap_or(0.0);
+        // Global bend (channel 0) applies to all voices; per-channel bend is added per-voice below.
+        let global_bend_norm = self.bend_per_channel[0];
+        let bend_per_channel = self.bend_per_channel;
 
         // Extract parameters needed for processing
         let gain = self.gain;
@@ -607,9 +645,12 @@ impl AudioNode for MultiSamplerNode {
 
             let layer = &self.layers[voice.layer_index];
 
-            // Calculate playback speed
+            // Calculate playback speed (includes pitch bend)
+            // Channel-0 = global; voice's own channel bend is added on top.
+            let voice_bend_norm = global_bend_norm + bend_per_channel[voice.channel as usize];
+            let total_bend_semitones = voice_bend_norm * self.pitch_bend_range + bend_cv;
             let semitone_diff = voice.note as i16 - layer.root_key as i16;
-            let speed = 2.0_f32.powf(semitone_diff as f32 / 12.0);
+            let speed = 2.0_f32.powf((semitone_diff as f32 + total_bend_semitones) / 12.0);
             let speed_adjusted = speed * (layer.sample_rate / sample_rate as f32);
 
             for frame in 0..frames {
@@ -765,6 +806,8 @@ impl AudioNode for MultiSamplerNode {
 
     fn reset(&mut self) {
         self.voices.clear();
+        self.bend_per_channel = [0.0; 16];
+        self.current_mod = 0.0;
     }
 
     fn node_type(&self) -> &str {

@@ -11,6 +11,7 @@ struct VoiceState {
     active: bool,
     releasing: bool, // Note-off received, still processing (e.g. ADSR release)
     note: u8,
+    note_channel: u8, // MIDI channel this voice was allocated on (0 = global/unset)
     age: u32, // For voice stealing
     pending_events: Vec<MidiEvent>, // MIDI events to send to this voice
 }
@@ -21,6 +22,7 @@ impl VoiceState {
             active: false,
             releasing: false,
             note: 0,
+            note_channel: 0,
             age: 0,
             pending_events: Vec::new(),
         }
@@ -273,6 +275,7 @@ impl AudioNode for VoiceAllocatorNode {
                     self.voices[voice_idx].active = true;
                     self.voices[voice_idx].releasing = false;
                     self.voices[voice_idx].note = event.data1;
+                    self.voices[voice_idx].note_channel = event.status & 0x0F;
                     self.voices[voice_idx].age = 0;
 
                     // Store MIDI event for this voice to process
@@ -295,10 +298,12 @@ impl AudioNode for VoiceAllocatorNode {
                 }
             }
             _ => {
-                // Other MIDI events (CC, pitch bend, etc.) - send to all active voices
+                // Route to matching-channel voices; channel 0 = global broadcast
+                let event_channel = event.status & 0x0F;
                 for voice_idx in 0..self.voice_count {
-                    if self.voices[voice_idx].active {
-                        self.voices[voice_idx].pending_events.push(*event);
+                    let voice = &mut self.voices[voice_idx];
+                    if voice.active && (event_channel == 0 || voice.note_channel == event_channel) {
+                        voice.pending_events.push(*event);
                     }
                 }
             }

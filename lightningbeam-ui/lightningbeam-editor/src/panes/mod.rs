@@ -212,6 +212,8 @@ pub struct SharedPaneState<'a> {
     pub is_playing: &'a mut bool,    // Whether playback is currently active
     /// Recording state
     pub is_recording: &'a mut bool,  // Whether recording is currently active
+    pub metronome_enabled: &'a mut bool,  // Whether metronome clicks during recording
+    pub count_in_enabled: &'a mut bool,  // Whether count-in fires before recording
     pub recording_clips: &'a mut std::collections::HashMap<uuid::Uuid, u32>, // layer_id -> clip_id
     pub recording_start_time: &'a mut f64,  // Playback time when recording started
     pub recording_layer_ids: &'a mut Vec<uuid::Uuid>,  // Layers being recorded to
@@ -233,7 +235,7 @@ pub struct SharedPaneState<'a> {
     /// NOTE: If an action later fails during execution, the cache may be out of sync with the
     /// backend. This is acceptable because MIDI note edits are simple and unlikely to fail.
     /// Undo/redo rebuilds affected entries from the backend to restore consistency.
-    pub midi_event_cache: &'a mut std::collections::HashMap<u32, Vec<(f64, u8, u8, bool)>>,
+    pub midi_event_cache: &'a mut std::collections::HashMap<u32, Vec<daw_backend::audio::midi::MidiEvent>>,
     /// Audio pool indices that got new raw audio data this frame (for thumbnail invalidation)
     pub audio_pools_with_new_waveforms: &'a std::collections::HashSet<usize>,
     /// Raw audio samples for GPU waveform rendering (pool_index -> (samples, sample_rate, channels))
@@ -268,6 +270,9 @@ pub struct SharedPaneState<'a> {
     pub waveform_stereo: bool,
     /// Generation counter - incremented on project load to force reloads
     pub project_generation: &'a mut u64,
+    /// Incremented whenever node graph topology changes (add/remove node or connection).
+    /// Used by the timeline to know when to refresh automation lane caches.
+    pub graph_topology_generation: &'a mut u64,
     /// Script ID to open in the script editor (set by node graph "Edit Script" action)
     pub script_to_edit: &'a mut Option<Uuid>,
     /// Script ID that was just saved (triggers auto-recompile of nodes using it)

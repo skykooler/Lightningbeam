@@ -57,6 +57,8 @@ mod test_mode;
 mod sample_import;
 mod sample_import_dialog;
 
+mod curve_editor;
+
 /// Lightningbeam Editor - Animation and video editing software
 #[derive(Parser, Debug)]
 #[command(name = "Lightningbeam Editor")]
@@ -294,7 +296,7 @@ enum SplitPreviewMode {
 }
 
 /// Rasterize an embedded SVG and upload it as an egui texture
-fn rasterize_svg(svg_data: &[u8], name: &str, render_size: u32, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+pub(crate) fn rasterize_svg(svg_data: &[u8], name: &str, render_size: u32, ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let tree = resvg::usvg::Tree::from_data(svg_data, &resvg::usvg::Options::default()).ok()?;
     let pixmap_size = tree.size().to_int_size();
     let scale_x = render_size as f32 / pixmap_size.width() as f32;
@@ -840,6 +842,8 @@ struct EditorApp {
     track_to_layer_map: HashMap<daw_backend::TrackId, Uuid>,
     /// Generation counter - incremented on project load to force UI components to reload
     project_generation: u64,
+    /// Incremented whenever node graph topology changes (add/remove node or connection)
+    graph_topology_generation: u64,
     // Clip instance ID mapping (Document clip instance UUIDs <-> backend clip instance IDs)
     clip_instance_to_backend_map: HashMap<Uuid, lightningbeam_core::action::BackendClipInstanceId>,
     // Playback state (global for all panes)
@@ -851,6 +855,8 @@ struct EditorApp {
     #[allow(dead_code)]
     armed_layers: HashSet<Uuid>,
     is_recording: bool,                   // Whether recording is currently active
+    metronome_enabled: bool,              // Whether metronome clicks during recording
+    count_in_enabled: bool,              // Whether count-in fires before recording
     recording_clips: HashMap<Uuid, u32>,  // layer_id -> backend clip_id during recording
     recording_start_time: f64,            // Playback time when recording started
     recording_layer_ids: Vec<Uuid>,       // Layers being recorded to (for creating clips)
@@ -882,10 +888,9 @@ struct EditorApp {
     output_level: (f32, f32),
     track_levels: HashMap<daw_backend::TrackId, f32>,
 
-    /// Cache for MIDI event data (keyed by backend midi_clip_id)
-    /// Prevents repeated backend queries for the same MIDI clip
-    /// Format: (timestamp, note_number, velocity, is_note_on)
-    midi_event_cache: HashMap<u32, Vec<(f64, u8, u8, bool)>>,
+    /// Cache for MIDI event data (keyed by backend midi_clip_id).
+    /// Stores full raw MidiEvents (note on/off, CC, pitch bend, etc.)
+    midi_event_cache: HashMap<u32, Vec<daw_backend::audio::midi::MidiEvent>>,
     /// Cache for audio file durations to avoid repeated queries
     /// Format: pool_index -> duration in seconds
     audio_duration_cache: HashMap<usize, f64>,
@@ -1116,12 +1121,15 @@ impl EditorApp {
             layer_to_track_map: HashMap::new(),
             track_to_layer_map: HashMap::new(),
             project_generation: 0,
+            graph_topology_generation: 0,
             clip_instance_to_backend_map: HashMap::new(),
             playback_time: 0.0, // Start at beginning
             is_playing: false,  // Start paused
             recording_arm_mode: RecordingArmMode::default(), // Auto mode by default
             armed_layers: HashSet::new(),     // No layers explicitly armed
             is_recording: false,              // Not recording initially
+            metronome_enabled: false,         // Metronome off by default
+            count_in_enabled: false,         // Count-in off by default
             recording_clips: HashMap::new(),  // No active recording clips
             recording_start_time: 0.0,        // Will be set when recording starts
             recording_layer_ids: Vec::new(),  // Will be populated when recording starts
@@ -1480,6 +1488,13 @@ impl EditorApp {
                 let layer = VectorLayer::new("Layer 1");
                 document.root.add_child(AnyLayer::Vector(layer))
             }
+        };
+
+        // Set default timeline mode based on activity
+        document.timeline_mode = match layout_index {
+            2 => lightningbeam_core::document::TimelineMode::Measures, // Music
+            1 => lightningbeam_core::document::TimelineMode::Seconds,  // Video
+            _ => lightningbeam_core::document::TimelineMode::Frames,   // Animation, Painting, etc.
         };
 
         // Reset action executor with new document
@@ -3099,10 +3114,16 @@ impl EditorApp {
                 };
                 // Rebuild MIDI cache after undo (backend_context dropped, borrows released)
                 if undo_succeeded {
-                    let midi_update = self.action_executor.last_redo_midi_notes()
-                        .map(|(id, notes)| (id, notes.to_vec()));
-                    if let Some((clip_id, notes)) = midi_update {
-                        self.rebuild_midi_cache_entry(clip_id, &notes);
+                    if let Some((clip_id, events)) = self.action_executor.last_redo_midi_events()
+                        .map(|(id, ev)| (id, ev.to_vec()))
+                    {
+                        self.midi_event_cache.insert(clip_id, events);
+                    } else {
+                        let midi_update = self.action_executor.last_redo_midi_notes()
+                            .map(|(id, notes)| (id, notes.to_vec()));
+                        if let Some((clip_id, notes)) = midi_update {
+                            self.rebuild_midi_cache_entry(clip_id, &notes);
+                        }
                     }
                     // Stale vertex/edge/face IDs from before the undo would
                     // crash selection rendering on the restored (smaller) DCEL.
@@ -3137,10 +3158,16 @@ impl EditorApp {
                 };
                 // Rebuild MIDI cache after redo (backend_context dropped, borrows released)
                 if redo_succeeded {
-                    let midi_update = self.action_executor.last_undo_midi_notes()
-                        .map(|(id, notes)| (id, notes.to_vec()));
-                    if let Some((clip_id, notes)) = midi_update {
-                        self.rebuild_midi_cache_entry(clip_id, &notes);
+                    if let Some((clip_id, events)) = self.action_executor.last_undo_midi_events()
+                        .map(|(id, ev)| (id, ev.to_vec()))
+                    {
+                        self.midi_event_cache.insert(clip_id, events);
+                    } else {
+                        let midi_update = self.action_executor.last_undo_midi_notes()
+                            .map(|(id, notes)| (id, notes.to_vec()));
+                        if let Some((clip_id, notes)) = midi_update {
+                            self.rebuild_midi_cache_entry(clip_id, &notes);
+                        }
                     }
                     self.selection.clear_geometry_selection();
                 }
@@ -3505,6 +3532,12 @@ impl EditorApp {
                 println!("Menu: Play");
                 // TODO: Implement play/pause
             }
+            MenuAction::ToggleCountIn => {
+                // Only effective when metronome is enabled (count-in requires a click track)
+                if self.metronome_enabled {
+                    self.count_in_enabled = !self.count_in_enabled;
+                }
+            }
 
             // View menu
             MenuAction::ZoomIn => {
@@ -3804,18 +3837,7 @@ impl EditorApp {
                 // track_id is unused by the query, pass 0
                 match controller.query_midi_clip(0, clip_id) {
                     Ok(clip_data) => {
-                        let processed_events: Vec<(f64, u8, u8, bool)> = clip_data.events.iter()
-                            .filter_map(|event| {
-                                let status_type = event.status & 0xF0;
-                                if status_type == 0x90 || status_type == 0x80 {
-                                    let is_note_on = status_type == 0x90 && event.data2 > 0;
-                                    Some((event.timestamp, event.data1, event.data2, is_note_on))
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect();
-                        self.midi_event_cache.insert(clip_id, processed_events);
+                        self.midi_event_cache.insert(clip_id, clip_data.events);
                         midi_fetched += 1;
                     }
                     Err(e) => eprintln!("Failed to fetch MIDI clip {}: {}", clip_id, e),
@@ -3954,12 +3976,12 @@ impl EditorApp {
     /// Rebuild a MIDI event cache entry from backend note format.
     /// Called after undo/redo to keep the cache consistent with the backend.
     fn rebuild_midi_cache_entry(&mut self, clip_id: u32, notes: &[(f64, u8, u8, f64)]) {
-        let mut events: Vec<(f64, u8, u8, bool)> = Vec::with_capacity(notes.len() * 2);
+        let mut events: Vec<daw_backend::audio::midi::MidiEvent> = Vec::with_capacity(notes.len() * 2);
         for &(start_time, note, velocity, duration) in notes {
-            events.push((start_time, note, velocity, true));
-            events.push((start_time + duration, note, velocity, false));
+            events.push(daw_backend::audio::midi::MidiEvent::note_on(start_time, 0, note, velocity));
+            events.push(daw_backend::audio::midi::MidiEvent::note_off(start_time + duration, 0, note, 0));
         }
-        events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
         self.midi_event_cache.insert(clip_id, events);
     }
 
@@ -3978,22 +4000,7 @@ impl EditorApp {
                 let duration = midi_clip.duration;
                 let event_count = midi_clip.events.len();
 
-                // Process MIDI events to cache format: (timestamp, note_number, velocity, is_note_on)
-                // Filter to note events only (status 0x90 = note-on, 0x80 = note-off)
-                let processed_events: Vec<(f64, u8, u8, bool)> = midi_clip.events.iter()
-                    .filter_map(|event| {
-                        let status_type = event.status & 0xF0;
-                        if status_type == 0x90 || status_type == 0x80 {
-                            // Note-on is 0x90 with velocity > 0, Note-off is 0x80 or velocity = 0
-                            let is_note_on = status_type == 0x90 && event.data2 > 0;
-                            Some((event.timestamp, event.data1, event.data2, is_note_on))
-                        } else {
-                            None // Ignore non-note events (CC, pitch bend, etc.)
-                        }
-                    })
-                    .collect();
-
-                let note_event_count = processed_events.len();
+                let processed_events = midi_clip.events.clone();
 
                 // Add to backend MIDI clip pool FIRST and get the backend clip ID
                 if let Some(ref controller_arc) = self.audio_controller {
@@ -4008,9 +4015,8 @@ impl EditorApp {
                     let clip = AudioClip::new_midi(&name, backend_clip_id, duration);
                     let frontend_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
 
-                    println!("Imported MIDI '{}' ({:.1}s, {} total events, {} note events) - Frontend ID: {}, Backend ID: {}",
-                        name, duration, event_count, note_event_count, frontend_clip_id, backend_clip_id);
-                    println!("✅ Added MIDI clip to backend pool and cached {} note events", note_event_count);
+                    println!("Imported MIDI '{}' ({:.1}s, {} total events) - Frontend ID: {}, Backend ID: {}",
+                        name, duration, event_count, frontend_clip_id, backend_clip_id);
 
                     Some(ImportedAssetInfo {
                         clip_id: frontend_clip_id,
@@ -5112,40 +5118,57 @@ impl eframe::App for EditorApp {
                             if let Some(layer_id) = midi_layer_id {
                                 // Lazily create the doc clip + instance on the first progress event
                                 // (there is no MidiRecordingStarted event from the backend).
-                                let already_exists = self.clip_instance_to_backend_map.values().any(|v| {
-                                    matches!(v, lightningbeam_core::action::BackendClipInstanceId::Midi(id) if *id == clip_id)
-                                });
-                                if !already_exists {
-                                    use lightningbeam_core::clip::{AudioClip, ClipInstance};
-                                    let clip = AudioClip::new_recording("Recording...");
-                                    let doc_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
-                                    let clip_instance = ClipInstance::new(doc_clip_id)
-                                        .with_timeline_start(self.recording_start_time);
-                                    let clip_instance_id = clip_instance.id;
-                                    if let Some(layer) = self.action_executor.document_mut().get_layer_mut(&layer_id) {
-                                        if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
-                                            audio_layer.clip_instances.push(clip_instance);
-                                        }
-                                    }
-                                    self.clip_instance_to_backend_map.insert(
-                                        clip_instance_id,
-                                        lightningbeam_core::action::BackendClipInstanceId::Midi(clip_id),
-                                    );
-                                }
-
-                                let doc_clip_id = {
-                                    let document = self.action_executor.document();
-                                    document.get_layer(&layer_id)
-                                        .and_then(|layer| {
-                                            if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
-                                                audio_layer.clip_instances.last().map(|i| i.clip_id)
-                                            } else {
-                                                None
-                                            }
-                                        })
+                                //
+                                // MidiClipId (clip_id) is the content ID; MidiClipInstanceId is
+                                // the placement ID used in the snapshot and backend operations.
+                                // We need to store the instance ID, not the content ID, so that
+                                // build_audio_clip_cache can correlate mc.id → doc UUID.
+                                // Command::CreateMidiClip has already been processed and the
+                                // snapshot refreshed by the time this event arrives.
+                                let backend_instance_id: u32 = if let Some(ref controller_arc) = self.audio_controller {
+                                    let controller = controller_arc.lock().unwrap();
+                                    let snap = controller.clip_snapshot();
+                                    let snap = snap.read().unwrap();
+                                    snap.midi.get(&_track_id)
+                                        .and_then(|instances| instances.iter().find(|mc| mc.clip_id == clip_id))
+                                        .map(|mc| mc.id)
+                                        .unwrap_or(clip_id)
+                                } else {
+                                    clip_id
                                 };
 
+                                // Find the Midi-typed clip instance the timeline already created.
+                                // Register it in the map (using the correct instance ID, not the
+                                // content ID) so trim/move actions can find it via the snapshot.
+                                let already_mapped = self.clip_instance_to_backend_map.values().any(|v| {
+                                    matches!(v, lightningbeam_core::action::BackendClipInstanceId::Midi(id) if *id == backend_instance_id)
+                                });
+                                let doc_clip_id = {
+                                    let doc = self.action_executor.document();
+                                    doc.audio_clip_by_midi_clip_id(clip_id).map(|(id, _)| id)
+                                };
                                 if let Some(doc_clip_id) = doc_clip_id {
+                                    if !already_mapped {
+                                        // Find the clip instance for this clip on the layer
+                                        let instance_id = {
+                                            let doc = self.action_executor.document();
+                                            doc.get_layer(&layer_id)
+                                                .and_then(|l| {
+                                                    if let lightningbeam_core::layer::AnyLayer::Audio(al) = l {
+                                                        al.clip_instances.iter()
+                                                            .find(|ci| ci.clip_id == doc_clip_id)
+                                                            .map(|ci| ci.id)
+                                                    } else { None }
+                                                })
+                                        };
+                                        if let Some(instance_id) = instance_id {
+                                            self.clip_instance_to_backend_map.insert(
+                                                instance_id,
+                                                lightningbeam_core::action::BackendClipInstanceId::Midi(backend_instance_id),
+                                            );
+                                        }
+                                    }
+                                    // Update the clip's duration so the timeline bar grows
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
                                         clip.duration = duration;
                                     }
@@ -5153,15 +5176,14 @@ impl eframe::App for EditorApp {
                             }
 
                             // Update midi_event_cache with notes captured so far
-                            // (inlined instead of calling rebuild_midi_cache_entry to avoid
-                            // conflicting &mut self borrow with event_rx loop)
+                            // (inlined to avoid conflicting &mut self borrow)
                             {
-                                let mut events: Vec<(f64, u8, u8, bool)> = Vec::with_capacity(notes.len() * 2);
+                                let mut events: Vec<daw_backend::audio::midi::MidiEvent> = Vec::with_capacity(notes.len() * 2);
                                 for &(start_time, note, velocity, dur) in &notes {
-                                    events.push((start_time, note, velocity, true));
-                                    events.push((start_time + dur, note, velocity, false));
+                                    events.push(daw_backend::audio::midi::MidiEvent::note_on(start_time, 0, note, velocity));
+                                    events.push(daw_backend::audio::midi::MidiEvent::note_off(start_time + dur, 0, note, 0));
                                 }
-                                events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                                events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
                                 self.midi_event_cache.insert(clip_id, events);
                             }
                             ctx.request_repaint();
@@ -5175,42 +5197,17 @@ impl eframe::App for EditorApp {
                                 let mut controller = controller_arc.lock().unwrap();
                                 match controller.query_midi_clip(track_id, clip_id) {
                                     Ok(midi_clip_data) => {
-                                        // Convert backend MidiEvent format to cache format
-                                        let cache_events: Vec<(f64, u8, u8, bool)> = midi_clip_data.events.iter()
-                                            .filter_map(|event| {
-                                                let status_type = event.status & 0xF0;
-                                                if status_type == 0x90 || status_type == 0x80 {
-                                                    let is_note_on = status_type == 0x90 && event.data2 > 0;
-                                                    Some((event.timestamp, event.data1, event.data2, is_note_on))
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                            .collect();
                                         drop(controller);
-                                        self.midi_event_cache.insert(clip_id, cache_events);
+                                        self.midi_event_cache.insert(clip_id, midi_clip_data.events.clone());
 
                                         // Update document clip with final duration and name
-                                        let midi_layer_id = self.track_to_layer_map.get(&track_id)
-                                            .filter(|lid| self.recording_layer_ids.contains(lid))
-                                            .copied();
-                                        if let Some(layer_id) = midi_layer_id {
-                                            let doc_clip_id = {
-                                                let document = self.action_executor.document();
-                                                document.get_layer(&layer_id)
-                                                    .and_then(|layer| {
-                                                        if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
-                                                            audio_layer.clip_instances.last().map(|i| i.clip_id)
-                                                        } else {
-                                                            None
-                                                        }
-                                                    })
-                                            };
-                                            if let Some(doc_clip_id) = doc_clip_id {
-                                                if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
-                                                    clip.duration = midi_clip_data.duration;
-                                                    clip.name = format!("MIDI Recording {}", clip_id);
-                                                }
+                                        let doc_clip_id = self.action_executor.document()
+                                            .audio_clip_by_midi_clip_id(clip_id)
+                                            .map(|(id, _)| id);
+                                        if let Some(doc_clip_id) = doc_clip_id {
+                                            if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
+                                                clip.duration = midi_clip_data.duration;
+                                                clip.name = format!("MIDI Recording {}", clip_id);
                                             }
                                         }
 
@@ -5596,9 +5593,28 @@ impl eframe::App for EditorApp {
             if let Some(menu_system) = &self.menu_system {
                 let recent_files = self.config.get_recent_files();
                 let layout_names: Vec<String> = self.layouts.iter().map(|l| l.name.clone()).collect();
+
+                // Determine timeline measures mode for conditional menu items
+                let timeline_is_measures = self.pane_instances.values().any(|p| {
+                    if let panes::PaneInstance::Timeline(t) = p { t.is_measures_mode() } else { false }
+                });
+
+                // Checked actions show "✔ Label"; hidden actions are not rendered at all
+                let checked: &[crate::menu::MenuAction] = if self.count_in_enabled && self.metronome_enabled {
+                    &[crate::menu::MenuAction::ToggleCountIn]
+                } else {
+                    &[]
+                };
+                let hidden: &[crate::menu::MenuAction] = if timeline_is_measures && self.metronome_enabled {
+                    &[]
+                } else {
+                    &[crate::menu::MenuAction::ToggleCountIn]
+                };
+
                 if let Some(action) = menu_system.render_egui_menu_bar(
                     ui, &recent_files, Some(&self.keymap),
                     &layout_names, self.current_layout_index,
+                    checked, hidden,
                 ) {
                     self.handle_menu_action(action);
                 }
@@ -5737,6 +5753,8 @@ impl eframe::App for EditorApp {
                     playback_time: &mut self.playback_time,
                     is_playing: &mut self.is_playing,
                     is_recording: &mut self.is_recording,
+                    metronome_enabled: &mut self.metronome_enabled,
+                    count_in_enabled: &mut self.count_in_enabled,
                     recording_clips: &mut self.recording_clips,
                     recording_start_time: &mut self.recording_start_time,
                     recording_layer_ids: &mut self.recording_layer_ids,
@@ -5769,6 +5787,7 @@ impl eframe::App for EditorApp {
                     track_to_layer_map: &self.track_to_layer_map,
                     waveform_stereo: self.config.waveform_stereo,
                     project_generation: &mut self.project_generation,
+                    graph_topology_generation: &mut self.graph_topology_generation,
                     script_to_edit: &mut self.script_to_edit,
                     script_saved: &mut self.script_saved,
                     region_selection: &mut self.region_selection,

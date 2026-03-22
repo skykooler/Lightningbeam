@@ -27,7 +27,7 @@ pub struct Engine {
     project: Project,
     audio_pool: AudioClipPool,
     buffer_pool: BufferPool,
-    playhead: u64,          // Playhead position in samples
+    playhead: i64,          // Playhead position in samples (may be negative during count-in pre-roll)
     sample_rate: u32,
     playing: bool,
     channels: u32,
@@ -73,6 +73,10 @@ pub struct Engine {
 
     // MIDI recording state
     midi_recording_state: Option<MidiRecordingState>,
+
+    // Currently held MIDI notes per track (note -> velocity), updated on NoteOn/NoteOff
+    // Used to inject held notes when recording starts mid-press (e.g. after count-in)
+    midi_held_notes: HashMap<TrackId, HashMap<u8, u8>>,
 
     // MIDI input manager for external MIDI devices
     midi_input_manager: Option<MidiInputManager>,
@@ -160,6 +164,7 @@ impl Engine {
             recording_mirror_tx: None,
             recording_progress_counter: 0,
             midi_recording_state: None,
+            midi_held_notes: HashMap::new(),
             midi_input_manager: None,
             metronome: Metronome::new(sample_rate),
             recording_sample_buffer: Vec::with_capacity(4096),
@@ -396,17 +401,18 @@ impl Engine {
             );
 
             // Update playhead (convert total samples to frames)
-            self.playhead += (output.len() / self.channels as usize) as u64;
+            self.playhead += (output.len() / self.channels as usize) as i64;
 
-            // Update atomic playhead for UI reads
+            // Update atomic playhead for UI reads (clamped to 0; negative = count-in pre-roll)
             self.playhead_atomic
-                .store(self.playhead, Ordering::Relaxed);
+                .store(self.playhead.max(0) as u64, Ordering::Relaxed);
 
             // Send periodic position updates
             self.frames_since_last_event += output.len() / self.channels as usize;
             if self.frames_since_last_event >= self.event_interval_frames / self.channels as usize
             {
-                let position_seconds = self.playhead as f64 / self.sample_rate as f64;
+                // Clamp to 0 during count-in pre-roll (negative playhead = before project start)
+                let position_seconds = self.playhead.max(0) as f64 / self.sample_rate as f64;
                 let _ = self
                     .event_tx
                     .push(AudioEvent::PlaybackPosition(position_seconds));
@@ -692,17 +698,17 @@ impl Engine {
                 self.project.stop_all_notes();
             }
             Command::Seek(seconds) => {
-                let frames = (seconds * self.sample_rate as f64) as u64;
-                self.playhead = frames;
-                self.playhead_atomic
-                    .store(self.playhead, Ordering::Relaxed);
+                self.playhead = (seconds * self.sample_rate as f64) as i64;
+                // Clamp to 0 for atomic/disk-reader; negative = count-in pre-roll (no disk reads needed)
+                let clamped = self.playhead.max(0) as u64;
+                self.playhead_atomic.store(clamped, Ordering::Relaxed);
                 // Stop all MIDI notes when seeking to prevent stuck notes
                 self.project.stop_all_notes();
                 // Reset all node graphs to clear effect buffers (echo, reverb, etc.)
                 self.project.reset_all_graphs();
                 // Notify disk reader to refill buffers from new position
                 if let Some(ref mut dr) = self.disk_reader {
-                    dr.send(crate::audio::disk_reader::DiskReaderCommand::Seek { frame: frames });
+                    dr.send(crate::audio::disk_reader::DiskReaderCommand::Seek { frame: clamped });
                 }
             }
             Command::SetTrackVolume(track_id, volume) => {
@@ -992,6 +998,13 @@ impl Engine {
                     clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
                 }
             }
+            Command::UpdateMidiClipEvents(_track_id, clip_id, events) => {
+                // Replace all events in a MIDI clip (used for CC/pitch bend editing)
+                if let Some(clip) = self.project.midi_clip_pool.get_clip_mut(clip_id) {
+                    clip.events = events;
+                    clip.events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                }
+            }
             Command::RemoveMidiClip(track_id, instance_id) => {
                 // Remove a MIDI clip instance from a track (for undo/redo support)
                 let _ = self.project.remove_midi_clip(track_id, instance_id);
@@ -1205,6 +1218,9 @@ impl Engine {
                 // Emit event to UI for visual feedback
                 let _ = self.event_tx.push(AudioEvent::NoteOn(note, velocity));
 
+                // Track held notes so count-in recording can inject them at start_time
+                self.midi_held_notes.entry(track_id).or_default().insert(note, velocity);
+
                 // If MIDI recording is active on this track, capture the event
                 if let Some(recording) = &mut self.midi_recording_state {
                     if recording.track_id == track_id {
@@ -1222,6 +1238,11 @@ impl Engine {
 
                 // Emit event to UI for visual feedback
                 let _ = self.event_tx.push(AudioEvent::NoteOff(note));
+
+                // Remove from held notes tracking
+                if let Some(track_notes) = self.midi_held_notes.get_mut(&track_id) {
+                    track_notes.remove(&note);
+                }
 
                 // If MIDI recording is active on this track, capture the event
                 if let Some(recording) = &mut self.midi_recording_state {
@@ -1655,7 +1676,7 @@ impl Engine {
                                 // Extract the directory path from the preset path for resolving relative sample paths
                                 let preset_base_path = std::path::Path::new(&preset_path).parent();
 
-                                match AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path) {
+                                match AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path, None) {
                                     Ok(graph) => {
                                         // Replace the track's graph
                                         match self.project.get_track_mut(track_id) {
@@ -1701,6 +1722,80 @@ impl Engine {
                             track_id,
                             format!("Failed to read preset file: {}", e)
                         ));
+                    }
+                }
+            }
+
+            Command::GraphLoadLbins(track_id, path) => {
+                match crate::audio::node_graph::lbins::load_lbins(&path) {
+                    Ok((preset, assets)) => {
+                        match AudioGraph::from_preset(&preset, self.sample_rate, 8192, None, Some(&assets)) {
+                            Ok(graph) => {
+                                match self.project.get_track_mut(track_id) {
+                                    Some(TrackNode::Midi(track)) => {
+                                        track.instrument_graph = graph;
+                                        track.graph_is_default = true;
+                                        let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                    }
+                                    Some(TrackNode::Audio(track)) => {
+                                        track.effects_graph = graph;
+                                        track.graph_is_default = true;
+                                        let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                    }
+                                    Some(TrackNode::Group(track)) => {
+                                        track.audio_graph = graph;
+                                        track.graph_is_default = true;
+                                        let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
+                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            Err(e) => {
+                                let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                    track_id,
+                                    format!("Failed to load .lbins graph: {}", e),
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                            track_id,
+                            format!("Failed to open .lbins file: {}", e),
+                        ));
+                    }
+                }
+            }
+
+            Command::GraphSaveLbins(track_id, path, preset_name, description, tags) => {
+                let graph = match self.project.get_track(track_id) {
+                    Some(TrackNode::Midi(track)) => Some(&track.instrument_graph),
+                    Some(TrackNode::Audio(track)) => Some(&track.effects_graph),
+                    Some(TrackNode::Group(track)) => Some(&track.audio_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
+                    let mut preset = graph.to_preset(&preset_name);
+                    preset.metadata.description = description;
+                    preset.metadata.tags = tags;
+                    preset.metadata.author = String::from("User");
+
+                    match crate::audio::node_graph::lbins::save_lbins(&path, &preset, None) {
+                        Ok(()) => {
+                            let _ = self.event_tx.push(AudioEvent::GraphPresetSaved(
+                                track_id,
+                                path.to_string_lossy().to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = self.event_tx.push(AudioEvent::GraphConnectionError(
+                                track_id,
+                                format!("Failed to save .lbins: {}", e),
+                            ));
+                        }
                     }
                 }
             }
@@ -2456,6 +2551,27 @@ impl Engine {
                 }
             }
 
+            Query::GetAutomationRange(track_id, node_id) => {
+                use crate::audio::node_graph::nodes::AutomationInputNode;
+
+                if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
+                    let graph = &track.instrument_graph;
+                    let node_idx = NodeIndex::new(node_id as usize);
+
+                    if let Some(graph_node) = graph.get_graph_node(node_idx) {
+                        if let Some(auto_node) = graph_node.node.as_any().downcast_ref::<AutomationInputNode>() {
+                            QueryResponse::AutomationRange(Ok((auto_node.value_min, auto_node.value_max)))
+                        } else {
+                            QueryResponse::AutomationRange(Err(format!("Node {} is not an AutomationInputNode", node_id)))
+                        }
+                    } else {
+                        QueryResponse::AutomationRange(Err(format!("Node {} not found", node_id)))
+                    }
+                } else {
+                    QueryResponse::AutomationRange(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                }
+            }
+
             Query::SerializeAudioPool(project_path) => {
                 QueryResponse::AudioPoolSerialized(self.audio_pool.serialize(&project_path))
             }
@@ -2509,12 +2625,12 @@ impl Engine {
                         match track_node {
                             TrackNode::Audio(track) => {
                                 // Load into effects graph with proper buffer size (8192 to handle any callback size)
-                                track.effects_graph = AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path)?;
+                                track.effects_graph = AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path, None)?;
                                 Ok(())
                             }
                             TrackNode::Midi(track) => {
                                 // Load into instrument graph with proper buffer size (8192 to handle any callback size)
-                                track.instrument_graph = AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path)?;
+                                track.instrument_graph = AudioGraph::from_preset(&preset, self.sample_rate, 8192, preset_base_path, None)?;
                                 Ok(())
                             }
                             TrackNode::Group(_) => {
@@ -2723,6 +2839,40 @@ impl Engine {
                 };
                 QueryResponse::GraphIsDefault(is_default)
             }
+
+            Query::GetPitchBendRange(track_id) => {
+                use crate::audio::node_graph::nodes::{MidiToCVNode, MultiSamplerNode, VoiceAllocatorNode};
+                use crate::audio::node_graph::AudioNode;
+                let range = if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
+                    let graph = &track.instrument_graph;
+                    let mut found = None;
+                    for idx in graph.node_indices() {
+                        if let Some(gn) = graph.get_graph_node(idx) {
+                            if let Some(ms) = gn.node.as_any().downcast_ref::<MultiSamplerNode>() {
+                                found = Some(ms.get_parameter(4)); // PARAM_PITCH_BEND_RANGE
+                                break;
+                            }
+                            // Search inside VoiceAllocator template for MidiToCV
+                            if let Some(va) = gn.node.as_any().downcast_ref::<VoiceAllocatorNode>() {
+                                let tg = va.template_graph();
+                                for tidx in tg.node_indices() {
+                                    if let Some(tgn) = tg.get_graph_node(tidx) {
+                                        if let Some(mc) = tgn.node.as_any().downcast_ref::<MidiToCVNode>() {
+                                            found = Some(mc.get_parameter(0)); // PARAM_PITCH_BEND_RANGE
+                                            break;
+                                        }
+                                    }
+                                }
+                                if found.is_some() { break; }
+                            }
+                        }
+                    }
+                    found.unwrap_or(2.0)
+                } else {
+                    2.0
+                };
+                QueryResponse::PitchBendRange(range)
+            }
         };
 
         // Send response back
@@ -2902,7 +3052,17 @@ impl Engine {
         // Check if track exists and is a MIDI track
         if let Some(crate::audio::track::TrackNode::Midi(_)) = self.project.get_track_mut(track_id) {
             // Create MIDI recording state
-            let recording_state = MidiRecordingState::new(track_id, clip_id, start_time);
+            let mut recording_state = MidiRecordingState::new(track_id, clip_id, start_time);
+
+            // Inject any notes currently held on this track (pressed during count-in pre-roll)
+            // so they start at t=0 of the recording rather than being lost
+            if let Some(held) = self.midi_held_notes.get(&track_id) {
+                for (&note, &velocity) in held {
+                    eprintln!("[MIDI_RECORDING] Injecting held note {} vel {} at start_time {:.3}s", note, velocity, start_time);
+                    recording_state.note_on(note, velocity, start_time);
+                }
+            }
+
             self.midi_recording_state = Some(recording_state);
 
             eprintln!("[MIDI_RECORDING] Started MIDI recording on track {} for clip {}", track_id, clip_id);
@@ -3317,6 +3477,11 @@ impl EngineController {
         let _ = self.command_tx.push(Command::UpdateMidiClipNotes(track_id, clip_id, notes));
     }
 
+    /// Replace all events in a MIDI clip (used for CC/pitch bend editing from the piano roll)
+    pub fn update_midi_clip_events(&mut self, track_id: TrackId, clip_id: MidiClipId, events: Vec<crate::audio::midi::MidiEvent>) {
+        let _ = self.command_tx.push(Command::UpdateMidiClipEvents(track_id, clip_id, events));
+    }
+
     /// Remove a MIDI clip instance from a track (for undo/redo support)
     pub fn remove_midi_clip(&mut self, track_id: TrackId, instance_id: MidiClipInstanceId) {
         let _ = self.command_tx.push(Command::RemoveMidiClip(track_id, instance_id));
@@ -3394,6 +3559,25 @@ impl EngineController {
         let _ = self.command_tx.push(Command::SetAutomationLaneEnabled(
             track_id, lane_id, enabled,
         ));
+    }
+
+    /// Add a keyframe to an AutomationInput node
+    pub fn automation_add_keyframe(&mut self, track_id: TrackId, node_id: u32,
+        time: f64, value: f32, interpolation: String,
+        ease_out: (f32, f32), ease_in: (f32, f32)) {
+        let _ = self.command_tx.push(Command::AutomationAddKeyframe(
+            track_id, node_id, time, value, interpolation, ease_out, ease_in));
+    }
+
+    /// Remove a keyframe from an AutomationInput node
+    pub fn automation_remove_keyframe(&mut self, track_id: TrackId, node_id: u32, time: f64) {
+        let _ = self.command_tx.push(Command::AutomationRemoveKeyframe(
+            track_id, node_id, time));
+    }
+
+    /// Set the display name of an AutomationInput node
+    pub fn automation_set_name(&mut self, track_id: TrackId, node_id: u32, name: String) {
+        let _ = self.command_tx.push(Command::AutomationSetName(track_id, node_id, name));
     }
 
     /// Start recording on a track
@@ -3540,6 +3724,16 @@ impl EngineController {
     /// Load a preset into a track's graph
     pub fn graph_load_preset(&mut self, track_id: TrackId, preset_path: String) {
         let _ = self.command_tx.push(Command::GraphLoadPreset(track_id, preset_path));
+    }
+
+    /// Load a `.lbins` instrument bundle into a track's graph
+    pub fn graph_load_lbins(&mut self, track_id: TrackId, path: std::path::PathBuf) {
+        let _ = self.command_tx.push(Command::GraphLoadLbins(track_id, path));
+    }
+
+    /// Save a track's graph as a `.lbins` instrument bundle
+    pub fn graph_save_lbins(&mut self, track_id: TrackId, path: std::path::PathBuf, preset_name: String, description: String, tags: Vec<String>) {
+        let _ = self.command_tx.push(Command::GraphSaveLbins(track_id, path, preset_name, description, tags));
     }
 
     /// Save a VoiceAllocator's template graph as a preset
@@ -3807,6 +4001,45 @@ impl EngineController {
         }
 
         Err("Query timeout".to_string())
+    }
+
+    /// Query automation node value range (min, max)
+    pub fn query_automation_range(&mut self, track_id: TrackId, node_id: u32) -> Result<(f32, f32), String> {
+        if let Err(_) = self.query_tx.push(Query::GetAutomationRange(track_id, node_id)) {
+            return Err("Failed to send query - queue full".to_string());
+        }
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::AutomationRange(result)) = self.query_response_rx.pop() {
+                return result;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+
+        Err("Query timeout".to_string())
+    }
+
+    /// Query the pitch bend range (semitones) for the instrument on a MIDI track.
+    /// Returns 2.0 (default) if the track or instrument cannot be found.
+    pub fn query_pitch_bend_range(&mut self, track_id: TrackId) -> f32 {
+        if let Err(_) = self.query_tx.push(Query::GetPitchBendRange(track_id)) {
+            return 2.0;
+        }
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(100);
+
+        while start.elapsed() < timeout {
+            if let Ok(QueryResponse::PitchBendRange(range)) = self.query_response_rx.pop() {
+                return range;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(50));
+        }
+
+        2.0 // default on timeout
     }
 
     /// Serialize the audio pool for project saving

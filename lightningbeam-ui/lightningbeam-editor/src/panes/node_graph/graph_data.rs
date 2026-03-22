@@ -301,6 +301,12 @@ pub struct GraphState {
     pub available_nam_models: Vec<NamModelInfo>,
     /// Search text for the NAM model picker popup
     pub nam_search_text: String,
+    /// Edit buffers for AutomationInput display names, keyed by frontend NodeId
+    pub automation_name_edits: HashMap<NodeId, String>,
+    /// Pending automation name changes (node_id, backend_node_id, new_name)
+    pub pending_automation_name_changes: Vec<(NodeId, u32, String)>,
+    /// AutomationInput nodes whose display name still needs to be queried from backend
+    pub pending_automation_name_queries: Vec<(NodeId, u32)>,
 }
 
 impl Default for GraphState {
@@ -327,6 +333,9 @@ impl Default for GraphState {
             pending_amp_sim_load: None,
             available_nam_models: Vec::new(),
             nam_search_text: String::new(),
+            automation_name_edits: HashMap::new(),
+            pending_automation_name_changes: Vec::new(),
+            pending_automation_name_queries: Vec::new(),
         }
     }
 }
@@ -1510,6 +1519,21 @@ impl NodeDataTrait for NodeData {
 
             if close_popup {
                 egui::Popup::close_id(ui.ctx(), popup_id);
+            }
+        } else if self.template == NodeTemplate::AutomationInput {
+            let backend_node_id = user_state.node_backend_ids.get(&node_id).copied().unwrap_or(0);
+            let edit_buf = user_state.automation_name_edits
+                .entry(node_id)
+                .or_insert_with(String::new);
+            let resp = ui.add(
+                egui::TextEdit::singleline(edit_buf)
+                    .hint_text("Lane name...")
+                    .desired_width(f32::INFINITY),
+            );
+            if resp.lost_focus() {
+                user_state.pending_automation_name_changes.push(
+                    (node_id, backend_node_id, edit_buf.clone()),
+                );
             }
         } else {
             ui.label("");

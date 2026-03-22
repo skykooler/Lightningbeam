@@ -28,11 +28,29 @@ const DEFAULT_VELOCITY: u8 = 100;
 // ── Types ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+enum PitchBendZone {
+    Start,   // First 30% of note: ramp from bend → 0
+    Middle,  // Middle 40%: bell curve 0 → bend → 0
+    End,     // Last 30%: ramp from 0 → bend
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum DragMode {
     MoveNotes { start_time_offset: f64, start_note_offset: i32 },
     ResizeNote { note_index: usize, original_duration: f64 },
     CreateNote,
     SelectRect,
+    /// Alt-drag pitch bend editing on a note
+    PitchBend {
+        note_index: usize,
+        zone: PitchBendZone,
+        note_pitch: u8,
+        note_channel: u8,
+        note_start: f64,
+        note_duration: f64,
+        origin_y: f32,
+        current_semitones: f32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +65,7 @@ struct TempNote {
 #[derive(Debug, Clone)]
 struct ResolvedNote {
     note: u8,
+    channel: u8,
     start_time: f64,
     duration: f64,
     velocity: u8,
@@ -94,6 +113,15 @@ pub struct PianoRollPane {
 
     // Spectrogram gamma (power curve for colormap)
     spectrogram_gamma: f32,
+
+    // Header slider values — persist across frames during drag
+    header_vel: f32,
+    header_mod: f32,
+
+    // Instrument pitch bend range in semitones (queried from backend when layer changes)
+    pitch_bend_range: f32,
+    // Layer ID for which pitch_bend_range was last queried
+    pitch_bend_range_layer: Option<uuid::Uuid>,
 }
 
 impl PianoRollPane {
@@ -123,6 +151,10 @@ impl PianoRollPane {
             user_scrolled_since_play: false,
             cached_clip_id: None,
             spectrogram_gamma: 0.8,
+            header_vel: 100.0,
+            header_mod: 0.0,
+            pitch_bend_range: 2.0,
+            pitch_bend_range_layer: None,
         }
     }
 
@@ -166,28 +198,33 @@ impl PianoRollPane {
 
     // ── Note resolution ──────────────────────────────────────────────────
 
-    fn resolve_notes(events: &[(f64, u8, u8, bool)]) -> Vec<ResolvedNote> {
-        let mut active: HashMap<u8, (f64, u8)> = HashMap::new(); // note -> (start_time, velocity)
+    fn resolve_notes(events: &[daw_backend::audio::midi::MidiEvent]) -> Vec<ResolvedNote> {
+        let mut active: HashMap<u8, (f64, u8, u8)> = HashMap::new(); // note -> (start_time, velocity, channel)
         let mut notes = Vec::new();
 
-        for &(timestamp, note_number, velocity, is_note_on) in events {
-            if is_note_on {
-                active.insert(note_number, (timestamp, velocity));
-            } else if let Some((start, vel)) = active.remove(&note_number) {
-                let duration = (timestamp - start).max(MIN_NOTE_DURATION);
-                notes.push(ResolvedNote {
-                    note: note_number,
-                    start_time: start,
-                    duration,
-                    velocity: vel,
-                });
+        for event in events {
+            let channel = event.status & 0x0F;
+            if event.is_note_on() {
+                active.insert(event.data1, (event.timestamp, event.data2, channel));
+            } else if event.is_note_off() {
+                if let Some((start, vel, ch)) = active.remove(&event.data1) {
+                    let duration = (event.timestamp - start).max(MIN_NOTE_DURATION);
+                    notes.push(ResolvedNote {
+                        note: event.data1,
+                        channel: ch,
+                        start_time: start,
+                        duration,
+                        velocity: vel,
+                    });
+                }
             }
         }
 
         // Handle unterminated notes
-        for (&note_number, &(start, vel)) in &active {
+        for (&note_number, &(start, vel, ch)) in &active {
             notes.push(ResolvedNote {
                 note: note_number,
+                channel: ch,
                 start_time: start,
                 duration: 0.5, // default duration for unterminated
                 velocity: vel,
@@ -251,16 +288,51 @@ impl PianoRollPane {
             None => return,
         };
 
+        // Query pitch bend range from backend when the layer changes
+        if self.pitch_bend_range_layer != Some(layer_id) {
+            if let Some(track_id) = shared.layer_to_track_map.get(&layer_id) {
+                if let Some(ctrl) = shared.audio_controller.as_ref() {
+                    if let Ok(mut c) = ctrl.lock() {
+                        self.pitch_bend_range = c.query_pitch_bend_range(*track_id);
+                    }
+                }
+            }
+            self.pitch_bend_range_layer = Some(layer_id);
+        }
+
         let document = shared.action_executor.document();
 
-        // Collect clip data we need before borrowing shared mutably
+        // Collect clip data using the engine snapshot (source of truth), which reflects
+        // recorded clips immediately. Falls back to document if snapshot is empty/absent.
         let mut clip_data: Vec<(u32, f64, f64, f64, Uuid)> = Vec::new(); // (midi_clip_id, timeline_start, trim_start, duration, instance_id)
-        if let Some(AnyLayer::Audio(audio_layer)) = document.get_layer(&layer_id) {
-            for instance in &audio_layer.clip_instances {
-                if let Some(clip) = document.audio_clips.get(&instance.clip_id) {
-                    if let AudioClipType::Midi { midi_clip_id } = clip.clip_type {
-                        let duration = instance.effective_duration(clip.duration);
-                        clip_data.push((midi_clip_id, instance.timeline_start, instance.trim_start, duration, instance.id));
+
+        let snapshot_clips: Option<Vec<daw_backend::audio::midi::MidiClipInstance>> =
+            shared.clip_snapshot.as_ref().and_then(|arc| {
+                let snap = arc.read().ok()?;
+                let track_id = shared.layer_to_track_map.get(&layer_id)?;
+                snap.midi.get(track_id).cloned()
+            });
+
+        if let Some(midi_instances) = snapshot_clips.filter(|v| !v.is_empty()) {
+            // Use snapshot data (engine is source of truth)
+            for mc in &midi_instances {
+                if let Some((clip_doc_id, _)) = document.audio_clip_by_midi_clip_id(mc.clip_id) {
+                    let clip_doc_id = clip_doc_id; // doc-side AudioClip uuid
+                    let duration = mc.external_duration;
+                    let instance_uuid = Uuid::nil(); // no doc-side instance uuid yet
+                    clip_data.push((mc.clip_id, mc.external_start, mc.internal_start, duration, instance_uuid));
+                    let _ = clip_doc_id; // used above for the if-let pattern
+                }
+            }
+        } else {
+            // Fall back to document (handles recording-in-progress and pre-snapshot clips)
+            if let Some(AnyLayer::Audio(audio_layer)) = document.get_layer(&layer_id) {
+                for instance in &audio_layer.clip_instances {
+                    if let Some(clip) = document.audio_clips.get(&instance.clip_id) {
+                        if let AudioClipType::Midi { midi_clip_id } = clip.clip_type {
+                            let duration = instance.effective_duration(clip.duration);
+                            clip_data.push((midi_clip_id, instance.timeline_start, instance.trim_start, duration, instance.id));
+                        }
                     }
                 }
             }
@@ -337,7 +409,7 @@ impl PianoRollPane {
             // Render notes
             if let Some(events) = shared.midi_event_cache.get(&midi_clip_id) {
                 let resolved = Self::resolve_notes(events);
-                self.render_notes(&grid_painter, grid_rect, &resolved, timeline_start, trim_start, duration, opacity, is_selected);
+                self.render_notes(&grid_painter, grid_rect, &resolved, events, timeline_start, trim_start, duration, opacity, is_selected, midi_clip_id);
             }
         }
 
@@ -508,16 +580,159 @@ impl PianoRollPane {
         }
     }
 
+    /// Find the peak pitch bend value (in semitones) for a note in the event list.
+    /// Returns 0.0 if no pitch bend events are present in the note's time range.
+    fn find_peak_pitch_bend_semitones(
+        events: &[daw_backend::audio::midi::MidiEvent],
+        note_start: f64,
+        note_end: f64,
+        channel: u8,
+        pitch_bend_range: f32,
+    ) -> f32 {
+        let mut peak = 0.0f32;
+        for ev in events {
+            if ev.timestamp > note_end + 0.01 { break; }
+            if ev.timestamp >= note_start - 0.01
+                && (ev.status & 0xF0) == 0xE0
+                && (ev.status & 0x0F) == channel
+            {
+                let raw = ((ev.data2 as i16) << 7) | (ev.data1 as i16);
+                let normalized = (raw - 8192) as f32 / 8192.0;
+                let semitones = normalized * pitch_bend_range;
+                if semitones.abs() > peak.abs() {
+                    peak = semitones;
+                }
+            }
+        }
+        peak
+    }
+
+    /// Determine which zone of a note was clicked based on the X position within the note rect.
+    fn pitch_bend_zone_from_x(click_x: f32, note_left: f32, note_right: f32) -> PitchBendZone {
+        let t = (click_x - note_left) / (note_right - note_left).max(1.0);
+        if t < 0.3 {
+            PitchBendZone::Start
+        } else if t < 0.7 {
+            PitchBendZone::Middle
+        } else {
+            PitchBendZone::End
+        }
+    }
+
+    /// Generate pitch bend MIDI events for a note based on the zone and target semitones.
+    fn generate_pitch_bend_events(
+        note_start: f64,
+        note_duration: f64,
+        zone: PitchBendZone,
+        semitones: f32,
+        channel: u8,
+        pitch_bend_range: f32,
+    ) -> Vec<daw_backend::audio::midi::MidiEvent> {
+        use daw_backend::audio::midi::MidiEvent;
+        let num_steps: usize = 128;
+        let mut events = Vec::new();
+        let encode_bend = |normalized: f32| -> (u8, u8) {
+            let value_14 = (normalized * 8191.0 + 8192.0).clamp(0.0, 16383.0) as i16;
+            ((value_14 & 0x7F) as u8, ((value_14 >> 7) & 0x7F) as u8)
+        };
+        // Use t directly (0..=1 across the full note) — same formula as the visual ghost.
+        // Start:  peak → 0  (ramps down over full note)
+        // Middle: 0 → peak → 0  (sine arch, peaks at center)
+        // End:    0 → peak  (ramps up over full note)
+        for i in 0..=num_steps {
+            let t = i as f64 / num_steps as f64;
+            let t_f32 = t as f32;
+            // Cosine ease curves: Start+End at equal value = perfectly flat (partition of unity).
+            // Start: (1+cos(πt))/2  — peaks at t=0, smooth decay to 0 at t=1
+            // End:   (1-cos(πt))/2  — 0 at t=0, smooth rise to peak at t=1
+            // Middle: sin(πt)       — arch peaking at t=0.5
+            let normalized = match zone {
+                PitchBendZone::Start  => semitones / pitch_bend_range * (1.0 + (std::f32::consts::PI * t_f32).cos()) * 0.5,
+                PitchBendZone::Middle => semitones / pitch_bend_range * (std::f32::consts::PI * t_f32).sin(),
+                PitchBendZone::End    => semitones / pitch_bend_range * (1.0 - (std::f32::consts::PI * t_f32).cos()) * 0.5,
+            };
+            let timestamp = note_start + t * note_duration;
+            let (lsb, msb) = encode_bend(normalized);
+            events.push(MidiEvent { timestamp, status: 0xE0 | channel, data1: lsb, data2: msb });
+        }
+        events
+    }
+
+    /// Find the lowest available MIDI channel (1–15) not already used by any note
+    /// overlapping [note_start, note_end], excluding the note being assigned itself.
+    /// Returns the note's current channel unchanged if it is already uniquely assigned (non-zero).
+    fn find_or_assign_channel(
+        events: &[daw_backend::audio::midi::MidiEvent],
+        note_start: f64,
+        note_end: f64,
+        note_pitch: u8,
+        current_channel: u8,
+    ) -> u8 {
+        use std::collections::HashMap;
+        let mut used = [false; 16];
+        // Walk events to find which channels have notes overlapping the target range.
+        // key = (pitch, channel), value = note_start_time
+        let mut active: HashMap<(u8, u8), f64> = HashMap::new();
+        for ev in events {
+            let ch = ev.status & 0x0F;
+            let msg = ev.status & 0xF0;
+            if msg == 0x90 && ev.data2 > 0 {
+                active.insert((ev.data1, ch), ev.timestamp);
+            } else if msg == 0x80 || (msg == 0x90 && ev.data2 == 0) {
+                if let Some(start) = active.remove(&(ev.data1, ch)) {
+                    // Overlaps target range and is NOT the note we're assigning
+                    if start < note_end && ev.timestamp > note_start
+                        && !(ev.data1 == note_pitch && ch == current_channel)
+                    {
+                        used[ch as usize] = true;
+                    }
+                }
+            }
+        }
+        // Mark still-active (no note-off seen) notes
+        for ((pitch, ch), start) in &active {
+            if *start < note_end && !(*pitch == note_pitch && *ch == current_channel) {
+                used[*ch as usize] = true;
+            }
+        }
+        // Keep current channel if already uniquely assigned and non-zero
+        if current_channel != 0 && !used[current_channel as usize] {
+            return current_channel;
+        }
+        // Find lowest free channel in 1..15
+        for ch in 1u8..16 {
+            if !used[ch as usize] { return ch; }
+        }
+        current_channel // fallback (>15 simultaneous notes)
+    }
+
+    /// Find the CC1 (modulation) value for a note in the event list.
+    /// Searches for a CC1 event at or just before the note's start time on the same channel.
+    fn find_cc1_for_note(events: &[daw_backend::audio::midi::MidiEvent], note_start: f64, note_end: f64, channel: u8) -> u8 {
+        let mut cc1 = 0u8;
+        for ev in events {
+            if ev.timestamp > note_end { break; }
+            if (ev.status & 0xF0) == 0xB0 && (ev.status & 0x0F) == channel && ev.data1 == 1 {
+                if ev.timestamp <= note_start {
+                    cc1 = ev.data2;
+                }
+            }
+        }
+        cc1
+    }
+
     fn render_notes(
         &self,
         painter: &egui::Painter,
         grid_rect: Rect,
         notes: &[ResolvedNote],
+        events: &[daw_backend::audio::midi::MidiEvent],
         clip_timeline_start: f64,
         trim_start: f64,
         clip_duration: f64,
         opacity: f32,
         is_selected_clip: bool,
+        clip_id: u32,
     ) {
         for (i, note) in notes.iter().enumerate() {
             // Skip notes entirely outside the visible trim window
@@ -588,6 +803,107 @@ impl PianoRollPane {
             if clipped.is_positive() {
                 painter.rect_filled(clipped, 1.0, color);
                 painter.rect_stroke(clipped, 1.0, Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, (76.0 * opacity) as u8)), StrokeKind::Middle);
+
+                // Modulation (CC1) bar: 3px column on left edge of note, fills from bottom
+                let cc1 = Self::find_cc1_for_note(events, note.start_time, note.start_time + note.duration, note.channel);
+                if cc1 > 0 {
+                    let bar_width = 3.0_f32.min(clipped.width());
+                    let bar_height = (cc1 as f32 / 127.0) * clipped.height();
+                    let bar_rect = Rect::from_min_size(
+                        pos2(clipped.min.x, clipped.max.y - bar_height),
+                        vec2(bar_width, bar_height),
+                    );
+                    let bar_alpha = (128.0 * opacity) as u8;
+                    painter.rect_filled(bar_rect, 0.0, Color32::from_rgba_unmultiplied(255, 255, 255, bar_alpha));
+                }
+
+                // Pitch bend ghost overlay — contour-following filled band
+                // Build a curve of semitone values sampled across the note width.
+                // For live drag: existing bend + new zone contribution (additive).
+                // For persisted: sample actual events.
+                const N_SAMPLES: usize = 24;
+                let bend_curve: Option<[f32; N_SAMPLES + 1]> =
+                    if let Some(DragMode::PitchBend { note_index: drag_idx, current_semitones, zone, note_channel: drag_ch, .. }) = self.drag_mode {
+                        if drag_idx == i && is_selected_clip && Some(clip_id) == self.selected_clip_id {
+                            let mut curve = [0.0f32; N_SAMPLES + 1];
+                            let pi = std::f32::consts::PI;
+                            for s in 0..=N_SAMPLES {
+                                let t = s as f32 / N_SAMPLES as f32;
+                                // Sample existing bend at this time position
+                                let ts = note.start_time + t as f64 * note.duration;
+                                let mut existing_norm = 0.0f32;
+                                for ev in events {
+                                    if ev.timestamp > ts { break; }
+                                    if (ev.status & 0xF0) == 0xE0 && (ev.status & 0x0F) == drag_ch {
+                                        let raw = ((ev.data2 as i16) << 7) | (ev.data1 as i16);
+                                        existing_norm = (raw - 8192) as f32 / 8192.0;
+                                    }
+                                }
+                                let existing_semi = existing_norm * self.pitch_bend_range;
+                                // New zone contribution
+                                let zone_semi = match zone {
+                                    PitchBendZone::Start  => current_semitones * (1.0 + (pi * t).cos()) * 0.5,
+                                    PitchBendZone::Middle => current_semitones * (pi * t).sin(),
+                                    PitchBendZone::End    => current_semitones * (1.0 - (pi * t).cos()) * 0.5,
+                                };
+                                curve[s] = existing_semi + zone_semi;
+                            }
+                            // Only show ghost if there's any meaningful bend at all
+                            if curve.iter().any(|v| v.abs() >= 0.05) {
+                                Some(curve)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                // For persisted notes (no live drag), sample actual pitch bend events
+                let bend_curve = bend_curve.or_else(|| {
+                    let peak = Self::find_peak_pitch_bend_semitones(
+                        events, note.start_time, note.start_time + note.duration,
+                        note.channel, self.pitch_bend_range);
+                    if peak.abs() < 0.05 { return None; }
+                    let mut curve = [0.0f32; N_SAMPLES + 1];
+                    for s in 0..=N_SAMPLES {
+                        let t = s as f64 / N_SAMPLES as f64;
+                        let ts = note.start_time + t * note.duration;
+                        // Find last pitch bend event at or before ts
+                        let mut bend_norm = 0.0f32;
+                        for ev in events {
+                            if ev.timestamp > ts { break; }
+                            if (ev.status & 0xF0) == 0xE0 && (ev.status & 0x0F) == note.channel {
+                                let raw = ((ev.data2 as i16) << 7) | (ev.data1 as i16);
+                                bend_norm = (raw - 8192) as f32 / 8192.0;
+                            }
+                        }
+                        curve[s] = bend_norm * self.pitch_bend_range;
+                    }
+                    Some(curve)
+                });
+
+                if let Some(curve) = bend_curve {
+                    // Draw a stroked curve relative to the note's centerline.
+                    let note_center_y = y + h * 0.5;
+                    // Brighten toward white for visibility
+                    let brighten = |c: u8| -> u8 { (c as u16 + (255 - c as u16) * 3 / 4) as u8 };
+                    let stroke_color = Color32::from_rgba_unmultiplied(
+                        brighten(r), brighten(g), brighten(b), (220.0 * opacity) as u8,
+                    );
+
+                    let points: Vec<egui::Pos2> = (0..=N_SAMPLES).map(|s| {
+                        let t = s as f32 / N_SAMPLES as f32;
+                        let px = (x + t * w).clamp(grid_rect.min.x, grid_rect.max.x);
+                        let bend_px = (curve[s] * self.note_height)
+                            .clamp(-(grid_rect.height()), grid_rect.height());
+                        let py = (note_center_y - bend_px).clamp(grid_rect.min.y, grid_rect.max.y);
+                        pos2(px, py)
+                    }).collect();
+                    painter.add(egui::Shape::line(points, egui::Stroke::new(3.0, stroke_color)));
+                }
             }
         }
     }
@@ -654,6 +970,7 @@ impl PianoRollPane {
         let response = ui.allocate_rect(full_rect, egui::Sense::click_and_drag());
         let shift_held = ui.input(|i| i.modifiers.shift);
         let ctrl_held = ui.input(|i| i.modifiers.ctrl);
+        let alt_held = ui.input(|i| i.modifiers.alt);
         let now = ui.input(|i| i.time);
 
         // Auto-release preview note after its duration expires.
@@ -784,7 +1101,7 @@ impl PianoRollPane {
                 if full_rect.contains(pos) {
                     let in_grid = pos.x >= grid_rect.min.x;
                     if in_grid {
-                        self.on_grid_press(pos, grid_rect, shift_held, ctrl_held, now, shared, clip_data);
+                        self.on_grid_press(pos, grid_rect, shift_held, ctrl_held, alt_held, now, shared, clip_data);
                     } else {
                         // Keyboard click - preview note (hold until mouse-up)
                         let note = self.y_to_note(pos.y, keyboard_rect);
@@ -807,10 +1124,14 @@ impl PianoRollPane {
         }
 
         // Update cursor
-        if let Some(hover_pos) = response.hover_pos() {
+        if matches!(self.drag_mode, Some(DragMode::PitchBend { .. })) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        } else if let Some(hover_pos) = response.hover_pos() {
             if hover_pos.x >= grid_rect.min.x {
                 if shift_held {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+                } else if alt_held && self.hit_test_note(hover_pos, grid_rect, shared, clip_data).is_some() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
                 } else if self.hit_test_note_edge(hover_pos, grid_rect, shared, clip_data).is_some() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 } else if self.hit_test_note(hover_pos, grid_rect, shared, clip_data).is_some() {
@@ -831,6 +1152,7 @@ impl PianoRollPane {
         grid_rect: Rect,
         shift_held: bool,
         ctrl_held: bool,
+        alt_held: bool,
         now: f64,
         shared: &mut SharedPaneState,
         clip_data: &[(u32, f64, f64, f64, Uuid)],
@@ -840,6 +1162,35 @@ impl PianoRollPane {
         self.drag_start_screen = Some(pos);
         self.drag_start_time = time;
         self.drag_start_note = note;
+
+        // Alt+click on a note: start pitch bend drag
+        if alt_held {
+            if let Some(note_idx) = self.hit_test_note(pos, grid_rect, shared, clip_data) {
+                if let Some(clip_id) = self.selected_clip_id {
+                    if let Some(events) = shared.midi_event_cache.get(&clip_id) {
+                        let resolved = Self::resolve_notes(events);
+                        if note_idx < resolved.len() {
+                            let n = &resolved[note_idx];
+                            // Determine zone from X position within note rect
+                            let note_x = self.time_to_x(n.start_time, grid_rect);
+                            let note_w = (n.duration as f32 * self.pixels_per_second).max(2.0);
+                            let zone = Self::pitch_bend_zone_from_x(pos.x, note_x, note_x + note_w);
+                            self.drag_mode = Some(DragMode::PitchBend {
+                                note_index: note_idx,
+                                zone,
+                                note_pitch: n.note,
+                                note_channel: n.channel,
+                                note_start: n.start_time,
+                                note_duration: n.duration,
+                                origin_y: pos.y,
+                                current_semitones: 0.0, // additive delta; existing bend shown separately
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+        }
 
         // Check if clicking on a note edge (resize)
         if let Some(note_idx) = self.hit_test_note_edge(pos, grid_rect, shared, clip_data) {
@@ -971,7 +1322,18 @@ impl PianoRollPane {
                     self.update_selection_from_rect(grid_rect, shared, clip_data);
                 }
             }
+            Some(DragMode::PitchBend { .. }) => {
+                // Handled below (needs mutable access to self.drag_mode and self.pitch_bend_range)
+            }
             None => {}
+        }
+
+        // Pitch bend drag: update current_semitones based on Y movement
+        if let Some(DragMode::PitchBend { ref mut current_semitones, ref mut origin_y, .. }) = self.drag_mode {
+            let range = self.pitch_bend_range;
+            let delta_semitones = (*origin_y - pos.y) / self.note_height;
+            *current_semitones = (*current_semitones + delta_semitones).clamp(-range, range);
+            *origin_y = pos.y;
         }
     }
 
@@ -1011,6 +1373,84 @@ impl PianoRollPane {
             Some(DragMode::SelectRect) => {
                 self.selection_rect = None;
                 self.update_focus(shared);
+            }
+            Some(DragMode::PitchBend { note_pitch, note_channel, note_start, note_duration, zone, current_semitones, .. }) => {
+                // Only commit if the drag added a meaningful new contribution
+                if current_semitones.abs() >= 0.05 {
+                    if let Some(clip_id) = self.selected_clip_id {
+                        let range = self.pitch_bend_range;
+                        let old_events = shared.midi_event_cache.get(&clip_id).cloned().unwrap_or_default();
+                        let mut new_events = old_events.clone();
+
+                        // Assign a unique channel to this note so bend only affects it
+                        let target_channel = Self::find_or_assign_channel(
+                            &new_events, note_start, note_start + note_duration,
+                            note_pitch, note_channel,
+                        );
+
+                        // Re-stamp note-on/off for this specific note if channel changed
+                        if target_channel != note_channel {
+                            for ev in &mut new_events {
+                                let msg = ev.status & 0xF0;
+                                let ch = ev.status & 0x0F;
+                                if (msg == 0x90 || msg == 0x80) && ev.data1 == note_pitch && ch == note_channel {
+                                    ev.status = (ev.status & 0xF0) | target_channel;
+                                }
+                            }
+                        }
+
+                        // Sample existing bend (normalised -1..1) at each step, then add the
+                        // new zone contribution additively and write back as combined events.
+                        let num_steps: usize = 128;
+                        let pi = std::f32::consts::PI;
+                        let existing_norm: Vec<f32> = (0..=num_steps).map(|i| {
+                            let t = i as f64 / num_steps as f64;
+                            let ts = note_start + t * note_duration;
+                            let mut bend = 0.0f32;
+                            for ev in &new_events {
+                                if ev.timestamp > ts { break; }
+                                if (ev.status & 0xF0) == 0xE0 && (ev.status & 0x0F) == target_channel {
+                                    let raw = ((ev.data2 as i16) << 7) | (ev.data1 as i16);
+                                    bend = (raw - 8192) as f32 / 8192.0;
+                                }
+                            }
+                            bend
+                        }).collect();
+
+                        // Remove old bend events in range before writing combined
+                        new_events.retain(|ev| {
+                            let is_bend = (ev.status & 0xF0) == 0xE0 && (ev.status & 0x0F) == target_channel;
+                            let in_range = ev.timestamp >= note_start - 0.001 && ev.timestamp <= note_start + note_duration + 0.01;
+                            !(is_bend && in_range)
+                        });
+
+                        let encode_bend = |normalized: f32| -> (u8, u8) {
+                            let v = (normalized * 8191.0 + 8192.0).clamp(0.0, 16383.0) as i16;
+                            ((v & 0x7F) as u8, ((v >> 7) & 0x7F) as u8)
+                        };
+                        for i in 0..=num_steps {
+                            let t = i as f32 / num_steps as f32;
+                            let zone_norm = match zone {
+                                PitchBendZone::Start  => current_semitones / range * (1.0 + (pi * t).cos()) * 0.5,
+                                PitchBendZone::Middle => current_semitones / range * (pi * t).sin(),
+                                PitchBendZone::End    => current_semitones / range * (1.0 - (pi * t).cos()) * 0.5,
+                            };
+                            let combined = (existing_norm[i] + zone_norm).clamp(-1.0, 1.0);
+                            let (lsb, msb) = encode_bend(combined);
+                            let ts = note_start + i as f64 / num_steps as f64 * note_duration;
+                            new_events.push(daw_backend::audio::midi::MidiEvent { timestamp: ts, status: 0xE0 | target_channel, data1: lsb, data2: msb });
+                        }
+                        // For End zone: reset just after note ends so it doesn't bleed into next note
+                        if zone == PitchBendZone::End {
+                            let (lsb, msb) = encode_bend(0.0);
+                            new_events.push(daw_backend::audio::midi::MidiEvent { timestamp: note_start + note_duration + 0.005, status: 0xE0 | target_channel, data1: lsb, data2: msb });
+                        }
+
+                        new_events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
+                        self.push_events_action("Set pitch bend", clip_id, old_events, new_events.clone(), shared);
+                        shared.midi_event_cache.insert(clip_id, new_events);
+                    }
+                }
             }
             None => {}
         }
@@ -1160,12 +1600,12 @@ impl PianoRollPane {
     /// simple operations unlikely to fail, and undo/redo rebuilds cache from the action's
     /// stored note data to restore consistency.
     fn update_cache_from_resolved(clip_id: u32, resolved: &[ResolvedNote], shared: &mut SharedPaneState) {
-        let mut events: Vec<(f64, u8, u8, bool)> = Vec::with_capacity(resolved.len() * 2);
+        let mut events: Vec<daw_backend::audio::midi::MidiEvent> = Vec::with_capacity(resolved.len() * 2);
         for n in resolved {
-            events.push((n.start_time, n.note, n.velocity, true));
-            events.push((n.start_time + n.duration, n.note, n.velocity, false));
+            events.push(daw_backend::audio::midi::MidiEvent::note_on(n.start_time, 0, n.note, n.velocity));
+            events.push(daw_backend::audio::midi::MidiEvent::note_off(n.start_time + n.duration, 0, n.note, 0));
         }
-        events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
         shared.midi_event_cache.insert(clip_id, events);
     }
 
@@ -1185,6 +1625,7 @@ impl PianoRollPane {
 
         resolved.push(ResolvedNote {
             note: temp.note,
+            channel: 0,
             start_time: temp.start_time,
             duration: temp.duration,
             velocity: temp.velocity,
@@ -1346,6 +1787,7 @@ impl PianoRollPane {
         for &(rel_time, note, velocity, duration) in &notes_to_paste {
             resolved.push(ResolvedNote {
                 note,
+                channel: 0,
                 start_time: paste_time + rel_time,
                 duration,
                 velocity,
@@ -1384,6 +1826,28 @@ impl PianoRollPane {
             midi_clip_id: clip_id,
             old_notes,
             new_notes,
+            description_text: description.to_string(),
+        };
+        shared.pending_actions.push(Box::new(action));
+    }
+
+    fn push_events_action(
+        &self,
+        description: &str,
+        clip_id: u32,
+        old_events: Vec<daw_backend::audio::midi::MidiEvent>,
+        new_events: Vec<daw_backend::audio::midi::MidiEvent>,
+        shared: &mut SharedPaneState,
+    ) {
+        let layer_id = match *shared.active_layer_id {
+            Some(id) => id,
+            None => return,
+        };
+        let action = lightningbeam_core::actions::UpdateMidiEventsAction {
+            layer_id,
+            midi_clip_id: clip_id,
+            old_events,
+            new_events,
             description_text: description.to_string(),
         };
         shared.pending_actions.push(Box::new(action));
@@ -1664,20 +2128,105 @@ impl PaneRenderer for PianoRollPane {
                 );
             }
 
-            // Velocity display for selected notes
-            if self.selected_note_indices.len() == 1 {
+            // Velocity + modulation sliders for selected note(s)
+            if !self.selected_note_indices.is_empty() {
                 if let Some(clip_id) = self.selected_clip_id {
-                    if let Some(events) = shared.midi_event_cache.get(&clip_id) {
-                        let resolved = Self::resolve_notes(events);
-                        if let Some(&idx) = self.selected_note_indices.iter().next() {
+                    if let Some(events) = shared.midi_event_cache.get(&clip_id).cloned() {
+                        let resolved = Self::resolve_notes(&events);
+                        // Pick the first selected note as the representative value
+                        let first_idx = self.selected_note_indices.iter().copied().next();
+                        if let Some(idx) = first_idx {
                             if idx < resolved.len() {
-                                ui.separator();
                                 let n = &resolved[idx];
-                                ui.label(
-                                    egui::RichText::new(format!("{} vel:{}", Self::note_name(n.note), n.velocity))
-                                        .color(header_secondary)
-                                        .size(10.0),
+
+                                // ── Velocity ──────────────────────────────
+                                ui.separator();
+                                ui.label(egui::RichText::new("Vel").color(header_secondary).size(10.0));
+                                let vel_resp = ui.add(
+                                    egui::DragValue::new(&mut self.header_vel)
+                                        .range(1.0..=127.0)
+                                        .max_decimals(0)
+                                        .speed(1.0),
                                 );
+                                // Commit before syncing so header_vel isn't overwritten first
+                                if vel_resp.drag_stopped() || vel_resp.lost_focus() {
+                                    let new_vel = self.header_vel.round().clamp(1.0, 127.0) as u8;
+                                    if new_vel != n.velocity {
+                                        let old_notes = Self::notes_to_backend_format(&resolved);
+                                        let mut new_resolved = resolved.clone();
+                                        for &i in &self.selected_note_indices {
+                                            if i < new_resolved.len() {
+                                                new_resolved[i].velocity = new_vel;
+                                            }
+                                        }
+                                        let new_notes = Self::notes_to_backend_format(&new_resolved);
+                                        self.push_update_action("Set velocity", clip_id, old_notes, new_notes, shared, &[]);
+                                        // Patch the event cache immediately so next frame sees the new velocity
+                                        if let Some(cached) = shared.midi_event_cache.get_mut(&clip_id) {
+                                            for &i in &self.selected_note_indices {
+                                                if i >= resolved.len() { continue; }
+                                                let sn = &resolved[i];
+                                                for ev in cached.iter_mut() {
+                                                    if ev.is_note_on() && ev.data1 == sn.note
+                                                        && (ev.status & 0x0F) == sn.channel
+                                                        && (ev.timestamp - sn.start_time).abs() < 1e-6
+                                                    {
+                                                        ev.data2 = new_vel;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // Sync from note only when idle (not on commit frames)
+                                if !vel_resp.dragged() && !vel_resp.has_focus() && !vel_resp.drag_stopped() && !vel_resp.lost_focus() {
+                                    self.header_vel = n.velocity as f32;
+                                }
+
+                                // ── Modulation (CC1) ──────────────────────
+                                ui.separator();
+                                ui.label(egui::RichText::new("Mod").color(header_secondary).size(10.0));
+                                let current_cc1 = Self::find_cc1_for_note(&events, n.start_time, n.start_time + n.duration, n.channel);
+                                let mod_resp = ui.add(
+                                    egui::DragValue::new(&mut self.header_mod)
+                                        .range(0.0..=127.0)
+                                        .max_decimals(0)
+                                        .speed(1.0),
+                                );
+                                // Commit before syncing
+                                if mod_resp.drag_stopped() || mod_resp.lost_focus() {
+                                    let new_cc1 = self.header_mod.round().clamp(0.0, 127.0) as u8;
+                                    if new_cc1 != current_cc1 {
+                                        let old_events = events.clone();
+                                        let mut new_events = events.clone();
+                                        for &i in &self.selected_note_indices {
+                                            if i >= resolved.len() { continue; }
+                                            let sn = &resolved[i];
+                                            new_events.retain(|ev| {
+                                                let is_cc1 = (ev.status & 0xF0) == 0xB0
+                                                    && (ev.status & 0x0F) == sn.channel
+                                                    && ev.data1 == 1;
+                                                let at_start = (ev.timestamp - sn.start_time).abs() < 0.001;
+                                                !(is_cc1 && at_start)
+                                            });
+                                            if new_cc1 > 0 {
+                                                new_events.push(daw_backend::audio::midi::MidiEvent {
+                                                    timestamp: sn.start_time,
+                                                    status: 0xB0 | sn.channel,
+                                                    data1: 1,
+                                                    data2: new_cc1,
+                                                });
+                                            }
+                                        }
+                                        new_events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
+                                        self.push_events_action("Set modulation", clip_id, old_events, new_events.clone(), shared);
+                                        shared.midi_event_cache.insert(clip_id, new_events);
+                                    }
+                                }
+                                // Sync from note only when idle
+                                if !mod_resp.dragged() && !mod_resp.has_focus() && !mod_resp.drag_stopped() && !mod_resp.lost_focus() {
+                                    self.header_mod = current_cc1 as f32;
+                                }
                             }
                         }
                     }

@@ -372,7 +372,7 @@ fn generate_video_thumbnail(
 /// Generate a piano roll thumbnail for MIDI clips
 /// Shows notes as horizontal bars with Y position = note % 12 (one octave)
 fn generate_midi_thumbnail(
-    events: &[(f64, u8, u8, bool)], // (timestamp, note_number, velocity, is_note_on)
+    events: &[daw_backend::audio::midi::MidiEvent],
     duration: f64,
     bg_color: egui::Color32,
     note_color: egui::Color32,
@@ -390,10 +390,11 @@ fn generate_midi_thumbnail(
     }
 
     // Draw note events
-    for &(timestamp, note_number, _velocity, is_note_on) in events {
-        if !is_note_on || timestamp > preview_duration {
+    for event in events {
+        if !event.is_note_on() || event.timestamp > preview_duration {
             continue;
         }
+        let (timestamp, note_number) = (event.timestamp, event.data1);
 
         let x = ((timestamp / preview_duration) * size as f64) as usize;
 

@@ -2,6 +2,7 @@ use crate::audio::{
     AudioClipInstanceId, AutomationLaneId, ClipId, CurveType, MidiClip, MidiClipId,
     MidiClipInstanceId, ParameterId, TrackId,
 };
+use crate::audio::midi::MidiEvent;
 use crate::audio::buffer_pool::BufferPoolStats;
 use crate::audio::node_graph::nodes::LoopMode;
 use crate::io::WaveformPeak;
@@ -85,6 +86,8 @@ pub enum Command {
     /// Update MIDI clip notes (track_id, clip_id, notes: Vec<(start_time, note, velocity, duration)>)
     /// NOTE: May need to switch to individual note operations if this becomes slow on clips with many notes
     UpdateMidiClipNotes(TrackId, MidiClipId, Vec<(f64, u8, u8, f64)>),
+    /// Replace all events in a MIDI clip (track_id, clip_id, events). Used for CC/pitch bend editing.
+    UpdateMidiClipEvents(TrackId, MidiClipId, Vec<MidiEvent>),
     /// Remove a MIDI clip instance from a track (track_id, instance_id) - for undo/redo support
     RemoveMidiClip(TrackId, MidiClipInstanceId),
     /// Remove an audio clip instance from a track (track_id, instance_id) - for undo/redo support
@@ -181,6 +184,10 @@ pub enum Command {
     GraphSavePreset(TrackId, String, String, String, Vec<String>),
     /// Load a preset into a track's graph (track_id, preset_path)
     GraphLoadPreset(TrackId, String),
+    /// Load a .lbins instrument bundle into a track's graph (track_id, path)
+    GraphLoadLbins(TrackId, std::path::PathBuf),
+    /// Save a track's graph as a .lbins instrument bundle (track_id, path, preset_name, description, tags)
+    GraphSaveLbins(TrackId, std::path::PathBuf, String, String, Vec<String>),
 
     // Metatrack subtrack graph commands
     /// Replace a metatrack's mixing graph with the default SubtrackInputs→Mixer→Output layout.
@@ -392,6 +399,8 @@ pub enum Query {
     GetAutomationKeyframes(TrackId, u32),
     /// Get the display name of an AutomationInput node (track_id, node_id)
     GetAutomationName(TrackId, u32),
+    /// Get the value range (min, max) of an AutomationInput node (track_id, node_id)
+    GetAutomationRange(TrackId, u32),
     /// Serialize audio pool for project saving (project_path)
     SerializeAudioPool(std::path::PathBuf),
     /// Load audio pool from serialized entries (entries, project_path)
@@ -439,6 +448,9 @@ pub enum Query {
     DuplicateMidiClipSync(MidiClipId),
     /// Get whether a track's graph is still the auto-generated default
     GetGraphIsDefault(TrackId),
+    /// Get the pitch bend range (in semitones) for the instrument on a MIDI track.
+    /// Searches for MidiToCVNode (in VA templates) or MultiSamplerNode (direct).
+    GetPitchBendRange(TrackId),
 }
 
 /// Oscilloscope data from a node
@@ -480,6 +492,8 @@ pub enum QueryResponse {
     AutomationKeyframes(Result<Vec<AutomationKeyframeData>, String>),
     /// Automation node name
     AutomationName(Result<String, String>),
+    /// Automation node value range (min, max)
+    AutomationRange(Result<(f32, f32), String>),
     /// Serialized audio pool entries
     AudioPoolSerialized(Result<Vec<crate::audio::pool::AudioPoolEntry>, String>),
     /// Audio pool loaded (returns list of missing pool indices)
@@ -514,4 +528,6 @@ pub enum QueryResponse {
     MidiClipDuplicated(Result<MidiClipId, String>),
     /// Whether a track's graph is the auto-generated default
     GraphIsDefault(bool),
+    /// Pitch bend range in semitones for the track's instrument
+    PitchBendRange(f32),
 }
