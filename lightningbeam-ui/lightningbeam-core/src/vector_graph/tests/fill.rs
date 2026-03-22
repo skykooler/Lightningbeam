@@ -51,7 +51,7 @@ fn paint_bucket_fills_rectangle() {
     let fid = fid.unwrap();
     let fill = g.fill(fid);
     assert_eq!(fill.boundary.len(), 4, "rectangle boundary should have 4 edges");
-    assert_eq!(fill.color, ShapeColor::rgb(255, 0, 0));
+    assert_eq!(fill.color, Some(ShapeColor::rgb(255, 0, 0)));
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn draw_line_across_fill_splits_it() {
 
     // Both fills should inherit the original color
     for (_, fill) in &live_fills {
-        assert_eq!(fill.color, ShapeColor::rgb(255, 0, 0));
+        assert_eq!(fill.color, Some(ShapeColor::rgb(255, 0, 0)));
     }
 }
 

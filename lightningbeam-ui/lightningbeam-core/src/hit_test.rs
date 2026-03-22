@@ -1,10 +1,10 @@
 //! Hit testing for selection and interaction
 //!
 //! Provides functions for testing if points or rectangles intersect with
-//! DCEL elements and clip instances, taking into account transform hierarchies.
+//! vector graph elements and clip instances, taking into account transform hierarchies.
 
 use crate::clip::ClipInstance;
-use crate::dcel::{VertexId, EdgeId, FaceId};
+use crate::vector_graph::{VertexId, EdgeId, FillId};
 use crate::layer::VectorLayer;
 use crate::shape::Shape;
 use serde::{Deserialize, Serialize};
@@ -14,25 +14,25 @@ use vello::kurbo::{Affine, Point, Rect, Shape as KurboShape};
 /// Result of a hit test operation
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HitResult {
-    /// Hit a DCEL edge (stroke)
+    /// Hit an edge (stroke)
     Edge(EdgeId),
-    /// Hit a DCEL face (fill)
-    Face(FaceId),
+    /// Hit a fill
+    Fill(FillId),
     /// Hit a clip instance
     ClipInstance(Uuid),
 }
 
-/// Result of a DCEL-only hit test (no clip instances)
+/// Result of a graph-only hit test (no clip instances)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DcelHitResult {
+pub enum GraphHitResult {
     Edge(EdgeId),
-    Face(FaceId),
+    Fill(FillId),
 }
 
-/// Hit test a layer at a specific point, returning edge or face hits.
+/// Hit test a layer at a specific point, returning edge or fill hits.
 ///
-/// Tests DCEL edges (strokes) and faces (fills) in the active keyframe.
-/// Edge hits take priority over face hits.
+/// Tests edges (strokes) and fills in the active keyframe.
+/// Edge hits take priority over fill hits.
 ///
 /// # Arguments
 ///
@@ -44,22 +44,22 @@ pub enum DcelHitResult {
 ///
 /// # Returns
 ///
-/// The first DCEL element hit, or None if no hit
+/// The first element hit, or None if no hit
 pub fn hit_test_layer(
     layer: &VectorLayer,
     time: f64,
     point: Point,
     tolerance: f64,
     parent_transform: Affine,
-) -> Option<DcelHitResult> {
-    let dcel = layer.dcel_at_time(time)?;
+) -> Option<GraphHitResult> {
+    let graph = layer.graph_at_time(time)?;
 
     // Transform point to local space
     let local_point = parent_transform.inverse() * point;
 
-    // 1. Check edges (strokes) — priority over faces
+    // 1. Check edges (strokes) — priority over fills
     let mut best_edge: Option<(EdgeId, f64)> = None;
-    for (i, edge) in dcel.edges.iter().enumerate() {
+    for (i, edge) in graph.edges.iter().enumerate() {
         if edge.deleted {
             continue;
         }
@@ -86,24 +86,24 @@ pub fn hit_test_layer(
         }
     }
     if let Some((edge_id, _)) = best_edge {
-        return Some(DcelHitResult::Edge(edge_id));
+        return Some(GraphHitResult::Edge(edge_id));
     }
 
-    // 2. Check faces (fills)
-    for (i, face) in dcel.faces.iter().enumerate() {
-        if face.deleted || i == 0 {
-            continue; // skip unbounded face
-        }
-        if face.fill_color.is_none() && face.image_fill.is_none() && face.gradient_fill.is_none() {
+    // 2. Check fills
+    for (i, fill) in graph.fills.iter().enumerate() {
+        if fill.deleted {
             continue;
         }
-        if face.outer_half_edge.is_none() {
+        if fill.color.is_none() && fill.image_fill.is_none() && fill.gradient_fill.is_none() {
+            continue;
+        }
+        if fill.boundary.is_empty() {
             continue;
         }
 
-        let path = dcel.face_to_bezpath(FaceId(i as u32));
+        let path = graph.fill_to_bezpath(FillId(i as u32));
         if path.winding(local_point) != 0 {
-            return Some(DcelHitResult::Face(FaceId(i as u32)));
+            return Some(GraphHitResult::Fill(FillId(i as u32)));
         }
     }
 
@@ -147,26 +147,26 @@ pub fn hit_test_shape(
     false
 }
 
-/// Result of DCEL marquee selection
+/// Result of graph marquee selection
 #[derive(Debug, Default)]
-pub struct DcelMarqueeResult {
+pub struct GraphMarqueeResult {
     pub edges: Vec<EdgeId>,
-    pub faces: Vec<FaceId>,
+    pub fills: Vec<FillId>,
 }
 
-/// Hit test DCEL elements within a rectangle (for marquee selection).
+/// Hit test graph elements within a rectangle (for marquee selection).
 ///
 /// Selects edges whose both endpoints are inside the rect,
-/// and faces whose all boundary vertices are inside the rect.
-pub fn hit_test_dcel_in_rect(
+/// and fills whose all boundary vertices are inside the rect.
+pub fn hit_test_graph_in_rect(
     layer: &VectorLayer,
     time: f64,
     rect: Rect,
     parent_transform: Affine,
-) -> DcelMarqueeResult {
-    let mut result = DcelMarqueeResult::default();
+) -> GraphMarqueeResult {
+    let mut result = GraphMarqueeResult::default();
 
-    let dcel = match layer.dcel_at_time(time) {
+    let graph = match layer.graph_at_time(time) {
         Some(d) => d,
         None => return result,
     };
@@ -175,41 +175,36 @@ pub fn hit_test_dcel_in_rect(
     let local_rect = inv.transform_rect_bbox(rect);
 
     // Check edges: both endpoints inside rect
-    for (i, edge) in dcel.edges.iter().enumerate() {
+    for (i, edge) in graph.edges.iter().enumerate() {
         if edge.deleted {
             continue;
         }
-        let [he_fwd, he_bwd] = edge.half_edges;
-        if he_fwd.is_none() || he_bwd.is_none() {
-            continue;
-        }
-        let v1 = dcel.half_edge(he_fwd).origin;
-        let v2 = dcel.half_edge(he_bwd).origin;
+        let v1 = edge.vertices[0];
+        let v2 = edge.vertices[1];
         if v1.is_none() || v2.is_none() {
             continue;
         }
-        let p1 = dcel.vertex(v1).position;
-        let p2 = dcel.vertex(v2).position;
+        let p1 = graph.vertex(v1).position;
+        let p2 = graph.vertex(v2).position;
         if local_rect.contains(p1) && local_rect.contains(p2) {
             result.edges.push(EdgeId(i as u32));
         }
     }
 
-    // Check faces: all boundary vertices inside rect
-    for (i, face) in dcel.faces.iter().enumerate() {
-        if face.deleted || i == 0 {
+    // Check fills: all boundary vertices inside rect
+    for (i, fill) in graph.fills.iter().enumerate() {
+        if fill.deleted {
             continue;
         }
-        if face.outer_half_edge.is_none() {
+        if fill.boundary.is_empty() {
             continue;
         }
-        let boundary = dcel.face_boundary(FaceId(i as u32));
-        let all_inside = boundary.iter().all(|&he_id| {
-            let v = dcel.half_edge(he_id).origin;
-            !v.is_none() && local_rect.contains(dcel.vertex(v).position)
+        let boundary_verts = graph.fill_boundary_vertices(FillId(i as u32));
+        let all_inside = boundary_verts.iter().all(|&v| {
+            !v.is_none() && local_rect.contains(graph.vertex(v).position)
         });
-        if all_inside && !boundary.is_empty() {
-            result.faces.push(FaceId(i as u32));
+        if all_inside && !boundary_verts.is_empty() {
+            result.fills.push(FillId(i as u32));
         }
     }
 
@@ -351,7 +346,7 @@ pub enum VectorEditHit {
     },
     /// Hit shape fill
     Fill {
-        face_id: FaceId,
+        fill_id: FillId,
     },
 }
 
@@ -397,7 +392,7 @@ pub fn hit_test_vector_editing(
 ) -> Option<VectorEditHit> {
     use kurbo::ParamCurveNearest;
 
-    let dcel = layer.dcel_at_time(time)?;
+    let graph = layer.graph_at_time(time)?;
 
     // Transform point into layer-local space
     let local_point = parent_transform.inverse() * point;
@@ -407,7 +402,7 @@ pub fn hit_test_vector_editing(
     // 1. Control points (only when show_control_points is true, e.g. BezierEdit tool)
     if show_control_points {
         let mut best_cp: Option<(EdgeId, u8, f64)> = None;
-        for (i, edge) in dcel.edges.iter().enumerate() {
+        for (i, edge) in graph.edges.iter().enumerate() {
             if edge.deleted {
                 continue;
             }
@@ -434,7 +429,7 @@ pub fn hit_test_vector_editing(
 
     // 2. Vertices
     let mut best_vertex: Option<(VertexId, f64)> = None;
-    for (i, vertex) in dcel.vertices.iter().enumerate() {
+    for (i, vertex) in graph.vertices.iter().enumerate() {
         if vertex.deleted {
             continue;
         }
@@ -451,7 +446,7 @@ pub fn hit_test_vector_editing(
 
     // 3. Curves (edges)
     let mut best_curve: Option<(EdgeId, f64, f64)> = None; // (edge_id, t, dist)
-    for (i, edge) in dcel.edges.iter().enumerate() {
+    for (i, edge) in graph.edges.iter().enumerate() {
         if edge.deleted {
             continue;
         }
@@ -467,20 +462,20 @@ pub fn hit_test_vector_editing(
         return Some(VectorEditHit::Curve { edge_id, parameter_t });
     }
 
-    // 4. Face fill testing
-    for (i, face) in dcel.faces.iter().enumerate() {
-        if face.deleted || i == 0 {
+    // 4. Fill testing
+    for (i, fill) in graph.fills.iter().enumerate() {
+        if fill.deleted {
             continue;
         }
-        if face.fill_color.is_none() && face.image_fill.is_none() && face.gradient_fill.is_none() {
+        if fill.color.is_none() && fill.image_fill.is_none() && fill.gradient_fill.is_none() {
             continue;
         }
-        if face.outer_half_edge.is_none() {
+        if fill.boundary.is_empty() {
             continue;
         }
-        let path = dcel.face_to_bezpath(FaceId(i as u32));
+        let path = graph.fill_to_bezpath(FillId(i as u32));
         if path.winding(local_point) != 0 {
-            return Some(VectorEditHit::Fill { face_id: FaceId(i as u32) });
+            return Some(VectorEditHit::Fill { fill_id: FillId(i as u32) });
         }
     }
 
@@ -495,16 +490,16 @@ mod tests {
 
     #[test]
     fn test_hit_test_simple_circle() {
-        // TODO: DCEL - rewrite test
+        // TODO: VectorGraph - rewrite test
     }
 
     #[test]
     fn test_hit_test_with_transform() {
-        // TODO: DCEL - rewrite test
+        // TODO: VectorGraph - rewrite test
     }
 
     #[test]
     fn test_marquee_selection() {
-        // TODO: DCEL - rewrite test
+        // TODO: VectorGraph - rewrite test
     }
 }

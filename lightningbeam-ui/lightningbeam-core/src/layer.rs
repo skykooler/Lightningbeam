@@ -4,7 +4,7 @@
 
 use crate::animation::AnimationData;
 use crate::clip::ClipInstance;
-use crate::dcel::Dcel;
+use crate::vector_graph::VectorGraph;
 use crate::effect_layer::EffectLayer;
 use crate::object::ShapeInstance;
 use crate::raster_layer::RasterLayer;
@@ -165,13 +165,13 @@ impl Default for TweenType {
     }
 }
 
-/// A keyframe containing vector artwork as a DCEL planar subdivision.
+/// A keyframe containing vector artwork as a VectorGraph.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShapeKeyframe {
     /// Time in seconds
     pub time: f64,
-    /// DCEL planar subdivision containing all vector artwork
-    pub dcel: Dcel,
+    /// Vector graph containing all vector artwork
+    pub graph: VectorGraph,
     /// What happens between this keyframe and the next
     #[serde(default)]
     pub tween_after: TweenType,
@@ -186,7 +186,7 @@ impl ShapeKeyframe {
     pub fn new(time: f64) -> Self {
         Self {
             time,
-            dcel: Dcel::new(),
+            graph: VectorGraph::new(),
             tween_after: TweenType::None,
             clip_instance_ids: Vec::new(),
         }
@@ -376,14 +376,14 @@ impl VectorLayer {
         self.keyframes.iter().position(|kf| (kf.time - time).abs() < tolerance)
     }
 
-    /// Get the DCEL at a given time (from the keyframe at-or-before time)
-    pub fn dcel_at_time(&self, time: f64) -> Option<&Dcel> {
-        self.keyframe_at(time).map(|kf| &kf.dcel)
+    /// Get the VectorGraph at a given time (from the keyframe at-or-before time)
+    pub fn graph_at_time(&self, time: f64) -> Option<&VectorGraph> {
+        self.keyframe_at(time).map(|kf| &kf.graph)
     }
 
-    /// Get a mutable DCEL at a given time
-    pub fn dcel_at_time_mut(&mut self, time: f64) -> Option<&mut Dcel> {
-        self.keyframe_at_mut(time).map(|kf| &mut kf.dcel)
+    /// Get a mutable VectorGraph at a given time
+    pub fn graph_at_time_mut(&mut self, time: f64) -> Option<&mut VectorGraph> {
+        self.keyframe_at_mut(time).map(|kf| &mut kf.graph)
     }
 
     /// Get the duration of the keyframe span starting at-or-before `time`.
@@ -433,7 +433,7 @@ impl VectorLayer {
     }
 
     // Shape-based methods removed — use DCEL methods instead.
-    // - shapes_at_time_mut → dcel_at_time_mut
+    // - shapes_at_time_mut → graph_at_time_mut
     // - get_shape_in_keyframe → use DCEL vertex/edge/face accessors
     // - get_shape_in_keyframe_mut → use DCEL vertex/edge/face accessors
 
@@ -458,17 +458,17 @@ impl VectorLayer {
             return &mut self.keyframes[idx];
         }
 
-        // Clone DCEL and clip instance IDs from the active keyframe
-        let (cloned_dcel, cloned_clip_ids) = self
+        // Clone graph and clip instance IDs from the active keyframe
+        let (cloned_graph, cloned_clip_ids) = self
             .keyframe_at(time)
             .map(|kf| {
-                (kf.dcel.clone(), kf.clip_instance_ids.clone())
+                (kf.graph.clone(), kf.clip_instance_ids.clone())
             })
-            .unwrap_or_else(|| (Dcel::new(), Vec::new()));
+            .unwrap_or_else(|| (VectorGraph::new(), Vec::new()));
 
         let insert_idx = self.keyframes.partition_point(|kf| kf.time < time);
         let mut kf = ShapeKeyframe::new(time);
-        kf.dcel = cloned_dcel;
+        kf.graph = cloned_graph;
         kf.clip_instance_ids = cloned_clip_ids;
         self.keyframes.insert(insert_idx, kf);
         &mut self.keyframes[insert_idx]

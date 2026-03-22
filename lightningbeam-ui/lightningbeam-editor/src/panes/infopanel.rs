@@ -99,7 +99,7 @@ impl InfopanelPane {
         let mut info = SelectionInfo::default();
 
         let edge_count = shared.selection.selected_edges().len();
-        let face_count = shared.selection.selected_faces().len();
+        let face_count = shared.selection.selected_fills().len();
         info.dcel_count = edge_count + face_count;
         info.is_empty = info.dcel_count == 0;
 
@@ -115,7 +115,7 @@ impl InfopanelPane {
 
             if let Some(layer) = document.get_layer(&layer_id) {
                 if let AnyLayer::Vector(vector_layer) = layer {
-                    if let Some(dcel) = vector_layer.dcel_at_time(*shared.playback_time) {
+                    if let Some(graph) = vector_layer.graph_at_time(*shared.playback_time) {
                         // Gather stroke properties from selected edges
                         let mut first_stroke_color: Option<Option<ShapeColor>> = None;
                         let mut first_stroke_width: Option<f64> = None;
@@ -123,7 +123,7 @@ impl InfopanelPane {
                         let mut stroke_width_mixed = false;
 
                         for &eid in shared.selection.selected_edges() {
-                            let edge = dcel.edge(eid);
+                            let edge = graph.edge(lightningbeam_core::vector_graph::EdgeId(eid.0));
                             let sc = edge.stroke_color;
                             let sw = edge.stroke_style.as_ref().map(|s| s.width);
 
@@ -152,10 +152,10 @@ impl InfopanelPane {
                         let mut first_fill_gradient: Option<Option<ShapeGradient>> = None;
                         let mut fill_gradient_mixed = false;
 
-                        for &fid in shared.selection.selected_faces() {
-                            let face = dcel.face(fid);
-                            let fc = face.fill_color;
-                            let fg = face.gradient_fill.clone();
+                        for &fid in shared.selection.selected_fills() {
+                            let fill = graph.fill(fid);
+                            let fc = fill.color;
+                            let fg = fill.gradient_fill.clone();
 
                             match first_fill_color {
                                 None => first_fill_color = Some(fc),
@@ -777,8 +777,10 @@ impl InfopanelPane {
             None => return,
         };
         let time = *shared.playback_time;
-        let face_ids: Vec<_> = shared.selection.selected_faces().iter().copied().collect();
-        let edge_ids: Vec<_> = shared.selection.selected_edges().iter().copied().collect();
+        let face_ids: Vec<lightningbeam_core::vector_graph::FillId> = shared.selection.selected_fills()
+            .iter().map(|fid| lightningbeam_core::vector_graph::FillId(fid.0)).collect();
+        let edge_ids: Vec<lightningbeam_core::vector_graph::EdgeId> = shared.selection.selected_edges()
+            .iter().map(|eid| lightningbeam_core::vector_graph::EdgeId(eid.0)).collect();
 
         egui::CollapsingHeader::new("Shape")
             .id_salt(("shape", path))

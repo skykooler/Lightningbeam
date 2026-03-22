@@ -341,8 +341,8 @@ pub fn render_layer_isolated(
                 image_cache,
                 video_manager,
             );
-            rendered.has_content = vector_layer.dcel_at_time(time)
-                .map_or(false, |dcel| !dcel.edges.iter().all(|e| e.deleted) || !dcel.faces.iter().skip(1).all(|f| f.deleted))
+            rendered.has_content = vector_layer.graph_at_time(time)
+                .map_or(false, |graph| !graph.edges.iter().all(|e| e.deleted) || !graph.fills.iter().all(|f| f.deleted))
                 || !vector_layer.clip_instances.is_empty();
         }
         AnyLayer::Audio(_) => {
@@ -1059,11 +1059,11 @@ fn gradient_bbox_endpoints(angle_deg: f32, bbox: kurbo::Rect) -> (kurbo::Point, 
     (start, end)
 }
 
-/// Render a DCEL to a Vello scene.
+/// Render a VectorGraph to a Vello scene.
 ///
-/// Walks faces for fills and edges for strokes.
-pub fn render_dcel(
-    dcel: &crate::dcel::Dcel,
+/// Walks fills and edges for strokes.
+pub fn render_vector_graph(
+    graph: &crate::vector_graph::VectorGraph,
     scene: &mut Scene,
     base_transform: Affine,
     layer_opacity: f64,
@@ -1072,23 +1072,23 @@ pub fn render_dcel(
 ) {
     let opacity_f32 = layer_opacity as f32;
 
-    // 1. Render faces (fills)
-    for (i, face) in dcel.faces.iter().enumerate() {
-        if face.deleted || i == 0 {
-            continue; // Skip unbounded face and deleted faces
+    // 1. Render fills
+    for (i, fill) in graph.fills.iter().enumerate() {
+        if fill.deleted {
+            continue; // Skip deleted fills
         }
-        if face.fill_color.is_none() && face.image_fill.is_none() && face.gradient_fill.is_none() {
+        if fill.color.is_none() && fill.image_fill.is_none() && fill.gradient_fill.is_none() {
             continue; // No fill to render
         }
 
-        let face_id = crate::dcel::FaceId(i as u32);
-        let path = dcel.face_to_bezpath_with_holes(face_id);
-        let fill_rule: Fill = face.fill_rule.into();
+        let fill_id = crate::vector_graph::FillId(i as u32);
+        let path = graph.fill_to_bezpath(fill_id);
+        let fill_rule: Fill = fill.fill_rule.into();
 
         let mut filled = false;
 
         // Image fill
-        if let Some(image_asset_id) = face.image_fill {
+        if let Some(image_asset_id) = fill.image_fill {
             if let Some(image_asset) = document.get_image_asset(&image_asset_id) {
                 if let Some(image) = image_cache.get_or_decode(image_asset) {
                     let image_with_alpha = (*image).clone().with_alpha(opacity_f32);
@@ -1100,7 +1100,7 @@ pub fn render_dcel(
 
         // Gradient fill (takes priority over solid colour fill)
         if !filled {
-            if let Some(ref grad) = face.gradient_fill {
+            if let Some(ref grad) = fill.gradient_fill {
                 use kurbo::Rect;
                 use crate::gradient::GradientType;
                 let bbox: Rect = vello::kurbo::Shape::bounding_box(&path);
@@ -1128,7 +1128,7 @@ pub fn render_dcel(
 
         // Solid colour fill
         if !filled {
-            if let Some(fill_color) = &face.fill_color {
+            if let Some(fill_color) = &fill.color {
                 let alpha = ((fill_color.a as f32 / 255.0) * opacity_f32 * 255.0) as u8;
                 let adjusted = crate::shape::ShapeColor::rgba(
                     fill_color.r,
@@ -1142,7 +1142,7 @@ pub fn render_dcel(
     }
 
     // 2. Render edges (strokes)
-    for edge in &dcel.edges {
+    for edge in &graph.edges {
         if edge.deleted {
             continue;
         }
@@ -1195,9 +1195,9 @@ fn render_vector_layer(
         render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data, image_cache, video_manager, group_end_time);
     }
 
-    // Render DCEL from active keyframe
-    if let Some(dcel) = layer.dcel_at_time(time) {
-        render_dcel(dcel, scene, base_transform, layer_opacity, document, image_cache);
+    // Render VectorGraph from active keyframe
+    if let Some(graph) = layer.graph_at_time(time) {
+        render_vector_graph(graph, scene, base_transform, layer_opacity, document, image_cache);
     }
 }
 
@@ -1362,29 +1362,29 @@ fn render_background_cpu(
     pixmap.fill_rect(bg_rect, &paint, ts_transform, None);
 }
 
-/// Render a DCEL to a CPU pixmap.
-fn render_dcel_cpu(
-    dcel: &crate::dcel::Dcel,
+/// Render a VectorGraph to a CPU pixmap.
+fn render_vector_graph_cpu(
+    graph: &crate::vector_graph::VectorGraph,
     pixmap: &mut tiny_skia::PixmapMut<'_>,
     transform: tiny_skia::Transform,
     opacity: f32,
     _document: &Document,
     _image_cache: &mut ImageCache,
 ) {
-    // 1. Faces (fills)
-    for (i, face) in dcel.faces.iter().enumerate() {
-        if face.deleted || i == 0 {
+    // 1. Fills
+    for (i, fill) in graph.fills.iter().enumerate() {
+        if fill.deleted {
             continue;
         }
-        if face.fill_color.is_none() && face.image_fill.is_none() && face.gradient_fill.is_none() {
+        if fill.color.is_none() && fill.image_fill.is_none() && fill.gradient_fill.is_none() {
             continue;
         }
 
-        let face_id = crate::dcel::FaceId(i as u32);
-        let path = dcel.face_to_bezpath_with_holes(face_id);
+        let fill_id = crate::vector_graph::FillId(i as u32);
+        let path = graph.fill_to_bezpath(fill_id);
         let Some(ts_path) = bezpath_to_ts(&path) else { continue };
 
-        let fill_type = match face.fill_rule {
+        let fill_type = match fill.fill_rule {
             crate::shape::FillRule::NonZero => tiny_skia::FillRule::Winding,
             crate::shape::FillRule::EvenOdd => tiny_skia::FillRule::EvenOdd,
         };
@@ -1392,7 +1392,7 @@ fn render_dcel_cpu(
         let mut filled = false;
 
         // Gradient fill (takes priority over solid)
-        if let Some(ref grad) = face.gradient_fill {
+        if let Some(ref grad) = fill.gradient_fill {
             let bbox: kurbo::Rect = vello::kurbo::Shape::bounding_box(&path);
             let (start, end) = match (grad.start_world, grad.end_world) {
                 (Some((sx, sy)), Some((ex, ey))) => match grad.kind {
@@ -1417,7 +1417,7 @@ fn render_dcel_cpu(
 
         // Solid colour fill
         if !filled {
-            if let Some(fc) = &face.fill_color {
+            if let Some(fc) = &fill.color {
                 let paint = solid_paint(fc.r, fc.g, fc.b, fc.a, opacity);
                 pixmap.fill_path(&ts_path, &paint, fill_type, transform, None);
             }
@@ -1425,7 +1425,7 @@ fn render_dcel_cpu(
     }
 
     // 2. Edges (strokes)
-    for edge in &dcel.edges {
+    for edge in &graph.edges {
         if edge.deleted {
             continue;
         }
@@ -1481,8 +1481,8 @@ fn render_vector_layer_cpu(
         );
     }
 
-    if let Some(dcel) = layer.dcel_at_time(time) {
-        render_dcel_cpu(dcel, pixmap, affine_to_ts(base_transform), layer_opacity as f32, document, image_cache);
+    if let Some(graph) = layer.graph_at_time(time) {
+        render_vector_graph_cpu(graph, pixmap, affine_to_ts(base_transform), layer_opacity as f32, document, image_cache);
     }
 }
 

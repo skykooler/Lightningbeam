@@ -1,17 +1,20 @@
-//! Add shape action — inserts strokes into the DCEL.
+//! Add shape action — inserts strokes into the VectorGraph.
 //!
 //! Converts a BezPath into cubic segments and inserts them via
-//! `Dcel::insert_stroke()`. Undo is handled by snapshotting the DCEL.
+//! `VectorGraph::insert_stroke()`. Undo is handled by snapshotting the graph.
 
 use crate::action::Action;
-use crate::dcel::{bezpath_to_cubic_segments, Dcel, FaceId, DEFAULT_SNAP_EPSILON};
+use crate::vector_graph::bezpath_to_cubic_segments;
 use crate::document::Document;
 use crate::layer::AnyLayer;
-use crate::shape::{ShapeColor, StrokeStyle};
-use kurbo::BezPath;
+use crate::shape::{FillRule, ShapeColor, StrokeStyle};
+use crate::vector_graph::VectorGraph;
+use kurbo::{BezPath, Shape as _};
 use uuid::Uuid;
 
-/// Action that inserts a drawn path into a vector layer's DCEL keyframe.
+const DEFAULT_SNAP_EPSILON: f64 = 0.5;
+
+/// Action that inserts a drawn path into a vector layer's VectorGraph keyframe.
 pub struct AddShapeAction {
     layer_id: Uuid,
     time: f64,
@@ -21,8 +24,8 @@ pub struct AddShapeAction {
     fill_color: Option<ShapeColor>,
     is_closed: bool,
     description_text: String,
-    /// Snapshot of the DCEL before insertion (for undo).
-    dcel_before: Option<Dcel>,
+    /// Snapshot of the graph before insertion (for undo).
+    graph_before: Option<VectorGraph>,
 }
 
 impl AddShapeAction {
@@ -44,7 +47,7 @@ impl AddShapeAction {
             fill_color,
             is_closed,
             description_text: "Add shape".to_string(),
-            dcel_before: None,
+            graph_before: None,
         }
     }
 
@@ -66,10 +69,10 @@ impl Action for AddShapeAction {
         };
 
         let keyframe = vl.ensure_keyframe_at(self.time);
-        let dcel = &mut keyframe.dcel;
+        let graph = &mut keyframe.graph;
 
         // Snapshot for undo
-        self.dcel_before = Some(dcel.clone());
+        self.graph_before = Some(graph.clone());
 
         let subpaths = bezpath_to_cubic_segments(&self.path);
 
@@ -77,40 +80,26 @@ impl Action for AddShapeAction {
             if segments.is_empty() {
                 continue;
             }
-            let result = dcel.insert_stroke(
+            let _new_edges = graph.insert_stroke(
                 segments,
                 self.stroke_style.clone(),
                 self.stroke_color.clone(),
                 DEFAULT_SNAP_EPSILON,
             );
 
-            // Apply fill to new faces if this is a closed shape with fill
+            // Apply fill if this is a closed shape with fill
             if self.is_closed {
                 if let Some(ref fill) = self.fill_color {
-                    if !result.new_faces.is_empty() {
-                        for face_id in &result.new_faces {
-                            dcel.face_mut(*face_id).fill_color = Some(fill.clone());
-                        }
-                    } else if let Some(&first_edge) = result.new_edges.first() {
-                        // Closed shape in F0 — no face was auto-created.
-                        // One half-edge of the first new edge is on the interior cycle.
-                        // Pick the side with positive signed area (CCW winding).
-                        let [he_a, he_b] = dcel.edge(first_edge).half_edges;
-                        let interior_he = if dcel.cycle_signed_area(he_a) > 0.0 {
-                            he_a
-                        } else {
-                            he_b
-                        };
-                        if dcel.half_edge(interior_he).face == FaceId(0) {
-                            let face_id = dcel.create_face_at_cycle(interior_he);
-                            dcel.face_mut(face_id).fill_color = Some(fill.clone());
-                        }
-                    }
+                    // Compute centroid of the path's bounding box and paint-bucket fill
+                    let bbox = self.path.bounding_box();
+                    let centroid = kurbo::Point::new(
+                        (bbox.x0 + bbox.x1) / 2.0,
+                        (bbox.y0 + bbox.y1) / 2.0,
+                    );
+                    graph.paint_bucket(centroid, fill.clone(), FillRule::NonZero, 0.0);
                 }
             }
         }
-
-        dcel.rebuild_spatial_index();
 
         Ok(())
     }
@@ -126,10 +115,10 @@ impl Action for AddShapeAction {
         };
 
         let keyframe = vl.ensure_keyframe_at(self.time);
-        keyframe.dcel = self
-            .dcel_before
+        keyframe.graph = self
+            .graph_before
             .take()
-            .ok_or_else(|| "No DCEL snapshot for undo".to_string())?;
+            .ok_or_else(|| "No graph snapshot for undo".to_string())?;
 
         Ok(())
     }

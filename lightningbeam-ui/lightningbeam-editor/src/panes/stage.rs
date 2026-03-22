@@ -1643,8 +1643,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             // Render selected DCEL from active region selection (with transform)
             if let Some(ref region_sel) = self.ctx.region_selection {
                 let sel_transform = overlay_transform * region_sel.transform;
-                lightningbeam_core::renderer::render_dcel(
-                    &region_sel.selected_dcel,
+                lightningbeam_core::renderer::render_vector_graph(
+                    &region_sel.selected_graph,
                     &mut scene,
                     sel_transform,
                     1.0,
@@ -1667,8 +1667,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             if let Some(ref region_sel) = self.ctx.region_selection {
                 let sel_transform = overlay_transform * region_sel.transform;
                 let mut image_cache = shared.image_cache.lock().unwrap();
-                lightningbeam_core::renderer::render_dcel(
-                    &region_sel.selected_dcel,
+                lightningbeam_core::renderer::render_vector_graph(
+                    &region_sel.selected_graph,
                     &mut scene,
                     sel_transform,
                     1.0,
@@ -1743,8 +1743,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     // NOTE: Skip this if Transform tool is active (it has its own handles)
                     if !self.ctx.selection.is_empty() && !matches!(self.ctx.selected_tool, Tool::Transform) {
                         // Draw Flash-style stipple pattern on selected edges and faces
-                        if self.ctx.selection.has_dcel_selection() {
-                            if let Some(dcel) = vector_layer.dcel_at_time(self.ctx.playback_time) {
+                        if self.ctx.selection.has_geometry_selection() {
+                            if let Some(graph) = vector_layer.graph_at_time(self.ctx.playback_time) {
                                 let stipple_brush = selection_stipple_brush();
                                 // brush_transform scales the stipple so 1 pattern pixel = 1 screen pixel.
                                 // The shape is in document space, transformed to screen by overlay_transform
@@ -1753,11 +1753,11 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 let inv_zoom = 1.0 / self.ctx.zoom as f64;
                                 let brush_xform = Some(Affine::scale(inv_zoom));
 
-                                // Stipple selected faces
-                                for &face_id in self.ctx.selection.selected_faces() {
-                                    let face = dcel.face(face_id);
-                                    if face.deleted || face_id.0 == 0 { continue; }
-                                    let path = dcel.face_to_bezpath_with_holes(face_id);
+                                // Stipple selected fills
+                                for &fill_id in self.ctx.selection.selected_fills() {
+                                    let fill = graph.fill(fill_id);
+                                    if fill.deleted { continue; }
+                                    let path = graph.fill_to_bezpath(fill_id);
                                     scene.fill(
                                         Fill::NonZero,
                                         overlay_transform,
@@ -1769,7 +1769,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                                 // Stipple selected edges
                                 for &edge_id in self.ctx.selection.selected_edges() {
-                                    let edge = dcel.edge(edge_id);
+                                    let edge = graph.edge(edge_id);
                                     if edge.deleted { continue; }
                                     let width = edge.stroke_style.as_ref()
                                         .map(|s| s.width)
@@ -1857,21 +1857,21 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         }
                     }
 
-                    // 1a. Draw stipple overlay on region-selected DCEL
+                    // 1a. Draw stipple overlay on region-selected graph
                     if let Some(ref region_sel) = self.ctx.region_selection {
-                        use lightningbeam_core::dcel::FaceId as DcelFaceId;
-                        let sel_dcel = &region_sel.selected_dcel;
+                        use lightningbeam_core::vector_graph::FillId;
+                        let sel_graph = &region_sel.selected_graph;
                         let sel_transform = overlay_transform * region_sel.transform;
                         let stipple_brush = selection_stipple_brush();
                         let inv_zoom = 1.0 / self.ctx.zoom as f64;
                         let brush_xform = Some(Affine::scale(inv_zoom));
 
-                        // Stipple faces with visible fill
-                        for (i, face) in sel_dcel.faces.iter().enumerate() {
-                            if face.deleted || i == 0 { continue; }
-                            if face.fill_color.is_none() && face.image_fill.is_none() && face.gradient_fill.is_none() { continue; }
-                            let face_id = DcelFaceId(i as u32);
-                            let path = sel_dcel.face_to_bezpath_with_holes(face_id);
+                        // Stipple fills with visible content
+                        for (i, fill) in sel_graph.fills.iter().enumerate() {
+                            if fill.deleted { continue; }
+                            if fill.color.is_none() && fill.image_fill.is_none() && fill.gradient_fill.is_none() { continue; }
+                            let fill_id = FillId(i as u32);
+                            let path = sel_graph.fill_to_bezpath(fill_id);
                             scene.fill(
                                 vello::peniko::Fill::NonZero,
                                 sel_transform,
@@ -1882,7 +1882,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         }
 
                         // Stipple edges with visible stroke
-                        for edge in &sel_dcel.edges {
+                        for edge in &sel_graph.edges {
                             if edge.deleted { continue; }
                             if edge.stroke_style.is_none() && edge.stroke_color.is_none() { continue; }
                             let width = edge.stroke_style.as_ref()
@@ -1935,8 +1935,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         };
 
                         if let Some(edge_id) = highlight_edge {
-                            if let Some(dcel) = vector_layer.dcel_at_time(self.ctx.playback_time) {
-                                let edge = dcel.edge(edge_id);
+                            if let Some(graph) = vector_layer.graph_at_time(self.ctx.playback_time) {
+                                let edge = graph.edge(edge_id);
                                 if !edge.deleted {
                                     let stipple_brush = selection_stipple_brush();
                                     let inv_zoom = 1.0 / self.ctx.zoom as f64;
@@ -2064,9 +2064,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         // For multiple objects: use axis-aligned bounding box (simpler for now)
 
                         let total_selected = self.ctx.selection.clip_instances().len();
-                        if self.ctx.selection.has_dcel_selection() {
+                        if self.ctx.selection.has_geometry_selection() {
                             // DCEL selection: compute bbox from selected vertices
-                            if let Some(dcel) = vector_layer.dcel_at_time(self.ctx.playback_time) {
+                            if let Some(graph) = vector_layer.graph_at_time(self.ctx.playback_time) {
                                 let mut min_x = f64::INFINITY;
                                 let mut min_y = f64::INFINITY;
                                 let mut max_x = f64::NEG_INFINITY;
@@ -2074,7 +2074,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 let mut found_any = false;
 
                                 for &vid in self.ctx.selection.selected_vertices() {
-                                    let v = dcel.vertex(vid);
+                                    let v = graph.vertex(vid);
                                     if v.deleted { continue; }
                                     min_x = min_x.min(v.position.x);
                                     min_y = min_y.min(v.position.y);
@@ -2800,7 +2800,7 @@ pub struct StagePane {
     // Last known viewport rect (for zoom-to-fit calculation)
     last_viewport_rect: Option<egui::Rect>,
     // Vector editing cache
-    dcel_editing_cache: Option<DcelEditingCache>,
+    graph_editing_cache: Option<GraphEditingCache>,
     // Current snap result (for visual feedback rendering)
     current_snap: Option<lightningbeam_core::snap::SnapResult>,
     // Raster stroke in progress: (layer_id, time, brush_state, buffer_before)
@@ -2975,7 +2975,7 @@ struct GradientState {
 struct VectorGradientState {
     layer_id: uuid::Uuid,
     time: f64,
-    face_ids: Vec<lightningbeam_core::dcel2::FaceId>,
+    fill_ids: Vec<lightningbeam_core::vector_graph::FillId>,
     start: egui::Vec2,  // World-space drag start
     end:   egui::Vec2,  // World-space drag end
 }
@@ -3048,13 +3048,13 @@ static WARP_READBACK_RESULTS: OnceLock<Arc<Mutex<std::collections::HashMap<u64, 
 
 /// Cached DCEL snapshot for undo when editing vertices, curves, or control points
 #[derive(Clone)]
-struct DcelEditingCache {
+struct GraphEditingCache {
     /// The layer ID containing the DCEL being edited
     layer_id: uuid::Uuid,
     /// The time of the keyframe being edited
     time: f64,
     /// Snapshot of the DCEL at edit start (for undo)
-    dcel_before: lightningbeam_core::dcel::Dcel,
+    graph_before: lightningbeam_core::vector_graph::VectorGraph,
 }
 
 // Global counter for generating unique instance IDs
@@ -3251,7 +3251,7 @@ impl StagePane {
             instance_id,
             pending_eyedropper_sample: None,
             last_viewport_rect: None,
-            dcel_editing_cache: None,
+            graph_editing_cache: None,
             current_snap: None,
             raster_stroke_state: None,
             raster_last_point: None,
@@ -3584,43 +3584,39 @@ impl StagePane {
             } else {
                 // No clip hit, test DCEL edges and faces
                 hit_test::hit_test_layer(vector_layer, *shared.playback_time, point, 5.0, Affine::IDENTITY)
-                    .map(|dcel_hit| match dcel_hit {
-                        hit_test::DcelHitResult::Edge(eid) => hit_test::HitResult::Edge(eid),
-                        hit_test::DcelHitResult::Face(fid) => hit_test::HitResult::Face(fid),
+                    .map(|graph_hit| match graph_hit {
+                        hit_test::GraphHitResult::Edge(eid) => hit_test::HitResult::Edge(eid),
+                        hit_test::GraphHitResult::Fill(fid) => hit_test::HitResult::Fill(fid),
                     })
             };
 
             if let Some(hit) = hit_result {
                 match hit {
                     hit_test::HitResult::Edge(edge_id) => {
-                        // DCEL edge was hit
-                        if let Some(dcel) = vector_layer.dcel_at_time(*shared.playback_time) {
+                        if let Some(graph) = vector_layer.graph_at_time(*shared.playback_time) {
                             if shift_held {
-                                shared.selection.toggle_edge(edge_id, dcel);
+                                shared.selection.toggle_edge(edge_id, graph);
                             } else {
-                                shared.selection.clear_dcel_selection();
-                                shared.selection.select_edge(edge_id, dcel);
+                                shared.selection.clear_geometry_selection();
+                                shared.selection.select_edge(edge_id, graph);
                             }
                         }
                         if let Some(layer_id) = *shared.active_layer_id {
                             *shared.focus = lightningbeam_core::selection::FocusSelection::Geometry { layer_id, time: *shared.playback_time };
                         }
-                        // DCEL element dragging deferred to Phase 3
                     }
-                    hit_test::HitResult::Face(face_id) => {
-                        // DCEL face was hit
-                        if let Some(dcel) = vector_layer.dcel_at_time(*shared.playback_time) {
+                    hit_test::HitResult::Fill(fill_id) => {
+                        if let Some(graph) = vector_layer.graph_at_time(*shared.playback_time) {
                             if shift_held {
-                                shared.selection.toggle_face(face_id, dcel);
+                                shared.selection.toggle_fill(fill_id, graph);
                             } else {
-                                shared.selection.clear_dcel_selection();
-                                shared.selection.select_face(face_id, dcel);
+                                shared.selection.clear_geometry_selection();
+                                shared.selection.select_fill(fill_id, graph);
                             }
                         }
                         if let Some(layer_id) = *shared.active_layer_id {
                             *shared.focus = lightningbeam_core::selection::FocusSelection::Geometry { layer_id, time: *shared.playback_time };
                         }
-                        // DCEL element dragging deferred to Phase 3
                     }
                     hit_test::HitResult::ClipInstance(clip_id) => {
                         // Clip instance was hit
@@ -3717,11 +3713,11 @@ impl StagePane {
                     let document = shared.action_executor.document();
                     if let Some(layer) = document.get_layer(&active_layer_id) {
                         if let AnyLayer::Vector(vl) = layer {
-                            if let Some(dcel) = vl.dcel_at_time(*shared.playback_time) {
+                            if let Some(graph) = vl.graph_at_time(*shared.playback_time) {
                                 if !shift_held {
-                                    shared.selection.clear_dcel_selection();
+                                    shared.selection.clear_geometry_selection();
                                 }
-                                shared.selection.select_edge(edge_id, dcel);
+                                shared.selection.select_edge(edge_id, graph);
                             }
                         }
                     }
@@ -3819,7 +3815,7 @@ impl StagePane {
                     );
 
                     // Hit test DCEL elements in rectangle
-                    let dcel_hits = hit_test::hit_test_dcel_in_rect(
+                    let graph_hits = hit_test::hit_test_graph_in_rect(
                         vector_layer,
                         *shared.playback_time,
                         selection_rect,
@@ -3831,18 +3827,18 @@ impl StagePane {
                         shared.selection.add_clip_instance(clip_id);
                     }
 
-                    // Add DCEL elements to selection
-                    if let Some(dcel) = vector_layer.dcel_at_time(*shared.playback_time) {
-                        for edge_id in dcel_hits.edges {
-                            shared.selection.select_edge(edge_id, dcel);
+                    // Add graph elements to selection
+                    if let Some(graph) = vector_layer.graph_at_time(*shared.playback_time) {
+                        for edge_id in graph_hits.edges {
+                            shared.selection.select_edge(edge_id, graph);
                         }
-                        for face_id in dcel_hits.faces {
-                            shared.selection.select_face(face_id, dcel);
+                        for fill_id in graph_hits.fills {
+                            shared.selection.select_fill(fill_id, graph);
                         }
                     }
 
                     // Update focus based on what was selected
-                    if shared.selection.has_dcel_selection() {
+                    if shared.selection.has_geometry_selection() {
                         if let Some(layer_id) = *shared.active_layer_id {
                             *shared.focus = lightningbeam_core::selection::FocusSelection::Geometry { layer_id, time: *shared.playback_time };
                         }
@@ -3861,7 +3857,7 @@ impl StagePane {
     /// Start editing a vertex - called when user clicks on a vertex
     fn start_vertex_editing(
         &mut self,
-        vertex_id: lightningbeam_core::dcel::VertexId,
+        vertex_id: lightningbeam_core::vector_graph::VertexId,
         _mouse_pos: vello::kurbo::Point,
         active_layer_id: uuid::Uuid,
         shared: &mut SharedPaneState,
@@ -3875,27 +3871,20 @@ impl StagePane {
             Some(AnyLayer::Vector(vl)) => vl,
             _ => return,
         };
-        let dcel = match layer.dcel_at_time(time) {
+        let graph = match layer.graph_at_time(time) {
             Some(d) => d,
             None => return,
         };
 
         // Snapshot DCEL for undo
-        self.dcel_editing_cache = Some(DcelEditingCache {
+        self.graph_editing_cache = Some(GraphEditingCache {
             layer_id: active_layer_id,
             time,
-            dcel_before: dcel.clone(),
+            graph_before: graph.clone(),
         });
 
-        // Find connected edges: iterate outgoing half-edges, collect unique edge IDs
-        let outgoing = dcel.vertex_outgoing(vertex_id);
-        let mut connected_edges = Vec::new();
-        for he_id in &outgoing {
-            let edge_id = dcel.half_edge(*he_id).edge;
-            if !connected_edges.contains(&edge_id) {
-                connected_edges.push(edge_id);
-            }
-        }
+        // Find connected edges
+        let connected_edges = graph.edges_at_vertex(vertex_id);
 
         *shared.tool_state = ToolState::EditingVertex {
             vertex_id,
@@ -3906,7 +3895,7 @@ impl StagePane {
     /// Start editing a curve - called when user clicks on a curve
     fn start_curve_editing(
         &mut self,
-        edge_id: lightningbeam_core::dcel::EdgeId,
+        edge_id: lightningbeam_core::vector_graph::EdgeId,
         parameter_t: f64,
         mouse_pos: vello::kurbo::Point,
         active_layer_id: uuid::Uuid,
@@ -3921,18 +3910,18 @@ impl StagePane {
             Some(AnyLayer::Vector(vl)) => vl,
             _ => return,
         };
-        let dcel = match layer.dcel_at_time(time) {
+        let graph = match layer.graph_at_time(time) {
             Some(d) => d,
             None => return,
         };
 
-        let original_curve = dcel.edge(edge_id).curve;
+        let original_curve = graph.edge(edge_id).curve;
 
         // Snapshot DCEL for undo
-        self.dcel_editing_cache = Some(DcelEditingCache {
+        self.graph_editing_cache = Some(GraphEditingCache {
             layer_id: active_layer_id,
             time,
-            dcel_before: dcel.clone(),
+            graph_before: graph.clone(),
         });
 
         *shared.tool_state = ToolState::EditingCurve {
@@ -3955,7 +3944,7 @@ impl StagePane {
         use lightningbeam_core::tool::ToolState;
         use vello::kurbo::Vec2;
 
-        let cache = match &self.dcel_editing_cache {
+        let cache = match &self.graph_editing_cache {
             Some(c) => c,
             None => return,
         };
@@ -3972,11 +3961,11 @@ impl StagePane {
         let skip_snap = matches!(tool_state, ToolState::EditingCurve { .. });
         let snap_result = if snap_enabled && !skip_snap {
             let document = shared.action_executor.document();
-            let dcel = match document.get_layer(&layer_id) {
-                Some(AnyLayer::Vector(vl)) => vl.dcel_at_time(time),
+            let graph = match document.get_layer(&layer_id) {
+                Some(AnyLayer::Vector(vl)) => vl.graph_at_time(time),
                 _ => None,
             };
-            dcel.and_then(|dcel| {
+            graph.and_then(|graph| {
                 let config = SnapConfig::from_screen_radius(SNAP_SCREEN_RADIUS, self.zoom as f64);
                 let exclusion = match &tool_state {
                     ToolState::EditingVertex { vertex_id, connected_edges } => SnapExclusion {
@@ -3989,7 +3978,7 @@ impl StagePane {
                     },
                     _ => SnapExclusion::default(),
                 };
-                snap::find_snap_target(dcel, mouse_pos, &config, &exclusion)
+                snap::find_snap_target(graph, mouse_pos, &config, &exclusion)
             })
         } else {
             None
@@ -4000,8 +3989,8 @@ impl StagePane {
 
         // Phase 2: Mutate DCEL with the (possibly snapped) position
         let document = shared.action_executor.document_mut();
-        let dcel = match document.get_layer_mut(&layer_id) {
-            Some(AnyLayer::Vector(vl)) => match vl.dcel_at_time_mut(time) {
+        let graph = match document.get_layer_mut(&layer_id) {
+            Some(AnyLayer::Vector(vl)) => match vl.graph_at_time_mut(time) {
                 Some(d) => d,
                 None => return,
             },
@@ -4010,33 +3999,31 @@ impl StagePane {
 
         match tool_state {
             ToolState::EditingVertex { vertex_id, connected_edges } => {
-                let old_pos = dcel.vertex(vertex_id).position;
+                let old_pos = graph.vertex(vertex_id).position;
                 let delta = Vec2::new(effective_pos.x - old_pos.x, effective_pos.y - old_pos.y);
-                dcel.vertex_mut(vertex_id).position = effective_pos;
+                graph.vertex_mut(vertex_id).position = effective_pos;
 
                 // Update connected edges: shift the adjacent control point by the same delta
                 for &edge_id in &connected_edges {
-                    let edge = dcel.edge(edge_id);
-                    let [he_fwd, _he_bwd] = edge.half_edges;
-                    let fwd_origin = dcel.half_edge(he_fwd).origin;
-                    let mut curve = dcel.edge(edge_id).curve;
+                    let [v0, v1] = graph.edge(edge_id).vertices;
+                    let mut curve = graph.edge(edge_id).curve;
 
-                    if fwd_origin == vertex_id {
+                    if v0 == vertex_id {
                         curve.p0 = effective_pos;
                         curve.p1 = curve.p1 + delta;
                     } else {
                         curve.p3 = effective_pos;
                         curve.p2 = curve.p2 + delta;
                     }
-                    dcel.edge_mut(edge_id).curve = curve;
+                    graph.edge_mut(edge_id).curve = curve;
                 }
             }
             ToolState::EditingCurve { edge_id, original_curve, start_mouse, .. } => {
                 let molded_curve = mold_curve(&original_curve, &effective_pos, &start_mouse);
-                dcel.edge_mut(edge_id).curve = molded_curve;
+                graph.edge_mut(edge_id).curve = molded_curve;
             }
             ToolState::EditingControlPoint { edge_id, point_index, .. } => {
-                let curve = &mut dcel.edge_mut(edge_id).curve;
+                let curve = &mut graph.edge_mut(edge_id).curve;
                 match point_index {
                     1 => curve.p1 = effective_pos,
                     2 => curve.p2 = effective_pos,
@@ -4053,11 +4040,11 @@ impl StagePane {
         active_layer_id: uuid::Uuid,
         shared: &mut SharedPaneState,
     ) {
-        use lightningbeam_core::actions::ModifyDcelAction;
+        use lightningbeam_core::actions::ModifyGraphAction;
         use lightningbeam_core::layer::AnyLayer;
 
         // Consume the cache
-        let cache = match self.dcel_editing_cache.take() {
+        let cache = match self.graph_editing_cache.take() {
             Some(c) => c,
             None => {
                 *shared.tool_state = lightningbeam_core::tool::ToolState::Idle;
@@ -4082,62 +4069,24 @@ impl StagePane {
             _ => None,
         };
 
-        if let Some((edge_ids, vertex_ids)) = editing_info {
+        if let Some((_edge_ids, vertex_ids)) = editing_info {
             let document = shared.action_executor.document_mut();
             if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(&active_layer_id) {
-                if let Some(dcel) = vl.dcel_at_time_mut(cache.time) {
-                    // Rebuild fans at the directly edited vertices
+                if let Some(graph) = vl.graph_at_time_mut(cache.time) {
+                    // VectorGraph doesn't need fan rebuilding or face cycle repair.
+                    // Just update edge curves for moved vertices.
                     for &vid in &vertex_ids {
-                        dcel.rebuild_vertex_fan(vid);
-                    }
-                    // Also rebuild fans at endpoints of connected edges
-                    // (their edge angles changed due to the edit)
-                    for &eid in &edge_ids {
-                        let [fwd, bwd] = dcel.edge(eid).half_edges;
-                        let v1 = dcel.half_edge(fwd).origin;
-                        let v2 = dcel.half_edge(bwd).origin;
-                        if !vertex_ids.contains(&v1) {
-                            dcel.rebuild_vertex_fan(v1);
-                        }
-                        if !vertex_ids.contains(&v2) {
-                            dcel.rebuild_vertex_fan(v2);
-                        }
-                    }
-                    // Repair face cycles at all affected vertices
-                    // (rebuild_vertex_fan may have split cycles without updating faces)
-                    let mut repaired: Vec<lightningbeam_core::dcel2::VertexId> = Vec::new();
-                    for &vid in &vertex_ids {
-                        if !repaired.contains(&vid) {
-                            dcel.repair_face_cycles_at_vertex(vid);
-                            repaired.push(vid);
-                        }
-                    }
-                    for &eid in &edge_ids {
-                        let [fwd, bwd] = dcel.edge(eid).half_edges;
-                        let v1 = dcel.half_edge(fwd).origin;
-                        let v2 = dcel.half_edge(bwd).origin;
-                        if !repaired.contains(&v1) {
-                            dcel.repair_face_cycles_at_vertex(v1);
-                            repaired.push(v1);
-                        }
-                        if !repaired.contains(&v2) {
-                            dcel.repair_face_cycles_at_vertex(v2);
-                            repaired.push(v2);
-                        }
-                    }
-                    // Recompute intersections for all moved edges
-                    for &eid in &edge_ids {
-                        dcel.recompute_edge_intersections(eid);
+                        graph.update_edges_for_vertex(vid);
                     }
                 }
             }
         }
 
-        // Get current DCEL state (after edits + intersection splits) as dcel_after
-        let dcel_after = {
+        // Get current DCEL state (after edits + intersection splits) as graph_after
+        let graph_after = {
             let document = shared.action_executor.document();
             match document.get_layer(&active_layer_id) {
-                Some(AnyLayer::Vector(vl)) => match vl.dcel_at_time(cache.time) {
+                Some(AnyLayer::Vector(vl)) => match vl.graph_at_time(cache.time) {
                     Some(d) => d.clone(),
                     None => {
                         *shared.tool_state = lightningbeam_core::tool::ToolState::Idle;
@@ -4152,17 +4101,17 @@ impl StagePane {
         };
 
         // Create the undo action
-        let action = ModifyDcelAction::new(
+        let action = ModifyGraphAction::new(
             cache.layer_id,
             cache.time,
-            cache.dcel_before,
-            dcel_after,
+            cache.graph_before,
+            graph_after,
             "Edit vector path",
         );
 
-        // Execute via action system (this replaces the DCEL with dcel_after,
+        // Execute via action system (this replaces the DCEL with graph_after,
         // which is the same as current state, so it's a no-op — but it registers
-        // the action in the undo stack with dcel_before for rollback)
+        // the action in the undo stack with graph_before for rollback)
         let _ = shared.action_executor.execute(Box::new(action));
 
         // Reset tool state and clear snap indicator
@@ -4268,7 +4217,7 @@ impl StagePane {
     /// Start editing a control point - called when user clicks on a control point
     fn start_control_point_editing(
         &mut self,
-        edge_id: lightningbeam_core::dcel::EdgeId,
+        edge_id: lightningbeam_core::vector_graph::EdgeId,
         point_index: u8,
         _mouse_pos: vello::kurbo::Point,
         active_layer_id: uuid::Uuid,
@@ -4283,12 +4232,12 @@ impl StagePane {
             Some(AnyLayer::Vector(vl)) => vl,
             _ => return,
         };
-        let dcel = match layer.dcel_at_time(time) {
+        let graph = match layer.graph_at_time(time) {
             Some(d) => d,
             None => return,
         };
 
-        let original_curve = dcel.edge(edge_id).curve;
+        let original_curve = graph.edge(edge_id).curve;
         let start_pos = match point_index {
             1 => original_curve.p1,
             2 => original_curve.p2,
@@ -4296,10 +4245,10 @@ impl StagePane {
         };
 
         // Snapshot DCEL for undo
-        self.dcel_editing_cache = Some(DcelEditingCache {
+        self.graph_editing_cache = Some(GraphEditingCache {
             layer_id: active_layer_id,
             time,
-            dcel_before: dcel.clone(),
+            graph_before: graph.clone(),
         });
 
         *shared.tool_state = ToolState::EditingControlPoint {
@@ -4332,14 +4281,14 @@ impl StagePane {
         };
         let time = *shared.playback_time;
 
-        let dcel = match shared.action_executor.document().get_layer(&layer_id) {
-            Some(AnyLayer::Vector(vl)) => vl.dcel_at_time(time),
+        let graph = match shared.action_executor.document().get_layer(&layer_id) {
+            Some(AnyLayer::Vector(vl)) => vl.graph_at_time(time),
             _ => None,
         };
 
-        let result = dcel.and_then(|dcel| {
+        let result = graph.and_then(|graph| {
             let config = SnapConfig::from_screen_radius(SNAP_SCREEN_RADIUS, self.zoom as f64);
-            snap::find_snap_target(dcel, point, &config, &SnapExclusion::default())
+            snap::find_snap_target(graph, point, &config, &SnapExclusion::default())
         });
 
         self.current_snap = result;
@@ -4967,17 +4916,9 @@ impl StagePane {
 
         let time = *shared.playback_time;
 
-        // Get mutable DCEL and snapshot it before insertion
-        let document = shared.action_executor.document_mut();
-        let dcel = match document.get_layer_mut(&layer_id) {
-            Some(AnyLayer::Vector(vl)) => match vl.dcel_at_time_mut(time) {
-                Some(d) => d,
-                None => return,
-            },
-            _ => return,
-        };
-
-        let snapshot = dcel.clone();
+        use lightningbeam_core::vector_graph::{EdgeId, FillId, VertexId};
+        use std::collections::{HashMap, HashSet};
+        use vello::kurbo::{ParamCurve, Shape as _};
 
         // Convert region path line segments to CubicBez for insert_stroke
         let segments: Vec<_> = {
@@ -5017,100 +4958,130 @@ impl StagePane {
             return;
         }
 
-        // Capture DCEL snapshot + region path for crash diagnosis (debug builds only)
-        #[cfg(debug_assertions)]
-        {
-            use vello::kurbo::PathEl;
-            let path_elems: Vec<serde_json::Value> = region_path.elements().iter().map(|el| match el {
-                PathEl::MoveTo(p) => serde_json::json!({"type": "M", "x": p.x, "y": p.y}),
-                PathEl::LineTo(p) => serde_json::json!({"type": "L", "x": p.x, "y": p.y}),
-                PathEl::QuadTo(p1, p2) => serde_json::json!({"type": "Q", "x1": p1.x, "y1": p1.y, "x2": p2.x, "y2": p2.y}),
-                PathEl::CurveTo(p1, p2, p3) => serde_json::json!({"type": "C", "x1": p1.x, "y1": p1.y, "x2": p2.x, "y2": p2.y, "x3": p3.x, "y3": p3.y}),
-                PathEl::ClosePath => serde_json::json!({"type": "Z"}),
-            }).collect();
-            let geom = serde_json::json!({
-                "region_path": path_elems,
-                "dcel_snapshot": serde_json::to_value(&snapshot).unwrap_or(serde_json::Value::Null),
-            });
-            shared.test_mode.set_pending_geometry(geom);
-        }
+        // Do all graph work in a block so the mutable borrow of shared ends
+        // before we assign to shared.region_selection.
+        let extraction_result = {
+            let document = shared.action_executor.document_mut();
+            let graph = match document.get_layer_mut(&layer_id) {
+                Some(AnyLayer::Vector(vl)) => match vl.graph_at_time_mut(time) {
+                    Some(d) => d,
+                    None => return,
+                },
+                _ => return,
+            };
 
-        // Insert region boundary as invisible edges (no stroke style/color)
-        let stroke_result = dcel.insert_stroke(&segments, None, None, 1.0);
-        let boundary_verts: Vec<_> = stroke_result.new_vertices.clone();
-        let region_edge_ids: Vec<_> = stroke_result.new_edges.clone();
+            let snapshot = graph.clone();
 
-        // Extract the inside portion; self (dcel) keeps the outside + boundary.
-        let mut selected_dcel = dcel.extract_region(&region_path, &boundary_verts);
+            // Insert region boundary as invisible edges (no stroke style/color)
+            let region_edge_ids = graph.insert_stroke(&segments, None, None, 1.0);
 
-        // Propagate fills ONLY on the extracted DCEL. The remainder (dcel) already
-        // has correct fills from the original data — its filled faces (e.g., the
-        // L-shaped remainder) keep their fill, and merged faces from edge removal
-        // correctly have no fill. Running propagate_fills on the remainder would
-        // incorrectly add fill to merged faces that span filled and unfilled areas.
-        selected_dcel.propagate_fills(&snapshot, &region_path, &boundary_verts);
+            let region_edge_set: HashSet<EdgeId> = region_edge_ids.iter().copied().collect();
 
-        // Check if the extracted DCEL has any visible content
-        let has_visible = selected_dcel.edges.iter().any(|e| !e.deleted && (e.stroke_style.is_some() || e.stroke_color.is_some()))
-            || selected_dcel.faces.iter().enumerate().any(|(i, f)| !f.deleted && i > 0 && (f.fill_color.is_some() || f.image_fill.is_some()));
+            // Classify edges: inside vs outside by midpoint winding
+            let mut inside_edges = HashSet::new();
+            for (i, edge) in graph.edges.iter().enumerate() {
+                let eid = EdgeId(i as u32);
+                if edge.deleted || region_edge_set.contains(&eid) {
+                    continue;
+                }
+                let mid = edge.curve.eval(0.5);
+                if region_path.winding(mid) != 0 {
+                    inside_edges.insert(eid);
+                }
+            }
 
-        if !has_visible {
-            // Nothing visible inside — restore snapshot and bail
-            *dcel = snapshot;
+            // Classify fills: inside vs outside by boundary centroid winding
+            let mut inside_fills = HashSet::new();
+            for (i, fill) in graph.fills.iter().enumerate() {
+                let fid = FillId(i as u32);
+                if fill.deleted {
+                    continue;
+                }
+                let centroid = Self::compute_fill_centroid(graph, fid);
+                if region_path.winding(centroid) != 0 {
+                    inside_fills.insert(fid);
+                }
+            }
+
+            // If nothing is inside, restore snapshot and bail
+            if inside_edges.is_empty() && inside_fills.is_empty() {
+                *graph = snapshot;
+                None
+            } else {
+                // Extract subgraph (boundary edges get duplicated into both graphs)
+                let (selected_graph, vtx_map, edge_map) = graph.extract_subgraph(
+                    &inside_edges,
+                    &inside_fills,
+                    &region_edge_set,
+                );
+
+                // Build boundary maps for merge-back
+                let boundary_vertex_map: HashMap<VertexId, VertexId> = vtx_map
+                    .iter()
+                    .filter(|(&old_vid, _)| !graph.vertex(old_vid).deleted)
+                    .map(|(&old, &new)| (new, old))
+                    .collect();
+
+                let boundary_edge_map: HashMap<EdgeId, EdgeId> = edge_map
+                    .iter()
+                    .filter(|(old_eid, _)| region_edge_set.contains(old_eid))
+                    .map(|(&old, &new)| (new, old))
+                    .collect();
+
+                Some((snapshot, selected_graph, region_edge_ids, boundary_vertex_map, boundary_edge_map))
+            }
+        };
+
+        let Some((snapshot, selected_graph, region_edge_ids, boundary_vertex_map, boundary_edge_map)) = extraction_result else {
             #[cfg(debug_assertions)]
             shared.test_mode.clear_pending_geometry();
             return;
-        }
+        };
 
-        // Compute inside_vertices: non-deleted verts in selected_dcel that aren't boundary.
-        let inside_vertices: Vec<_> = selected_dcel
-            .vertices
-            .iter()
-            .enumerate()
-            .filter_map(|(i, v)| {
-                if v.deleted { return None; }
-                let vid = lightningbeam_core::dcel::VertexId(i as u32);
-                if !boundary_verts.contains(&vid) { Some(vid) } else { None }
-            })
-            .collect();
-
-        let action_epoch = shared.action_executor.epoch();
-
-        shared.selection.clear();
-
-        // Populate global selection with the faces from the extracted DCEL so
-        // property panels and other tools can see what is selected. We add face
-        // IDs only (no boundary edges/vertices) because the boundary geometry
-        // lives in selected_dcel, not in the live DCEL.
-        for (i, face) in selected_dcel.faces.iter().enumerate() {
-            if face.deleted || i == 0 { continue; }
-            if face.fill_color.is_some() || face.image_fill.is_some() {
-                shared.selection.select_face_id_only(lightningbeam_core::dcel::FaceId(i as u32));
-            }
-        }
-
-        // Store the extracted DCEL as the clipboard-ready vector subgraph.
-        // This allows clipboard_copy_selection to serialize it without needing
-        // to re-extract geometry from the live DCEL.
-        shared.selection.vector_subgraph = Some(selected_dcel.clone());
-
-        // Store region selection state with extracted DCEL
         *shared.region_selection = Some(lightningbeam_core::selection::RegionSelection {
-            region_path,
+            region_path: region_path.clone(),
             layer_id,
             time,
-            dcel_snapshot: snapshot,
-            selected_dcel,
+            graph_snapshot: snapshot,
+            selected_graph,
             transform: vello::kurbo::Affine::IDENTITY,
             committed: false,
-            inside_vertices,
-            boundary_vertices: boundary_verts,
             region_edge_ids,
-            action_epoch_at_selection: action_epoch,
+            action_epoch_at_selection: shared.action_executor.epoch(),
+            boundary_vertex_map,
+            boundary_edge_map,
         });
+
+        shared.selection.clear_geometry_selection();
 
         #[cfg(debug_assertions)]
         shared.test_mode.clear_pending_geometry();
+    }
+
+    /// Compute the centroid of a fill's boundary edge midpoints.
+    fn compute_fill_centroid(
+        graph: &lightningbeam_core::vector_graph::VectorGraph,
+        fid: lightningbeam_core::vector_graph::FillId,
+    ) -> vello::kurbo::Point {
+        use vello::kurbo::{ParamCurve, Point};
+        let fill = graph.fill(fid);
+        let mut sum_x = 0.0;
+        let mut sum_y = 0.0;
+        let mut count = 0;
+        for &(eid, _) in &fill.boundary {
+            if eid.is_none() {
+                continue;
+            }
+            let mid = graph.edge(eid).curve.eval(0.5);
+            sum_x += mid.x;
+            sum_y += mid.y;
+            count += 1;
+        }
+        if count > 0 {
+            Point::new(sum_x / count as f64, sum_y / count as f64)
+        } else {
+            Point::ZERO
+        }
     }
 
     /// Revert an uncommitted region selection, restoring the DCEL from snapshot
@@ -5129,28 +5100,37 @@ impl StagePane {
 
         let no_actions_taken =
             shared.action_executor.epoch() == region_sel.action_epoch_at_selection;
+        let no_transform = region_sel.transform == vello::kurbo::Affine::IDENTITY;
 
         let doc = shared.action_executor.document_mut();
         if let Some(AnyLayer::Vector(vl)) = doc.get_layer_mut(&region_sel.layer_id) {
-            if let Some(dcel) = vl.dcel_at_time_mut(region_sel.time) {
-                if no_actions_taken {
-                    // Nothing changed: restore snapshot cleanly (undo boundary insertion)
-                    *dcel = region_sel.dcel_snapshot;
+            if let Some(graph) = vl.graph_at_time_mut(region_sel.time) {
+                if no_actions_taken && no_transform {
+                    // Fast path: nothing changed, restore from snapshot
+                    *graph = region_sel.graph_snapshot;
                 } else {
-                    // Actions were applied to the selection: merge selected_dcel back
-                    let mut merged = region_sel.dcel_snapshot;
-                    merged.merge_back_from_selected(
-                        &region_sel.selected_dcel,
-                        &region_sel.inside_vertices,
-                        &region_sel.boundary_vertices,
-                        &region_sel.region_edge_ids,
+                    // Delete the main graph's copy of boundary edges
+                    for &eid in &region_sel.region_edge_ids {
+                        if !graph.edge(eid).deleted {
+                            graph.free_edge(eid);
+                        }
+                    }
+
+                    // Merge the (possibly transformed) selected_graph back
+                    graph.merge_subgraph(
+                        &region_sel.selected_graph,
+                        region_sel.transform,
+                        &region_sel.boundary_vertex_map,
+                        &region_sel.boundary_edge_map,
                     );
-                    *dcel = merged;
+
+                    // Clean up invisible edges left from the boundary
+                    graph.gc_invisible_edges();
                 }
             }
         }
 
-        shared.selection.clear_dcel_selection();
+        shared.selection.clear_geometry_selection();
     }
 
     /// Create a rectangle path centered at origin (easier for curve editing later)
@@ -7507,8 +7487,8 @@ impl StagePane {
     }
 
     /// Handle transform tool for DCEL elements (vertices/edges).
-    /// Uses snapshot-based undo via ModifyDcelAction.
-    fn handle_transform_dcel(
+    /// Uses snapshot-based undo via ModifyGraphAction.
+    fn handle_transform_graph(
         &mut self,
         ui: &mut egui::Ui,
         response: &egui::Response,
@@ -7522,7 +7502,7 @@ impl StagePane {
         let time = *shared.playback_time;
 
         // Calculate bounding box of selected DCEL vertices
-        let selected_verts: Vec<lightningbeam_core::dcel::VertexId> =
+        let selected_verts: Vec<lightningbeam_core::vector_graph::VertexId> =
             shared.selection.selected_vertices().iter().copied().collect();
 
         if selected_verts.is_empty() {
@@ -7532,13 +7512,13 @@ impl StagePane {
         let bbox = {
             let document = shared.action_executor.document();
             if let Some(AnyLayer::Vector(vl)) = document.get_layer(active_layer_id) {
-                if let Some(dcel) = vl.dcel_at_time(time) {
+                if let Some(graph) = vl.graph_at_time(time) {
                     let mut min_x = f64::MAX;
                     let mut min_y = f64::MAX;
                     let mut max_x = f64::MIN;
                     let mut max_y = f64::MIN;
                     for &vid in &selected_verts {
-                        let v = dcel.vertex(vid);
+                        let v = graph.vertex(vid);
                         if v.deleted { continue; }
                         min_x = min_x.min(v.position.x);
                         min_y = min_y.min(v.position.y);
@@ -7569,11 +7549,11 @@ impl StagePane {
                         original_bbox,
                     };
 
-                    if let Some(ref cache) = self.dcel_editing_cache {
-                        let original_dcel = cache.dcel_before.clone();
-                        let selected_verts_set: std::collections::HashSet<lightningbeam_core::dcel::VertexId> =
+                    if let Some(ref cache) = self.graph_editing_cache {
+                        let original_graph = cache.graph_before.clone();
+                        let selected_verts_set: std::collections::HashSet<lightningbeam_core::vector_graph::VertexId> =
                             selected_verts.iter().copied().collect();
-                        let selected_edges: std::collections::HashSet<lightningbeam_core::dcel::EdgeId> =
+                        let selected_edges: std::collections::HashSet<lightningbeam_core::vector_graph::EdgeId> =
                             shared.selection.selected_edges().iter().copied().collect();
 
                         let affine = Self::compute_transform_affine(
@@ -7582,9 +7562,9 @@ impl StagePane {
 
                         let document = shared.action_executor.document_mut();
                         if let Some(AnyLayer::Vector(vl)) = document.get_layer_mut(active_layer_id) {
-                            if let Some(dcel) = vl.dcel_at_time_mut(time) {
-                                Self::apply_dcel_transform(
-                                    dcel, &original_dcel, &selected_verts_set, &selected_edges, affine,
+                            if let Some(graph) = vl.graph_at_time_mut(time) {
+                                Self::apply_graph_transform(
+                                    graph, &original_graph, &selected_verts_set, &selected_edges, affine,
                                 );
                             }
                         }
@@ -7593,18 +7573,18 @@ impl StagePane {
 
                 // Release: finalize
                 if self.rsp_drag_stopped(response) || (self.rsp_any_released(ui) && matches!(*shared.tool_state, ToolState::Transforming { .. })) {
-                    if let Some(cache) = self.dcel_editing_cache.take() {
-                        let dcel_after = {
+                    if let Some(cache) = self.graph_editing_cache.take() {
+                        let graph_after = {
                             let document = shared.action_executor.document();
                             match document.get_layer(active_layer_id) {
-                                Some(AnyLayer::Vector(vl)) => vl.dcel_at_time(time).cloned(),
+                                Some(AnyLayer::Vector(vl)) => vl.graph_at_time(time).cloned(),
                                 _ => None,
                             }
                         };
-                        if let Some(dcel_after) = dcel_after {
-                            use lightningbeam_core::actions::ModifyDcelAction;
-                            let action = ModifyDcelAction::new(
-                                cache.layer_id, cache.time, cache.dcel_before, dcel_after, "Transform",
+                        if let Some(graph_after) = graph_after {
+                            use lightningbeam_core::actions::ModifyGraphAction;
+                            let action = ModifyGraphAction::new(
+                                cache.layer_id, cache.time, cache.graph_before, graph_after, "Transform",
                             );
                             shared.pending_actions.push(Box::new(action));
                         }
@@ -7624,11 +7604,11 @@ impl StagePane {
                 // Snapshot DCEL for undo
                 let document = shared.action_executor.document();
                 if let Some(AnyLayer::Vector(vl)) = document.get_layer(active_layer_id) {
-                    if let Some(dcel) = vl.dcel_at_time(time) {
-                        self.dcel_editing_cache = Some(DcelEditingCache {
+                    if let Some(graph) = vl.graph_at_time(time) {
+                        self.graph_editing_cache = Some(GraphEditingCache {
                             layer_id: *active_layer_id,
                             time,
-                            dcel_before: dcel.clone(),
+                            graph_before: graph.clone(),
                         });
                     }
                 }
@@ -8290,23 +8270,23 @@ impl StagePane {
 
     /// Apply an affine transform to selected DCEL vertices and their connected edge control points.
     /// Reads original positions from `original_dcel` and writes transformed positions to `dcel`.
-    fn apply_dcel_transform(
-        dcel: &mut lightningbeam_core::dcel::Dcel,
-        original_dcel: &lightningbeam_core::dcel::Dcel,
-        selected_verts: &std::collections::HashSet<lightningbeam_core::dcel::VertexId>,
-        selected_edges: &std::collections::HashSet<lightningbeam_core::dcel::EdgeId>,
+    fn apply_graph_transform(
+        graph: &mut lightningbeam_core::vector_graph::VectorGraph,
+        original_graph: &lightningbeam_core::vector_graph::VectorGraph,
+        selected_verts: &std::collections::HashSet<lightningbeam_core::vector_graph::VertexId>,
+        selected_edges: &std::collections::HashSet<lightningbeam_core::vector_graph::EdgeId>,
         affine: vello::kurbo::Affine,
     ) {
         // Transform selected vertex positions
         for &vid in selected_verts {
-            let original_pos = original_dcel.vertex(vid).position;
-            dcel.vertex_mut(vid).position = affine * original_pos;
+            let original_pos = original_graph.vertex(vid).position;
+            graph.vertex_mut(vid).position = affine * original_pos;
         }
 
         // Transform edge curves for selected edges
         for &eid in selected_edges {
-            let original_curve = original_dcel.edge(eid).curve;
-            let edge = dcel.edge_mut(eid);
+            let original_curve = original_graph.edge(eid).curve;
+            let edge = graph.edge_mut(eid);
             edge.curve.p0 = affine * original_curve.p0;
             edge.curve.p1 = affine * original_curve.p1;
             edge.curve.p2 = affine * original_curve.p2;
@@ -9216,7 +9196,7 @@ impl StagePane {
         rect: egui::Rect,
     ) {
         use lightningbeam_core::layer::AnyLayer;
-        use lightningbeam_core::dcel2::FaceId;
+        use lightningbeam_core::vector_graph::FillId;
 
         let Some(layer_id) = *shared.active_layer_id else { return };
 
@@ -9235,23 +9215,25 @@ impl StagePane {
             let Some(kf) = vl.keyframe_at(*shared.playback_time) else { return };
 
             let point = vello::kurbo::Point::new(click_world.x as f64, click_world.y as f64);
-            let face_id = kf.dcel.find_face_containing_point(point);
+            let fill_id = match kf.graph.find_fill_at_point(point) {
+                Some(fid) => fid,
+                None => return, // No fill at this point
+            };
 
-            // Face 0 is the unbounded background face — nothing to fill.
-            if face_id == FaceId(0) || kf.dcel.face(face_id).deleted { return; }
+            if kf.graph.fill(fill_id).deleted { return; }
 
-            // If the clicked face is already selected, apply to all selected faces;
-            // otherwise apply only to the clicked face.
-            let face_ids: Vec<FaceId> = if shared.selection.selected_faces().contains(&face_id) {
-                shared.selection.selected_faces().iter().cloned().collect()
+            // If the clicked fill is already selected, apply to all selected fills;
+            // otherwise apply only to the clicked fill.
+            let fill_ids: Vec<FillId> = if shared.selection.selected_fills().contains(&fill_id) {
+                shared.selection.selected_fills().iter().cloned().collect()
             } else {
-                vec![face_id]
+                vec![fill_id]
             };
 
             self.vector_gradient_state = Some(VectorGradientState {
                 layer_id,
                 time: *shared.playback_time,
-                face_ids,
+                fill_ids,
                 start: click_world,
                 end:   click_world,
             });
@@ -9287,7 +9269,7 @@ impl StagePane {
 
                 use lightningbeam_core::actions::SetFillPaintAction;
                 let action = SetFillPaintAction::gradient(
-                    gs.layer_id, gs.time, gs.face_ids, Some(gradient),
+                    gs.layer_id, gs.time, gs.fill_ids, Some(gradient),
                 );
                 if let Err(e) = shared.action_executor.execute(Box::new(action)) {
                     eprintln!("Vector gradient fill: {e}");
@@ -9352,8 +9334,8 @@ impl StagePane {
         }
 
         // For vector layers with DCEL selection, use DCEL-specific transform path
-        if shared.selection.has_dcel_selection() {
-            self.handle_transform_dcel(ui, response, point, &active_layer_id, shared);
+        if shared.selection.has_geometry_selection() {
+            self.handle_transform_graph(ui, response, point, &active_layer_id, shared);
             return;
         }
 
@@ -10450,7 +10432,7 @@ impl StagePane {
                             );
 
                             // Hit test DCEL elements in rectangle
-                            let dcel_hits = hit_test::hit_test_dcel_in_rect(
+                            let graph_hits = hit_test::hit_test_graph_in_rect(
                                 vector_layer,
                                 *shared.playback_time,
                                 selection_rect,
@@ -10462,20 +10444,20 @@ impl StagePane {
                                 shared.selection.add_clip_instance(clip_id);
                             }
 
-                            // Add DCEL elements to selection
-                            if let Some(dcel) = vector_layer.dcel_at_time(*shared.playback_time) {
-                                for edge_id in dcel_hits.edges {
-                                    shared.selection.select_edge(edge_id, dcel);
+                            // Add graph elements to selection
+                            if let Some(graph) = vector_layer.graph_at_time(*shared.playback_time) {
+                                for edge_id in graph_hits.edges {
+                                    shared.selection.select_edge(edge_id, graph);
                                 }
-                                for face_id in dcel_hits.faces {
-                                    shared.selection.select_face(face_id, dcel);
+                                for fill_id in graph_hits.fills {
+                                    shared.selection.select_fill(fill_id, graph);
                                 }
                             }
                         }
                     }
 
                     // Update focus based on what was selected
-                    if shared.selection.has_dcel_selection() {
+                    if shared.selection.has_geometry_selection() {
                         if let Some(layer_id) = *shared.active_layer_id {
                             *shared.focus = lightningbeam_core::selection::FocusSelection::Geometry { layer_id, time: *shared.playback_time };
                         }
@@ -10684,63 +10666,63 @@ impl StagePane {
 
         // Delete/Backspace: remove selected DCEL elements
         if ui.input(|i| shared.keymap.action_pressed_with_backspace(crate::keymap::AppAction::StageDelete, i)) {
-            if shared.selection.has_dcel_selection() {
+            if shared.selection.has_geometry_selection() {
                 if let Some(active_layer_id) = *shared.active_layer_id {
                     let time = *shared.playback_time;
 
                     // Collect selected edge IDs before mutating
-                    let selected_edges: Vec<lightningbeam_core::dcel::EdgeId> =
+                    let selected_edges: Vec<lightningbeam_core::vector_graph::EdgeId> =
                         shared.selection.selected_edges().iter().copied().collect();
 
                     if !selected_edges.is_empty() {
                         // Snapshot before
-                        let dcel_before = {
+                        let graph_before = {
                             let document = shared.action_executor.document();
                             match document.get_layer(&active_layer_id) {
                                 Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => {
-                                    vl.dcel_at_time(time).cloned()
+                                    vl.graph_at_time(time).cloned()
                                 }
                                 _ => None,
                             }
                         };
 
-                        if let Some(dcel_before) = dcel_before {
+                        if let Some(graph_before) = graph_before {
                             // Remove selected edges
                             {
                                 let document = shared.action_executor.document_mut();
                                 if let Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) = document.get_layer_mut(&active_layer_id) {
-                                    if let Some(dcel) = vl.dcel_at_time_mut(time) {
+                                    if let Some(graph) = vl.graph_at_time_mut(time) {
                                         for eid in &selected_edges {
-                                            dcel.remove_edge(*eid);
+                                            graph.remove_edge(*eid);
                                         }
                                     }
                                 }
                             }
 
                             // Snapshot after
-                            let dcel_after = {
+                            let graph_after = {
                                 let document = shared.action_executor.document();
                                 match document.get_layer(&active_layer_id) {
                                     Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => {
-                                        vl.dcel_at_time(time).cloned()
+                                        vl.graph_at_time(time).cloned()
                                     }
                                     _ => None,
                                 }
                             };
 
-                            if let Some(dcel_after) = dcel_after {
-                                use lightningbeam_core::actions::ModifyDcelAction;
-                                let action = ModifyDcelAction::new(
+                            if let Some(graph_after) = graph_after {
+                                use lightningbeam_core::actions::ModifyGraphAction;
+                                let action = ModifyGraphAction::new(
                                     active_layer_id,
                                     time,
-                                    dcel_before,
-                                    dcel_after,
+                                    graph_before,
+                                    graph_after,
                                     "Delete",
                                 );
                                 shared.pending_actions.push(Box::new(action));
                             }
 
-                            shared.selection.clear_dcel_selection();
+                            shared.selection.clear_geometry_selection();
                         }
                     }
                 }
@@ -10869,7 +10851,7 @@ impl StagePane {
         );
 
         // Get the DCEL for drawing overlays
-        let dcel = match layer.dcel_at_time(*shared.playback_time) {
+        let graph = match layer.graph_at_time(*shared.playback_time) {
             Some(d) => d,
             None => return,
         };
@@ -10911,9 +10893,9 @@ impl StagePane {
             // BezierEdit mode: Draw all vertices, control points, and tangent lines
 
             // Draw control point tangent lines and control points for all edges
-            for (i, edge) in dcel.edges.iter().enumerate() {
+            for (i, edge) in graph.edges.iter().enumerate() {
                 if edge.deleted { continue; }
-                let edge_id = lightningbeam_core::dcel::EdgeId(i as u32);
+                let edge_id = lightningbeam_core::vector_graph::EdgeId(i as u32);
                 let curve = &edge.curve;
 
                 // Tangent lines from endpoints to control points
@@ -10943,9 +10925,9 @@ impl StagePane {
             }
 
             // Draw vertices on top of everything
-            for (i, vertex) in dcel.vertices.iter().enumerate() {
+            for (i, vertex) in graph.vertices.iter().enumerate() {
                 if vertex.deleted { continue; }
-                let vid = lightningbeam_core::dcel::VertexId(i as u32);
+                let vid = lightningbeam_core::vector_graph::VertexId(i as u32);
                 let screen_pos = world_to_screen(vertex.position);
                 let is_hovered = hover_vertex == Some(vid);
                 if is_hovered {
@@ -10957,7 +10939,7 @@ impl StagePane {
         } else {
             // Select mode: Only show hover highlight for the element under the mouse
             if let Some(vid) = hover_vertex {
-                let pos = dcel.vertex(vid).position;
+                let pos = graph.vertex(vid).position;
                 let screen_pos = world_to_screen(pos);
                 painter.circle(screen_pos, vertex_hover_radius, vertex_color, vertex_hover_stroke);
             }
@@ -10965,7 +10947,7 @@ impl StagePane {
             // Note: curve hover highlight is now rendered via Vello stipple in the scene
 
             if let Some((eid, pidx)) = hover_cp {
-                let curve = &dcel.edge(eid).curve;
+                let curve = &graph.edge(eid).curve;
                 let cp_pos = if pidx == 1 { curve.p1 } else { curve.p2 };
                 let screen_pos = world_to_screen(cp_pos);
                 painter.circle_filled(screen_pos, cp_hover_radius, cp_hover_color);
@@ -11108,8 +11090,8 @@ impl StagePane {
                 use lightningbeam_core::layer::AnyLayer;
                 if let Some(layer_id) = *shared.active_layer_id {
                     if let Some(AnyLayer::Vector(vl)) = shared.action_executor.document().get_layer(&layer_id) {
-                        if let Some(dcel) = vl.dcel_at_time(*shared.playback_time) {
-                            let edge = dcel.edge(edge_id);
+                        if let Some(graph) = vl.graph_at_time(*shared.playback_time) {
+                            let edge = graph.edge(edge_id);
                             if !edge.deleted {
                                 // Draw a small circle at the snap point on the curve
                                 painter.circle(screen_pos, 4.0, egui::Color32::TRANSPARENT, vertex_hover_stroke);

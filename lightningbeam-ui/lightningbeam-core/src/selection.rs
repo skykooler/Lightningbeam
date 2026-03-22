@@ -2,9 +2,9 @@
 //!
 //! Tracks selected DCEL elements (edges, faces, vertices) and clip instances for editing operations.
 
-use crate::dcel::{Dcel, EdgeId, FaceId, VertexId};
+use crate::vector_graph::{VectorGraph, EdgeId, FillId, VertexId};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use vello::kurbo::{Affine, BezPath};
 
@@ -181,8 +181,8 @@ pub struct Selection {
     /// Currently selected edges
     selected_edges: HashSet<EdgeId>,
 
-    /// Currently selected faces
-    selected_faces: HashSet<FaceId>,
+    /// Currently selected fills
+    selected_fills: HashSet<FillId>,
 
     /// Currently selected clip instances
     selected_clip_instances: Vec<Uuid>,
@@ -203,7 +203,7 @@ pub struct Selection {
     /// Cleared when the selection is cleared. Used by clipboard_copy_selection
     /// to avoid re-extracting the geometry from the live DCEL.
     #[serde(skip)]
-    pub vector_subgraph: Option<Dcel>,
+    pub vector_subgraph: Option<VectorGraph>,
 }
 
 impl Selection {
@@ -212,7 +212,7 @@ impl Selection {
         Self {
             selected_vertices: HashSet::new(),
             selected_edges: HashSet::new(),
-            selected_faces: HashSet::new(),
+            selected_fills: HashSet::new(),
             selected_clip_instances: Vec::new(),
             raster_selection: None,
             raster_floating: None,
@@ -221,94 +221,70 @@ impl Selection {
     }
 
     // -----------------------------------------------------------------------
-    // DCEL element selection
+    // Geometry element selection (VectorGraph)
     // -----------------------------------------------------------------------
 
     /// Select an edge and its endpoint vertices, forming/extending a subgraph.
-    pub fn select_edge(&mut self, edge_id: EdgeId, dcel: &Dcel) {
-        if edge_id.is_none() || dcel.edge(edge_id).deleted {
+    pub fn select_edge(&mut self, edge_id: EdgeId, graph: &VectorGraph) {
+        if edge_id.is_none() || graph.edge(edge_id).deleted {
             return;
         }
         self.selected_edges.insert(edge_id);
 
         // Add both endpoint vertices
-        let [he_fwd, he_bwd] = dcel.edge(edge_id).half_edges;
-        if !he_fwd.is_none() {
-            let v = dcel.half_edge(he_fwd).origin;
-            if !v.is_none() {
-                self.selected_vertices.insert(v);
-            }
+        let [v0, v1] = graph.edge(edge_id).vertices;
+        if !v0.is_none() {
+            self.selected_vertices.insert(v0);
         }
-        if !he_bwd.is_none() {
-            let v = dcel.half_edge(he_bwd).origin;
-            if !v.is_none() {
-                self.selected_vertices.insert(v);
-            }
+        if !v1.is_none() {
+            self.selected_vertices.insert(v1);
         }
     }
 
-    /// Select a face by ID only, without adding boundary edges or vertices.
+    /// Select a fill by ID only, without adding boundary edges or vertices.
     ///
-    /// Use this when the geometry lives in a separate DCEL (e.g. region selection's
-    /// `selected_dcel`) so we don't add stale edge/vertex IDs to the selection.
-    pub fn select_face_id_only(&mut self, face_id: FaceId) {
-        if !face_id.is_none() && face_id.0 != 0 {
-            self.selected_faces.insert(face_id);
+    /// Use this when the geometry lives in a separate graph (e.g. region selection's
+    /// `selected_graph`) so we don't add stale edge/vertex IDs to the selection.
+    pub fn select_fill_id_only(&mut self, fill_id: FillId) {
+        if !fill_id.is_none() {
+            self.selected_fills.insert(fill_id);
         }
     }
 
-    /// Select a face and all its boundary edges + vertices.
-    pub fn select_face(&mut self, face_id: FaceId, dcel: &Dcel) {
-        if face_id.is_none() || face_id.0 == 0 || dcel.face(face_id).deleted {
+    /// Select a fill and all its boundary edges + vertices.
+    pub fn select_fill(&mut self, fill_id: FillId, graph: &VectorGraph) {
+        if fill_id.is_none() || graph.fill(fill_id).deleted {
             return;
         }
-        self.selected_faces.insert(face_id);
+        self.selected_fills.insert(fill_id);
 
         // Add all boundary edges and vertices
-        let boundary = dcel.face_boundary(face_id);
-        for he_id in boundary {
-            let he = dcel.half_edge(he_id);
-            let edge_id = he.edge;
-            if !edge_id.is_none() {
-                self.selected_edges.insert(edge_id);
-                // Add endpoints
-                let [he_fwd, he_bwd] = dcel.edge(edge_id).half_edges;
-                if !he_fwd.is_none() {
-                    let v = dcel.half_edge(he_fwd).origin;
-                    if !v.is_none() {
-                        self.selected_vertices.insert(v);
-                    }
-                }
-                if !he_bwd.is_none() {
-                    let v = dcel.half_edge(he_bwd).origin;
-                    if !v.is_none() {
-                        self.selected_vertices.insert(v);
-                    }
-                }
+        for eid in graph.fill_boundary_edges(fill_id) {
+            self.selected_edges.insert(eid);
+            let [v0, v1] = graph.edge(eid).vertices;
+            if !v0.is_none() {
+                self.selected_vertices.insert(v0);
+            }
+            if !v1.is_none() {
+                self.selected_vertices.insert(v1);
             }
         }
     }
 
     /// Deselect an edge and its vertices (if they have no other selected edges).
-    pub fn deselect_edge(&mut self, edge_id: EdgeId, dcel: &Dcel) {
+    pub fn deselect_edge(&mut self, edge_id: EdgeId, graph: &VectorGraph) {
         self.selected_edges.remove(&edge_id);
 
         // Remove endpoint vertices only if they're not used by other selected edges
-        let [he_fwd, he_bwd] = dcel.edge(edge_id).half_edges;
-        for he_id in [he_fwd, he_bwd] {
-            if he_id.is_none() {
-                continue;
-            }
-            let v = dcel.half_edge(he_id).origin;
+        let [v0, v1] = graph.edge(edge_id).vertices;
+        for v in [v0, v1] {
             if v.is_none() {
                 continue;
             }
             // Check if any other selected edge uses this vertex
             let used = self.selected_edges.iter().any(|&eid| {
-                let e = dcel.edge(eid);
-                let [a, b] = e.half_edges;
-                (!a.is_none() && dcel.half_edge(a).origin == v)
-                    || (!b.is_none() && dcel.half_edge(b).origin == v)
+                let e = graph.edge(eid);
+                e.vertices[0] == v || e.vertices[1] == v
             });
             if !used {
                 self.selected_vertices.remove(&v);
@@ -316,26 +292,26 @@ impl Selection {
         }
     }
 
-    /// Deselect a face (edges/vertices stay if still referenced by other selections).
-    pub fn deselect_face(&mut self, face_id: FaceId) {
-        self.selected_faces.remove(&face_id);
+    /// Deselect a fill (edges/vertices stay if still referenced by other selections).
+    pub fn deselect_fill(&mut self, fill_id: FillId) {
+        self.selected_fills.remove(&fill_id);
     }
 
     /// Toggle an edge's selection state.
-    pub fn toggle_edge(&mut self, edge_id: EdgeId, dcel: &Dcel) {
+    pub fn toggle_edge(&mut self, edge_id: EdgeId, graph: &VectorGraph) {
         if self.selected_edges.contains(&edge_id) {
-            self.deselect_edge(edge_id, dcel);
+            self.deselect_edge(edge_id, graph);
         } else {
-            self.select_edge(edge_id, dcel);
+            self.select_edge(edge_id, graph);
         }
     }
 
-    /// Toggle a face's selection state.
-    pub fn toggle_face(&mut self, face_id: FaceId, dcel: &Dcel) {
-        if self.selected_faces.contains(&face_id) {
-            self.deselect_face(face_id);
+    /// Toggle a fill's selection state.
+    pub fn toggle_fill(&mut self, fill_id: FillId, graph: &VectorGraph) {
+        if self.selected_fills.contains(&fill_id) {
+            self.deselect_fill(fill_id);
         } else {
-            self.select_face(face_id, dcel);
+            self.select_fill(fill_id, graph);
         }
     }
 
@@ -344,9 +320,9 @@ impl Selection {
         self.selected_edges.contains(edge_id)
     }
 
-    /// Check if a face is selected.
-    pub fn contains_face(&self, face_id: &FaceId) -> bool {
-        self.selected_faces.contains(face_id)
+    /// Check if a fill is selected.
+    pub fn contains_fill(&self, fill_id: &FillId) -> bool {
+        self.selected_fills.contains(fill_id)
     }
 
     /// Check if a vertex is selected.
@@ -354,17 +330,17 @@ impl Selection {
         self.selected_vertices.contains(vertex_id)
     }
 
-    /// Clear DCEL element selections (edges, faces, vertices).
-    pub fn clear_dcel_selection(&mut self) {
+    /// Clear geometry element selections (edges, fills, vertices).
+    pub fn clear_geometry_selection(&mut self) {
         self.selected_vertices.clear();
         self.selected_edges.clear();
-        self.selected_faces.clear();
+        self.selected_fills.clear();
         self.vector_subgraph = None;
     }
 
-    /// Check if any DCEL elements are selected.
-    pub fn has_dcel_selection(&self) -> bool {
-        !self.selected_edges.is_empty() || !self.selected_faces.is_empty()
+    /// Check if any geometry elements are selected.
+    pub fn has_geometry_selection(&self) -> bool {
+        !self.selected_edges.is_empty() || !self.selected_fills.is_empty()
     }
 
     /// Get selected edges.
@@ -372,9 +348,9 @@ impl Selection {
         &self.selected_edges
     }
 
-    /// Get selected faces.
-    pub fn selected_faces(&self) -> &HashSet<FaceId> {
-        &self.selected_faces
+    /// Get selected fills.
+    pub fn selected_fills(&self) -> &HashSet<FillId> {
+        &self.selected_fills
     }
 
     /// Get selected vertices.
@@ -449,7 +425,7 @@ impl Selection {
     pub fn clear(&mut self) {
         self.selected_vertices.clear();
         self.selected_edges.clear();
-        self.selected_faces.clear();
+        self.selected_fills.clear();
         self.selected_clip_instances.clear();
         self.raster_selection = None;
         self.raster_floating = None;
@@ -459,7 +435,7 @@ impl Selection {
     /// Check if selection is empty
     pub fn is_empty(&self) -> bool {
         self.selected_edges.is_empty()
-            && self.selected_faces.is_empty()
+            && self.selected_fills.is_empty()
             && self.selected_clip_instances.is_empty()
     }
 }
@@ -479,25 +455,25 @@ pub struct RegionSelection {
     pub layer_id: Uuid,
     /// Keyframe time
     pub time: f64,
-    /// Snapshot of the DCEL before region boundary insertion, for revert
-    pub dcel_snapshot: Dcel,
-    /// The extracted DCEL containing geometry inside the region
-    pub selected_dcel: Dcel,
-    /// Transform applied to the selected DCEL (e.g. from dragging)
+    /// Snapshot of the graph before region boundary insertion, for revert
+    pub graph_snapshot: VectorGraph,
+    /// The extracted graph containing geometry inside the region
+    pub selected_graph: VectorGraph,
+    /// Transform applied to the selected graph (e.g. from dragging)
     pub transform: Affine,
     /// Whether the selection has been committed (via an operation on the selection)
     pub committed: bool,
-    /// Non-boundary vertices that are strictly inside the region (for merge-back).
-    pub inside_vertices: Vec<VertexId>,
-    /// Region boundary intersection vertices (for merge-back and fill propagation).
-    pub boundary_vertices: Vec<VertexId>,
     /// IDs of the invisible edges inserted for the region boundary stroke.
-    /// Removing these during merge-back heals the face splits they created.
+    /// These exist in the main graph (remainder side). Deleted during merge-back.
     pub region_edge_ids: Vec<EdgeId>,
     /// Action epoch recorded when this selection was created.
     /// Compared against `ActionExecutor::epoch()` on deselect to decide
     /// whether merge-back is needed or a clean snapshot restore suffices.
     pub action_epoch_at_selection: u64,
+    /// selected_graph VID → main graph VID for boundary vertices (shared between both graphs).
+    pub boundary_vertex_map: HashMap<VertexId, VertexId>,
+    /// selected_graph boundary EID → main graph boundary EID (duplicated edges to skip on merge).
+    pub boundary_edge_map: HashMap<EdgeId, EdgeId>,
 }
 
 #[cfg(test)]
@@ -570,23 +546,23 @@ mod tests {
     }
 
     #[test]
-    fn test_dcel_selection_basics() {
+    fn test_geometry_selection_basics() {
         let selection = Selection::new();
-        assert!(!selection.has_dcel_selection());
+        assert!(!selection.has_geometry_selection());
         assert!(selection.selected_edges().is_empty());
-        assert!(selection.selected_faces().is_empty());
+        assert!(selection.selected_fills().is_empty());
         assert!(selection.selected_vertices().is_empty());
     }
 
     #[test]
-    fn test_clear_dcel_selection() {
+    fn test_clear_geometry_selection() {
         let mut selection = Selection::new();
-        // Manually insert for unit test (no DCEL needed)
+        // Manually insert for unit test (no graph needed)
         selection.selected_edges.insert(EdgeId(0));
         selection.selected_vertices.insert(VertexId(0));
-        assert!(selection.has_dcel_selection());
+        assert!(selection.has_geometry_selection());
 
-        selection.clear_dcel_selection();
-        assert!(!selection.has_dcel_selection());
+        selection.clear_geometry_selection();
+        assert!(!selection.has_geometry_selection());
     }
 }

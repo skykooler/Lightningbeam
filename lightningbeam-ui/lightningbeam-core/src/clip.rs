@@ -170,7 +170,7 @@ impl VectorClip {
             // Only process vector layers (skip other layer types)
             if let AnyLayer::Vector(vector_layer) = &layer_node.data {
                 // Calculate bounds from DCEL edges
-                if let Some(dcel) = vector_layer.dcel_at_time(clip_time) {
+                if let Some(dcel) = vector_layer.graph_at_time(clip_time) {
                     use kurbo::Shape as KurboShape;
                     for edge in &dcel.edges {
                         if edge.deleted {

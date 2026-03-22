@@ -1,24 +1,24 @@
-//! Set shape properties action — operates on DCEL edge/face IDs.
+//! Set shape properties action — operates on VectorGraph edge/fill IDs.
 
 use crate::action::Action;
-use crate::dcel::{EdgeId, FaceId};
+use crate::vector_graph::{EdgeId, FillId};
 use crate::document::Document;
 use crate::layer::AnyLayer;
 use crate::shape::ShapeColor;
 use uuid::Uuid;
 
-/// Action that sets fill/stroke properties on DCEL elements.
+/// Action that sets fill/stroke properties on VectorGraph elements.
 pub struct SetShapePropertiesAction {
     layer_id: Uuid,
     time: f64,
     change: PropertyChange,
     old_edge_values: Vec<(EdgeId, Option<ShapeColor>, Option<f64>)>,
-    old_face_values: Vec<(FaceId, Option<ShapeColor>)>,
+    old_fill_values: Vec<(FillId, Option<ShapeColor>)>,
 }
 
 enum PropertyChange {
     FillColor {
-        face_ids: Vec<FaceId>,
+        fill_ids: Vec<FillId>,
         color: Option<ShapeColor>,
     },
     StrokeColor {
@@ -35,15 +35,15 @@ impl SetShapePropertiesAction {
     pub fn set_fill_color(
         layer_id: Uuid,
         time: f64,
-        face_ids: Vec<FaceId>,
+        fill_ids: Vec<FillId>,
         color: Option<ShapeColor>,
     ) -> Self {
         Self {
             layer_id,
             time,
-            change: PropertyChange::FillColor { face_ids, color },
+            change: PropertyChange::FillColor { fill_ids, color },
             old_edge_values: Vec::new(),
-            old_face_values: Vec::new(),
+            old_fill_values: Vec::new(),
         }
     }
 
@@ -58,7 +58,7 @@ impl SetShapePropertiesAction {
             time,
             change: PropertyChange::StrokeColor { edge_ids, color },
             old_edge_values: Vec::new(),
-            old_face_values: Vec::new(),
+            old_fill_values: Vec::new(),
         }
     }
 
@@ -73,15 +73,15 @@ impl SetShapePropertiesAction {
             time,
             change: PropertyChange::StrokeWidth { edge_ids, width },
             old_edge_values: Vec::new(),
-            old_face_values: Vec::new(),
+            old_fill_values: Vec::new(),
         }
     }
 
-    fn get_dcel_mut<'a>(
+    fn get_graph_mut<'a>(
         document: &'a mut Document,
         layer_id: &Uuid,
         time: f64,
-    ) -> Result<&'a mut crate::dcel::Dcel, String> {
+    ) -> Result<&'a mut crate::vector_graph::VectorGraph, String> {
         let layer = document
             .get_layer_mut(layer_id)
             .ok_or_else(|| format!("Layer {} not found", layer_id))?;
@@ -89,40 +89,40 @@ impl SetShapePropertiesAction {
             AnyLayer::Vector(vl) => vl,
             _ => return Err("Not a vector layer".to_string()),
         };
-        vl.dcel_at_time_mut(time)
+        vl.graph_at_time_mut(time)
             .ok_or_else(|| format!("No keyframe at time {}", time))
     }
 }
 
 impl Action for SetShapePropertiesAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
-        let dcel = Self::get_dcel_mut(document, &self.layer_id, self.time)?;
+        let graph = Self::get_graph_mut(document, &self.layer_id, self.time)?;
 
         match &self.change {
-            PropertyChange::FillColor { face_ids, color } => {
-                self.old_face_values.clear();
-                for &fid in face_ids {
-                    let face = dcel.face(fid);
-                    self.old_face_values.push((fid, face.fill_color));
-                    dcel.face_mut(fid).fill_color = *color;
+            PropertyChange::FillColor { fill_ids, color } => {
+                self.old_fill_values.clear();
+                for &fid in fill_ids {
+                    let fill = graph.fill(fid);
+                    self.old_fill_values.push((fid, fill.color));
+                    graph.fill_mut(fid).color = *color;
                 }
             }
             PropertyChange::StrokeColor { edge_ids, color } => {
                 self.old_edge_values.clear();
                 for &eid in edge_ids {
-                    let edge = dcel.edge(eid);
+                    let edge = graph.edge(eid);
                     let old_width = edge.stroke_style.as_ref().map(|s| s.width);
                     self.old_edge_values.push((eid, edge.stroke_color, old_width));
-                    dcel.edge_mut(eid).stroke_color = *color;
+                    graph.edge_mut(eid).stroke_color = *color;
                 }
             }
             PropertyChange::StrokeWidth { edge_ids, width } => {
                 self.old_edge_values.clear();
                 for &eid in edge_ids {
-                    let edge = dcel.edge(eid);
+                    let edge = graph.edge(eid);
                     let old_width = edge.stroke_style.as_ref().map(|s| s.width);
                     self.old_edge_values.push((eid, edge.stroke_color, old_width));
-                    if let Some(ref mut style) = dcel.edge_mut(eid).stroke_style {
+                    if let Some(ref mut style) = graph.edge_mut(eid).stroke_style {
                         style.width = *width;
                     }
                 }
@@ -133,23 +133,23 @@ impl Action for SetShapePropertiesAction {
     }
 
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
-        let dcel = Self::get_dcel_mut(document, &self.layer_id, self.time)?;
+        let graph = Self::get_graph_mut(document, &self.layer_id, self.time)?;
 
         match &self.change {
             PropertyChange::FillColor { .. } => {
-                for &(fid, old_color) in &self.old_face_values {
-                    dcel.face_mut(fid).fill_color = old_color;
+                for &(fid, old_color) in &self.old_fill_values {
+                    graph.fill_mut(fid).color = old_color;
                 }
             }
             PropertyChange::StrokeColor { .. } => {
                 for &(eid, old_color, _) in &self.old_edge_values {
-                    dcel.edge_mut(eid).stroke_color = old_color;
+                    graph.edge_mut(eid).stroke_color = old_color;
                 }
             }
             PropertyChange::StrokeWidth { .. } => {
                 for &(eid, _, old_width) in &self.old_edge_values {
                     if let Some(w) = old_width {
-                        if let Some(ref mut style) = dcel.edge_mut(eid).stroke_style {
+                        if let Some(ref mut style) = graph.edge_mut(eid).stroke_style {
                             style.width = w;
                         }
                     }

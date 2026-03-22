@@ -1,45 +1,45 @@
-//! Modify DCEL action — snapshot-based undo for DCEL editing
+//! Modify graph action — snapshot-based undo for VectorGraph editing
 
 use crate::action::Action;
-use crate::dcel::Dcel;
+use crate::vector_graph::VectorGraph;
 use crate::document::Document;
 use crate::layer::AnyLayer;
 use uuid::Uuid;
 
-/// Action that captures a before/after DCEL snapshot for undo/redo.
+/// Action that captures a before/after VectorGraph snapshot for undo/redo.
 ///
 /// Used by vertex editing, curve editing, and control point editing.
 /// The caller provides both snapshots (taken before and after the edit).
-pub struct ModifyDcelAction {
+pub struct ModifyGraphAction {
     layer_id: Uuid,
     time: f64,
-    dcel_before: Option<Dcel>,
-    dcel_after: Option<Dcel>,
+    graph_before: Option<VectorGraph>,
+    graph_after: Option<VectorGraph>,
     description_text: String,
 }
 
-impl ModifyDcelAction {
+impl ModifyGraphAction {
     pub fn new(
         layer_id: Uuid,
         time: f64,
-        dcel_before: Dcel,
-        dcel_after: Dcel,
+        graph_before: VectorGraph,
+        graph_after: VectorGraph,
         description: impl Into<String>,
     ) -> Self {
         Self {
             layer_id,
             time,
-            dcel_before: Some(dcel_before),
-            dcel_after: Some(dcel_after),
+            graph_before: Some(graph_before),
+            graph_after: Some(graph_after),
             description_text: description.into(),
         }
     }
 }
 
-impl Action for ModifyDcelAction {
+impl Action for ModifyGraphAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
-        let dcel_after = self.dcel_after.as_ref()
-            .ok_or("ModifyDcelAction: no dcel_after snapshot")?
+        let graph_after = self.graph_after.as_ref()
+            .ok_or("ModifyGraphAction: no graph_after snapshot")?
             .clone();
 
         let layer = document.get_layer_mut(&self.layer_id)
@@ -47,7 +47,7 @@ impl Action for ModifyDcelAction {
 
         if let AnyLayer::Vector(vl) = layer {
             if let Some(kf) = vl.keyframe_at_mut(self.time) {
-                kf.dcel = dcel_after;
+                kf.graph = graph_after;
                 Ok(())
             } else {
                 Err(format!("No keyframe at time {}", self.time))
@@ -58,8 +58,8 @@ impl Action for ModifyDcelAction {
     }
 
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
-        let dcel_before = self.dcel_before.as_ref()
-            .ok_or("ModifyDcelAction: no dcel_before snapshot")?
+        let graph_before = self.graph_before.as_ref()
+            .ok_or("ModifyGraphAction: no graph_before snapshot")?
             .clone();
 
         let layer = document.get_layer_mut(&self.layer_id)
@@ -67,7 +67,7 @@ impl Action for ModifyDcelAction {
 
         if let AnyLayer::Vector(vl) = layer {
             if let Some(kf) = vl.keyframe_at_mut(self.time) {
-                kf.dcel = dcel_before;
+                kf.graph = graph_before;
                 Ok(())
             } else {
                 Err(format!("No keyframe at time {}", self.time))

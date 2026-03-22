@@ -2258,29 +2258,20 @@ impl EditorApp {
             };
 
             self.clipboard_manager.copy(content);
-        } else if self.selection.has_dcel_selection() {
+        } else if self.selection.has_geometry_selection() {
             let subgraph = if let Some(dcel) = self.selection.vector_subgraph.take() {
                 // Region selection: the sub-DCEL was pre-extracted on commit.
                 dcel
             } else {
-                // Select tool: extract faces adjacent to the selected edges from the live DCEL.
-                let active_layer_id = match self.active_layer_id {
-                    Some(id) => id,
-                    None => return,
-                };
-                let document = self.action_executor.document();
-                let Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) = document.get_layer(&active_layer_id) else {
-                    return;
-                };
-                let Some(live_dcel) = vl.dcel_at_time(self.playback_time) else {
-                    return;
-                };
-                let selected_edges = self.selection.selected_edges().clone();
-                lightningbeam_core::dcel2::extract_faces_for_edges(live_dcel, &selected_edges)
+                // Select tool: extract faces adjacent to the selected edges.
+                // TODO: VectorGraph copy — extract_faces_for_edges requires Dcel;
+                // port to VectorGraph when clipboard is migrated.
+                return;
             };
 
             let dcel_json = serde_json::to_string(&subgraph).unwrap_or_default();
-            let svg_xml = lightningbeam_core::svg_export::dcel_to_svg(&subgraph);
+            // TODO: svg_export needs to be ported to VectorGraph
+            let svg_xml = String::new();
             self.clipboard_manager.copy(
                 lightningbeam_core::clipboard::ClipboardContent::VectorGeometry {
                     dcel_json,
@@ -2381,7 +2372,7 @@ impl EditorApp {
             }
 
             self.selection.clear_clip_instances();
-        } else if self.selection.has_dcel_selection() {
+        } else if self.selection.has_geometry_selection() {
             let active_layer_id = match self.active_layer_id {
                 Some(id) => id,
                 None => return,
@@ -2397,50 +2388,37 @@ impl EditorApp {
                     // Current document DCEL = outside portion only (boundary edges present).
                     // We commit the snapshot as "before" and the current state as "after",
                     // then drop the region selection so it is not merged back.
-                    let document = self.action_executor.document();
-                    if let Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) =
-                        document.get_layer(&region_sel.layer_id)
-                    {
-                        if let Some(dcel_after) = vl.dcel_at_time(region_sel.time) {
-                            let action = lightningbeam_core::actions::ModifyDcelAction::new(
-                                region_sel.layer_id,
-                                region_sel.time,
-                                region_sel.dcel_snapshot.clone(),
-                                dcel_after.clone(),
-                                "Cut/delete region selection",
-                            );
-                            if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                                eprintln!("Delete region selection failed: {}", e);
-                            }
-                        }
-                    }
+                    // TODO: Region selection delete requires converting Dcel snapshot
+                    // to VectorGraph for ModifyGraphAction. Deferred until RegionSelection
+                    // is migrated from Dcel to VectorGraph.
+                    eprintln!("Region selection delete: not yet ported to VectorGraph");
                     // region_sel is dropped; the stage pane will see region_selection == None.
                 }
-                self.selection.clear_dcel_selection();
+                self.selection.clear_geometry_selection();
                 return;
             }
 
             // Select-tool case: delete the selected edges.
-            let edge_ids: Vec<lightningbeam_core::dcel::EdgeId> =
+            let edge_ids: Vec<lightningbeam_core::vector_graph::EdgeId> =
                 self.selection.selected_edges().iter().copied().collect();
 
             if !edge_ids.is_empty() {
                 let document = self.action_executor.document();
                 if let Some(layer) = document.get_layer(&active_layer_id) {
                     if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
-                        if let Some(dcel_before) = vector_layer.dcel_at_time(self.playback_time) {
-                            let mut dcel_after = dcel_before.clone();
+                        if let Some(graph_before) = vector_layer.graph_at_time(self.playback_time) {
+                            let mut graph_after = graph_before.clone();
                             for edge_id in &edge_ids {
-                                if !dcel_after.edge(*edge_id).deleted {
-                                    dcel_after.remove_edge(*edge_id);
+                                if !graph_after.edge(*edge_id).deleted {
+                                    graph_after.remove_edge(*edge_id);
                                 }
                             }
 
-                            let action = lightningbeam_core::actions::ModifyDcelAction::new(
+                            let action = lightningbeam_core::actions::ModifyGraphAction::new(
                                 active_layer_id,
                                 self.playback_time,
-                                dcel_before.clone(),
-                                dcel_after,
+                                graph_before.clone(),
+                                graph_after,
                                 "Delete selected edges",
                             );
 
@@ -2452,7 +2430,7 @@ impl EditorApp {
                 }
             }
 
-            self.selection.clear_dcel_selection();
+            self.selection.clear_geometry_selection();
         }
     }
 
@@ -2574,42 +2552,10 @@ impl EditorApp {
                     self.selection.add_clip_instance(id);
                 }
             }
-            ClipboardContent::VectorGeometry { dcel_json, .. } => {
-                // Deserialize the subgraph and merge it into the live DCEL.
-                let clipboard_dcel: lightningbeam_core::dcel2::Dcel =
-                    match serde_json::from_str(&dcel_json) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            eprintln!("Paste: failed to deserialize vector geometry: {e}");
-                            return;
-                        }
-                    };
-
-                let active_layer_id = match self.active_layer_id {
-                    Some(id) => id,
-                    None => return,
-                };
-
-                let document = self.action_executor.document();
-                let Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) =
-                    document.get_layer(&active_layer_id) else { return };
-                let Some(dcel_before) = vl.dcel_at_time(self.playback_time) else { return };
-
-                let mut dcel_after = dcel_before.clone();
-                // Paste with a small nudge so it is visually distinct from the original.
-                let nudge = vello::kurbo::Vec2::new(10.0, 10.0);
-                dcel_after.import_from(&clipboard_dcel, nudge);
-
-                let action = lightningbeam_core::actions::ModifyDcelAction::new(
-                    active_layer_id,
-                    self.playback_time,
-                    dcel_before.clone(),
-                    dcel_after,
-                    "Paste vector geometry",
-                );
-                if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                    eprintln!("Paste vector geometry failed: {e}");
-                }
+            ClipboardContent::VectorGeometry { .. } => {
+                // TODO: VectorGraph paste — import_from requires Dcel;
+                // port when clipboard is migrated from Dcel to VectorGraph.
+                eprintln!("Paste vector geometry: not yet ported to VectorGraph");
             }
             ClipboardContent::Layers { .. } => {
                 // TODO: insert copied layers as siblings at the current selection point.
@@ -3160,7 +3106,7 @@ impl EditorApp {
                     }
                     // Stale vertex/edge/face IDs from before the undo would
                     // crash selection rendering on the restored (smaller) DCEL.
-                    self.selection.clear_dcel_selection();
+                    self.selection.clear_geometry_selection();
                 }
             }
             MenuAction::Redo => {
@@ -3196,7 +3142,7 @@ impl EditorApp {
                     if let Some((clip_id, notes)) = midi_update {
                         self.rebuild_midi_cache_entry(clip_id, &notes);
                     }
-                    self.selection.clear_dcel_selection();
+                    self.selection.clear_geometry_selection();
                 }
             }
             MenuAction::Cut => {
@@ -3246,7 +3192,7 @@ impl EditorApp {
                     _ => {
                         // Existing clip instance grouping fallback (stub)
                         if let Some(layer_id) = self.active_layer_id {
-                            if self.selection.has_dcel_selection() {
+                            if self.selection.has_geometry_selection() {
                                 // TODO: DCEL group deferred to Phase 2
                             } else {
                                 let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
@@ -3270,7 +3216,7 @@ impl EditorApp {
             }
             MenuAction::ConvertToMovieClip => {
                 if let Some(layer_id) = self.active_layer_id {
-                    if self.selection.has_dcel_selection() {
+                    if self.selection.has_geometry_selection() {
                         // TODO: DCEL convert-to-movie-clip deferred to Phase 2
                     } else {
                         let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();

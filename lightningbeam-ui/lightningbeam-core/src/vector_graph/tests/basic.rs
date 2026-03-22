@@ -91,7 +91,7 @@ fn alloc_fill_with_boundary() {
     let fid = g.alloc_fill(boundary, fill_color, FillRule::NonZero);
 
     assert_eq!(g.fill(fid).boundary.len(), 3);
-    assert_eq!(g.fill(fid).color, fill_color);
+    assert_eq!(g.fill(fid).color, Some(fill_color));
 }
 
 // ── Adjacency ────────────────────────────────────────────────────────────

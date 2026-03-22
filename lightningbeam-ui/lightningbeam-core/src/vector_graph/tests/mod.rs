@@ -8,3 +8,5 @@ mod fill;
 mod editing;
 #[cfg(test)]
 mod gap_close;
+#[cfg(test)]
+mod region;

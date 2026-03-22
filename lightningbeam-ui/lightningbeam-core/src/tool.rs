@@ -203,13 +203,13 @@ pub enum ToolState {
 
     /// Editing a vertex (dragging it and connected edges)
     EditingVertex {
-        vertex_id: crate::dcel::VertexId,
-        connected_edges: Vec<crate::dcel::EdgeId>,  // edges to update when vertex moves
+        vertex_id: crate::vector_graph::VertexId,
+        connected_edges: Vec<crate::vector_graph::EdgeId>,  // edges to update when vertex moves
     },
 
     /// Editing a curve (reshaping with moldCurve algorithm)
     EditingCurve {
-        edge_id: crate::dcel::EdgeId,
+        edge_id: crate::vector_graph::EdgeId,
         original_curve: vello::kurbo::CubicBez,
         start_mouse: Point,
         parameter_t: f64,
@@ -217,7 +217,7 @@ pub enum ToolState {
 
     /// Pending curve interaction: click selects edge, drag starts curve editing
     PendingCurveInteraction {
-        edge_id: crate::dcel::EdgeId,
+        edge_id: crate::vector_graph::EdgeId,
         parameter_t: f64,
         start_mouse: Point,
     },
@@ -235,7 +235,7 @@ pub enum ToolState {
 
     /// Editing a control point (BezierEdit tool only)
     EditingControlPoint {
-        edge_id: crate::dcel::EdgeId,
+        edge_id: crate::vector_graph::EdgeId,
         point_index: u8,           // 1 or 2 (p1 or p2 of the cubic bezier)
         original_curve: vello::kurbo::CubicBez,
         start_pos: Point,

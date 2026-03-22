@@ -15,6 +15,7 @@ pub mod tests;
 
 use kurbo::{CubicBez, ParamCurve, Point};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::curve_intersections::find_curve_intersections;
@@ -95,15 +96,19 @@ pub struct Edge {
     pub deleted: bool,
 }
 
-/// A fill: an explicit boundary referencing edges, with a color.
+/// A fill: an explicit boundary referencing edges, with visual properties.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Fill {
     /// Ordered cycle of directed edge references forming the boundary.
+    /// `EdgeId::NONE` entries act as separators between outer contour and hole contours.
     pub boundary: Vec<(EdgeId, Direction)>,
-    pub color: ShapeColor,
+    pub color: Option<ShapeColor>,
     pub fill_rule: FillRule,
+    #[serde(default)]
+    pub gradient_fill: Option<crate::gradient::ShapeGradient>,
+    #[serde(default)]
+    pub image_fill: Option<uuid::Uuid>,
     pub deleted: bool,
-    // TODO: gradient_fill, image_fill
 }
 
 // ---------------------------------------------------------------------------
@@ -198,13 +203,15 @@ impl VectorGraph {
     pub fn alloc_fill(
         &mut self,
         boundary: Vec<(EdgeId, Direction)>,
-        color: ShapeColor,
+        color: impl Into<Option<ShapeColor>>,
         fill_rule: FillRule,
     ) -> FillId {
         let fill = Fill {
             boundary,
-            color,
+            color: color.into(),
             fill_rule,
+            gradient_fill: None,
+            image_fill: None,
             deleted: false,
         };
         if let Some(idx) = self.free_fills.pop() {
@@ -342,6 +349,61 @@ impl VectorGraph {
         for eid in to_free {
             self.free_edge(eid);
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Fill / hit-test queries
+    // -------------------------------------------------------------------
+
+    /// Find a fill whose boundary encloses the given point.
+    /// Returns the smallest (by area) enclosing fill.
+    pub fn find_fill_at_point(&self, point: Point) -> Option<FillId> {
+        let mut best: Option<(FillId, f64)> = None;
+        for (i, fill) in self.fills.iter().enumerate() {
+            if fill.deleted {
+                continue;
+            }
+            let fid = FillId(i as u32);
+            let path = self.fill_to_bezpath(fid);
+            if kurbo::Shape::winding(&path, point) != 0 {
+                let area = kurbo::Shape::area(&path).abs();
+                if best.is_none() || area < best.unwrap().1 {
+                    best = Some((fid, area));
+                }
+            }
+        }
+        best.map(|(fid, _)| fid)
+    }
+
+    /// Get the distinct edge IDs from a fill's boundary (skipping NONE separators).
+    pub fn fill_boundary_edges(&self, fill_id: FillId) -> Vec<EdgeId> {
+        let fill = &self.fills[fill_id.idx()];
+        let mut edges = Vec::new();
+        for &(eid, _) in &fill.boundary {
+            if !eid.is_none() && !edges.contains(&eid) {
+                edges.push(eid);
+            }
+        }
+        edges
+    }
+
+    /// Get the distinct vertex IDs from a fill's boundary edges.
+    pub fn fill_boundary_vertices(&self, fill_id: FillId) -> Vec<VertexId> {
+        let mut verts = Vec::new();
+        for eid in self.fill_boundary_edges(fill_id) {
+            let e = &self.edges[eid.idx()];
+            for &vid in &e.vertices {
+                if !verts.contains(&vid) {
+                    verts.push(vid);
+                }
+            }
+        }
+        verts
+    }
+
+    /// Alias for `delete_edge_by_user` — removes an edge, handling fill merging/invisibility.
+    pub fn remove_edge(&mut self, id: EdgeId) {
+        self.delete_edge_by_user(id);
     }
 
     // -------------------------------------------------------------------
@@ -1393,6 +1455,223 @@ impl VectorGraph {
 
         None
     }
+
+    // ── Region selection: extract / merge subgraph ──────────────────────
+
+    /// Extract a subgraph containing `inside_edges` and `inside_fills`.
+    ///
+    /// Boundary edges (`boundary_edge_ids`) are **duplicated** — they exist in
+    /// both the returned graph and `self`, so both sides have closed fill
+    /// boundaries when the selection is moved.
+    ///
+    /// Returns `(new_graph, vertex_map, edge_map)` where the maps go from
+    /// old (self) IDs to new (returned graph) IDs.
+    pub fn extract_subgraph(
+        &mut self,
+        inside_edges: &HashSet<EdgeId>,
+        inside_fills: &HashSet<FillId>,
+        boundary_edge_ids: &HashSet<EdgeId>,
+    ) -> (VectorGraph, HashMap<VertexId, VertexId>, HashMap<EdgeId, EdgeId>) {
+        let mut new_graph = VectorGraph::new();
+        let mut vtx_map: HashMap<VertexId, VertexId> = HashMap::new();
+        let mut edge_map: HashMap<EdgeId, EdgeId> = HashMap::new();
+
+        // Collect all edge IDs we need to copy into the new graph
+        let edges_to_copy: HashSet<EdgeId> = inside_edges
+            .union(boundary_edge_ids)
+            .copied()
+            .collect();
+
+        // Collect all vertices referenced by edges we're copying
+        let mut referenced_vids: HashSet<VertexId> = HashSet::new();
+        for &eid in &edges_to_copy {
+            if eid.is_none() || self.edges[eid.idx()].deleted {
+                continue;
+            }
+            for &vid in &self.edges[eid.idx()].vertices {
+                referenced_vids.insert(vid);
+            }
+        }
+
+        // Determine which vertices are interior (exclusively owned by the
+        // extracted subgraph) vs boundary (shared with remaining geometry).
+        // A vertex is interior if ALL of its incident edges are either in
+        // inside_edges or boundary_edge_ids.
+        let mut interior_vertices: HashSet<VertexId> = HashSet::new();
+        let mut boundary_vertices: HashSet<VertexId> = HashSet::new();
+        for &vid in &referenced_vids {
+            let incident = self.edges_at_vertex(vid);
+            let all_inside = incident.iter().all(|&eid| edges_to_copy.contains(&eid));
+            if all_inside {
+                interior_vertices.insert(vid);
+            } else {
+                boundary_vertices.insert(vid);
+            }
+        }
+
+        // Allocate vertices in new graph
+        for &vid in &referenced_vids {
+            let pos = self.vertices[vid.idx()].position;
+            let new_vid = new_graph.alloc_vertex(pos);
+            vtx_map.insert(vid, new_vid);
+        }
+
+        // Copy edges into new graph
+        for &eid in &edges_to_copy {
+            if eid.is_none() || self.edges[eid.idx()].deleted {
+                continue;
+            }
+            let edge = &self.edges[eid.idx()];
+            let new_v0 = vtx_map[&edge.vertices[0]];
+            let new_v1 = vtx_map[&edge.vertices[1]];
+            let new_eid = new_graph.alloc_edge(
+                edge.curve,
+                new_v0,
+                new_v1,
+                edge.stroke_style.clone(),
+                edge.stroke_color.clone(),
+            );
+            edge_map.insert(eid, new_eid);
+        }
+
+        // Copy inside fills into new graph
+        for &fid in inside_fills {
+            if fid.is_none() || self.fills[fid.idx()].deleted {
+                continue;
+            }
+            let fill = &self.fills[fid.idx()];
+            let new_boundary: Vec<(EdgeId, Direction)> = fill
+                .boundary
+                .iter()
+                .map(|&(eid, dir)| {
+                    if eid.is_none() {
+                        (EdgeId::NONE, dir)
+                    } else if let Some(&new_eid) = edge_map.get(&eid) {
+                        (new_eid, dir)
+                    } else {
+                        // Edge referenced by fill but not in edges_to_copy —
+                        // shouldn't happen if classification is correct, but
+                        // skip gracefully.
+                        (EdgeId::NONE, dir)
+                    }
+                })
+                .collect();
+            let new_fid = new_graph.alloc_fill(
+                new_boundary,
+                fill.color,
+                fill.fill_rule,
+            );
+            // Copy gradient and image fill
+            new_graph.fills[new_fid.idx()].gradient_fill = fill.gradient_fill.clone();
+            new_graph.fills[new_fid.idx()].image_fill = fill.image_fill;
+        }
+
+        // Remove inside_edges from self (but NOT boundary edges — those are duplicated)
+        for &eid in inside_edges {
+            if !eid.is_none() && !self.edges[eid.idx()].deleted {
+                self.free_edge(eid);
+            }
+        }
+
+        // Remove inside fills from self
+        for &fid in inside_fills {
+            if !fid.is_none() && !self.fills[fid.idx()].deleted {
+                self.free_fill(fid);
+            }
+        }
+
+        // Free interior vertices (they have no remaining edges in self)
+        for &vid in &interior_vertices {
+            self.free_vertex(vid);
+        }
+
+        (new_graph, vtx_map, edge_map)
+    }
+
+    /// Merge another graph back into `self`, applying `transform` to all geometry.
+    ///
+    /// `boundary_vertex_map` maps vertex IDs in `other` to existing vertex IDs in
+    /// `self` (shared boundary vertices that should reconnect rather than duplicate).
+    ///
+    /// `boundary_edge_map` maps edge IDs in `other` to existing edge IDs in `self`
+    /// (duplicated boundary edges that should be skipped — `self` already has them).
+    pub fn merge_subgraph(
+        &mut self,
+        other: &VectorGraph,
+        transform: kurbo::Affine,
+        boundary_vertex_map: &HashMap<VertexId, VertexId>,
+        boundary_edge_map: &HashMap<EdgeId, EdgeId>,
+    ) {
+        let mut vtx_map: HashMap<VertexId, VertexId> = HashMap::new();
+        let mut edge_map: HashMap<EdgeId, EdgeId> = HashMap::new();
+
+        // Map or allocate vertices
+        for (i, vertex) in other.vertices.iter().enumerate() {
+            let other_vid = VertexId(i as u32);
+            if vertex.deleted {
+                continue;
+            }
+            if let Some(&self_vid) = boundary_vertex_map.get(&other_vid) {
+                vtx_map.insert(other_vid, self_vid);
+            } else {
+                let pos = transform * vertex.position;
+                let new_vid = self.alloc_vertex(pos);
+                vtx_map.insert(other_vid, new_vid);
+            }
+        }
+
+        // Map or allocate edges
+        for (i, edge) in other.edges.iter().enumerate() {
+            let other_eid = EdgeId(i as u32);
+            if edge.deleted {
+                continue;
+            }
+            if let Some(&self_eid) = boundary_edge_map.get(&other_eid) {
+                edge_map.insert(other_eid, self_eid);
+            } else {
+                let new_v0 = vtx_map[&edge.vertices[0]];
+                let new_v1 = vtx_map[&edge.vertices[1]];
+                // Transform the curve control points
+                let curve = CubicBez::new(
+                    transform * edge.curve.p0,
+                    transform * edge.curve.p1,
+                    transform * edge.curve.p2,
+                    transform * edge.curve.p3,
+                );
+                let new_eid = self.alloc_edge(
+                    curve,
+                    new_v0,
+                    new_v1,
+                    edge.stroke_style.clone(),
+                    edge.stroke_color.clone(),
+                );
+                edge_map.insert(other_eid, new_eid);
+            }
+        }
+
+        // Copy fills
+        for (_i, fill) in other.fills.iter().enumerate() {
+            if fill.deleted {
+                continue;
+            }
+            let new_boundary: Vec<(EdgeId, Direction)> = fill
+                .boundary
+                .iter()
+                .map(|&(eid, dir)| {
+                    if eid.is_none() {
+                        (EdgeId::NONE, dir)
+                    } else if let Some(&new_eid) = edge_map.get(&eid) {
+                        (new_eid, dir)
+                    } else {
+                        (EdgeId::NONE, dir)
+                    }
+                })
+                .collect();
+            let new_fid = self.alloc_fill(new_boundary, fill.color, fill.fill_rule);
+            self.fills[new_fid.idx()].gradient_fill = fill.gradient_fill.clone();
+            self.fills[new_fid.idx()].image_fill = fill.image_fill;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1565,4 +1844,66 @@ fn nearest_point_on_cubic(curve: &CubicBez, point: Point) -> (f64, f64) {
     let dx = p.x - point.x;
     let dy = p.y - point.y;
     (best_t, (dx * dx + dy * dy).sqrt())
+}
+
+/// Convert a BezPath into groups of cubic Bézier segments (one group per subpath).
+pub fn bezpath_to_cubic_segments(path: &kurbo::BezPath) -> Vec<Vec<CubicBez>> {
+    use kurbo::PathEl;
+
+    let mut result: Vec<Vec<CubicBez>> = Vec::new();
+    let mut current: Vec<CubicBez> = Vec::new();
+    let mut subpath_start = Point::ZERO;
+    let mut cursor = Point::ZERO;
+
+    for el in path.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                if !current.is_empty() {
+                    result.push(std::mem::take(&mut current));
+                }
+                subpath_start = p;
+                cursor = p;
+            }
+            PathEl::LineTo(p) => {
+                let c1 = lerp_point(cursor, p, 1.0 / 3.0);
+                let c2 = lerp_point(cursor, p, 2.0 / 3.0);
+                current.push(CubicBez::new(cursor, c1, c2, p));
+                cursor = p;
+            }
+            PathEl::QuadTo(p1, p2) => {
+                let cp1 = Point::new(
+                    cursor.x + (2.0 / 3.0) * (p1.x - cursor.x),
+                    cursor.y + (2.0 / 3.0) * (p1.y - cursor.y),
+                );
+                let cp2 = Point::new(
+                    p2.x + (2.0 / 3.0) * (p1.x - p2.x),
+                    p2.y + (2.0 / 3.0) * (p1.y - p2.y),
+                );
+                current.push(CubicBez::new(cursor, cp1, cp2, p2));
+                cursor = p2;
+            }
+            PathEl::CurveTo(p1, p2, p3) => {
+                current.push(CubicBez::new(cursor, p1, p2, p3));
+                cursor = p3;
+            }
+            PathEl::ClosePath => {
+                let dist = ((cursor.x - subpath_start.x).powi(2)
+                    + (cursor.y - subpath_start.y).powi(2))
+                .sqrt();
+                if dist > 1e-9 {
+                    let c1 = lerp_point(cursor, subpath_start, 1.0 / 3.0);
+                    let c2 = lerp_point(cursor, subpath_start, 2.0 / 3.0);
+                    current.push(CubicBez::new(cursor, c1, c2, subpath_start));
+                }
+                cursor = subpath_start;
+                if !current.is_empty() {
+                    result.push(std::mem::take(&mut current));
+                }
+            }
+        }
+    }
+    if !current.is_empty() {
+        result.push(current);
+    }
+    result
 }

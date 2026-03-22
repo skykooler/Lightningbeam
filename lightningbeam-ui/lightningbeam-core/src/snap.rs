@@ -3,7 +3,7 @@
 //! Provides snap-to-geometry queries that find the nearest vertex, edge midpoint,
 //! or curve point within a given radius. Priority order: Vertex > Midpoint > Curve.
 
-use crate::dcel::{Dcel, EdgeId, VertexId};
+use crate::vector_graph::{VectorGraph, EdgeId, VertexId};
 use vello::kurbo::{ParamCurve, ParamCurveNearest, Point};
 
 /// Default snap radius in screen pixels (converted to document space via zoom).
@@ -70,7 +70,7 @@ pub struct SnapExclusion {
 /// Priority: Vertex > Edge Midpoint > Nearest point on Curve.
 /// Returns `None` if nothing is within the configured radius.
 pub fn find_snap_target(
-    dcel: &Dcel,
+    graph: &VectorGraph,
     point: Point,
     config: &SnapConfig,
     exclusion: &SnapExclusion,
@@ -80,7 +80,7 @@ pub fn find_snap_target(
     // Phase 1: Vertex snap (highest priority)
     if config.snap_to_vertices {
         let mut best: Option<(VertexId, Point, f64)> = None;
-        for (i, vertex) in dcel.vertices.iter().enumerate() {
+        for (i, vertex) in graph.vertices.iter().enumerate() {
             if vertex.deleted {
                 continue;
             }
@@ -109,7 +109,7 @@ pub fn find_snap_target(
     // Phase 2: Edge midpoint snap
     if config.snap_to_midpoints {
         let mut best: Option<(EdgeId, Point, f64)> = None;
-        for (i, edge) in dcel.edges.iter().enumerate() {
+        for (i, edge) in graph.edges.iter().enumerate() {
             if edge.deleted {
                 continue;
             }
@@ -139,7 +139,7 @@ pub fn find_snap_target(
     // Phase 3: Nearest point on curve
     if config.snap_to_curves {
         let mut best: Option<(EdgeId, f64, Point, f64)> = None;
-        for (i, edge) in dcel.edges.iter().enumerate() {
+        for (i, edge) in graph.edges.iter().enumerate() {
             if edge.deleted {
                 continue;
             }
@@ -176,21 +176,21 @@ mod tests {
     use super::*;
     use vello::kurbo::CubicBez;
 
-    fn make_dcel_with_edge() -> Dcel {
-        let mut dcel = Dcel::new();
+    fn make_graph_with_edge() -> VectorGraph {
+        let mut graph = VectorGraph::new();
         let curve = CubicBez::new(
             Point::new(0.0, 0.0),
             Point::new(33.0, 0.0),
             Point::new(67.0, 0.0),
             Point::new(100.0, 0.0),
         );
-        dcel.insert_stroke(&[curve], None, None, 0.5);
-        dcel
+        graph.insert_stroke(&[curve], None, None, 0.5);
+        graph
     }
 
     #[test]
     fn snap_to_vertex() {
-        let dcel = make_dcel_with_edge();
+        let graph = make_graph_with_edge();
         let config = SnapConfig {
             radius: 5.0,
             snap_to_vertices: true,
@@ -198,14 +198,14 @@ mod tests {
             snap_to_curves: true,
         };
         let exclusion = SnapExclusion::default();
-        let result = find_snap_target(&dcel, Point::new(2.0, 0.0), &config, &exclusion);
+        let result = find_snap_target(&graph, Point::new(2.0, 0.0), &config, &exclusion);
         assert!(result.is_some());
         assert!(matches!(result.unwrap().target, SnapTarget::Vertex { .. }));
     }
 
     #[test]
     fn snap_to_midpoint() {
-        let dcel = make_dcel_with_edge();
+        let graph = make_graph_with_edge();
         let config = SnapConfig {
             radius: 5.0,
             snap_to_vertices: true,
@@ -214,14 +214,14 @@ mod tests {
         };
         let exclusion = SnapExclusion::default();
         // Point near midpoint (50, 0) but far from vertices (0,0) and (100,0)
-        let result = find_snap_target(&dcel, Point::new(51.0, 0.0), &config, &exclusion);
+        let result = find_snap_target(&graph, Point::new(51.0, 0.0), &config, &exclusion);
         assert!(result.is_some());
         assert!(matches!(result.unwrap().target, SnapTarget::Midpoint { .. }));
     }
 
     #[test]
     fn snap_to_curve() {
-        let dcel = make_dcel_with_edge();
+        let graph = make_graph_with_edge();
         let config = SnapConfig {
             radius: 5.0,
             snap_to_vertices: true,
@@ -230,14 +230,14 @@ mod tests {
         };
         let exclusion = SnapExclusion::default();
         // Point near t=0.25 on curve (25, 0) — not near a vertex or midpoint
-        let result = find_snap_target(&dcel, Point::new(25.0, 3.0), &config, &exclusion);
+        let result = find_snap_target(&graph, Point::new(25.0, 3.0), &config, &exclusion);
         assert!(result.is_some());
         assert!(matches!(result.unwrap().target, SnapTarget::Curve { .. }));
     }
 
     #[test]
     fn no_snap_outside_radius() {
-        let dcel = make_dcel_with_edge();
+        let graph = make_graph_with_edge();
         let config = SnapConfig {
             radius: 5.0,
             snap_to_vertices: true,
@@ -245,13 +245,13 @@ mod tests {
             snap_to_curves: true,
         };
         let exclusion = SnapExclusion::default();
-        let result = find_snap_target(&dcel, Point::new(50.0, 20.0), &config, &exclusion);
+        let result = find_snap_target(&graph, Point::new(50.0, 20.0), &config, &exclusion);
         assert!(result.is_none());
     }
 
     #[test]
     fn exclusion_skips_vertex() {
-        let dcel = make_dcel_with_edge();
+        let graph = make_graph_with_edge();
         let config = SnapConfig {
             radius: 5.0,
             snap_to_vertices: true,
@@ -263,7 +263,7 @@ mod tests {
             vertices: vec![VertexId(0)],
             edges: vec![],
         };
-        let result = find_snap_target(&dcel, Point::new(2.0, 0.0), &config, &exclusion);
+        let result = find_snap_target(&graph, Point::new(2.0, 0.0), &config, &exclusion);
         assert!(result.is_none());
     }
 }
