@@ -139,6 +139,17 @@ pub fn render_curve_lane(
     // ── Background ──────────────────────────────────────────────────────────
     painter.rect_filled(rect, 0.0, Color32::from_rgba_premultiplied(20, 20, 25, 230));
 
+    // Inset shadow: dark line at top, light line at bottom
+    painter.line_segment(
+        [rect.left_top(), rect.right_top()],
+        Stroke::new(1.0, Color32::from_black_alpha(60)),
+    );
+    let bottom_y = rect.max.y - 1.0;
+    painter.line_segment(
+        [Pos2::new(rect.min.x, bottom_y), Pos2::new(rect.max.x, bottom_y)],
+        Stroke::new(1.0, Color32::from_white_alpha(18)),
+    );
+
     // Zero-line (value = 0, or mid-line if range doesn't include 0)
     let zero_norm = normalize(0.0).clamp(0.0, 1.0);
     let zero_y = value_to_y(zero_norm, rect);
