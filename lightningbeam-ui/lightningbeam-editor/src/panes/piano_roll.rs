@@ -34,6 +34,48 @@ enum PitchBendZone {
     End,     // Last 30%: ramp from 0 → bend
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+enum SnapValue {
+    #[default] None,
+    Whole, Half, Quarter, Eighth, Sixteenth, ThirtySecond,
+    QuarterTriplet, EighthTriplet, SixteenthTriplet, ThirtySecondTriplet,
+    EighthSwingLight, SixteenthSwingLight,
+    EighthSwingHeavy, SixteenthSwingHeavy,
+}
+
+impl SnapValue {
+    fn label(self) -> &'static str {
+        match self {
+            Self::None              => "None",
+            Self::Whole             => "1/1",
+            Self::Half              => "1/2",
+            Self::Quarter           => "1/4",
+            Self::Eighth            => "1/8",
+            Self::Sixteenth         => "1/16",
+            Self::ThirtySecond      => "1/32",
+            Self::QuarterTriplet    => "1/4T",
+            Self::EighthTriplet     => "1/8T",
+            Self::SixteenthTriplet  => "1/16T",
+            Self::ThirtySecondTriplet => "1/32T",
+            Self::EighthSwingLight    => "1/8 swing light",
+            Self::SixteenthSwingLight => "1/16 swing light",
+            Self::EighthSwingHeavy    => "1/8 swing heavy",
+            Self::SixteenthSwingHeavy => "1/16 swing heavy",
+        }
+    }
+
+    fn all() -> &'static [SnapValue] {
+        &[
+            Self::None, Self::Whole, Self::Half, Self::Quarter,
+            Self::Eighth, Self::Sixteenth, Self::ThirtySecond,
+            Self::QuarterTriplet, Self::EighthTriplet,
+            Self::SixteenthTriplet, Self::ThirtySecondTriplet,
+            Self::EighthSwingLight, Self::SixteenthSwingLight,
+            Self::EighthSwingHeavy, Self::SixteenthSwingHeavy,
+        ]
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum DragMode {
     MoveNotes { start_time_offset: f64, start_note_offset: i32 },
@@ -122,6 +164,11 @@ pub struct PianoRollPane {
     pitch_bend_range: f32,
     // Layer ID for which pitch_bend_range was last queried
     pitch_bend_range_layer: Option<uuid::Uuid>,
+
+    // Snap / quantize
+    snap_value: SnapValue,
+    last_snap_selection: HashSet<usize>,
+    snap_user_changed: bool, // set in render_header, consumed before handle_input
 }
 
 impl PianoRollPane {
@@ -155,6 +202,9 @@ impl PianoRollPane {
             header_mod: 0.0,
             pitch_bend_range: 2.0,
             pitch_bend_range_layer: None,
+            snap_value: SnapValue::None,
+            last_snap_selection: HashSet::new(),
+            snap_user_changed: false,
         }
     }
 
@@ -263,6 +313,61 @@ impl PianoRollPane {
 
     // ── MIDI mode rendering ──────────────────────────────────────────────
 
+} // end impl PianoRollPane (snap helpers follow as free functions)
+
+fn snap_to_value(t: f64, snap: SnapValue, bpm: f64) -> f64 {
+    let beat = 60.0 / bpm;
+    match snap {
+        SnapValue::None                => t,
+        SnapValue::Whole               => round_to_grid(t, beat * 4.0),
+        SnapValue::Half                => round_to_grid(t, beat * 2.0),
+        SnapValue::Quarter             => round_to_grid(t, beat),
+        SnapValue::Eighth              => round_to_grid(t, beat * 0.5),
+        SnapValue::Sixteenth           => round_to_grid(t, beat * 0.25),
+        SnapValue::ThirtySecond        => round_to_grid(t, beat * 0.125),
+        SnapValue::QuarterTriplet      => round_to_grid(t, beat * 2.0 / 3.0),
+        SnapValue::EighthTriplet       => round_to_grid(t, beat / 3.0),
+        SnapValue::SixteenthTriplet    => round_to_grid(t, beat / 6.0),
+        SnapValue::ThirtySecondTriplet => round_to_grid(t, beat / 12.0),
+        SnapValue::EighthSwingLight    => snap_swing(t, beat,       2.0 / 3.0),
+        SnapValue::SixteenthSwingLight => snap_swing(t, beat * 0.5, 2.0 / 3.0),
+        SnapValue::EighthSwingHeavy    => snap_swing(t, beat,       3.0 / 4.0),
+        SnapValue::SixteenthSwingHeavy => snap_swing(t, beat * 0.5, 3.0 / 4.0),
+    }
+}
+
+fn round_to_grid(t: f64, interval: f64) -> f64 {
+    (t / interval).round() * interval
+}
+
+fn snap_swing(t: f64, cell: f64, ratio: f64) -> f64 {
+    let cell_n = (t / cell).floor() as i64;
+    let cell_start = cell_n as f64 * cell;
+    let cands = [cell_start, cell_start + ratio * cell, cell_start + cell];
+    *cands.iter().min_by(|&&a, &&b| (a - t).abs().partial_cmp(&(b - t).abs()).unwrap()).unwrap()
+}
+
+fn detect_snap(notes: &[&ResolvedNote], bpm: f64) -> SnapValue {
+    const EPS: f64 = 0.002;
+    if notes.is_empty() { return SnapValue::None; }
+    let order = [
+        SnapValue::Whole, SnapValue::Half, SnapValue::Quarter,
+        SnapValue::EighthSwingHeavy, SnapValue::EighthSwingLight, SnapValue::Eighth,
+        SnapValue::SixteenthSwingHeavy, SnapValue::SixteenthSwingLight,
+        SnapValue::QuarterTriplet, SnapValue::Sixteenth,
+        SnapValue::EighthTriplet, SnapValue::ThirtySecond,
+        SnapValue::SixteenthTriplet, SnapValue::ThirtySecondTriplet,
+    ];
+    for &sv in &order {
+        if notes.iter().all(|n| (snap_to_value(n.start_time, sv, bpm) - n.start_time).abs() < EPS) {
+            return sv;
+        }
+    }
+    SnapValue::None
+}
+
+impl PianoRollPane {
+
     fn render_midi_mode(
         &mut self,
         ui: &mut egui::Ui,
@@ -342,6 +447,18 @@ impl PianoRollPane {
         if self.selected_clip_id.is_none() {
             if let Some(&(clip_id, ..)) = clip_data.first() {
                 self.selected_clip_id = Some(clip_id);
+            }
+        }
+
+        // Apply quantize if the user changed the snap dropdown (must happen before handle_input
+        // which may clear the selection when the ComboBox click propagates to the grid).
+        if self.snap_user_changed {
+            self.snap_user_changed = false;
+            if self.snap_value != SnapValue::None && !self.selected_note_indices.is_empty() {
+                if let Some(clip_id) = self.selected_clip_id {
+                    let bpm = shared.action_executor.document().bpm;
+                    self.quantize_selected_notes(clip_id, bpm, shared);
+                }
             }
         }
 
@@ -1095,7 +1212,9 @@ impl PianoRollPane {
 
         // Immediate press detection (fires on the actual press frame, before egui's drag threshold).
         // This ensures note preview and hit testing use the real press position.
-        let pointer_just_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
+        // Skip when any popup (e.g. ComboBox dropdown) is open so clicks there don't pass through.
+        let pointer_just_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+            && !ui.ctx().is_popup_open();
         if pointer_just_pressed {
             if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
                 if full_rect.contains(pos) {
@@ -1255,7 +1374,11 @@ impl PianoRollPane {
             if let Some(selected_clip) = clip_data.iter().find(|c| Some(c.0) == self.selected_clip_id) {
                 let clip_start = selected_clip.1;
                 let trim_start = selected_clip.2;
-                let clip_local_time = (time - clip_start).max(0.0) + trim_start;
+                let bpm = shared.action_executor.document().bpm;
+                let clip_local_time = snap_to_value(
+                    (time - clip_start).max(0.0) + trim_start,
+                    self.snap_value, bpm,
+                );
                 self.creating_note = Some(TempNote {
                     note,
                     start_time: clip_local_time,
@@ -1266,11 +1389,18 @@ impl PianoRollPane {
                 self.preview_note_on(note, DEFAULT_VELOCITY, None, now, shared);
             }
         } else {
-            // Start selection rectangle
+            // Start selection rectangle and seek playhead to clicked time
             self.selected_note_indices.clear();
             self.update_focus(shared);
             self.selection_rect = Some((pos, pos));
             self.drag_mode = Some(DragMode::SelectRect);
+
+            let bpm = shared.action_executor.document().bpm;
+            let seek_time = snap_to_value(time.max(0.0), self.snap_value, bpm);
+            *shared.playback_time = seek_time;
+            if let Some(ctrl) = shared.audio_controller.as_ref() {
+                if let Ok(mut c) = ctrl.lock() { c.seek(seek_time); }
+            }
         }
     }
 
@@ -1652,10 +1782,12 @@ impl PianoRollPane {
         let resolved = Self::resolve_notes(events);
         let old_notes = Self::notes_to_backend_format(&resolved);
 
+        let bpm = shared.action_executor.document().bpm;
         let mut new_resolved = resolved.clone();
         for &idx in &self.selected_note_indices {
             if idx < new_resolved.len() {
-                new_resolved[idx].start_time = (new_resolved[idx].start_time + dt).max(0.0);
+                let raw_time = (new_resolved[idx].start_time + dt).max(0.0);
+                new_resolved[idx].start_time = snap_to_value(raw_time, self.snap_value, bpm);
                 new_resolved[idx].note = (new_resolved[idx].note as i32 + dn).clamp(0, 127) as u8;
             }
         }
@@ -1829,6 +1961,23 @@ impl PianoRollPane {
             description_text: description.to_string(),
         };
         shared.pending_actions.push(Box::new(action));
+    }
+
+    fn quantize_selected_notes(&mut self, clip_id: u32, bpm: f64, shared: &mut SharedPaneState) {
+        let events = match shared.midi_event_cache.get(&clip_id) { Some(e) => e, None => return };
+        let resolved = Self::resolve_notes(events);
+        let old_notes = Self::notes_to_backend_format(&resolved);
+        let mut new_resolved = resolved.clone();
+        for &idx in &self.selected_note_indices {
+            if idx < new_resolved.len() {
+                new_resolved[idx].start_time =
+                    snap_to_value(new_resolved[idx].start_time, self.snap_value, bpm).max(0.0);
+            }
+        }
+        let new_notes = Self::notes_to_backend_format(&new_resolved);
+        Self::update_cache_from_resolved(clip_id, &new_resolved, shared);
+        self.push_update_action("Quantize notes", clip_id, old_notes, new_notes, shared, &[]);
+        self.cached_clip_id = None;
     }
 
     fn push_events_action(
@@ -2255,6 +2404,46 @@ impl PaneRenderer for PianoRollPane {
                         .range(0.5..=10.0)
                         .max_decimals(1),
                 );
+            }
+
+            // Snap-to dropdown — only in Measures mode
+            let doc = shared.action_executor.document();
+            let is_measures = doc.timeline_mode == lightningbeam_core::document::TimelineMode::Measures;
+            let bpm = doc.bpm;
+            drop(doc);
+
+            if is_measures {
+                // Auto-detect grid when selection changes
+                if self.selected_note_indices != self.last_snap_selection {
+                    if !self.selected_note_indices.is_empty() {
+                        if let Some(clip_id) = self.selected_clip_id {
+                            if let Some(events) = shared.midi_event_cache.get(&clip_id) {
+                                let resolved = Self::resolve_notes(events);
+                                let sel: Vec<&ResolvedNote> = self.selected_note_indices.iter()
+                                    .filter_map(|&i| resolved.get(i))
+                                    .collect();
+                                self.snap_value = detect_snap(&sel, bpm);
+                            }
+                        }
+                    }
+                    self.last_snap_selection = self.selected_note_indices.clone();
+                }
+
+                ui.separator();
+                ui.label(egui::RichText::new("Snap to:").color(header_secondary).size(10.0));
+                let old_snap = self.snap_value;
+                egui::ComboBox::from_id_salt("piano_roll_snap")
+                    .selected_text(self.snap_value.label())
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        for &sv in SnapValue::all() {
+                            ui.selectable_value(&mut self.snap_value, sv, sv.label());
+                        }
+                    });
+
+                if self.snap_value != old_snap {
+                    self.snap_user_changed = true;
+                }
             }
         });
         true

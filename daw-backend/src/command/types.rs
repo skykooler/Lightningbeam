@@ -310,8 +310,8 @@ pub enum AudioEvent {
     GraphConnectionError(TrackId, String),
     /// Graph state changed (for full UI sync)
     GraphStateChanged(TrackId),
-    /// Preset fully loaded (track_id) - emitted after all nodes and samples are loaded
-    GraphPresetLoaded(TrackId),
+    /// Preset fully loaded (track_id, preset_name) - emitted after all nodes and samples are loaded
+    GraphPresetLoaded(TrackId, String),
     /// Preset has been saved to file (track_id, preset_path)
     GraphPresetSaved(TrackId, String),
     /// Script compilation result (track_id, node_id, success, error, ui_declaration, source)

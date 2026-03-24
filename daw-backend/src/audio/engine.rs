@@ -1673,6 +1673,7 @@ impl Engine {
                     Ok(json) => {
                         match crate::audio::node_graph::preset::GraphPreset::from_json(&json) {
                             Ok(preset) => {
+                                let preset_name = preset.metadata.name.clone();
                                 // Extract the directory path from the preset path for resolving relative sample paths
                                 let preset_base_path = std::path::Path::new(&preset_path).parent();
 
@@ -1684,19 +1685,19 @@ impl Engine {
                                                 track.instrument_graph = graph;
                                                 track.graph_is_default = true;
                                                 let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
-                                                let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                                let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id, preset_name));
                                             }
                                             Some(TrackNode::Audio(track)) => {
                                                 track.effects_graph = graph;
                                                 track.graph_is_default = true;
                                                 let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
-                                                let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                                let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id, preset_name));
                                             }
                                             Some(TrackNode::Group(track)) => {
                                                 track.audio_graph = graph;
                                                 track.graph_is_default = true;
                                                 let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
-                                                let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                                let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id, preset_name));
                                             }
                                             _ => {}
                                         }
@@ -1729,6 +1730,7 @@ impl Engine {
             Command::GraphLoadLbins(track_id, path) => {
                 match crate::audio::node_graph::lbins::load_lbins(&path) {
                     Ok((preset, assets)) => {
+                        let preset_name = preset.metadata.name.clone();
                         match AudioGraph::from_preset(&preset, self.sample_rate, 8192, None, Some(&assets)) {
                             Ok(graph) => {
                                 match self.project.get_track_mut(track_id) {
@@ -1736,19 +1738,19 @@ impl Engine {
                                         track.instrument_graph = graph;
                                         track.graph_is_default = true;
                                         let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
-                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id, preset_name));
                                     }
                                     Some(TrackNode::Audio(track)) => {
                                         track.effects_graph = graph;
                                         track.graph_is_default = true;
                                         let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
-                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id, preset_name));
                                     }
                                     Some(TrackNode::Group(track)) => {
                                         track.audio_graph = graph;
                                         track.graph_is_default = true;
                                         let _ = self.event_tx.push(AudioEvent::GraphStateChanged(track_id));
-                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id));
+                                        let _ = self.event_tx.push(AudioEvent::GraphPresetLoaded(track_id, preset_name));
                                     }
                                     _ => {}
                                 }

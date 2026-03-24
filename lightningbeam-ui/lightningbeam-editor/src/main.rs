@@ -5267,7 +5267,7 @@ impl eframe::App for EditorApp {
                             self.waveform_gpu_dirty.insert(pool_index);
                             ctx.request_repaint();
                         }
-                        AudioEvent::GraphPresetLoaded(_track_id) => {
+                        AudioEvent::GraphPresetLoaded(track_id, preset_name) => {
                             // Preset was loaded on the audio thread — bump generation
                             // so the node graph pane reloads from backend
                             self.project_generation += 1;
@@ -5278,6 +5278,17 @@ impl eframe::App for EditorApp {
                                 std::sync::atomic::Ordering::Relaxed,
                                 |v| if v > 0 { Some(v - 1) } else { Some(0) },
                             );
+                            // Auto-rename the MIDI layer to match the preset name, unless
+                            // the user has already given it a custom name
+                            if let Some(&layer_uuid) = self.track_to_layer_map.get(&track_id) {
+                                let doc = self.action_executor.document_mut();
+                                if let Some(layer) = doc.get_layer_mut(&layer_uuid) {
+                                    use lightningbeam_core::layer::LayerTrait;
+                                    if !layer.has_custom_name() {
+                                        layer.set_name(preset_name);
+                                    }
+                                }
+                            }
                             ctx.request_repaint();
                         }
                         AudioEvent::InputLevel(peak) => {

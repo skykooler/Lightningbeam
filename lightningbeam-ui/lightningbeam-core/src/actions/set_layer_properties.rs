@@ -20,6 +20,8 @@ pub enum LayerProperty {
     Visible(bool),
     /// Video layer only: toggle live webcam preview
     CameraEnabled(bool),
+    /// Rename the layer; sets has_custom_name = true
+    Name(String),
 }
 
 /// Stored old value for rollback
@@ -33,6 +35,7 @@ enum OldValue {
     Opacity(f64),
     Visible(bool),
     CameraEnabled(bool),
+    Name(String),
 }
 
 /// Action that sets a property on one or more layers
@@ -101,6 +104,7 @@ impl Action for SetLayerPropertiesAction {
                             };
                             OldValue::CameraEnabled(val)
                         }
+                        LayerProperty::Name(_) => OldValue::Name(layer.name().to_string()),
                     });
                 }
 
@@ -117,6 +121,10 @@ impl Action for SetLayerPropertiesAction {
                         if let AnyLayer::Video(v) = layer {
                             v.camera_enabled = *c;
                         }
+                    }
+                    LayerProperty::Name(n) => {
+                        layer.set_name(n.clone());
+                        layer.set_has_custom_name(true);
                     }
                 }
             }
@@ -142,6 +150,10 @@ impl Action for SetLayerPropertiesAction {
                             if let AnyLayer::Video(v) = layer {
                                 v.camera_enabled = *c;
                             }
+                        }
+                        OldValue::Name(n) => {
+                            layer.set_name(n.clone());
+                            layer.set_has_custom_name(false);
                         }
                     }
                 }
@@ -206,6 +218,7 @@ impl Action for SetLayerPropertiesAction {
             LayerProperty::InputGain(_) => "input gain",
             LayerProperty::Muted(_) => "mute",
             LayerProperty::Soloed(_) => "solo",
+            LayerProperty::Name(_) => "name",
             LayerProperty::Locked(_) => "lock",
             LayerProperty::Opacity(_) => "opacity",
             LayerProperty::Visible(_) => "visibility",

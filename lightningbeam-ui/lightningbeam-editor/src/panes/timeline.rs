@@ -219,6 +219,9 @@ pub struct TimelinePane {
     metronome_icon: Option<egui::TextureHandle>,
     /// Count-in pre-roll state: set when count-in is active, cleared when recording fires
     pending_recording_start: Option<PendingRecordingStart>,
+
+    /// Layer currently being renamed via inline text edit (layer_id, buffer)
+    renaming_layer: Option<(uuid::Uuid, String)>,
 }
 
 /// Deferred recording start created during count-in pre-roll
@@ -680,6 +683,7 @@ impl TimelinePane {
             automation_topology_generation: u64::MAX,
             metronome_icon: None,
             pending_recording_start: None,
+            renaming_layer: None,
         }
     }
 
@@ -1924,14 +1928,51 @@ impl TimelinePane {
                 name_x_offset = 10.0 + indent + 18.0;
             }
 
-            // Layer name
-            ui.painter().text(
-                header_rect.min + egui::vec2(name_x_offset, 10.0),
-                egui::Align2::LEFT_TOP,
-                &layer_name,
-                egui::FontId::proportional(14.0),
-                text_color,
+            // Layer name — double-click to rename inline
+            let name_pos = header_rect.min + egui::vec2(name_x_offset, 4.0);
+            let name_rect = egui::Rect::from_min_size(
+                name_pos,
+                egui::vec2(header_rect.max.x - name_pos.x - 8.0, 22.0),
             );
+            let is_renaming = self.renaming_layer.as_ref().map_or(false, |(id, _)| *id == layer_id);
+            if is_renaming {
+                let buf = &mut self.renaming_layer.as_mut().unwrap().1;
+                let te = egui::TextEdit::singleline(buf)
+                    .font(egui::FontId::proportional(14.0))
+                    .text_color(text_color)
+                    .frame(false)
+                    .desired_width(name_rect.width());
+                let te_resp = ui.put(name_rect, te);
+                te_resp.request_focus();
+                let done = te_resp.lost_focus()
+                    || ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Escape));
+                if done {
+                    let new_name = self.renaming_layer.take().unwrap().1;
+                    let new_name = new_name.trim().to_string();
+                    if !new_name.is_empty() && new_name != layer_name {
+                        pending_actions.push(Box::new(
+                            lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                                layer_id,
+                                lightningbeam_core::actions::LayerProperty::Name(new_name),
+                            )
+                        ));
+                    }
+                    self.layer_control_clicked = true;
+                }
+            } else {
+                let name_resp = ui.allocate_rect(name_rect, egui::Sense::click());
+                ui.painter().text(
+                    name_pos + egui::vec2(0.0, 6.0),
+                    egui::Align2::LEFT_TOP,
+                    &layer_name,
+                    egui::FontId::proportional(14.0),
+                    text_color,
+                );
+                if name_resp.double_clicked() {
+                    self.renaming_layer = Some((layer_id, layer_name.clone()));
+                    self.layer_control_clicked = true;
+                }
+            }
 
             // Layer type (smaller text below name with colored background)
             let type_text_pos = header_rect.min + egui::vec2(name_x_offset, 28.0);
@@ -1972,30 +2013,30 @@ impl TimelinePane {
 
             let Some(layer_for_controls) = any_layer_for_controls else { continue; };
 
-            // Layer controls (mute, solo, lock, volume)
-            let controls_top = header_rect.min.y + 4.0;
+            // Layer controls: volume slider top-right, buttons below it
             let controls_right = header_rect.max.x - 8.0;
             let button_size = egui::vec2(20.0, 20.0);
             let slider_width = 60.0;
 
-            // Position controls from right to left
             let volume_slider_rect = egui::Rect::from_min_size(
-                egui::pos2(controls_right - slider_width, controls_top),
+                egui::pos2(controls_right - slider_width, header_rect.min.y + 4.0),
                 egui::vec2(slider_width, 20.0),
             );
 
+            // Buttons sit below the slider, right-aligned to match it
+            let buttons_top = volume_slider_rect.max.y + 4.0;
             let lock_button_rect = egui::Rect::from_min_size(
-                egui::pos2(volume_slider_rect.min.x - button_size.x - 4.0, controls_top),
+                egui::pos2(controls_right - button_size.x, buttons_top),
                 button_size,
             );
 
             let solo_button_rect = egui::Rect::from_min_size(
-                egui::pos2(lock_button_rect.min.x - button_size.x - 4.0, controls_top),
+                egui::pos2(lock_button_rect.min.x - button_size.x - 4.0, buttons_top),
                 button_size,
             );
 
             let mute_button_rect = egui::Rect::from_min_size(
-                egui::pos2(solo_button_rect.min.x - button_size.x - 4.0, controls_top),
+                egui::pos2(solo_button_rect.min.x - button_size.x - 4.0, buttons_top),
                 button_size,
             );
 
@@ -2123,6 +2164,7 @@ impl TimelinePane {
             // Volume slider (nonlinear: 0-70% slider = 0-100% volume, 70-100% slider = 100-200% volume)
             // Disabled when the user has edited the Volume automation curve beyond the default single keyframe
             let volume_response = ui.scope_builder(egui::UiBuilder::new().max_rect(volume_slider_rect), |ui| {
+                ui.spacing_mut().slider_width = slider_width;
                 // Map volume (0.0-2.0) to slider position (0.0-1.0)
                 let slider_value = if current_volume <= 1.0 {
                     // 0.0-1.0 volume maps to 0.0-0.7 slider (70%)
@@ -2185,7 +2227,7 @@ impl TimelinePane {
             if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer_for_controls {
                 if audio_layer.audio_layer_type == lightningbeam_core::layer::AudioLayerType::Sampled {
                     let gain_slider_rect = egui::Rect::from_min_size(
-                        egui::pos2(controls_right - slider_width, controls_top + 22.0),
+                        egui::pos2(controls_right - slider_width, volume_slider_rect.max.y + 4.0),
                         egui::vec2(slider_width, 16.0),
                     );
                     let current_gain = audio_layer.layer.input_gain;
@@ -2215,7 +2257,7 @@ impl TimelinePane {
 
                     // Label
                     let label_rect = egui::Rect::from_min_size(
-                        egui::pos2(gain_slider_rect.min.x - 26.0, controls_top + 22.0),
+                        egui::pos2(gain_slider_rect.min.x - 26.0, volume_slider_rect.max.y + 4.0),
                         egui::vec2(24.0, 16.0),
                     );
                     ui.painter().text(
