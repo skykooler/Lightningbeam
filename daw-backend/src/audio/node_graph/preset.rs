@@ -100,6 +100,16 @@ fn default_version() -> u32 {
     1
 }
 
+/// Serialized keyframe for AutomationInput nodes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedKeyframe {
+    pub time: f64,
+    pub value: f32,
+    pub interpolation: String,
+    pub ease_out: (f32, f32),
+    pub ease_in: (f32, f32),
+}
+
 /// Serialized node representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedNode {
@@ -141,6 +151,14 @@ pub struct SerializedNode {
     /// Allows the UI to display actual track names on the node's output ports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub port_names: Vec<String>,
+
+    /// For AutomationInput nodes: user-visible display name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automation_display_name: Option<String>,
+
+    /// For AutomationInput nodes: saved keyframes
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automation_keyframes: Vec<SerializedKeyframe>,
 }
 
 /// Serialized group definition (frontend-only visual grouping, stored opaquely by backend)
@@ -239,6 +257,8 @@ impl SerializedNode {
             nam_model_path: None,
             num_ports: None,
             port_names: Vec::new(),
+            automation_display_name: None,
+            automation_keyframes: Vec::new(),
         }
     }
 

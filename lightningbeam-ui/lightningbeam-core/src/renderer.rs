@@ -1449,7 +1449,7 @@ fn render_vector_graph_cpu(
         }
 
         // Image fill — decode to Pixmap and use as a Pattern shader
-        if let Some(image_asset_id) = face.image_fill {
+        if let Some(image_asset_id) = fill.image_fill {
             if let Some(asset) = document.get_image_asset(&image_asset_id) {
                 if let Some(img_pixmap) = image_cache.get_or_decode_cpu(asset) {
                     let pattern = tiny_skia::Pattern::new(

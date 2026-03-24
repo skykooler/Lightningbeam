@@ -777,7 +777,7 @@ impl NodeTemplateTrait for NodeTemplate {
             NodeTemplate::Pan => {
                 graph.add_input_param(node_id, "Audio In".into(), DataType::Audio, ValueType::float(0.0), InputParamKind::ConnectionOnly, true);
                 graph.add_input_param(node_id, "Pan".into(), DataType::CV,
-                    ValueType::float_param(0.0, -1.0, 1.0, "", 0, None), InputParamKind::ConstantOnly, true);
+                    ValueType::float_param(0.0, -1.0, 1.0, "", 0, None), InputParamKind::ConnectionOrConstant, true);
                 graph.add_output_param(node_id, "Audio Out".into(), DataType::Audio);
             }
             NodeTemplate::RingModulator => {

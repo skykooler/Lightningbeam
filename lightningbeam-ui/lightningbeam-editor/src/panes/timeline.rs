@@ -2000,7 +2000,22 @@ impl TimelinePane {
             );
 
             // Get layer ID and current property values from the layer we already have
-            let current_volume = layer_for_controls.volume();
+            // Check if there's a Volume automation lane; use it to drive the slider
+            let volume_auto_info = self.automation_cache.get(&layer_id)
+                .and_then(|lanes| lanes.iter().find(|l| l.name == "Volume"))
+                .map(|l| (l.node_id, l.keyframes.clone()));
+
+            // Classify the volume automation state
+            let (volume_auto_node_id, volume_auto_value, volume_is_automated) =
+                match &volume_auto_info {
+                    None => (None, None, false),
+                    Some((nid, kfs)) if kfs.len() == 1 && (kfs[0].time - 0.0).abs() < 0.001 => {
+                        (Some(*nid), Some(kfs[0].value as f64), false)
+                    }
+                    Some((nid, _)) => (Some(*nid), None, true),
+                };
+
+            let current_volume = volume_auto_value.unwrap_or_else(|| layer_for_controls.volume());
             let is_muted = layer_for_controls.muted();
             let is_soloed = layer_for_controls.soloed();
             let is_locked = layer_for_controls.locked();
@@ -2106,6 +2121,7 @@ impl TimelinePane {
             }
 
             // Volume slider (nonlinear: 0-70% slider = 0-100% volume, 70-100% slider = 100-200% volume)
+            // Disabled when the user has edited the Volume automation curve beyond the default single keyframe
             let volume_response = ui.scope_builder(egui::UiBuilder::new().max_rect(volume_slider_rect), |ui| {
                 // Map volume (0.0-2.0) to slider position (0.0-1.0)
                 let slider_value = if current_volume <= 1.0 {
@@ -2116,11 +2132,11 @@ impl TimelinePane {
                     0.7 + (current_volume - 1.0) * 0.3
                 };
 
-                let mut temp_slider_value = slider_value;
+                let mut temp_slider_value = slider_value as f32;
                 let slider = egui::Slider::new(&mut temp_slider_value, 0.0..=1.0)
                     .show_value(false);
 
-                let response = ui.add(slider);
+                let response = ui.add_enabled(!volume_is_automated, slider);
                 (response, temp_slider_value)
             }).inner;
 
@@ -2128,7 +2144,7 @@ impl TimelinePane {
             if volume_response.0.dragged() || volume_response.0.has_focus() {
                 self.layer_control_clicked = true;
             }
-            if volume_response.0.changed() {
+            if volume_response.0.changed() && !volume_is_automated {
                 self.layer_control_clicked = true;
                 // Map slider position (0.0-1.0) back to volume (0.0-2.0)
                 let new_volume = if volume_response.1 <= 0.7 {
@@ -2139,12 +2155,30 @@ impl TimelinePane {
                     1.0 + (volume_response.1 - 0.7) / 0.3
                 };
 
-                pending_actions.push(Box::new(
-                    lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                if let Some(node_id) = volume_auto_node_id {
+                    // Route through automation: update the t=0 keyframe
+                    self.pending_automation_actions.push(AutomationLaneAction::AddKeyframe {
                         layer_id,
-                        lightningbeam_core::actions::LayerProperty::Volume(new_volume),
-                    )
-                ));
+                        node_id,
+                        time: 0.0,
+                        value: new_volume,
+                    });
+                    // Optimistic cache update so slider feels immediate
+                    if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
+                        if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
+                            if let Some(kf) = lane.keyframes.iter_mut().find(|k| k.time < 0.001) {
+                                kf.value = new_volume;
+                            }
+                        }
+                    }
+                } else {
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                            layer_id,
+                            lightningbeam_core::actions::LayerProperty::Volume(new_volume as f64),
+                        )
+                    ));
+                }
             }
 
             // Input gain slider for sampled audio layers (below volume slider)
@@ -5161,15 +5195,19 @@ impl PaneRenderer for TimelinePane {
                                 // Optimistic cache update
                                 if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
                                     if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
-                                        let new_kf = crate::curve_editor::CurvePoint {
-                                            time,
-                                            value,
-                                            interpolation: crate::curve_editor::CurveInterpolation::Linear,
-                                            ease_out: (0.0, 0.0),
-                                            ease_in: (0.0, 0.0),
-                                        };
-                                        lane.keyframes.push(new_kf);
-                                        lane.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+                                        // Replace existing keyframe at same time, or insert new one
+                                        if let Some(existing) = lane.keyframes.iter_mut().find(|k| (k.time - time).abs() < 0.001) {
+                                            existing.value = value;
+                                        } else {
+                                            lane.keyframes.push(crate::curve_editor::CurvePoint {
+                                                time,
+                                                value,
+                                                interpolation: crate::curve_editor::CurveInterpolation::Linear,
+                                                ease_out: (0.0, 0.0),
+                                                ease_in: (0.0, 0.0),
+                                            });
+                                            lane.keyframes.sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+                                        }
                                     }
                                 }
                             }

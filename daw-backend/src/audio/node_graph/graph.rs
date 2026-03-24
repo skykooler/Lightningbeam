@@ -1009,6 +1009,29 @@ impl AudioGraph {
                     }
                 }
 
+                // For AutomationInput nodes, serialize display name and keyframes
+                if node.node_type() == "AutomationInput" {
+                    use crate::audio::node_graph::nodes::{AutomationInputNode, InterpolationType};
+                    use crate::audio::node_graph::preset::SerializedKeyframe;
+                    if let Some(auto_node) = node.as_any().downcast_ref::<AutomationInputNode>() {
+                        serialized.automation_display_name = Some(auto_node.display_name().to_string());
+                        serialized.automation_keyframes = auto_node.keyframes().iter().map(|kf| {
+                            SerializedKeyframe {
+                                time: kf.time,
+                                value: kf.value,
+                                interpolation: match kf.interpolation {
+                                    InterpolationType::Linear => "linear",
+                                    InterpolationType::Bezier => "bezier",
+                                    InterpolationType::Step   => "step",
+                                    InterpolationType::Hold   => "hold",
+                                }.to_string(),
+                                ease_out: kf.ease_out,
+                                ease_in: kf.ease_in,
+                            }
+                        }).collect();
+                    }
+                }
+
                 // For AmpSim nodes, serialize the model path
                 if node.node_type() == "AmpSim" {
                     use crate::audio::node_graph::nodes::AmpSimNode;
@@ -1316,6 +1339,35 @@ impl AudioGraph {
                             match &result {
                                 Ok(()) => eprintln!("[AmpSim] Preset: model loaded successfully"),
                                 Err(e) => eprintln!("[AmpSim] Preset: failed to load NAM model: {}", e),
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Restore AutomationInput display name and keyframes
+            if serialized_node.node_type == "AutomationInput" {
+                use crate::audio::node_graph::nodes::{AutomationInputNode, AutomationKeyframe, InterpolationType};
+                if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
+                    if let Some(auto_node) = graph_node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
+                        if let Some(ref name) = serialized_node.automation_display_name {
+                            auto_node.set_display_name(name.clone());
+                        }
+                        if !serialized_node.automation_keyframes.is_empty() {
+                            auto_node.clear_keyframes();
+                            for kf in &serialized_node.automation_keyframes {
+                                auto_node.add_keyframe(AutomationKeyframe {
+                                    time: kf.time,
+                                    value: kf.value,
+                                    interpolation: match kf.interpolation.as_str() {
+                                        "bezier" => InterpolationType::Bezier,
+                                        "step"   => InterpolationType::Step,
+                                        "hold"   => InterpolationType::Hold,
+                                        _        => InterpolationType::Linear,
+                                    },
+                                    ease_out: kf.ease_out,
+                                    ease_in: kf.ease_in,
+                                });
                             }
                         }
                     }

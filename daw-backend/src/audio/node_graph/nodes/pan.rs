@@ -113,10 +113,8 @@ impl AudioNode for PanNode {
         let frames_to_process = frames.min(output_frames);
 
         for frame in 0..frames_to_process {
-            // Pan CV input: when connected, replaces parameter; when unconnected, uses parameter
-            // CV is in 0-1 range, mapped to -1 to +1 pan range
-            let cv_raw = cv_input_or_default(inputs, 1, frame, (self.pan + 1.0) * 0.5);
-            let pan = (cv_raw * 2.0 - 1.0).clamp(-1.0, 1.0);
+            // Pan CV input: -1..+1 directly (0 = center), defaults to parameter value when unconnected
+            let pan = cv_input_or_default(inputs, 1, frame, self.pan).clamp(-1.0, 1.0);
 
             // Calculate gains using constant-power panning law
             let angle = (pan + 1.0) * 0.5 * PI / 2.0;

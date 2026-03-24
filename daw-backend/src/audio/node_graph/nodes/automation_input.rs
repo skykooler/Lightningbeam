@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
 use crate::audio::midi::MidiEvent;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
@@ -63,12 +63,17 @@ impl AutomationInputNode {
             NodePort::new("CV Out", SignalType::CV, 0),
         ];
 
+        let parameters = vec![
+            Parameter::new(0, "Min", f32::NEG_INFINITY, f32::INFINITY, -1.0, ParameterUnit::Generic),
+            Parameter::new(1, "Max", f32::NEG_INFINITY, f32::INFINITY,  1.0, ParameterUnit::Generic),
+        ];
+
         Self {
             name: name.clone(),
             display_name: "Automation".to_string(),
             keyframes: vec![AutomationKeyframe::new(0.0, 0.0)],
             outputs,
-            parameters: Vec::new(),
+            parameters,
             playback_time: Arc::new(RwLock::new(0.0)),
             value_min: -1.0,
             value_max: 1.0,
@@ -221,12 +226,20 @@ impl AudioNode for AutomationInputNode {
         &self.parameters
     }
 
-    fn set_parameter(&mut self, _id: u32, _value: f32) {
-        // No parameters
+    fn set_parameter(&mut self, id: u32, value: f32) {
+        match id {
+            0 => self.value_min = value,
+            1 => self.value_max = value,
+            _ => {}
+        }
     }
 
-    fn get_parameter(&self, _id: u32) -> f32 {
-        0.0
+    fn get_parameter(&self, id: u32) -> f32 {
+        match id {
+            0 => self.value_min,
+            1 => self.value_max,
+            _ => 0.0,
+        }
     }
 
     fn process(
