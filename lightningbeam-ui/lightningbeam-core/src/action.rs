@@ -120,6 +120,17 @@ pub trait Action: Send {
     fn midi_events_after_rollback(&self) -> Option<(u32, &[daw_backend::audio::midi::MidiEvent])> {
         None
     }
+
+    /// Return MIDI event data for multiple clips after execute/redo (e.g. BPM change).
+    /// Each element is (midi_clip_id, events). Default: empty.
+    fn all_midi_events_after_execute(&self) -> Vec<(u32, Vec<daw_backend::audio::midi::MidiEvent>)> {
+        Vec::new()
+    }
+
+    /// Return MIDI event data for multiple clips after rollback/undo.
+    fn all_midi_events_after_rollback(&self) -> Vec<(u32, Vec<daw_backend::audio::midi::MidiEvent>)> {
+        Vec::new()
+    }
 }
 
 /// Action executor that wraps the document and manages undo/redo
@@ -299,6 +310,16 @@ impl ActionExecutor {
     /// Get full MIDI event data from the last action on the redo stack (after undo).
     pub fn last_redo_midi_events(&self) -> Option<(u32, &[daw_backend::audio::midi::MidiEvent])> {
         self.redo_stack.last().and_then(|a| a.midi_events_after_rollback())
+    }
+
+    /// Get multi-clip MIDI event data from the last undo stack action (after redo).
+    pub fn last_undo_all_midi_events(&self) -> Vec<(u32, Vec<daw_backend::audio::midi::MidiEvent>)> {
+        self.undo_stack.last().map(|a| a.all_midi_events_after_execute()).unwrap_or_default()
+    }
+
+    /// Get multi-clip MIDI event data from the last redo stack action (after undo).
+    pub fn last_redo_all_midi_events(&self) -> Vec<(u32, Vec<daw_backend::audio::midi::MidiEvent>)> {
+        self.redo_stack.last().map(|a| a.all_midi_events_after_rollback()).unwrap_or_default()
     }
 
     /// Get the description of the next action to redo

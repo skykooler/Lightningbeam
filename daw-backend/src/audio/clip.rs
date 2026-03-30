@@ -15,6 +15,7 @@ pub type ClipId = AudioClipInstanceId;
 /// ## Timing Model
 /// - `internal_start` / `internal_end`: Define the region of the source audio to play (trimming)
 /// - `external_start` / `external_duration`: Define where the clip appears on the timeline and how long
+/// - `*_beats` / `*_frames`: Derived representations for Measures/Frames mode display
 ///
 /// ## Looping
 /// If `external_duration` is greater than `internal_end - internal_start`,
@@ -26,13 +27,21 @@ pub struct AudioClipInstance {
 
     /// Start position within the audio content (seconds)
     pub internal_start: f64,
+    #[serde(default)] pub internal_start_beats: f64,
+    #[serde(default)] pub internal_start_frames: f64,
     /// End position within the audio content (seconds)
     pub internal_end: f64,
+    #[serde(default)] pub internal_end_beats: f64,
+    #[serde(default)] pub internal_end_frames: f64,
 
     /// Start position on the timeline (seconds)
     pub external_start: f64,
+    #[serde(default)] pub external_start_beats: f64,
+    #[serde(default)] pub external_start_frames: f64,
     /// Duration on the timeline (seconds) - can be longer than internal duration for looping
     pub external_duration: f64,
+    #[serde(default)] pub external_duration_beats: f64,
+    #[serde(default)] pub external_duration_frames: f64,
 
     /// Clip-level gain
     pub gain: f32,
@@ -62,9 +71,17 @@ impl AudioClipInstance {
             id,
             audio_pool_index,
             internal_start,
+            internal_start_beats: 0.0,
+            internal_start_frames: 0.0,
             internal_end,
+            internal_end_beats: 0.0,
+            internal_end_frames: 0.0,
             external_start,
+            external_start_beats: 0.0,
+            external_start_frames: 0.0,
             external_duration,
+            external_duration_beats: 0.0,
+            external_duration_frames: 0.0,
             gain: 1.0,
             read_ahead: None,
         }
@@ -83,9 +100,17 @@ impl AudioClipInstance {
             id,
             audio_pool_index,
             internal_start: offset,
+            internal_start_beats: 0.0,
+            internal_start_frames: 0.0,
             internal_end: offset + duration,
+            internal_end_beats: 0.0,
+            internal_end_frames: 0.0,
             external_start: start_time,
+            external_start_beats: 0.0,
+            external_start_frames: 0.0,
             external_duration: duration,
+            external_duration_beats: 0.0,
+            external_duration_frames: 0.0,
             gain: 1.0,
             read_ahead: None,
         }
@@ -146,5 +171,41 @@ impl AudioClipInstance {
     /// Set clip gain
     pub fn set_gain(&mut self, gain: f32) {
         self.gain = gain.max(0.0);
+    }
+
+    /// Populate beats/frames from the current seconds values.
+    pub fn sync_from_seconds(&mut self, bpm: f64, fps: f64) {
+        self.external_start_beats = self.external_start * bpm / 60.0;
+        self.external_start_frames = self.external_start * fps;
+        self.external_duration_beats = self.external_duration * bpm / 60.0;
+        self.external_duration_frames = self.external_duration * fps;
+        self.internal_start_beats = self.internal_start * bpm / 60.0;
+        self.internal_start_frames = self.internal_start * fps;
+        self.internal_end_beats = self.internal_end * bpm / 60.0;
+        self.internal_end_frames = self.internal_end * fps;
+    }
+
+    /// BPM changed; recompute seconds/frames from the stored beats values.
+    pub fn apply_beats(&mut self, bpm: f64, fps: f64) {
+        self.external_start = self.external_start_beats * 60.0 / bpm;
+        self.external_start_frames = self.external_start * fps;
+        self.external_duration = self.external_duration_beats * 60.0 / bpm;
+        self.external_duration_frames = self.external_duration * fps;
+        self.internal_start = self.internal_start_beats * 60.0 / bpm;
+        self.internal_start_frames = self.internal_start * fps;
+        self.internal_end = self.internal_end_beats * 60.0 / bpm;
+        self.internal_end_frames = self.internal_end * fps;
+    }
+
+    /// FPS changed; recompute seconds/beats from the stored frames values.
+    pub fn apply_frames(&mut self, fps: f64, bpm: f64) {
+        self.external_start = self.external_start_frames / fps;
+        self.external_start_beats = self.external_start * bpm / 60.0;
+        self.external_duration = self.external_duration_frames / fps;
+        self.external_duration_beats = self.external_duration * bpm / 60.0;
+        self.internal_start = self.internal_start_frames / fps;
+        self.internal_start_beats = self.internal_start * bpm / 60.0;
+        self.internal_end = self.internal_end_frames / fps;
+        self.internal_end_beats = self.internal_end * bpm / 60.0;
     }
 }

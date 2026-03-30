@@ -610,11 +610,23 @@ pub struct ClipInstance {
     /// This is the external positioning - where the instance appears on the timeline
     /// Default: 0.0 (start at beginning of layer)
     pub timeline_start: f64,
+    /// timeline_start in beats (quarter-note beats); derived from timeline_start
+    #[serde(default)]
+    pub timeline_start_beats: f64,
+    /// timeline_start in frames; derived from timeline_start
+    #[serde(default)]
+    pub timeline_start_frames: f64,
 
     /// How long this instance appears on the timeline (in seconds)
     /// If timeline_duration > (trim_end - trim_start), the trimmed content will loop
     /// Default: None (use trimmed clip duration, no looping)
     pub timeline_duration: Option<f64>,
+    /// timeline_duration in beats; derived from timeline_duration
+    #[serde(default)]
+    pub timeline_duration_beats: Option<f64>,
+    /// timeline_duration in frames; derived from timeline_duration
+    #[serde(default)]
+    pub timeline_duration_frames: Option<f64>,
 
     /// Trim start: offset into the clip's internal content (in seconds)
     /// Allows trimming the beginning of the clip
@@ -623,11 +635,23 @@ pub struct ClipInstance {
     /// - For vector: offset into the animation timeline
     /// Default: 0.0 (start at beginning of clip)
     pub trim_start: f64,
+    /// trim_start in beats; derived from trim_start
+    #[serde(default)]
+    pub trim_start_beats: f64,
+    /// trim_start in frames; derived from trim_start
+    #[serde(default)]
+    pub trim_start_frames: f64,
 
     /// Trim end: offset into the clip's internal content (in seconds)
     /// Allows trimming the end of the clip
     /// Default: None (use full clip duration)
     pub trim_end: Option<f64>,
+    /// trim_end in beats; derived from trim_end
+    #[serde(default)]
+    pub trim_end_beats: Option<f64>,
+    /// trim_end in frames; derived from trim_end
+    #[serde(default)]
+    pub trim_end_frames: Option<f64>,
 
     /// Playback speed multiplier
     /// 1.0 = normal speed, 0.5 = half speed, 2.0 = double speed
@@ -696,9 +720,17 @@ impl ClipInstance {
             opacity: 1.0,
             name: None,
             timeline_start: 0.0,
+            timeline_start_beats: 0.0,
+            timeline_start_frames: 0.0,
             timeline_duration: None,
+            timeline_duration_beats: None,
+            timeline_duration_frames: None,
             trim_start: 0.0,
+            trim_start_beats: 0.0,
+            trim_start_frames: 0.0,
             trim_end: None,
+            trim_end_beats: None,
+            trim_end_frames: None,
             playback_speed: 1.0,
             gain: 1.0,
             loop_before: None,
@@ -714,12 +746,68 @@ impl ClipInstance {
             opacity: 1.0,
             name: None,
             timeline_start: 0.0,
+            timeline_start_beats: 0.0,
+            timeline_start_frames: 0.0,
             timeline_duration: None,
+            timeline_duration_beats: None,
+            timeline_duration_frames: None,
             trim_start: 0.0,
+            trim_start_beats: 0.0,
+            trim_start_frames: 0.0,
             trim_end: None,
+            trim_end_beats: None,
+            trim_end_frames: None,
             playback_speed: 1.0,
             gain: 1.0,
             loop_before: None,
+        }
+    }
+
+    /// Sync beats and frames from the seconds fields (call after any seconds-based write).
+    pub fn sync_from_seconds(&mut self, bpm: f64, fps: f64) {
+        self.timeline_start_beats = self.timeline_start * bpm / 60.0;
+        self.timeline_start_frames = self.timeline_start * fps;
+        self.trim_start_beats = self.trim_start * bpm / 60.0;
+        self.trim_start_frames = self.trim_start * fps;
+        self.trim_end_beats = self.trim_end.map(|v| v * bpm / 60.0);
+        self.trim_end_frames = self.trim_end.map(|v| v * fps);
+        self.timeline_duration_beats = self.timeline_duration.map(|v| v * bpm / 60.0);
+        self.timeline_duration_frames = self.timeline_duration.map(|v| v * fps);
+    }
+
+    /// Recompute seconds and frames from beats (call when BPM changes in Measures mode).
+    pub fn apply_beats(&mut self, bpm: f64, fps: f64) {
+        self.timeline_start = self.timeline_start_beats * 60.0 / bpm;
+        self.timeline_start_frames = self.timeline_start * fps;
+        self.trim_start = self.trim_start_beats * 60.0 / bpm;
+        self.trim_start_frames = self.trim_start * fps;
+        if let Some(b) = self.trim_end_beats {
+            let s = b * 60.0 / bpm;
+            self.trim_end = Some(s);
+            self.trim_end_frames = Some(s * fps);
+        }
+        if let Some(b) = self.timeline_duration_beats {
+            let s = b * 60.0 / bpm;
+            self.timeline_duration = Some(s);
+            self.timeline_duration_frames = Some(s * fps);
+        }
+    }
+
+    /// Recompute seconds and beats from frames (call when FPS changes in Frames mode).
+    pub fn apply_frames(&mut self, fps: f64, bpm: f64) {
+        self.timeline_start = self.timeline_start_frames / fps;
+        self.timeline_start_beats = self.timeline_start * bpm / 60.0;
+        self.trim_start = self.trim_start_frames / fps;
+        self.trim_start_beats = self.trim_start * bpm / 60.0;
+        if let Some(f) = self.trim_end_frames {
+            let s = f / fps;
+            self.trim_end = Some(s);
+            self.trim_end_beats = Some(s * bpm / 60.0);
+        }
+        if let Some(f) = self.timeline_duration_frames {
+            let s = f / fps;
+            self.timeline_duration = Some(s);
+            self.timeline_duration_beats = Some(s * bpm / 60.0);
         }
     }
 

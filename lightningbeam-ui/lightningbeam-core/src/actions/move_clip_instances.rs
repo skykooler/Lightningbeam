@@ -119,6 +119,9 @@ impl Action for MoveClipInstancesAction {
         // Store adjusted moves for rollback
         self.layer_moves = adjusted_moves.clone();
 
+        let bpm = document.bpm;
+        let fps = document.framerate;
+
         // Apply all adjusted moves
         for (layer_id, moves) in &adjusted_moves {
             let layer = document.get_layer_mut(layer_id)
@@ -139,6 +142,7 @@ impl Action for MoveClipInstancesAction {
                 if let Some(clip_instance) = clip_instances.iter_mut().find(|ci| ci.id == *clip_id)
                 {
                     clip_instance.timeline_start = *new;
+                    clip_instance.sync_from_seconds(bpm, fps);
                 }
             }
         }
@@ -147,6 +151,8 @@ impl Action for MoveClipInstancesAction {
     }
 
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
+        let bpm = document.bpm;
+        let fps = document.framerate;
         for (layer_id, moves) in &self.layer_moves {
             let layer = document.get_layer_mut(layer_id)
                 .ok_or_else(|| format!("Layer {} not found", layer_id))?;
@@ -166,6 +172,7 @@ impl Action for MoveClipInstancesAction {
                 if let Some(clip_instance) = clip_instances.iter_mut().find(|ci| ci.id == *clip_id)
                 {
                     clip_instance.timeline_start = *old;
+                    clip_instance.sync_from_seconds(bpm, fps);
                 }
             }
         }

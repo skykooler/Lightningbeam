@@ -222,6 +222,9 @@ pub struct TimelinePane {
 
     /// Layer currently being renamed via inline text edit (layer_id, buffer)
     renaming_layer: Option<(uuid::Uuid, String)>,
+
+    /// BPM value captured when a drag/focus-in starts (for single-undo-action on commit)
+    bpm_drag_start: Option<f64>,
 }
 
 /// Deferred recording start created during count-in pre-roll
@@ -505,11 +508,19 @@ fn build_audio_clip_cache(
                     let mut ci = ClipInstance::new(clip_id);
                     ci.id = instance_id;
                     ci.timeline_start = ac.external_start;
+                    ci.timeline_start_beats = ac.external_start_beats;
+                    ci.timeline_start_frames = ac.external_start_frames;
                     ci.trim_start = ac.internal_start;
+                    ci.trim_start_beats = ac.internal_start_beats;
+                    ci.trim_start_frames = ac.internal_start_frames;
                     ci.trim_end = Some(ac.internal_end);
+                    ci.trim_end_beats = Some(ac.internal_end_beats);
+                    ci.trim_end_frames = Some(ac.internal_end_frames);
                     let internal_dur = ac.internal_end - ac.internal_start;
                     if (ac.external_duration - internal_dur).abs() > 1e-9 {
                         ci.timeline_duration = Some(ac.external_duration);
+                        ci.timeline_duration_beats = Some(ac.external_duration_beats);
+                        ci.timeline_duration_frames = Some(ac.external_duration_frames);
                     }
                     ci.gain = ac.gain;
                     instances.push(ci);
@@ -527,11 +538,19 @@ fn build_audio_clip_cache(
                     let mut ci = ClipInstance::new(clip_id);
                     ci.id = instance_id;
                     ci.timeline_start = mc.external_start;
+                    ci.timeline_start_beats = mc.external_start_beats;
+                    ci.timeline_start_frames = mc.external_start_frames;
                     ci.trim_start = mc.internal_start;
+                    ci.trim_start_beats = mc.internal_start_beats;
+                    ci.trim_start_frames = mc.internal_start_frames;
                     ci.trim_end = Some(mc.internal_end);
+                    ci.trim_end_beats = Some(mc.internal_end_beats);
+                    ci.trim_end_frames = Some(mc.internal_end_frames);
                     let internal_dur = mc.internal_end - mc.internal_start;
                     if (mc.external_duration - internal_dur).abs() > 1e-9 {
                         ci.timeline_duration = Some(mc.external_duration);
+                        ci.timeline_duration_beats = Some(mc.external_duration_beats);
+                        ci.timeline_duration_frames = Some(mc.external_duration_frames);
                     }
                     instances.push(ci);
                 }
@@ -684,6 +703,7 @@ impl TimelinePane {
             metronome_icon: None,
             pending_recording_start: None,
             renaming_layer: None,
+            bpm_drag_start: None,
         }
     }
 
@@ -1004,8 +1024,11 @@ impl TimelinePane {
                             *shared.recording_clips.get(&layer_id).unwrap_or(&0), 0.0);
                         let doc_clip_id = shared.action_executor.document_mut().add_audio_clip(doc_clip);
 
-                        let clip_instance = ClipInstance::new(doc_clip_id)
+                        let bpm = shared.action_executor.document().bpm;
+                        let fps = shared.action_executor.document().framerate;
+                        let mut clip_instance = ClipInstance::new(doc_clip_id)
                             .with_timeline_start(start_time);
+                        clip_instance.sync_from_seconds(bpm, fps);
 
                         if let Some(layer) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
                             if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
@@ -1340,6 +1363,61 @@ impl TimelinePane {
         ((time - self.viewport_start_time) * self.pixels_per_second as f64) as f32
     }
 
+    /// Effective display start for a clip instance.
+    ///
+    /// In Measures mode, uses `timeline_start_beats` as the canonical position so clips stay
+    /// anchored to their beat position during live BPM drag preview. Falls back to seconds
+    /// in other modes or when beat data is unavailable.
+    fn instance_display_start(&self, ci: &lightningbeam_core::clip::ClipInstance, bpm: f64) -> f64 {
+        if self.time_display_format == lightningbeam_core::document::TimelineMode::Measures
+            && (ci.timeline_start_beats.abs() > 1e-12 || ci.timeline_start == 0.0)
+        {
+            ci.timeline_start_beats * 60.0 / bpm - ci.loop_before.unwrap_or(0.0)
+        } else {
+            ci.effective_start()
+        }
+    }
+
+    /// In Measures mode, uses beats fields for the clip's on-timeline duration so the width
+    /// stays correct during live BPM drag preview. Falls back to seconds in other modes.
+    fn instance_display_duration(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_dur_secs: f64, bpm: f64) -> f64 {
+        use lightningbeam_core::document::TimelineMode;
+        if self.time_display_format == TimelineMode::Measures {
+            // Looping/extended clip: explicit timeline_duration_beats
+            if let Some(dur_beats) = ci.timeline_duration_beats {
+                if dur_beats.abs() > 1e-12 {
+                    return dur_beats * 60.0 / bpm;
+                }
+            }
+            // Non-looping: derive from trim range in beats
+            let ts_beats = ci.trim_start_beats;
+            if let Some(te_beats) = ci.trim_end_beats {
+                if te_beats.abs() > 1e-12 || ts_beats.abs() > 1e-12 {
+                    return (te_beats - ts_beats).max(0.0) * 60.0 / bpm;
+                }
+            }
+        }
+        ci.total_duration(clip_dur_secs)
+    }
+
+    /// In Measures mode, returns the clip content start (trim_start) and duration in
+    /// beat-derived display seconds, for use when rendering note overlays.
+    fn content_display_range(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_dur_secs: f64, bpm: f64) -> (f64, f64) {
+        use lightningbeam_core::document::TimelineMode;
+        if self.time_display_format == TimelineMode::Measures {
+            let ts_beats = ci.trim_start_beats;
+            if let Some(te_beats) = ci.trim_end_beats {
+                if te_beats.abs() > 1e-12 || ts_beats.abs() > 1e-12 {
+                    let start = ts_beats * 60.0 / bpm;
+                    let dur = (te_beats - ts_beats).max(0.0) * 60.0 / bpm;
+                    return (start, dur);
+                }
+            }
+        }
+        let trim_end = ci.trim_end.unwrap_or(clip_dur_secs);
+        (ci.trim_start, (trim_end - ci.trim_start).max(0.0))
+    }
+
     /// Convert pixel x-coordinate to time (seconds)
     fn x_to_time(&self, x: f32) -> f64 {
         self.viewport_start_time + (x / self.pixels_per_second) as f64
@@ -1616,6 +1694,9 @@ impl TimelinePane {
 
     /// Render mini piano roll visualization for MIDI clips on timeline
     /// Shows notes modulo 12 (one octave) matching the JavaScript reference implementation
+    ///
+    /// `display_bpm`: when `Some(bpm)`, note timestamps are derived from `timestamp_beats`
+    /// so positions stay beat-anchored during live BPM drag preview.
     #[allow(clippy::too_many_arguments)]
     fn render_midi_piano_roll(
         painter: &egui::Painter,
@@ -1630,6 +1711,7 @@ impl TimelinePane {
         theme: &crate::theme::Theme,
         ctx: &egui::Context,
         faded: bool,
+        display_bpm: Option<f64>,
     ) {
         let clip_height = clip_rect.height();
         let note_height = clip_height / 12.0; // 12 semitones per octave
@@ -1637,6 +1719,17 @@ impl TimelinePane {
         // Get note color from theme CSS (fallback to black)
         let note_style = theme.style(".timeline-midi-note", ctx);
         let note_color = note_style.background_color().unwrap_or(egui::Color32::BLACK);
+
+        // In Measures mode during BPM drag, derive display time from beats so notes
+        // stay anchored to their beat positions.
+        let event_display_time = |ev: &daw_backend::audio::midi::MidiEvent| -> f64 {
+            if let Some(bpm) = display_bpm {
+                if ev.timestamp_beats.abs() > 1e-12 || ev.timestamp == 0.0 {
+                    return ev.timestamp_beats * 60.0 / bpm;
+                }
+            }
+            ev.timestamp
+        };
 
         // Build a map of active notes (note_number -> note_on_timestamp)
         // to calculate durations when we encounter note-offs
@@ -1646,10 +1739,10 @@ impl TimelinePane {
         // First pass: pair note-ons with note-offs to calculate durations
         for event in events {
             if event.is_note_on() {
-                let (note_number, timestamp) = (event.data1, event.timestamp);
+                let (note_number, timestamp) = (event.data1, event_display_time(event));
                 active_notes.insert(note_number, timestamp);
             } else if event.is_note_off() {
-                let (note_number, timestamp) = (event.data1, event.timestamp);
+                let (note_number, timestamp) = (event.data1, event_display_time(event));
                 if let Some(&note_on_time) = active_notes.get(&note_number) {
                     let duration = timestamp - note_on_time;
 
@@ -3120,14 +3213,15 @@ impl TimelinePane {
                 let clip_duration = effective_clip_duration(document, layer, clip_instance);
 
                 if let Some(clip_duration) = clip_duration {
-                    // Calculate effective duration accounting for trimming
-                    let mut instance_duration = clip_instance.total_duration(clip_duration);
+                    // Calculate effective duration accounting for trimming.
+                    // In Measures mode, uses beats fields so width tracks BPM during live drag.
+                    let mut instance_duration = self.instance_display_duration(clip_instance, clip_duration, document.bpm);
 
-                    // Instance positioned on the layer's timeline using timeline_start
-                    // The layer itself has start_time, so the absolute timeline position is:
-                    // layer.start_time + instance.timeline_start
+                    // Instance positioned on the layer's timeline using timeline_start.
+                    // In Measures mode, uses timeline_start_beats so clips stay at their beat
+                    // position during live BPM drag preview.
                     let _layer_data = layer.layer();
-                    let mut instance_start = clip_instance.effective_start();
+                    let mut instance_start = self.instance_display_start(clip_instance, document.bpm);
 
                     // Apply drag offset preview for selected clips with snapping
                     let is_selected = selection.contains_clip_instance(&clip_instance.id);
@@ -3148,12 +3242,13 @@ impl TimelinePane {
 
                     // Content origin: where the first "real" content iteration starts
                     // Loop iterations tile outward from this point
-                    let mut content_origin = clip_instance.timeline_start;
+                    let mut content_origin = instance_start + clip_instance.loop_before.unwrap_or(0.0);
 
-                    // Track preview trim values for waveform rendering
-                    let mut preview_trim_start = clip_instance.trim_start;
-                    let preview_trim_end_default = clip_instance.trim_end.unwrap_or(clip_duration);
-                    let mut preview_clip_duration = (preview_trim_end_default - preview_trim_start).max(0.0);
+                    // Track preview trim values for note/waveform rendering.
+                    // In Measures mode, derive from beats so they track BPM during live drag.
+                    let (base_trim_start, base_clip_duration) = self.content_display_range(clip_instance, clip_duration, document.bpm);
+                    let mut preview_trim_start = base_trim_start;
+                    let mut preview_clip_duration = base_clip_duration;
 
                     if let Some(drag_type) = self.clip_drag_state {
                         if is_selected || is_linked_to_dragged {
@@ -3408,6 +3503,11 @@ impl TimelinePane {
                                                     let iter_duration = iter_end - iter_start;
                                                     if iter_duration <= 0.0 { continue; }
 
+                                                    let note_bpm = if self.time_display_format == lightningbeam_core::document::TimelineMode::Measures {
+                                                        Some(document.bpm)
+                                                    } else {
+                                                        None
+                                                    };
                                                     Self::render_midi_piano_roll(
                                                         &painter,
                                                         clip_rect,
@@ -3421,9 +3521,15 @@ impl TimelinePane {
                                                         theme,
                                                         ui.ctx(),
                                                         si != 0, // fade non-content iterations
+                                                        note_bpm,
                                                     );
                                                 }
                                             } else {
+                                                let note_bpm = if self.time_display_format == lightningbeam_core::document::TimelineMode::Measures {
+                                                    Some(document.bpm)
+                                                } else {
+                                                    None
+                                                };
                                                 Self::render_midi_piano_roll(
                                                     &painter,
                                                     clip_rect,
@@ -3437,6 +3543,7 @@ impl TimelinePane {
                                                     theme,
                                                     ui.ctx(),
                                                     false,
+                                                    note_bpm,
                                                 );
                                             }
                                         }
@@ -5061,11 +5168,50 @@ impl PaneRenderer for TimelinePane {
                 .range(20.0..=300.0)
                 .speed(0.5)
                 .fixed_decimals(1));
+
+            // Capture start BPM on drag/focus start
+            if bpm_response.gained_focus() || bpm_response.drag_started() {
+                if self.bpm_drag_start.is_none() {
+                    self.bpm_drag_start = Some(bpm);
+                }
+            }
+
             if bpm_response.changed() {
+                // Fallback capture: if gained_focus/drag_started didn't fire (e.g. rapid input),
+                // capture start BPM on the first change before updating the document.
+                if self.bpm_drag_start.is_none() {
+                    self.bpm_drag_start = Some(bpm);
+                }
+                // Live preview: update document directly so grid reflows immediately
                 shared.action_executor.document_mut().bpm = bpm_val;
                 if let Some(controller_arc) = shared.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
                     controller.set_tempo(bpm_val as f32, (time_sig_num, time_sig_den));
+                }
+            }
+
+            // On commit, dispatch a single ChangeBpmAction (single undo entry)
+            if bpm_response.drag_stopped() || bpm_response.lost_focus() {
+                if let Some(start_bpm) = self.bpm_drag_start.take() {
+                    let new_bpm = shared.action_executor.document().bpm;
+                    if (start_bpm - new_bpm).abs() > 1e-6
+                        && self.time_display_format == lightningbeam_core::document::TimelineMode::Measures
+                    {
+                        use lightningbeam_core::actions::ChangeBpmAction;
+                        // Revert the live-preview mutation so the action owns it
+                        shared.action_executor.document_mut().bpm = start_bpm;
+                        let action = ChangeBpmAction::new(
+                            start_bpm,
+                            new_bpm,
+                            shared.action_executor.document(),
+                            shared.midi_event_cache,
+                        );
+                        // Immediately update midi_event_cache for rendering
+                        for (clip_id, events) in action.new_midi_events() {
+                            shared.midi_event_cache.insert(clip_id, events.clone());
+                        }
+                        shared.pending_actions.push(Box::new(action));
+                    }
                 }
             }
 

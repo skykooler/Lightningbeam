@@ -4,6 +4,8 @@
 //! through the action system.
 
 pub mod add_clip_instance;
+pub mod change_bpm;
+pub mod change_fps;
 pub mod add_effect;
 pub mod add_layer;
 pub mod add_shape;
@@ -70,3 +72,5 @@ pub use raster_stroke::RasterStrokeAction;
 pub use raster_fill::RasterFillAction;
 pub use move_layer::MoveLayerAction;
 pub use set_fill_paint::SetFillPaintAction;
+pub use change_bpm::ChangeBpmAction;
+pub use change_fps::ChangeFpsAction;

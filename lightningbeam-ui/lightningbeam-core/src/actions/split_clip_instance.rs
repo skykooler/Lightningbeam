@@ -179,6 +179,7 @@ impl Action for SplitClipInstanceAction {
         }
 
         self.new_instance_id = Some(right_instance.id);
+        right_instance.sync_from_seconds(document.bpm, document.framerate);
 
         // Now modify the original (left) instance and add the new (right) instance
         let layer_mut = document
@@ -235,6 +236,21 @@ impl Action for SplitClipInstanceAction {
             }
             AnyLayer::Raster(_) => {
                 return Err("Cannot split clip instances on group layers".to_string());
+            }
+        }
+
+        // Sync derived fields on the left (original) instance
+        let (bpm, fps) = (document.bpm, document.framerate);
+        if let Some(layer) = document.get_layer_mut(&self.layer_id) {
+            let cis: &mut Vec<crate::clip::ClipInstance> = match layer {
+                AnyLayer::Vector(vl) => &mut vl.clip_instances,
+                AnyLayer::Audio(al) => &mut al.clip_instances,
+                AnyLayer::Video(vl) => &mut vl.clip_instances,
+                AnyLayer::Effect(el) => &mut el.clip_instances,
+                _ => return { self.executed = true; Ok(()) },
+            };
+            if let Some(inst) = cis.iter_mut().find(|ci| ci.id == self.instance_id) {
+                inst.sync_from_seconds(bpm, fps);
             }
         }
 

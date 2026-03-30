@@ -42,6 +42,8 @@ pub struct InfopanelPane {
     selected_shape_gradient_stop: Option<usize>,
     /// Selected stop index for gradient editor in tool section (gradient tool).
     selected_tool_gradient_stop: Option<usize>,
+    /// FPS value captured when a drag/focus-in starts (for single-undo-action on commit)
+    fps_drag_start: Option<f64>,
 }
 
 impl InfopanelPane {
@@ -58,6 +60,7 @@ impl InfopanelPane {
             brush_preview_textures: Vec::new(),
             selected_shape_gradient_stop: None,
             selected_tool_gradient_stop: None,
+            fps_drag_start: None,
         }
     }
 }
@@ -906,21 +909,20 @@ impl InfopanelPane {
     }
 
     /// Render document settings section (shown when nothing is focused)
-    fn render_document_section(&self, ui: &mut Ui, path: &NodePath, shared: &mut SharedPaneState) {
+    fn render_document_section(&mut self, ui: &mut Ui, path: &NodePath, shared: &mut SharedPaneState) {
         egui::CollapsingHeader::new("Document")
             .id_salt(("document", path))
             .default_open(true)
             .show(ui, |ui| {
                 ui.add_space(4.0);
 
-                let document = shared.action_executor.document();
-
-                // Get current values for editing
-                let mut width = document.width;
-                let mut height = document.height;
-                let mut duration = document.duration;
-                let mut framerate = document.framerate;
-                let layer_count = document.root.children.len();
+                // Extract all needed values up front, then drop the borrow before closures
+                // that need mutable access to shared or self.
+                let (mut width, mut height, mut duration, mut framerate, layer_count, background_color) = {
+                    let document = shared.action_executor.document();
+                    (document.width, document.height, document.duration, document.framerate,
+                     document.root.children.len(), document.background_color)
+                };
 
                 // Canvas width
                 ui.horizontal(|ui| {
@@ -966,24 +968,54 @@ impl InfopanelPane {
                 // Framerate
                 ui.horizontal(|ui| {
                     ui.label("Framerate:");
-                    if ui
-                        .add(
-                            DragValue::new(&mut framerate)
-                                .speed(1.0)
-                                .range(1.0..=120.0)
-                                .suffix(" fps"),
-                        )
-                        .changed()
-                    {
-                        let action = SetDocumentPropertiesAction::set_framerate(framerate);
-                        shared.pending_actions.push(Box::new(action));
+                    let fps_response = ui.add(
+                        DragValue::new(&mut framerate)
+                            .speed(1.0)
+                            .range(1.0..=120.0)
+                            .suffix(" fps"),
+                    );
+
+                    if fps_response.gained_focus() || fps_response.drag_started() {
+                        if self.fps_drag_start.is_none() {
+                            self.fps_drag_start = Some(framerate);
+                        }
+                    }
+
+                    if fps_response.changed() {
+                        // Live preview: update document directly
+                        shared.action_executor.document_mut().framerate = framerate;
+                    }
+
+                    if fps_response.drag_stopped() || fps_response.lost_focus() {
+                        if let Some(start_fps) = self.fps_drag_start.take() {
+                            let new_fps = shared.action_executor.document().framerate;
+                            let timeline_mode = shared.action_executor.document().timeline_mode;
+                            if (start_fps - new_fps).abs() > 1e-9
+                                && timeline_mode == lightningbeam_core::document::TimelineMode::Frames
+                            {
+                                use lightningbeam_core::actions::ChangeFpsAction;
+                                // Revert live-preview so the action owns it
+                                shared.action_executor.document_mut().framerate = start_fps;
+                                let action = ChangeFpsAction::new(
+                                    start_fps,
+                                    new_fps,
+                                    shared.action_executor.document(),
+                                );
+                                shared.pending_actions.push(Box::new(action));
+                            } else if (start_fps - new_fps).abs() > 1e-9 {
+                                // Not in Frames mode — use simple property action (no stretching)
+                                shared.action_executor.document_mut().framerate = start_fps;
+                                let action = SetDocumentPropertiesAction::set_framerate(new_fps);
+                                shared.pending_actions.push(Box::new(action));
+                            }
+                        }
                     }
                 });
 
                 // Background color (with alpha)
                 ui.horizontal(|ui| {
                     ui.label("Background:");
-                    let bg = document.background_color;
+                    let bg = background_color;
                     let mut color = [bg.r, bg.g, bg.b, bg.a];
                     if ui.color_edit_button_srgba_unmultiplied(&mut color).changed() {
                         let action = SetDocumentPropertiesAction::set_background_color(

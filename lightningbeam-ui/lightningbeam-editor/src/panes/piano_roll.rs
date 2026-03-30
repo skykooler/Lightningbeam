@@ -770,7 +770,7 @@ impl PianoRollPane {
             };
             let timestamp = note_start + t * note_duration;
             let (lsb, msb) = encode_bend(normalized);
-            events.push(MidiEvent { timestamp, status: 0xE0 | channel, data1: lsb, data2: msb });
+            events.push(MidiEvent::new(timestamp, 0xE0 | channel, lsb, msb));
         }
         events
     }
@@ -1568,15 +1568,20 @@ impl PianoRollPane {
                             let combined = (existing_norm[i] + zone_norm).clamp(-1.0, 1.0);
                             let (lsb, msb) = encode_bend(combined);
                             let ts = note_start + i as f64 / num_steps as f64 * note_duration;
-                            new_events.push(daw_backend::audio::midi::MidiEvent { timestamp: ts, status: 0xE0 | target_channel, data1: lsb, data2: msb });
+                            new_events.push(daw_backend::audio::midi::MidiEvent::new(ts, 0xE0 | target_channel, lsb, msb));
                         }
                         // For End zone: reset just after note ends so it doesn't bleed into next note
                         if zone == PitchBendZone::End {
                             let (lsb, msb) = encode_bend(0.0);
-                            new_events.push(daw_backend::audio::midi::MidiEvent { timestamp: note_start + note_duration + 0.005, status: 0xE0 | target_channel, data1: lsb, data2: msb });
+                            new_events.push(daw_backend::audio::midi::MidiEvent::new(note_start + note_duration + 0.005, 0xE0 | target_channel, lsb, msb));
                         }
 
                         new_events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
+                        {
+                            let doc = shared.action_executor.document();
+                            let bpm = doc.bpm; let fps = doc.framerate;
+                            for ev in &mut new_events { ev.sync_from_seconds(bpm, fps); }
+                        }
                         self.push_events_action("Set pitch bend", clip_id, old_events, new_events.clone(), shared);
                         shared.midi_event_cache.insert(clip_id, new_events);
                     }
@@ -2359,15 +2364,17 @@ impl PaneRenderer for PianoRollPane {
                                                 !(is_cc1 && at_start)
                                             });
                                             if new_cc1 > 0 {
-                                                new_events.push(daw_backend::audio::midi::MidiEvent {
-                                                    timestamp: sn.start_time,
-                                                    status: 0xB0 | sn.channel,
-                                                    data1: 1,
-                                                    data2: new_cc1,
-                                                });
+                                                new_events.push(daw_backend::audio::midi::MidiEvent::new(
+                                                    sn.start_time, 0xB0 | sn.channel, 1, new_cc1,
+                                                ));
                                             }
                                         }
                                         new_events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
+                                        {
+                                            let doc = shared.action_executor.document();
+                                            let bpm = doc.bpm; let fps = doc.framerate;
+                                            for ev in &mut new_events { ev.sync_from_seconds(bpm, fps); }
+                                        }
                                         self.push_events_action("Set modulation", clip_id, old_events, new_events.clone(), shared);
                                         shared.midi_event_cache.insert(clip_id, new_events);
                                     }

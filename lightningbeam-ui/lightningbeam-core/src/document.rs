@@ -619,6 +619,56 @@ impl Document {
         layers
     }
 
+    /// Migrate old documents: compute beats/frames from seconds for any ClipInstance whose
+    /// derived fields are still zero (i.e., documents saved before triple-representation).
+    /// Call once after loading a document.
+    pub fn sync_all_clip_positions(&mut self) {
+        let bpm = self.bpm;
+        let fps = self.framerate;
+
+        fn sync_list(list: &mut [crate::layer::AnyLayer], bpm: f64, fps: f64) {
+            for layer in list.iter_mut() {
+                match layer {
+                    crate::layer::AnyLayer::Vector(vl) => {
+                        for ci in &mut vl.clip_instances {
+                            if ci.timeline_start_beats == 0.0 { ci.sync_from_seconds(bpm, fps); }
+                        }
+                    }
+                    crate::layer::AnyLayer::Audio(al) => {
+                        for ci in &mut al.clip_instances {
+                            if ci.timeline_start_beats == 0.0 { ci.sync_from_seconds(bpm, fps); }
+                        }
+                    }
+                    crate::layer::AnyLayer::Video(vl) => {
+                        for ci in &mut vl.clip_instances {
+                            if ci.timeline_start_beats == 0.0 { ci.sync_from_seconds(bpm, fps); }
+                        }
+                    }
+                    crate::layer::AnyLayer::Effect(el) => {
+                        for ci in &mut el.clip_instances {
+                            if ci.timeline_start_beats == 0.0 { ci.sync_from_seconds(bpm, fps); }
+                        }
+                    }
+                    crate::layer::AnyLayer::Group(g) => {
+                        sync_list(&mut g.children, bpm, fps);
+                    }
+                    crate::layer::AnyLayer::Raster(_) => {}
+                }
+            }
+        }
+
+        sync_list(&mut self.root.children, bpm, fps);
+        for clip in self.vector_clips.values_mut() {
+            for node in &mut clip.layers.roots {
+                if let crate::layer::AnyLayer::Vector(vl) = &mut node.data {
+                    for ci in &mut vl.clip_instances {
+                        if ci.timeline_start_beats == 0.0 { ci.sync_from_seconds(bpm, fps); }
+                    }
+                }
+            }
+        }
+    }
+
     // === CLIP LIBRARY METHODS ===
 
     /// Add a vector clip to the library

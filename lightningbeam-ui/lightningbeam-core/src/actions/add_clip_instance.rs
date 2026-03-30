@@ -79,6 +79,8 @@ impl Action for AddClipInstanceAction {
         if let Some(valid_start) = adjusted_start {
             // Update instance to use the valid position
             self.clip_instance.timeline_start = valid_start;
+            let (bpm, fps) = (document.bpm, document.framerate);
+            self.clip_instance.sync_from_seconds(bpm, fps);
         } else {
             // No valid position found - reject the operation
             return Err("Cannot add clip: no valid position found on layer (layer is full)".to_string());

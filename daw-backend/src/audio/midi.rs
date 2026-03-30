@@ -3,6 +3,12 @@
 pub struct MidiEvent {
     /// Time position within the clip in seconds (sample-rate independent)
     pub timestamp: f64,
+    /// Time position in beats (quarter-note beats from clip start); derived from timestamp
+    #[serde(default)]
+    pub timestamp_beats: f64,
+    /// Time position in frames; derived from timestamp
+    #[serde(default)]
+    pub timestamp_frames: f64,
     /// MIDI status byte (includes channel)
     pub status: u8,
     /// First data byte (note number, CC number, etc.)
@@ -16,6 +22,8 @@ impl MidiEvent {
     pub fn new(timestamp: f64, status: u8, data1: u8, data2: u8) -> Self {
         Self {
             timestamp,
+            timestamp_beats: 0.0,
+            timestamp_frames: 0.0,
             status,
             data1,
             data2,
@@ -26,6 +34,8 @@ impl MidiEvent {
     pub fn note_on(timestamp: f64, channel: u8, note: u8, velocity: u8) -> Self {
         Self {
             timestamp,
+            timestamp_beats: 0.0,
+            timestamp_frames: 0.0,
             status: 0x90 | (channel & 0x0F),
             data1: note,
             data2: velocity,
@@ -36,10 +46,30 @@ impl MidiEvent {
     pub fn note_off(timestamp: f64, channel: u8, note: u8, velocity: u8) -> Self {
         Self {
             timestamp,
+            timestamp_beats: 0.0,
+            timestamp_frames: 0.0,
             status: 0x80 | (channel & 0x0F),
             data1: note,
             data2: velocity,
         }
+    }
+
+    /// Sync beats and frames from seconds (call after constructing or when seconds is canonical)
+    pub fn sync_from_seconds(&mut self, bpm: f64, fps: f64) {
+        self.timestamp_beats = self.timestamp * bpm / 60.0;
+        self.timestamp_frames = self.timestamp * fps;
+    }
+
+    /// Recompute seconds and frames from beats (call when BPM changes in Measures mode)
+    pub fn apply_beats(&mut self, bpm: f64, fps: f64) {
+        self.timestamp = self.timestamp_beats * 60.0 / bpm;
+        self.timestamp_frames = self.timestamp * fps;
+    }
+
+    /// Recompute seconds and beats from frames (call when FPS changes in Frames mode)
+    pub fn apply_frames(&mut self, fps: f64, bpm: f64) {
+        self.timestamp = self.timestamp_frames / fps;
+        self.timestamp_beats = self.timestamp * bpm / 60.0;
     }
 
     /// Check if this is a note on event (with non-zero velocity)
@@ -128,6 +158,7 @@ impl MidiClip {
 /// ## Timing Model
 /// - `internal_start` / `internal_end`: Define the region of the source clip to play (trimming)
 /// - `external_start` / `external_duration`: Define where the instance appears on the timeline and how long
+/// - `*_beats` / `*_frames`: Derived representations for Measures/Frames mode display
 ///
 /// ## Looping
 /// If `external_duration` is greater than `internal_end - internal_start`,
@@ -139,13 +170,21 @@ pub struct MidiClipInstance {
 
     /// Start position within the clip content (seconds)
     pub internal_start: f64,
+    #[serde(default)] pub internal_start_beats: f64,
+    #[serde(default)] pub internal_start_frames: f64,
     /// End position within the clip content (seconds)
     pub internal_end: f64,
+    #[serde(default)] pub internal_end_beats: f64,
+    #[serde(default)] pub internal_end_frames: f64,
 
     /// Start position on the timeline (seconds)
     pub external_start: f64,
+    #[serde(default)] pub external_start_beats: f64,
+    #[serde(default)] pub external_start_frames: f64,
     /// Duration on the timeline (seconds) - can be longer than internal duration for looping
     pub external_duration: f64,
+    #[serde(default)] pub external_duration_beats: f64,
+    #[serde(default)] pub external_duration_frames: f64,
 }
 
 impl MidiClipInstance {
@@ -162,9 +201,17 @@ impl MidiClipInstance {
             id,
             clip_id,
             internal_start,
+            internal_start_beats: 0.0,
+            internal_start_frames: 0.0,
             internal_end,
+            internal_end_beats: 0.0,
+            internal_end_frames: 0.0,
             external_start,
+            external_start_beats: 0.0,
+            external_start_frames: 0.0,
             external_duration,
+            external_duration_beats: 0.0,
+            external_duration_frames: 0.0,
         }
     }
 
@@ -179,9 +226,17 @@ impl MidiClipInstance {
             id,
             clip_id,
             internal_start: 0.0,
+            internal_start_beats: 0.0,
+            internal_start_frames: 0.0,
             internal_end: clip_duration,
+            internal_end_beats: 0.0,
+            internal_end_frames: 0.0,
             external_start,
+            external_start_beats: 0.0,
+            external_start_frames: 0.0,
             external_duration: clip_duration,
+            external_duration_beats: 0.0,
+            external_duration_frames: 0.0,
         }
     }
 
@@ -213,6 +268,42 @@ impl MidiClipInstance {
     /// Check if this instance overlaps with a time range
     pub fn overlaps_range(&self, range_start: f64, range_end: f64) -> bool {
         self.external_start < range_end && self.external_end() > range_start
+    }
+
+    /// Populate beats/frames from the current seconds values.
+    pub fn sync_from_seconds(&mut self, bpm: f64, fps: f64) {
+        self.external_start_beats = self.external_start * bpm / 60.0;
+        self.external_start_frames = self.external_start * fps;
+        self.external_duration_beats = self.external_duration * bpm / 60.0;
+        self.external_duration_frames = self.external_duration * fps;
+        self.internal_start_beats = self.internal_start * bpm / 60.0;
+        self.internal_start_frames = self.internal_start * fps;
+        self.internal_end_beats = self.internal_end * bpm / 60.0;
+        self.internal_end_frames = self.internal_end * fps;
+    }
+
+    /// BPM changed; recompute seconds/frames from the stored beats values.
+    pub fn apply_beats(&mut self, bpm: f64, fps: f64) {
+        self.external_start = self.external_start_beats * 60.0 / bpm;
+        self.external_start_frames = self.external_start * fps;
+        self.external_duration = self.external_duration_beats * 60.0 / bpm;
+        self.external_duration_frames = self.external_duration * fps;
+        self.internal_start = self.internal_start_beats * 60.0 / bpm;
+        self.internal_start_frames = self.internal_start * fps;
+        self.internal_end = self.internal_end_beats * 60.0 / bpm;
+        self.internal_end_frames = self.internal_end * fps;
+    }
+
+    /// FPS changed; recompute seconds/beats from the stored frames values.
+    pub fn apply_frames(&mut self, fps: f64, bpm: f64) {
+        self.external_start = self.external_start_frames / fps;
+        self.external_start_beats = self.external_start * bpm / 60.0;
+        self.external_duration = self.external_duration_frames / fps;
+        self.external_duration_beats = self.external_duration * bpm / 60.0;
+        self.internal_start = self.internal_start_frames / fps;
+        self.internal_start_beats = self.internal_start * bpm / 60.0;
+        self.internal_end = self.internal_end_frames / fps;
+        self.internal_end_beats = self.internal_end * bpm / 60.0;
     }
 
     /// Get events that should be triggered in a given timeline range

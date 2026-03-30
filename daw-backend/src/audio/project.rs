@@ -216,6 +216,46 @@ impl Project {
         self.tracks.iter().map(|(&id, node)| (id, node))
     }
 
+    /// After a BPM change, update MIDI clip durations then sync all clip beats/frames from seconds.
+    ///
+    /// `midi_durations` maps each MidiClipId to its new content duration in seconds.
+    /// Call this after the seconds positions have already been updated (e.g. via MoveClip).
+    pub fn apply_bpm_change(&mut self, bpm: f64, fps: f64, midi_durations: &[(crate::audio::midi::MidiClipId, f64)]) {
+        for (_, track) in self.tracks.iter_mut() {
+            match track {
+                crate::audio::track::TrackNode::Audio(t) => {
+                    for clip in &mut t.clips {
+                        clip.sync_from_seconds(bpm, fps);
+                    }
+                }
+                crate::audio::track::TrackNode::Midi(t) => {
+                    // Update content durations first so internal_end is correct before sync
+                    for instance in &mut t.clip_instances {
+                        if let Some(&new_dur) = midi_durations.iter()
+                            .find(|(id, _)| *id == instance.clip_id)
+                            .map(|(_, d)| d)
+                        {
+                            let old_internal_dur = instance.internal_duration();
+                            instance.internal_end = instance.internal_start + new_dur;
+                            // Scale external_duration by the same ratio (works for both looping and non-looping)
+                            if old_internal_dur > 1e-12 {
+                                instance.external_duration = instance.external_duration * new_dur / old_internal_dur;
+                            }
+                        }
+                        instance.sync_from_seconds(bpm, fps);
+                    }
+                    // Update pool clip durations
+                    for &(clip_id, new_dur) in midi_durations {
+                        if let Some(clip) = self.midi_clip_pool.get_clip_mut(clip_id) {
+                            clip.duration = new_dur;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Get oscilloscope data from a node in a track's graph
     pub fn get_oscilloscope_data(&self, track_id: TrackId, node_id: u32, sample_count: usize) -> Option<(Vec<f32>, Vec<f32>)> {
         if let Some(TrackNode::Midi(track)) = self.tracks.get(&track_id) {
