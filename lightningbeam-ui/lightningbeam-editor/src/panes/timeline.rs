@@ -5198,8 +5198,9 @@ impl PaneRenderer for TimelinePane {
                         && self.time_display_format == lightningbeam_core::document::TimelineMode::Measures
                     {
                         use lightningbeam_core::actions::ChangeBpmAction;
-                        // Revert the live-preview mutation so the action owns it
-                        shared.action_executor.document_mut().bpm = start_bpm;
+                        // document.bpm is already new_bpm from the live preview — keep it.
+                        // ChangeBpmAction::new uses the passed old/new params, not document.bpm,
+                        // so we don't need to revert (which would cause a one-frame flash).
                         let action = ChangeBpmAction::new(
                             start_bpm,
                             new_bpm,

@@ -3157,8 +3157,11 @@ impl Engine {
 
                 // Add new events from the recorded notes
                 // Timestamps are now stored in seconds (sample-rate independent)
+                let bpm = self.current_bpm;
+                let fps = self.current_fps;
                 for (start_time, note, velocity, duration) in notes.iter() {
-                    let note_on = MidiEvent::note_on(*start_time, 0, *note, *velocity);
+                    let mut note_on = MidiEvent::note_on(*start_time, 0, *note, *velocity);
+                    note_on.sync_from_seconds(bpm, fps);
 
                     eprintln!("[MIDI_RECORDING] Note {}: start_time={:.3}s, duration={:.3}s",
                               note, start_time, duration);
@@ -3167,7 +3170,8 @@ impl Engine {
 
                     // Add note off event
                     let note_off_time = *start_time + *duration;
-                    let note_off = MidiEvent::note_off(note_off_time, 0, *note, 64);
+                    let mut note_off = MidiEvent::note_off(note_off_time, 0, *note, 64);
+                    note_off.sync_from_seconds(bpm, fps);
                     clip.events.push(note_off);
                 }
 
@@ -3180,6 +3184,7 @@ impl Engine {
                     if let Some(instance) = track.clip_instances.iter_mut().find(|i| i.clip_id == clip_id) {
                         instance.internal_end = recording_duration;
                         instance.external_duration = recording_duration;
+                        instance.sync_from_seconds(bpm, fps);
                         eprintln!("[MIDI_RECORDING] Updated clip instance timing: internal_end={:.3}s, external_duration={:.3}s",
                                   instance.internal_end, instance.external_duration);
                     }
