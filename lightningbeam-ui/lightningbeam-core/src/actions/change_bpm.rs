@@ -290,12 +290,13 @@ impl Action for ChangeBpmAction {
             }
         }
 
-        // Sync beat/frame representations and rescale MIDI clip durations in the backend
+        // Sync beat/frame representations, rescale MIDI clip durations, and rescale
+        // automation keyframe times in the backend
         let fps = document.framerate;
         let midi_durations: Vec<(u32, f64)> = self.midi_snapshots.iter()
             .map(|s| (s.midi_clip_id, s.new_clip_duration))
             .collect();
-        controller.apply_bpm_change(self.new_bpm, fps, midi_durations);
+        controller.apply_bpm_change(self.old_bpm, self.new_bpm, fps, midi_durations);
 
         Ok(())
     }
@@ -337,12 +338,13 @@ impl Action for ChangeBpmAction {
             }
         }
 
-        // Sync beat/frame representations and restore MIDI clip durations in the backend
+        // Sync beat/frame representations, restore MIDI clip durations, and restore
+        // automation keyframe times in the backend
         let fps = document.framerate;
         let midi_durations: Vec<(u32, f64)> = self.midi_snapshots.iter()
             .map(|s| (s.midi_clip_id, s.old_clip_duration))
             .collect();
-        controller.apply_bpm_change(self.old_bpm, fps, midi_durations);
+        controller.apply_bpm_change(self.new_bpm, self.old_bpm, fps, midi_durations);
 
         Ok(())
     }

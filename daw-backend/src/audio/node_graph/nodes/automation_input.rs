@@ -18,6 +18,12 @@ pub enum InterpolationType {
 pub struct AutomationKeyframe {
     /// Time in seconds (absolute project time)
     pub time: f64,
+    /// Time in beats (derived; canonical in Measures mode)
+    #[serde(default)]
+    pub time_beats: f64,
+    /// Time in frames (derived; canonical in Frames mode)
+    #[serde(default)]
+    pub time_frames: f64,
     /// CV output value
     pub value: f32,
     /// Interpolation type to next keyframe
@@ -32,11 +38,31 @@ impl AutomationKeyframe {
     pub fn new(time: f64, value: f32) -> Self {
         Self {
             time,
+            time_beats: 0.0,
+            time_frames: 0.0,
             value,
             interpolation: InterpolationType::Linear,
             ease_out: (0.58, 1.0),
             ease_in: (0.42, 0.0),
         }
+    }
+
+    /// Populate beats/frames from the current seconds value.
+    pub fn sync_from_seconds(&mut self, bpm: f64, fps: f64) {
+        self.time_beats = self.time * bpm / 60.0;
+        self.time_frames = self.time * fps;
+    }
+
+    /// BPM changed; beats are canonical → recompute seconds and frames.
+    pub fn apply_beats(&mut self, bpm: f64, fps: f64) {
+        self.time = self.time_beats * 60.0 / bpm;
+        self.time_frames = self.time * fps;
+    }
+
+    /// FPS changed; frames are canonical → recompute seconds and beats.
+    pub fn apply_frames(&mut self, fps: f64, bpm: f64) {
+        self.time = self.time_frames / fps;
+        self.time_beats = self.time * bpm / 60.0;
     }
 }
 
@@ -141,6 +167,24 @@ impl AutomationInputNode {
     /// Clear all keyframes
     pub fn clear_keyframes(&mut self) {
         self.keyframes.clear();
+    }
+
+    /// Populate beats/frames on all keyframes from their current seconds values.
+    pub fn sync_keyframes_from_seconds(&mut self, bpm: f64, fps: f64) {
+        for kf in &mut self.keyframes {
+            kf.sync_from_seconds(bpm, fps);
+        }
+    }
+
+    /// BPM changed: for each keyframe, bootstrap beats from seconds (using `from_bpm`) if not yet
+    /// set, then re-derive seconds and frames from beats using `to_bpm`.
+    pub fn apply_beats_to_keyframes(&mut self, from_bpm: f64, to_bpm: f64, fps: f64) {
+        for kf in &mut self.keyframes {
+            if kf.time_beats == 0.0 && kf.time.abs() > 1e-9 {
+                kf.sync_from_seconds(from_bpm, fps);
+            }
+            kf.apply_beats(to_bpm, fps);
+        }
     }
 
     /// Evaluate curve at a specific time

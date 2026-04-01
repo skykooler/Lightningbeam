@@ -215,6 +215,8 @@ pub struct TimelinePane {
     automation_cache_generation: u64,
     /// Last seen graph_topology_generation; used to detect node additions/removals
     automation_topology_generation: u64,
+    /// Last seen BPM; automation keyframe times rescale on BPM change, so clear cache when it differs
+    automation_cache_bpm: f64,
     /// Cached metronome icon texture (loaded on first use)
     metronome_icon: Option<egui::TextureHandle>,
     /// Count-in pre-roll state: set when count-in is active, cleared when recording fires
@@ -378,6 +380,7 @@ enum AutomationLaneAction {
     AddKeyframe { layer_id: uuid::Uuid, node_id: u32, time: f64, value: f32 },
     MoveKeyframe { layer_id: uuid::Uuid, node_id: u32, old_time: f64, new_time: f64, new_value: f32, interpolation: String, ease_out: (f32, f32), ease_in: (f32, f32) },
     DeleteKeyframe { layer_id: uuid::Uuid, node_id: u32, time: f64 },
+    SetRange { layer_id: uuid::Uuid, node_id: u32, min: f32, max: f32 },
 }
 
 /// Paint a soft drop shadow around a rect using gradient meshes (bottom + right + corner).
@@ -700,6 +703,7 @@ impl TimelinePane {
             pending_automation_actions: Vec::new(),
             automation_cache_generation: u64::MAX,
             automation_topology_generation: u64::MAX,
+            automation_cache_bpm: f64::NAN,
             metronome_icon: None,
             pending_recording_start: None,
             renaming_layer: None,
@@ -1836,6 +1840,7 @@ impl TimelinePane {
         layer_to_track_map: &std::collections::HashMap<uuid::Uuid, daw_backend::TrackId>,
         track_levels: &std::collections::HashMap<daw_backend::TrackId, f32>,
         input_level: f32,
+        playback_time: f64,
     ) {
         // Background for header column
         let header_style = theme.style(".timeline-header", ui.ctx());
@@ -2146,7 +2151,11 @@ impl TimelinePane {
                     Some((nid, kfs)) if kfs.len() == 1 && (kfs[0].time - 0.0).abs() < 0.001 => {
                         (Some(*nid), Some(kfs[0].value as f64), false)
                     }
-                    Some((nid, _)) => (Some(*nid), None, true),
+                    Some((nid, kfs)) => {
+                        // Multiple keyframes — slider is read-only; show the curve value at playback pos
+                        let v = crate::curve_editor::evaluate_curve(kfs, playback_time);
+                        (Some(*nid), Some(v as f64), true)
+                    }
                 };
 
             let current_volume = volume_auto_value.unwrap_or_else(|| layer_for_controls.volume());
@@ -2292,6 +2301,16 @@ impl TimelinePane {
 
                 if let Some(node_id) = volume_auto_node_id {
                     // Route through automation: update the t=0 keyframe
+                    // Ensure range is 0–2 so the curve editor shows the correct y-axis
+                    let needs_range_update = self.automation_cache.get(&layer_id)
+                        .and_then(|lanes| lanes.iter().find(|l| l.node_id == node_id))
+                        .map(|l| (l.value_min - 0.0).abs() > 0.01 || (l.value_max - 2.0).abs() > 0.01)
+                        .unwrap_or(true);
+                    if needs_range_update {
+                        self.pending_automation_actions.push(AutomationLaneAction::SetRange {
+                            layer_id, node_id, min: 0.0, max: 2.0,
+                        });
+                    }
                     self.pending_automation_actions.push(AutomationLaneAction::AddKeyframe {
                         layer_id,
                         node_id,
@@ -2301,6 +2320,8 @@ impl TimelinePane {
                     // Optimistic cache update so slider feels immediate
                     if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
                         if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
+                            lane.value_min = 0.0;
+                            lane.value_max = 2.0;
                             if let Some(kf) = lane.keyframes.iter_mut().find(|k| k.time < 0.001) {
                                 kf.value = new_volume;
                             }
@@ -5211,6 +5232,17 @@ impl PaneRenderer for TimelinePane {
                         for (clip_id, events) in action.new_midi_events() {
                             shared.midi_event_cache.insert(clip_id, events.clone());
                         }
+                        // Optimistically rescale automation keyframe times in the cache.
+                        // The backend rescales asynchronously via ApplyBpmChange; this keeps
+                        // the cache consistent without waiting for the engine to round-trip.
+                        let scale = start_bpm / new_bpm;
+                        for lanes in self.automation_cache.values_mut() {
+                            for lane in lanes.iter_mut() {
+                                for kf in lane.keyframes.iter_mut() {
+                                    kf.time *= scale;
+                                }
+                            }
+                        }
                         shared.pending_actions.push(Box::new(action));
                     }
                 }
@@ -5354,7 +5386,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer header column with clipping
         ui.set_clip_rect(layer_headers_rect.intersect(original_clip_rect));
-        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers, shared.layer_to_track_map, shared.track_levels, shared.input_level);
+        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers, shared.layer_to_track_map, shared.track_levels, shared.input_level, *shared.playback_time);
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
@@ -5428,6 +5460,18 @@ impl PaneRenderer for TimelinePane {
                                 }
                             }
                         }
+                        AutomationLaneAction::SetRange { layer_id, node_id, min, max } => {
+                            if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                                controller.automation_set_range(track_id, node_id, min, max);
+                                // Optimistic cache update
+                                if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
+                                    if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
+                                        lane.value_min = min;
+                                        lane.value_max = max;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -5436,6 +5480,14 @@ impl PaneRenderer for TimelinePane {
         // Invalidate automation cache when the project changes (new node added, etc.)
         if *shared.project_generation != self.automation_cache_generation {
             self.automation_cache_generation = *shared.project_generation;
+            self.automation_cache.clear();
+        }
+
+        // Invalidate automation cache when BPM changes (but not during a live drag —
+        // during drag the backend hasn't rescaled yet so re-querying would give stale data).
+        let bpm_committed = self.bpm_drag_start.is_none();
+        if bpm_committed && (document.bpm - self.automation_cache_bpm).abs() > 1e-9 {
+            self.automation_cache_bpm = document.bpm;
             self.automation_cache.clear();
         }
 

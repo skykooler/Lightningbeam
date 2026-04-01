@@ -737,6 +737,18 @@ impl AudioGraph {
         self.graph.node_indices()
     }
 
+    /// BPM changed: rescale all AutomationInput keyframe times to preserve beat positions.
+    /// `from_bpm` is the BPM before the change (used to bootstrap beats if not yet populated).
+    /// `to_bpm` is the new BPM (used to re-derive seconds from beats).
+    pub fn apply_beats_to_automation_keyframes(&mut self, from_bpm: f64, to_bpm: f64, fps: f64) {
+        use super::nodes::AutomationInputNode;
+        for node in self.graph.node_weights_mut() {
+            if let Some(auto_node) = node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
+                auto_node.apply_beats_to_keyframes(from_bpm, to_bpm, fps);
+            }
+        }
+    }
+
     /// Reallocate a node's output buffers to match its current port list.
     ///
     /// Must be called after `SubtrackInputsNode::update_subtracks` changes the port count,
@@ -1358,6 +1370,8 @@ impl AudioGraph {
                             for kf in &serialized_node.automation_keyframes {
                                 auto_node.add_keyframe(AutomationKeyframe {
                                     time: kf.time,
+                                    time_beats: 0.0,
+                                    time_frames: 0.0,
                                     value: kf.value,
                                     interpolation: match kf.interpolation.as_str() {
                                         "bezier" => InterpolationType::Bezier,

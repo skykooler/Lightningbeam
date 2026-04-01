@@ -144,9 +144,10 @@ pub enum Command {
     SetMetronomeEnabled(bool),
     /// Set project tempo and time signature (bpm, (numerator, denominator))
     SetTempo(f32, (u32, u32)),
-    /// After a BPM change: update MIDI clip durations and sync all clip beats/frames from seconds.
-    /// (bpm, fps, midi_durations: Vec<(clip_id, new_duration_seconds)>)
-    ApplyBpmChange(f64, f64, Vec<(MidiClipId, f64)>),
+    /// After a BPM change: update MIDI clip durations, sync clip beats/frames, and rescale
+    /// automation keyframe times to preserve beat positions.
+    /// (from_bpm, to_bpm, fps, midi_durations: Vec<(clip_id, new_duration_seconds)>)
+    ApplyBpmChange(f64, f64, f64, Vec<(MidiClipId, f64)>),
 
     // Node graph commands
     /// Add a node to a track's instrument graph (track_id, node_type, position_x, position_y)

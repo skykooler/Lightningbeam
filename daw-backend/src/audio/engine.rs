@@ -1306,10 +1306,10 @@ impl Engine {
                 self.current_bpm = bpm as f64;
             }
 
-            Command::ApplyBpmChange(bpm, fps, midi_durations) => {
-                self.current_bpm = bpm;
+            Command::ApplyBpmChange(from_bpm, to_bpm, fps, midi_durations) => {
+                self.current_bpm = to_bpm;
                 self.current_fps = fps;
-                self.project.apply_bpm_change(bpm, fps, &midi_durations);
+                self.project.apply_bpm_change(from_bpm, to_bpm, fps, &midi_durations);
                 self.refresh_clip_snapshot();
             }
 
@@ -2181,13 +2181,16 @@ impl Engine {
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
                         // Downcast to AutomationInputNode using as_any_mut
                         if let Some(auto_node) = graph_node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
-                            let keyframe = AutomationKeyframe {
+                            let mut keyframe = AutomationKeyframe {
                                 time,
+                                time_beats: 0.0,
+                                time_frames: 0.0,
                                 value,
                                 interpolation,
                                 ease_out,
                                 ease_in,
                             };
+                            keyframe.sync_from_seconds(self.current_bpm, self.current_fps);
                             auto_node.add_keyframe(keyframe);
                         } else {
                             eprintln!("Node {} is not an AutomationInputNode", node_id);
@@ -3632,6 +3635,12 @@ impl EngineController {
         let _ = self.command_tx.push(Command::AutomationSetName(track_id, node_id, name));
     }
 
+    /// Set the min/max output range of an AutomationInput node (param ids 0 = min, 1 = max)
+    pub fn automation_set_range(&mut self, track_id: TrackId, node_id: u32, min: f32, max: f32) {
+        self.graph_set_parameter(track_id, node_id, 0, min);
+        self.graph_set_parameter(track_id, node_id, 1, max);
+    }
+
     /// Start recording on a track
     pub fn start_recording(&mut self, track_id: TrackId, start_time: f64) {
         let _ = self.command_tx.push(Command::StartRecording(track_id, start_time));
@@ -3692,10 +3701,12 @@ impl EngineController {
         let _ = self.command_tx.push(Command::SetTempo(bpm, time_signature));
     }
 
-    /// After a BPM change: update MIDI clip durations and sync all clip beats/frames.
+    /// After a BPM change: update MIDI clip durations, sync clip beats/frames, and rescale
+    /// automation keyframe times to preserve beat positions.
+    /// `from_bpm` is the BPM before the change; `to_bpm` is the new BPM.
     /// Call this after move_clip() has been called for all affected clips.
-    pub fn apply_bpm_change(&mut self, bpm: f64, fps: f64, midi_durations: Vec<(crate::audio::MidiClipId, f64)>) {
-        let _ = self.command_tx.push(Command::ApplyBpmChange(bpm, fps, midi_durations));
+    pub fn apply_bpm_change(&mut self, from_bpm: f64, to_bpm: f64, fps: f64, midi_durations: Vec<(crate::audio::MidiClipId, f64)>) {
+        let _ = self.command_tx.push(Command::ApplyBpmChange(from_bpm, to_bpm, fps, midi_durations));
     }
 
     // Node graph operations

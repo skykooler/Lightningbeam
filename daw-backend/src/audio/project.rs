@@ -216,19 +216,25 @@ impl Project {
         self.tracks.iter().map(|(&id, node)| (id, node))
     }
 
-    /// After a BPM change, update MIDI clip durations then sync all clip beats/frames from seconds.
+    /// After a BPM change, update MIDI clip durations, sync clip beats/frames, and rescale
+    /// automation keyframe times to preserve beat positions.
     ///
+    /// `from_bpm` is the BPM before the change (used to bootstrap beats on legacy data).
+    /// `to_bpm` is the new BPM.
     /// `midi_durations` maps each MidiClipId to its new content duration in seconds.
     /// Call this after the seconds positions have already been updated (e.g. via MoveClip).
-    pub fn apply_bpm_change(&mut self, bpm: f64, fps: f64, midi_durations: &[(crate::audio::midi::MidiClipId, f64)]) {
+    pub fn apply_bpm_change(&mut self, from_bpm: f64, to_bpm: f64, fps: f64, midi_durations: &[(crate::audio::midi::MidiClipId, f64)]) {
         for (_, track) in self.tracks.iter_mut() {
             match track {
                 crate::audio::track::TrackNode::Audio(t) => {
                     for clip in &mut t.clips {
-                        clip.sync_from_seconds(bpm, fps);
+                        clip.sync_from_seconds(to_bpm, fps);
                     }
                 }
                 crate::audio::track::TrackNode::Midi(t) => {
+                    // Rescale automation keyframe times in this track's graph
+                    t.instrument_graph.apply_beats_to_automation_keyframes(from_bpm, to_bpm, fps);
+
                     // Update content durations first so internal_end is correct before sync
                     for instance in &mut t.clip_instances {
                         if let Some(&new_dur) = midi_durations.iter()
@@ -242,7 +248,7 @@ impl Project {
                                 instance.external_duration = instance.external_duration * new_dur / old_internal_dur;
                             }
                         }
-                        instance.sync_from_seconds(bpm, fps);
+                        instance.sync_from_seconds(to_bpm, fps);
                     }
                     // Update pool clip durations
                     for &(clip_id, new_dur) in midi_durations {
