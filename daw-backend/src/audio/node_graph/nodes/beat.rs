@@ -1,5 +1,6 @@
 use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
 use crate::audio::midi::MidiEvent;
+use crate::time::Beats;
 
 const PARAM_RESOLUTION: u32 = 0;
 
@@ -61,12 +62,12 @@ pub struct BeatNode {
     bpm: f32,
     beats_per_bar: u32,
     resolution: BeatResolution,
-    /// Playback time in seconds, set by the graph before process()
-    playback_time: f64,
+    /// Playback time in beats, set by the graph before process()
+    playback_time: Beats,
     /// Previous playback_time to detect paused state
-    prev_playback_time: f64,
-    /// Free-running time accumulator for when playback is stopped
-    free_run_time: f64,
+    prev_playback_time: Beats,
+    /// Free-running beat accumulator for when playback is stopped
+    free_run_time: Beats,
     inputs: Vec<NodePort>,
     outputs: Vec<NodePort>,
     parameters: Vec<Parameter>,
@@ -92,16 +93,16 @@ impl BeatNode {
             bpm: DEFAULT_BPM,
             beats_per_bar: DEFAULT_BEATS_PER_BAR,
             resolution: BeatResolution::Quarter,
-            playback_time: 0.0,
-            prev_playback_time: -1.0,
-            free_run_time: 0.0,
+            playback_time: Beats::ZERO,
+            prev_playback_time: Beats(-1.0),
+            free_run_time: Beats::ZERO,
             inputs,
             outputs,
             parameters,
         }
     }
 
-    pub fn set_playback_time(&mut self, time: f64) {
+    pub fn set_playback_time(&mut self, time: Beats) {
         self.playback_time = time;
     }
 
@@ -169,8 +170,8 @@ impl AudioNode for BeatNode {
         let base_time = if paused { self.free_run_time } else { self.playback_time };
 
         for i in 0..len {
-            let time = base_time + i as f64 * sample_period;
-            let beat_pos = time * beats_per_second;
+            // base_time is already in beats; advance by beats_per_second per second
+            let beat_pos = base_time.0 + i as f64 * beats_per_second * sample_period;
 
             // Beat subdivision phase: 0→1 sawtooth
             let sub_phase = ((beat_pos * subs_per_beat) % 1.0) as f32;
@@ -188,13 +189,13 @@ impl AudioNode for BeatNode {
         }
 
         // Advance free-run time (always ticks, so it's ready when playback stops)
-        self.free_run_time += len as f64 * sample_period;
+        self.free_run_time += Beats(len as f64 * beats_per_second * sample_period);
     }
 
     fn reset(&mut self) {
-        self.playback_time = 0.0;
-        self.prev_playback_time = -1.0;
-        self.free_run_time = 0.0;
+        self.playback_time = Beats::ZERO;
+        self.prev_playback_time = Beats(-1.0);
+        self.free_run_time = Beats::ZERO;
     }
 
     fn node_type(&self) -> &str {
@@ -211,9 +212,9 @@ impl AudioNode for BeatNode {
             bpm: self.bpm,
             beats_per_bar: self.beats_per_bar,
             resolution: self.resolution,
-            playback_time: 0.0,
-            prev_playback_time: -1.0,
-            free_run_time: 0.0,
+            playback_time: Beats::ZERO,
+            prev_playback_time: Beats(-1.0),
+            free_run_time: Beats::ZERO,
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
             parameters: self.parameters.clone(),

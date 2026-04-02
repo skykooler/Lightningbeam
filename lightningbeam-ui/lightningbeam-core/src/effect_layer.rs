@@ -142,16 +142,18 @@ impl EffectLayer {
         self.clip_instances.iter_mut().find(|e| &e.id == id)
     }
 
-    /// Get all clip instances (effects) that are active at a given time
+    /// Get all clip instances (effects) that are active at a given time.
     ///
-    /// Uses `EFFECT_DURATION` to calculate effective duration for each instance.
-    pub fn active_clip_instances_at(&self, time: f64) -> Vec<&ClipInstance> {
+    /// `time_secs` is the playback time in seconds; `bpm` is used to convert
+    /// `timeline_start` (beats) to seconds for comparison.
+    pub fn active_clip_instances_at(&self, time_secs: f64, tempo_map: &crate::tempo_map::TempoMap) -> Vec<&ClipInstance> {
         use crate::effect::EFFECT_DURATION;
+        let time_beats = tempo_map.inverse_transform(time_secs);
         self.clip_instances
             .iter()
             .filter(|e| {
-                let end = e.timeline_start + e.effective_duration(EFFECT_DURATION);
-                time >= e.timeline_start && time < end
+                let end = e.timeline_start + e.effective_duration(EFFECT_DURATION, tempo_map);
+                time_beats >= e.timeline_start && time_beats < end
             })
             .collect()
     }
@@ -239,13 +241,13 @@ mod tests {
         layer.add_clip_instance(effect2);
 
         // At time 2: only effect1 active
-        assert_eq!(layer.active_clip_instances_at(2.0).len(), 1);
+        assert_eq!(layer.active_clip_instances_at(2.0, 60.0).len(), 1);
 
         // At time 4: both effects active
-        assert_eq!(layer.active_clip_instances_at(4.0).len(), 2);
+        assert_eq!(layer.active_clip_instances_at(4.0, 60.0).len(), 2);
 
         // At time 7: only effect2 active
-        assert_eq!(layer.active_clip_instances_at(7.0).len(), 1);
+        assert_eq!(layer.active_clip_instances_at(7.0, 60.0).len(), 1);
     }
 
     #[test]

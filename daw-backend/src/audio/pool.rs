@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::f32::consts::PI;
 use serde::{Deserialize, Serialize};
+use crate::time::Seconds;
 
 /// Windowed sinc interpolation for high-quality time stretching
 /// This is stateless and can handle arbitrary fractional positions
@@ -442,19 +443,20 @@ impl AudioClipPool {
     }
 
     /// Render audio from a file in the pool with high-quality windowed sinc interpolation
-    /// start_time_seconds: position in the audio file to start reading from (in seconds)
+    /// start_time: position in the audio file to start reading from (in seconds)
     /// clip_read_ahead: per-clip-instance read-ahead buffer for compressed audio streaming
     /// Returns the number of samples actually rendered
     pub fn render_from_file(
         &self,
         pool_index: usize,
         output: &mut [f32],
-        start_time_seconds: f64,
+        start_time: Seconds,
         gain: f32,
         engine_sample_rate: u32,
         engine_channels: u32,
         clip_read_ahead: Option<&super::disk_reader::ReadAheadBuffer>,
     ) -> usize {
+        let start_time_seconds = start_time.0;
         let Some(audio_file) = self.files.get(pool_index) else {
             return 0;
         };

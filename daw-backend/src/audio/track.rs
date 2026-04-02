@@ -6,6 +6,8 @@ use super::node_graph::AudioGraph;
 use super::node_graph::nodes::{AudioInputNode, AudioOutputNode};
 use super::node_graph::preset::GraphPreset;
 use super::pool::AudioClipPool;
+use crate::tempo_map::TempoMap;
+use crate::time::{Beats, Seconds};
 use serde::{Serialize, Deserialize};
 use std::collections::{HashMap, HashSet};
 
@@ -23,10 +25,12 @@ pub type Track = AudioTrack;
 /// Rendering context that carries timing information through the track hierarchy
 ///
 /// This allows metatracks to transform time for their children (time stretch, offset, etc.)
-#[derive(Debug, Clone, Copy)]
-pub struct RenderContext {
+#[derive(Clone, Copy)]
+pub struct RenderContext<'a> {
     /// Current playhead position in seconds (in transformed time)
-    pub playhead_seconds: f64,
+    pub playhead_seconds: Seconds,
+    /// Tempo map for beat ↔ second conversion
+    pub tempo_map: &'a TempoMap,
     /// Audio sample rate
     pub sample_rate: u32,
     /// Number of channels
@@ -41,16 +45,17 @@ pub struct RenderContext {
     pub live_only: bool,
 }
 
-impl RenderContext {
-    /// Create a new render context
+impl<'a> RenderContext<'a> {
     pub fn new(
-        playhead_seconds: f64,
+        playhead_seconds: Seconds,
+        tempo_map: &'a TempoMap,
         sample_rate: u32,
         channels: u32,
         buffer_size: usize,
     ) -> Self {
         Self {
             playhead_seconds,
+            tempo_map,
             sample_rate,
             channels,
             buffer_size,
@@ -59,14 +64,20 @@ impl RenderContext {
         }
     }
 
-    /// Get the duration of the buffer in seconds
-    pub fn buffer_duration(&self) -> f64 {
-        self.buffer_size as f64 / (self.sample_rate as f64 * self.channels as f64)
+    pub fn buffer_duration(&self) -> Seconds {
+        Seconds(self.buffer_size as f64 / (self.sample_rate as f64 * self.channels as f64))
     }
 
-    /// Get the end time of the buffer
-    pub fn buffer_end(&self) -> f64 {
+    pub fn buffer_end(&self) -> Seconds {
         self.playhead_seconds + self.buffer_duration()
+    }
+
+    pub fn playhead_beats(&self) -> Beats {
+        self.tempo_map.seconds_to_beats(self.playhead_seconds)
+    }
+
+    pub fn buffer_end_beats(&self) -> Beats {
+        self.tempo_map.seconds_to_beats(self.buffer_end())
     }
 }
 
@@ -170,14 +181,14 @@ pub struct Metatrack {
     pub time_stretch: f32,
     /// Pitch shift in semitones (for future implementation)
     pub pitch_shift: f32,
-    /// Time offset in seconds (shift content forward/backward in time)
-    pub offset: f64,
-    /// Trim start: offset into the metatrack's internal content (seconds)
+    /// Time offset (shift content forward/backward in time)
+    pub offset: Seconds,
+    /// Trim start: offset into the metatrack's internal content
     /// Children will see time starting from this point
-    pub trim_start: f64,
-    /// Trim end: offset into the metatrack's internal content (seconds)
+    pub trim_start: Seconds,
+    /// Trim end: offset into the metatrack's internal content
     /// None means no end trim (play until content ends)
-    pub trim_end: Option<f64>,
+    pub trim_end: Option<Seconds>,
     /// Automation lanes for this metatrack
     pub automation_lanes: HashMap<AutomationLaneId, AutomationLane>,
     next_automation_id: AutomationLaneId,
@@ -231,8 +242,8 @@ impl Metatrack {
             solo: false,
             time_stretch: 1.0,
             pitch_shift: 0.0,
-            offset: 0.0,
-            trim_start: 0.0,
+            offset: Seconds::ZERO,
+            trim_start: Seconds::ZERO,
             trim_end: None,
             automation_lanes: HashMap::new(),
             next_automation_id: 0,
@@ -493,7 +504,7 @@ impl Metatrack {
     }
 
     /// Evaluate automation at a specific time and return effective parameters
-    pub fn evaluate_automation_at_time(&self, time: f64) -> (f32, f32, f64) {
+    pub fn evaluate_automation_at_time(&self, time: Beats) -> (f32, f32, Seconds) {
         let mut volume = self.volume;
         let mut time_stretch = self.time_stretch;
         let mut offset = self.offset;
@@ -517,7 +528,7 @@ impl Metatrack {
                 }
                 ParameterId::TimeOffset => {
                     if let Some(automated_value) = lane.evaluate(time) {
-                        offset = automated_value as f64;
+                        offset = Seconds(automated_value as f64);
                     }
                 }
                 _ => {}
@@ -561,7 +572,7 @@ impl Metatrack {
 
     /// Check whether this metatrack should produce audio at the given parent time.
     /// Returns false if the playhead is outside the trim window.
-    pub fn is_active_at_time(&self, parent_playhead: f64) -> bool {
+    pub fn is_active_at_time(&self, parent_playhead: Seconds) -> bool {
         let local_time = (parent_playhead - self.offset) * self.time_stretch as f64;
         if local_time < self.trim_start {
             return false;
@@ -580,7 +591,7 @@ impl Metatrack {
     /// Time stretch affects how fast content plays: 0.5 = half speed, 2.0 = double speed
     /// Offset shifts content forward/backward in time
     /// Trim start offsets into the internal content
-    pub fn transform_context(&self, ctx: RenderContext) -> RenderContext {
+    pub fn transform_context<'a>(&self, ctx: RenderContext<'a>) -> RenderContext<'a> {
         let mut transformed = ctx;
 
         // Apply transformations in order:
@@ -596,7 +607,7 @@ impl Metatrack {
         let stretched = adjusted_playhead * self.time_stretch as f64;
 
         // 3. Add trim_start so children see time starting from the trim point
-        //    If trim_start=2.0, children start seeing time 2.0 when parent reaches offset
+        //    If trim_start=2.0s, children start seeing time 2.0s when parent reaches offset
         transformed.playhead_seconds = stretched + self.trim_start;
 
         // Accumulate time stretch for nested metatracks
@@ -772,13 +783,13 @@ impl MidiTrack {
         // Send note-off for all 128 possible MIDI notes to silence the instrument
         let mut note_offs = Vec::new();
         for note in 0..128 {
-            note_offs.push(MidiEvent::note_off(0.0, 0, note, 0));
+            note_offs.push(MidiEvent::note_off(Beats::ZERO, 0, note, 0));
         }
 
         // Create a silent buffer to process the note-offs
         let buffer_size = 512 * 2; // stereo
         let mut silent_buffer = vec![0.0f32; buffer_size];
-        self.instrument_graph.process(&mut silent_buffer, &note_offs, 0.0);
+        self.instrument_graph.process(&mut silent_buffer, &note_offs, Beats::ZERO);
     }
 
     /// Queue a live MIDI event (from virtual keyboard or MIDI controller)
@@ -805,17 +816,17 @@ impl MidiTrack {
         let mut midi_events = Vec::new();
 
         if !ctx.live_only {
-            let buffer_duration_seconds = output.len() as f64 / (ctx.sample_rate as f64 * ctx.channels as f64);
-            let buffer_end_seconds = ctx.playhead_seconds + buffer_duration_seconds;
+            let playhead_beats = ctx.playhead_beats();
+            let buffer_end_beats = ctx.buffer_end_beats();
 
-            // Collect MIDI events from all clip instances that overlap with current time range
+            // Collect MIDI events from all clip instances that overlap with current beat range
             let mut currently_active = HashSet::new();
             for instance in &self.clip_instances {
-                if instance.overlaps_range(ctx.playhead_seconds, buffer_end_seconds) {
+                if instance.overlaps_range(playhead_beats, buffer_end_beats) {
                     currently_active.insert(instance.id);
                 }
                 if let Some(clip) = midi_pool.get_clip(instance.clip_id) {
-                    let events = instance.get_events_in_range(clip, ctx.playhead_seconds, buffer_end_seconds);
+                    let events = instance.get_events_in_range(clip, playhead_beats, buffer_end_beats);
                     midi_events.extend(events);
                 }
             }
@@ -824,7 +835,7 @@ impl MidiTrack {
             for prev_id in &self.prev_active_instances {
                 if !currently_active.contains(prev_id) {
                     for note in 0..128u8 {
-                        midi_events.push(MidiEvent::note_off(ctx.playhead_seconds, 0, note, 0));
+                        midi_events.push(MidiEvent::note_off(playhead_beats, 0, note, 0));
                     }
                     break;
                 }
@@ -836,10 +847,10 @@ impl MidiTrack {
         midi_events.extend(self.live_midi_queue.drain(..));
 
         // Generate audio using instrument graph
-        self.instrument_graph.process(output, &midi_events, ctx.playhead_seconds);
+        self.instrument_graph.process(output, &midi_events, ctx.playhead_beats());
 
         // Evaluate and apply automation (skip automation in live_only mode — no playhead to evaluate at)
-        let effective_volume = if ctx.live_only { self.volume } else { self.evaluate_automation_at_time(ctx.playhead_seconds) };
+        let effective_volume = if ctx.live_only { self.volume } else { self.evaluate_automation_at_time(ctx.playhead_beats()) };
 
         // Apply track volume
         for sample in output.iter_mut() {
@@ -848,7 +859,7 @@ impl MidiTrack {
     }
 
     /// Evaluate automation at a specific time and return the effective volume
-    fn evaluate_automation_at_time(&self, time: f64) -> f32 {
+    fn evaluate_automation_at_time(&self, time: Beats) -> f32 {
         let mut volume = self.volume;
 
         // Check for volume automation
@@ -1081,12 +1092,9 @@ impl AudioTrack {
         &mut self,
         output: &mut [f32],
         pool: &AudioClipPool,
-        playhead_seconds: f64,
-        sample_rate: u32,
-        channels: u32,
+        ctx: RenderContext<'_>,
     ) -> usize {
-        let buffer_duration_seconds = output.len() as f64 / (sample_rate as f64 * channels as f64);
-        let buffer_end_seconds = playhead_seconds + buffer_duration_seconds;
+        let buffer_end = ctx.buffer_end();
 
         // Split borrow: take clip_render_buffer out to avoid borrow conflict with &self methods
         let mut clip_buffer = std::mem::take(&mut self.clip_render_buffer);
@@ -1096,16 +1104,8 @@ impl AudioTrack {
 
         // Render all active clip instances into the buffer
         for clip in &self.clips {
-            // Check if clip overlaps with current buffer time range
-            if clip.external_start < buffer_end_seconds && clip.external_end() > playhead_seconds {
-                rendered += self.render_clip(
-                    clip,
-                    &mut clip_buffer,
-                    pool,
-                    playhead_seconds,
-                    sample_rate,
-                    channels,
-                );
+            if clip.external_start_secs(ctx.tempo_map) < buffer_end && clip.external_end_secs(ctx.tempo_map) > ctx.playhead_seconds {
+                rendered += self.render_clip(clip, &mut clip_buffer, pool, ctx);
             }
         }
 
@@ -1123,13 +1123,13 @@ impl AudioTrack {
         }
 
         // Process through the effects graph (this will write to output buffer)
-        self.effects_graph.process(output, &[], playhead_seconds);
+        self.effects_graph.process(output, &[], ctx.playhead_beats());
 
         // Put the buffer back for reuse next callback
         self.clip_render_buffer = clip_buffer;
 
         // Evaluate and apply automation
-        let effective_volume = self.evaluate_automation_at_time(playhead_seconds);
+        let effective_volume = self.evaluate_automation_at_time(ctx.playhead_beats());
 
         // Apply track volume
         for sample in output.iter_mut() {
@@ -1140,7 +1140,7 @@ impl AudioTrack {
     }
 
     /// Evaluate automation at a specific time and return the effective volume
-    fn evaluate_automation_at_time(&self, time: f64) -> f32 {
+    fn evaluate_automation_at_time(&self, time: Beats) -> f32 {
         let mut volume = self.volume;
 
         // Check for volume automation
@@ -1169,49 +1169,40 @@ impl AudioTrack {
         clip: &AudioClipInstance,
         output: &mut [f32],
         pool: &AudioClipPool,
-        playhead_seconds: f64,
-        sample_rate: u32,
-        channels: u32,
+        ctx: RenderContext<'_>,
     ) -> usize {
-        let buffer_duration_seconds = output.len() as f64 / (sample_rate as f64 * channels as f64);
-        let buffer_end_seconds = playhead_seconds + buffer_duration_seconds;
+        let playhead = ctx.playhead_seconds;
+        let buffer_end = ctx.buffer_end();
+        let tempo_map = ctx.tempo_map;
+        let sample_rate = ctx.sample_rate;
+        let channels = ctx.channels;
 
         // Determine the time range we need to render (intersection of buffer and clip external bounds)
-        let render_start_seconds = playhead_seconds.max(clip.external_start);
-        let render_end_seconds = buffer_end_seconds.min(clip.external_end());
+        let render_start = playhead.max(clip.external_start_secs(tempo_map));
+        let render_end = buffer_end.min(clip.external_end_secs(tempo_map));
 
-        // If no overlap, return early
-        if render_start_seconds >= render_end_seconds {
+        if render_start >= render_end {
             return 0;
         }
 
         let internal_duration = clip.internal_duration();
-        if internal_duration <= 0.0 {
+        if internal_duration <= Seconds::ZERO {
             return 0;
         }
 
-        // Calculate combined gain
         let combined_gain = clip.gain;
-
         let mut total_rendered = 0;
-
-        // Process the render range sample by sample (or in chunks for efficiency)
-        // For looping clips, we need to handle wrap-around at the loop boundary
         let samples_per_second = sample_rate as f64 * channels as f64;
 
-        // For now, render in a simpler way - iterate through the timeline range
-        // and use get_content_position for each sample position
-        let output_start_offset = ((render_start_seconds - playhead_seconds) * samples_per_second + 0.5) as usize;
-        let output_end_offset = ((render_end_seconds - playhead_seconds) * samples_per_second + 0.5) as usize;
+        let output_start_offset = ((render_start - playhead).0 * samples_per_second + 0.5) as usize;
+        let output_end_offset = ((render_end - playhead).0 * samples_per_second + 0.5) as usize;
 
         if output_end_offset > output.len() || output_start_offset > output.len() {
             return 0;
         }
 
-        // If not looping, we can render in one chunk (more efficient)
-        if !clip.is_looping() {
-            // Simple case: no looping
-            let content_start = clip.get_content_position(render_start_seconds).unwrap_or(clip.internal_start);
+        if !clip.is_looping(tempo_map) {
+            let content_start = clip.get_content_position(render_start, tempo_map).unwrap_or(clip.internal_start);
             let output_len = output.len();
             let output_slice = &mut output[output_start_offset..output_end_offset.min(output_len)];
 
@@ -1225,23 +1216,20 @@ impl AudioTrack {
                 clip.read_ahead.as_deref(),
             );
         } else {
-            // Looping case: need to handle wrap-around at loop boundaries
-            // Render in segments, one per loop iteration
-            let mut timeline_pos = render_start_seconds;
+            // Looping case: handle wrap-around at loop boundaries
+            let mut timeline_pos = render_start;
             let mut output_offset = output_start_offset;
 
-            while timeline_pos < render_end_seconds && output_offset < output.len() {
-                // Calculate position within the loop
-                let relative_pos = timeline_pos - clip.external_start;
-                let loop_offset = relative_pos % internal_duration;
-                let content_pos = clip.internal_start + loop_offset;
+            while timeline_pos < render_end && output_offset < output.len() {
+                let relative_pos = timeline_pos - clip.external_start_secs(tempo_map);
+                let loop_offset = relative_pos.0 % internal_duration.0;
+                let content_pos = clip.internal_start + Seconds(loop_offset);
 
-                // Calculate how much we can render before hitting the loop boundary
-                let time_to_loop_end = internal_duration - loop_offset;
-                let time_to_render_end = render_end_seconds - timeline_pos;
+                let time_to_loop_end = Seconds(internal_duration.0 - loop_offset);
+                let time_to_render_end = render_end - timeline_pos;
                 let chunk_duration = time_to_loop_end.min(time_to_render_end);
 
-                let chunk_samples = (chunk_duration * samples_per_second) as usize;
+                let chunk_samples = (chunk_duration.0 * samples_per_second) as usize;
                 let chunk_samples = chunk_samples.min(output.len() - output_offset);
 
                 if chunk_samples == 0 {
@@ -1262,7 +1250,7 @@ impl AudioTrack {
 
                 total_rendered += rendered;
                 output_offset += chunk_samples;
-                timeline_pos += chunk_duration;
+                timeline_pos = timeline_pos + chunk_duration;
             }
         }
 

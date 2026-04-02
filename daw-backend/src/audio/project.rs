@@ -4,6 +4,8 @@ use super::midi::{MidiClip, MidiClipId, MidiClipInstance, MidiClipInstanceId, Mi
 use super::midi_pool::MidiClipPool;
 use super::pool::AudioClipPool;
 use super::track::{AudioTrack, Metatrack, MidiTrack, RenderContext, TrackId, TrackNode};
+use crate::tempo_map::TempoMap;
+use crate::time::{Beats, Seconds};
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 
@@ -216,52 +218,6 @@ impl Project {
         self.tracks.iter().map(|(&id, node)| (id, node))
     }
 
-    /// After a BPM change, update MIDI clip durations, sync clip beats/frames, and rescale
-    /// automation keyframe times to preserve beat positions.
-    ///
-    /// `from_bpm` is the BPM before the change (used to bootstrap beats on legacy data).
-    /// `to_bpm` is the new BPM.
-    /// `midi_durations` maps each MidiClipId to its new content duration in seconds.
-    /// Call this after the seconds positions have already been updated (e.g. via MoveClip).
-    pub fn apply_bpm_change(&mut self, from_bpm: f64, to_bpm: f64, fps: f64, midi_durations: &[(crate::audio::midi::MidiClipId, f64)]) {
-        for (_, track) in self.tracks.iter_mut() {
-            match track {
-                crate::audio::track::TrackNode::Audio(t) => {
-                    for clip in &mut t.clips {
-                        clip.sync_from_seconds(to_bpm, fps);
-                    }
-                }
-                crate::audio::track::TrackNode::Midi(t) => {
-                    // Rescale automation keyframe times in this track's graph
-                    t.instrument_graph.apply_beats_to_automation_keyframes(from_bpm, to_bpm, fps);
-
-                    // Update content durations first so internal_end is correct before sync
-                    for instance in &mut t.clip_instances {
-                        if let Some(&new_dur) = midi_durations.iter()
-                            .find(|(id, _)| *id == instance.clip_id)
-                            .map(|(_, d)| d)
-                        {
-                            let old_internal_dur = instance.internal_duration();
-                            instance.internal_end = instance.internal_start + new_dur;
-                            // Scale external_duration by the same ratio (works for both looping and non-looping)
-                            if old_internal_dur > 1e-12 {
-                                instance.external_duration = instance.external_duration * new_dur / old_internal_dur;
-                            }
-                        }
-                        instance.sync_from_seconds(to_bpm, fps);
-                    }
-                    // Update pool clip durations
-                    for &(clip_id, new_dur) in midi_durations {
-                        if let Some(clip) = self.midi_clip_pool.get_clip_mut(clip_id) {
-                            clip.duration = new_dur;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
     /// Get oscilloscope data from a node in a track's graph
     pub fn get_oscilloscope_data(&self, track_id: TrackId, node_id: u32, sample_count: usize) -> Option<(Vec<f32>, Vec<f32>)> {
         if let Some(TrackNode::Midi(track)) = self.tracks.get(&track_id) {
@@ -334,9 +290,9 @@ impl Project {
         &mut self,
         track_id: TrackId,
         events: Vec<MidiEvent>,
-        duration: f64,
+        duration: Beats,
         name: String,
-        external_start: f64,
+        external_start: Beats,
     ) -> Result<(MidiClipId, MidiClipInstanceId), &'static str> {
         // Verify track exists and is a MIDI track
         if !matches!(self.tracks.get(&track_id), Some(TrackNode::Midi(_))) {
@@ -369,11 +325,11 @@ impl Project {
 
     /// Legacy method for backwards compatibility - creates clip and instance from old MidiClip format
     pub fn add_midi_clip(&mut self, track_id: TrackId, clip: MidiClip) -> Result<MidiClipInstanceId, &'static str> {
-        self.add_midi_clip_at(track_id, clip, 0.0)
+        self.add_midi_clip_at(track_id, clip, Beats::ZERO)
     }
 
     /// Add a MIDI clip to the pool and create an instance at the given timeline position
-    pub fn add_midi_clip_at(&mut self, track_id: TrackId, clip: MidiClip, start_time: f64) -> Result<MidiClipInstanceId, &'static str> {
+    pub fn add_midi_clip_at(&mut self, track_id: TrackId, clip: MidiClip, start_time: Beats) -> Result<MidiClipInstanceId, &'static str> {
         // Add the clip to the pool (it already has events and duration)
         let duration = clip.duration;
         let clip_id = clip.id;
@@ -417,7 +373,8 @@ impl Project {
         output: &mut [f32],
         audio_pool: &AudioClipPool,
         buffer_pool: &mut BufferPool,
-        playhead_seconds: f64,
+        playhead_seconds: Seconds,
+        tempo_map: &TempoMap,
         sample_rate: u32,
         channels: u32,
         live_only: bool,
@@ -429,7 +386,7 @@ impl Project {
         // Create initial render context
         let ctx = RenderContext {
             live_only,
-            ..RenderContext::new(playhead_seconds, sample_rate, channels, output.len())
+            ..RenderContext::new(playhead_seconds, tempo_map, sample_rate, channels, output.len())
         };
 
         // Render each root track (index-based to avoid clone)
@@ -503,7 +460,7 @@ impl Project {
                 let mut track_buffer = buffer_pool.acquire();
                 track_buffer.resize(output.len(), 0.0);
                 track_buffer.fill(0.0);
-                track.render(&mut track_buffer, audio_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
+                track.render(&mut track_buffer, audio_pool, ctx);
                 // Accumulate peak level for VU metering (max over meter interval)
                 let buffer_peak = track_buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
                 track.peak_level = track.peak_level.max(buffer_peak);
@@ -591,7 +548,7 @@ impl Project {
                     let mut graph_output = buffer_pool.acquire();
                     graph_output.resize(output.len(), 0.0);
                     graph_output.fill(0.0);
-                    group.audio_graph.process(&mut graph_output, &[], ctx.playhead_seconds);
+                    group.audio_graph.process(&mut graph_output, &[], ctx.playhead_beats());
 
                     for (out_sample, graph_sample) in output.iter_mut().zip(graph_output.iter()) {
                         *out_sample += graph_sample * group.volume;
@@ -686,7 +643,7 @@ impl Project {
     pub fn send_midi_note_on(&mut self, track_id: TrackId, note: u8, velocity: u8) {
         // Queue the MIDI note-on event to the track's live MIDI queue
         if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
-            let event = MidiEvent::note_on(0.0, 0, note, velocity);
+            let event = MidiEvent::note_on(Beats::ZERO, 0, note, velocity);
             track.queue_live_midi(event);
         }
     }
@@ -695,7 +652,7 @@ impl Project {
     pub fn send_midi_note_off(&mut self, track_id: TrackId, note: u8) {
         // Queue the MIDI note-off event to the track's live MIDI queue
         if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
-            let event = MidiEvent::note_off(0.0, 0, note, 0);
+            let event = MidiEvent::note_off(Beats::ZERO, 0, note, 0);
             track.queue_live_midi(event);
         }
     }

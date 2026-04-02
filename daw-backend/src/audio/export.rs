@@ -2,6 +2,8 @@ use super::buffer_pool::BufferPool;
 use super::pool::AudioPool;
 use super::project::Project;
 use crate::command::AudioEvent;
+use crate::tempo_map::TempoMap;
+use crate::time::Seconds;
 use std::path::Path;
 
 /// Render chunk size for offline export. Matches the real-time playback buffer size
@@ -42,10 +44,12 @@ pub struct ExportSettings {
     pub bit_depth: u16,
     /// MP3 bitrate in kbps (128, 192, 256, 320)
     pub mp3_bitrate: u32,
-    /// Start time in seconds
-    pub start_time: f64,
-    /// End time in seconds
-    pub end_time: f64,
+    /// Start time
+    pub start_time: Seconds,
+    /// End time
+    pub end_time: Seconds,
+    /// Tempo map for beat-position scheduling
+    pub tempo_map: TempoMap,
 }
 
 impl Default for ExportSettings {
@@ -56,8 +60,9 @@ impl Default for ExportSettings {
             channels: 2,
             bit_depth: 16,
             mp3_bitrate: 320,
-            start_time: 0.0,
-            end_time: 60.0,
+            start_time: Seconds::ZERO,
+            end_time: Seconds(60.0),
+            tempo_map: TempoMap::constant(120.0),
         }
     }
 }
@@ -79,15 +84,15 @@ pub fn export_audio<P: AsRef<Path>>(
 {
     // Validate duration
     let duration = settings.end_time - settings.start_time;
-    if duration <= 0.0 {
+    if duration <= Seconds::ZERO {
         return Err(format!(
             "Export duration is zero or negative (start={:.3}s, end={:.3}s). \
              Check that the timeline has content.",
-            settings.start_time, settings.end_time
+            settings.start_time.seconds_to_f64(), settings.end_time.seconds_to_f64()
         ));
     }
 
-    let total_frames = (duration * settings.sample_rate as f64).round() as usize;
+    let total_frames = (duration.seconds_to_f64() * settings.sample_rate as f64).round() as usize;
     if total_frames == 0 {
         return Err("Export would produce zero audio frames".to_string());
     }
@@ -148,11 +153,11 @@ pub fn render_to_memory(
 {
     // Calculate total number of frames
     let duration = settings.end_time - settings.start_time;
-    let total_frames = (duration * settings.sample_rate as f64).round() as usize;
+    let total_frames = (duration.seconds_to_f64() * settings.sample_rate as f64).round() as usize;
     let total_samples = total_frames * settings.channels as usize;
 
     println!("Export: duration={:.3}s, total_frames={}, total_samples={}, channels={}",
-             duration, total_frames, total_samples, settings.channels);
+             duration.seconds_to_f64(), total_frames, total_samples, settings.channels);
 
     let chunk_samples = EXPORT_CHUNK_FRAMES * settings.channels as usize;
 
@@ -178,6 +183,7 @@ pub fn render_to_memory(
             pool,
             &mut buffer_pool,
             playhead,
+            &settings.tempo_map,
             settings.sample_rate,
             settings.channels,
             false,
@@ -185,9 +191,9 @@ pub fn render_to_memory(
 
         // Calculate how many samples we actually need from this chunk
         let remaining_time = settings.end_time - playhead;
-        let samples_needed = if remaining_time < chunk_duration {
+        let samples_needed = if remaining_time.seconds_to_f64() < chunk_duration {
             // Calculate frames needed and ensure it's a whole number
-            let frames_needed = (remaining_time * settings.sample_rate as f64).round() as usize;
+            let frames_needed = (remaining_time.seconds_to_f64() * settings.sample_rate as f64).round() as usize;
             let samples = frames_needed * settings.channels as usize;
             // Ensure we don't exceed chunk size
             samples.min(chunk_samples)
@@ -207,7 +213,7 @@ pub fn render_to_memory(
             });
         }
 
-        playhead += chunk_duration;
+        playhead = playhead + Seconds(chunk_duration);
     }
 
     println!("Export: rendered {} samples total", all_samples.len());
@@ -361,7 +367,7 @@ fn export_mp3<P: AsRef<Path>>(
 
     // Calculate rendering parameters
     let duration = settings.end_time - settings.start_time;
-    let total_frames = (duration * settings.sample_rate as f64).round() as usize;
+    let total_frames = (duration.seconds_to_f64() * settings.sample_rate as f64).round() as usize;
 
     let chunk_samples = EXPORT_CHUNK_FRAMES * settings.channels as usize;
     let chunk_duration = EXPORT_CHUNK_FRAMES as f64 / settings.sample_rate as f64;
@@ -396,6 +402,7 @@ fn export_mp3<P: AsRef<Path>>(
             pool,
             &mut buffer_pool,
             playhead,
+            &settings.tempo_map,
             settings.sample_rate,
             settings.channels,
             false,
@@ -403,8 +410,8 @@ fn export_mp3<P: AsRef<Path>>(
 
         // Calculate how many samples we need from this chunk
         let remaining_time = settings.end_time - playhead;
-        let samples_needed = if remaining_time < chunk_duration {
-            ((remaining_time * settings.sample_rate as f64) as usize * settings.channels as usize)
+        let samples_needed = if remaining_time.seconds_to_f64() < chunk_duration {
+            ((remaining_time.seconds_to_f64() * settings.sample_rate as f64) as usize * settings.channels as usize)
                 .min(chunk_samples)
         } else {
             chunk_samples
@@ -445,7 +452,7 @@ fn export_mp3<P: AsRef<Path>>(
             }
         }
 
-        playhead += chunk_duration;
+        playhead = playhead + Seconds(chunk_duration);
     }
 
     // Encode any remaining samples as the final frame
@@ -529,7 +536,7 @@ fn export_aac<P: AsRef<Path>>(
 
     // Calculate rendering parameters
     let duration = settings.end_time - settings.start_time;
-    let total_frames = (duration * settings.sample_rate as f64).round() as usize;
+    let total_frames = (duration.seconds_to_f64() * settings.sample_rate as f64).round() as usize;
 
     let chunk_samples = EXPORT_CHUNK_FRAMES * settings.channels as usize;
     let chunk_duration = EXPORT_CHUNK_FRAMES as f64 / settings.sample_rate as f64;
@@ -564,6 +571,7 @@ fn export_aac<P: AsRef<Path>>(
             pool,
             &mut buffer_pool,
             playhead,
+            &settings.tempo_map,
             settings.sample_rate,
             settings.channels,
             false,
@@ -571,8 +579,8 @@ fn export_aac<P: AsRef<Path>>(
 
         // Calculate how many samples we need from this chunk
         let remaining_time = settings.end_time - playhead;
-        let samples_needed = if remaining_time < chunk_duration {
-            ((remaining_time * settings.sample_rate as f64) as usize * settings.channels as usize)
+        let samples_needed = if remaining_time.seconds_to_f64() < chunk_duration {
+            ((remaining_time.seconds_to_f64() * settings.sample_rate as f64) as usize * settings.channels as usize)
                 .min(chunk_samples)
         } else {
             chunk_samples
@@ -613,7 +621,7 @@ fn export_aac<P: AsRef<Path>>(
             }
         }
 
-        playhead += chunk_duration;
+        playhead = playhead + Seconds(chunk_duration);
     }
 
     // Encode any remaining samples as the final frame

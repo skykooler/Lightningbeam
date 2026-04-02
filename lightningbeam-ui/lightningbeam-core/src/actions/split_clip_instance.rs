@@ -126,8 +126,8 @@ impl Action for SplitClipInstanceAction {
             .get_clip_duration(&instance.clip_id)
             .ok_or_else(|| format!("Clip {} not found", instance.clip_id))?;
 
-        // Calculate the effective duration and timeline end
-        let effective_duration = instance.effective_duration(clip_duration);
+        // Calculate the effective duration and timeline end (both in beats)
+        let effective_duration = instance.effective_duration(clip_duration, document.tempo_map());
         let timeline_end = instance.timeline_start + effective_duration;
 
         // Validate: split_time must be strictly within the clip's timeline span
@@ -179,7 +179,6 @@ impl Action for SplitClipInstanceAction {
         }
 
         self.new_instance_id = Some(right_instance.id);
-        right_instance.sync_from_seconds(document.bpm, document.framerate);
 
         // Now modify the original (left) instance and add the new (right) instance
         let layer_mut = document
@@ -236,21 +235,6 @@ impl Action for SplitClipInstanceAction {
             }
             AnyLayer::Raster(_) => {
                 return Err("Cannot split clip instances on group layers".to_string());
-            }
-        }
-
-        // Sync derived fields on the left (original) instance
-        let (bpm, fps) = (document.bpm, document.framerate);
-        if let Some(layer) = document.get_layer_mut(&self.layer_id) {
-            let cis: &mut Vec<crate::clip::ClipInstance> = match layer {
-                AnyLayer::Vector(vl) => &mut vl.clip_instances,
-                AnyLayer::Audio(al) => &mut al.clip_instances,
-                AnyLayer::Video(vl) => &mut vl.clip_instances,
-                AnyLayer::Effect(el) => &mut el.clip_instances,
-                _ => return { self.executed = true; Ok(()) },
-            };
-            if let Some(inst) = cis.iter_mut().find(|ci| ci.id == self.instance_id) {
-                inst.sync_from_seconds(bpm, fps);
             }
         }
 
@@ -406,10 +390,10 @@ impl Action for SplitClipInstanceAction {
                 let instance = daw_backend::MidiClipInstance::new(
                     0,
                     *midi_clip_id,
-                    internal_start,
-                    internal_end,
-                    external_start,
-                    external_duration,
+                    daw_backend::Beats(internal_start),
+                    daw_backend::Beats(internal_end),
+                    daw_backend::Beats(external_start),
+                    daw_backend::Beats(external_duration),
                 );
 
                 let query = Query::AddMidiClipInstanceSync(*backend_track_id, instance);

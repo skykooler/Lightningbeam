@@ -74,10 +74,11 @@ fn compute_clip_stacking(
         return vec![(0, 1); clip_instances.len()];
     }
 
+    let tempo_map = document.tempo_map();
     let ranges: Vec<(f64, f64)> = clip_instances.iter().map(|ci| {
         let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(0.0);
         let start = ci.effective_start();
-        let end = start + ci.total_duration(clip_dur);
+        let end = start + ci.total_duration(clip_dur, tempo_map);
         (start, end)
     }).collect();
 
@@ -510,20 +511,14 @@ fn build_audio_clip_cache(
                         .unwrap_or_else(|| audio_backend_uuid(ac.id));
                     let mut ci = ClipInstance::new(clip_id);
                     ci.id = instance_id;
-                    ci.timeline_start = ac.external_start;
-                    ci.timeline_start_beats = ac.external_start_beats;
-                    ci.timeline_start_frames = ac.external_start_frames;
-                    ci.trim_start = ac.internal_start;
-                    ci.trim_start_beats = ac.internal_start_beats;
-                    ci.trim_start_frames = ac.internal_start_frames;
-                    ci.trim_end = Some(ac.internal_end);
-                    ci.trim_end_beats = Some(ac.internal_end_beats);
-                    ci.trim_end_frames = Some(ac.internal_end_frames);
-                    let internal_dur = ac.internal_end - ac.internal_start;
-                    if (ac.external_duration - internal_dur).abs() > 1e-9 {
-                        ci.timeline_duration = Some(ac.external_duration);
-                        ci.timeline_duration_beats = Some(ac.external_duration_beats);
-                        ci.timeline_duration_frames = Some(ac.external_duration_frames);
+                    ci.timeline_start = ac.external_start.beats_to_f64();
+                    ci.trim_start = ac.internal_start.seconds_to_f64();
+                    ci.trim_end = Some(ac.internal_end.seconds_to_f64());
+                    let internal_dur_secs = (ac.internal_end - ac.internal_start).seconds_to_f64();
+                    let tempo_map = document.tempo_map();
+                    let external_dur_secs = tempo_map.transform(ac.external_duration.beats_to_f64());
+                    if (external_dur_secs - internal_dur_secs).abs() > 1e-9 {
+                        ci.timeline_duration = Some(ac.external_duration.beats_to_f64());
                     }
                     ci.gain = ac.gain;
                     instances.push(ci);
@@ -540,21 +535,12 @@ fn build_audio_clip_cache(
                         .unwrap_or_else(|| midi_backend_uuid(mc.id));
                     let mut ci = ClipInstance::new(clip_id);
                     ci.id = instance_id;
-                    ci.timeline_start = mc.external_start;
-                    ci.timeline_start_beats = mc.external_start_beats;
-                    ci.timeline_start_frames = mc.external_start_frames;
-                    ci.trim_start = mc.internal_start;
-                    ci.trim_start_beats = mc.internal_start_beats;
-                    ci.trim_start_frames = mc.internal_start_frames;
-                    ci.trim_end = Some(mc.internal_end);
-                    ci.trim_end_beats = Some(mc.internal_end_beats);
-                    ci.trim_end_frames = Some(mc.internal_end_frames);
-                    let internal_dur = mc.internal_end - mc.internal_start;
-                    if (mc.external_duration - internal_dur).abs() > 1e-9 {
-                        ci.timeline_duration = Some(mc.external_duration);
-                        ci.timeline_duration_beats = Some(mc.external_duration_beats);
-                        ci.timeline_duration_frames = Some(mc.external_duration_frames);
-                    }
+                    ci.timeline_start = mc.external_start.beats_to_f64();
+                    ci.trim_start = mc.internal_start.beats_to_f64();
+                    ci.trim_end = Some(mc.internal_end.beats_to_f64());
+                    // Always set timeline_duration for MIDI clips: duration is in beats, so we
+                    // must bypass the content_window_secs * bpm/60 formula (which expects seconds).
+                    ci.timeline_duration = Some(mc.external_duration.beats_to_f64());
                     instances.push(ci);
                 }
             }
@@ -955,12 +941,19 @@ impl TimelinePane {
             && *shared.metronome_enabled
             && self.time_display_format == TimelineMode::Measures
         {
-            let (bpm, beats_per_measure) = {
+            let (tempo_map, beats_per_measure) = {
                 let doc = shared.action_executor.document();
-                (doc.bpm, doc.time_signature.numerator as f64)
+                (doc.tempo_map().clone(), doc.time_signature.numerator as f64)
             };
-            let count_in_duration = beats_per_measure * (60.0 / bpm);
-            let seek_to = start_time - count_in_duration; // may be negative
+            // Convert start_time to beats, subtract one measure, convert back to seconds
+            let start_beat = tempo_map.inverse_transform(start_time);
+            let count_in_start_beat = start_beat - beats_per_measure;
+            let seek_to = if count_in_start_beat >= 0.0 {
+                tempo_map.transform(count_in_start_beat)
+            } else {
+                // Before beat 0: extrapolate using initial BPM
+                tempo_map.transform(0.0) - count_in_start_beat.abs() * (60.0 / tempo_map.global_bpm())
+            };
 
             if let Some(controller_arc) = shared.audio_controller {
                 let mut controller = controller_arc.lock().unwrap();
@@ -1025,14 +1018,11 @@ impl TimelinePane {
 
                         // Create document clip + clip instance immediately
                         let doc_clip = AudioClip::new_midi("Recording...",
-                            *shared.recording_clips.get(&layer_id).unwrap_or(&0), 0.0);
+                            *shared.recording_clips.get(&layer_id).unwrap_or(&0), daw_backend::Beats::ZERO);
                         let doc_clip_id = shared.action_executor.document_mut().add_audio_clip(doc_clip);
 
-                        let bpm = shared.action_executor.document().bpm;
-                        let fps = shared.action_executor.document().framerate;
                         let mut clip_instance = ClipInstance::new(doc_clip_id)
                             .with_timeline_start(start_time);
-                        clip_instance.sync_from_seconds(bpm, fps);
 
                         if let Some(layer) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
                             if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
@@ -1203,8 +1193,9 @@ impl TimelinePane {
         for (ci_idx, clip_instance) in clip_instances.iter().enumerate() {
             let clip_duration = effective_clip_duration(document, layer, clip_instance)?;
 
+            let tempo_map = document.tempo_map();
             let instance_start = clip_instance.effective_start();
-            let instance_duration = clip_instance.total_duration(clip_duration);
+            let instance_duration = clip_instance.total_duration(clip_duration, tempo_map);
             let instance_end = instance_start + instance_duration;
 
             let start_x = self.time_to_x(instance_start);
@@ -1284,12 +1275,13 @@ impl TimelinePane {
         let child_clips = group.all_child_clip_instances();
         let mut spans: Vec<(f64, f64, Vec<uuid::Uuid>)> = Vec::new(); // (start, end, clip_ids)
 
+        let tempo_map = document.tempo_map();
         for (_child_layer_id, ci) in &child_clips {
             let clip_dur = document.get_clip_duration(&ci.clip_id).unwrap_or_else(|| {
                 ci.trim_end.unwrap_or(1.0) - ci.trim_start
             });
             let start = ci.effective_start();
-            let end = start + ci.total_duration(clip_dur);
+            let end = start + ci.total_duration(clip_dur, tempo_map);
             spans.push((start, end, vec![ci.id]));
         }
 
@@ -1367,57 +1359,23 @@ impl TimelinePane {
         ((time - self.viewport_start_time) * self.pixels_per_second as f64) as f32
     }
 
-    /// Effective display start for a clip instance.
+    /// Effective display start for a clip instance, in seconds.
     ///
-    /// In Measures mode, uses `timeline_start_beats` as the canonical position so clips stay
-    /// anchored to their beat position during live BPM drag preview. Falls back to seconds
-    /// in other modes or when beat data is unavailable.
-    fn instance_display_start(&self, ci: &lightningbeam_core::clip::ClipInstance, bpm: f64) -> f64 {
-        if self.time_display_format == lightningbeam_core::document::TimelineMode::Measures
-            && (ci.timeline_start_beats.abs() > 1e-12 || ci.timeline_start == 0.0)
-        {
-            ci.timeline_start_beats * 60.0 / bpm - ci.loop_before.unwrap_or(0.0)
-        } else {
-            ci.effective_start()
-        }
+    /// `timeline_start` is in beats; converts to seconds using the current (preview) BPM so
+    /// clips stay anchored to their beat position during live BPM drag.
+    fn instance_display_start(&self, ci: &lightningbeam_core::clip::ClipInstance, tempo_map: &daw_backend::TempoMap) -> f64 {
+        tempo_map.transform(ci.effective_start())
     }
 
-    /// In Measures mode, uses beats fields for the clip's on-timeline duration so the width
-    /// stays correct during live BPM drag preview. Falls back to seconds in other modes.
-    fn instance_display_duration(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_dur_secs: f64, bpm: f64) -> f64 {
-        use lightningbeam_core::document::TimelineMode;
-        if self.time_display_format == TimelineMode::Measures {
-            // Looping/extended clip: explicit timeline_duration_beats
-            if let Some(dur_beats) = ci.timeline_duration_beats {
-                if dur_beats.abs() > 1e-12 {
-                    return dur_beats * 60.0 / bpm;
-                }
-            }
-            // Non-looping: derive from trim range in beats
-            let ts_beats = ci.trim_start_beats;
-            if let Some(te_beats) = ci.trim_end_beats {
-                if te_beats.abs() > 1e-12 || ts_beats.abs() > 1e-12 {
-                    return (te_beats - ts_beats).max(0.0) * 60.0 / bpm;
-                }
-            }
-        }
-        ci.total_duration(clip_dur_secs)
+    /// Effective on-timeline duration for a clip instance, in seconds.
+    ///
+    /// `total_duration` is in beats; converts to seconds using the current (preview) BPM.
+    fn instance_display_duration(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_dur_secs: f64, tempo_map: &daw_backend::TempoMap) -> f64 {
+        tempo_map.transform(ci.timeline_start + ci.total_duration(clip_dur_secs, tempo_map)) - tempo_map.transform(ci.effective_start())
     }
 
-    /// In Measures mode, returns the clip content start (trim_start) and duration in
-    /// beat-derived display seconds, for use when rendering note overlays.
-    fn content_display_range(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_dur_secs: f64, bpm: f64) -> (f64, f64) {
-        use lightningbeam_core::document::TimelineMode;
-        if self.time_display_format == TimelineMode::Measures {
-            let ts_beats = ci.trim_start_beats;
-            if let Some(te_beats) = ci.trim_end_beats {
-                if te_beats.abs() > 1e-12 || ts_beats.abs() > 1e-12 {
-                    let start = ts_beats * 60.0 / bpm;
-                    let dur = (te_beats - ts_beats).max(0.0) * 60.0 / bpm;
-                    return (start, dur);
-                }
-            }
-        }
+    /// Returns the clip content start (trim_start) and duration in display seconds.
+    fn content_display_range(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_dur_secs: f64, _bpm: f64) -> (f64, f64) {
         let trim_end = ci.trim_end.unwrap_or(clip_dur_secs);
         (ci.trim_start, (trim_end - ci.trim_start).max(0.0))
     }
@@ -1433,7 +1391,7 @@ impl TimelinePane {
     /// - Seconds mode: no snapping
     fn quantize_grid_size(
         &self,
-        bpm: f64,
+        tempo_map: &daw_backend::TempoMap,
         time_sig: &lightningbeam_core::document::TimeSignature,
         framerate: f64,
     ) -> Option<f64> {
@@ -1441,8 +1399,8 @@ impl TimelinePane {
             TimelineMode::Frames => Some(1.0 / framerate),
             TimelineMode::Measures => {
                 use lightningbeam_core::beat_time::{beat_duration, measure_duration};
-                let beat = beat_duration(bpm);
-                let measure = measure_duration(bpm, time_sig);
+                let beat = beat_duration(0.0, tempo_map);
+                let measure = measure_duration(0.0, tempo_map, time_sig);
                 let pps = self.pixels_per_second as f64;
                 // Very zoomed in: 16th note > 40px → no snap
                 if pps * beat / 4.0 > 40.0 { return None; }
@@ -1467,11 +1425,11 @@ impl TimelinePane {
     fn snap_to_grid(
         &self,
         t: f64,
-        bpm: f64,
+        tempo_map: &daw_backend::TempoMap,
         time_sig: &lightningbeam_core::document::TimeSignature,
         framerate: f64,
     ) -> f64 {
-        match self.quantize_grid_size(bpm, time_sig, framerate) {
+        match self.quantize_grid_size(tempo_map, time_sig, framerate) {
             Some(grid) => (t / grid).round() * grid,
             None => t,
         }
@@ -1481,11 +1439,11 @@ impl TimelinePane {
     /// Snaps the anchor clip's resulting position to the grid; all selected clips use the same offset.
     fn snapped_move_offset(
         &self,
-        bpm: f64,
+        tempo_map: &daw_backend::TempoMap,
         time_sig: &lightningbeam_core::document::TimeSignature,
         framerate: f64,
     ) -> f64 {
-        match self.quantize_grid_size(bpm, time_sig, framerate) {
+        match self.quantize_grid_size(tempo_map, time_sig, framerate) {
             Some(grid) => {
                 let snapped = ((self.drag_anchor_start + self.drag_offset) / grid).round() * grid;
                 snapped - self.drag_anchor_start
@@ -1524,7 +1482,7 @@ impl TimelinePane {
 
     /// Render the time ruler at the top
     fn render_ruler(&self, ui: &mut egui::Ui, rect: egui::Rect, theme: &crate::theme::Theme,
-                    bpm: f64, time_sig: &lightningbeam_core::document::TimeSignature, framerate: f64) {
+                    tempo_map: &daw_backend::TempoMap, time_sig: &lightningbeam_core::document::TimeSignature, framerate: f64) {
         let painter = ui.painter();
 
         // Background
@@ -1570,8 +1528,8 @@ impl TimelinePane {
                 }
             }
             TimelineMode::Measures => {
-                let beats_per_second = bpm / 60.0;
-                let beat_dur = lightningbeam_core::beat_time::beat_duration(bpm);
+                let beats_per_second = tempo_map.bpm_at(daw_backend::Beats(0.0)) / 60.0;
+                let beat_dur = lightningbeam_core::beat_time::beat_duration(0.0, tempo_map);
                 let bpm_count = time_sig.numerator;
                 let px_per_beat = beat_dur as f32 * self.pixels_per_second;
 
@@ -1724,15 +1682,10 @@ impl TimelinePane {
         let note_style = theme.style(".timeline-midi-note", ctx);
         let note_color = note_style.background_color().unwrap_or(egui::Color32::BLACK);
 
-        // In Measures mode during BPM drag, derive display time from beats so notes
-        // stay anchored to their beat positions.
+        // `timestamp` is in beats; convert to display-seconds using the current (preview) BPM.
+        let tempo_map = daw_backend::TempoMap::constant(display_bpm.unwrap_or(120.0));
         let event_display_time = |ev: &daw_backend::audio::midi::MidiEvent| -> f64 {
-            if let Some(bpm) = display_bpm {
-                if ev.timestamp_beats.abs() > 1e-12 || ev.timestamp == 0.0 {
-                    return ev.timestamp_beats * 60.0 / bpm;
-                }
-            }
-            ev.timestamp
+            tempo_map.transform(ev.timestamp.beats_to_f64())
         };
 
         // Build a map of active notes (note_number -> note_on_timestamp)
@@ -2782,7 +2735,7 @@ impl TimelinePane {
                     }
                 }
                 TimelineMode::Measures => {
-                    let beats_per_second = document.bpm / 60.0;
+                    let beats_per_second = document.tempo_map().bpm_at(daw_backend::Beats(0.0)) / 60.0;
                     let bpm_count = document.time_signature.numerator;
                     let start_beat = (self.viewport_start_time.max(0.0) * beats_per_second).floor() as i64;
                     let end_beat = (self.x_to_time(rect.width()) * beats_per_second).ceil() as i64;
@@ -2860,10 +2813,10 @@ impl TimelinePane {
                         ci.trim_end.unwrap_or(1.0) - ci.trim_start
                     });
                     let mut start = ci.effective_start();
-                    let dur = ci.total_duration(clip_dur);
+                    let dur = ci.total_duration(clip_dur, document.tempo_map());
                     // Apply drag offset for selected clips during move
                     if is_move_drag && selection.contains_clip_instance(&ci.id) {
-                        start = (start + self.snapped_move_offset(document.bpm, &document.time_signature, document.framerate)).max(0.0);
+                        start = (start + self.snapped_move_offset(document.tempo_map(), &document.time_signature, document.framerate)).max(0.0);
                     }
                     ranges.push((start, start + dur));
                 }
@@ -2933,9 +2886,9 @@ impl TimelinePane {
                                     .unwrap_or_else(|| ci.trim_end.unwrap_or(1.0) - ci.trim_start);
                                 let mut ci_start = ci.effective_start();
                                 if is_move_drag && selection.contains_clip_instance(&ci.id) {
-                                    ci_start = (ci_start + self.snapped_move_offset(document.bpm, &document.time_signature, document.framerate)).max(0.0);
+                                    ci_start = (ci_start + self.snapped_move_offset(document.tempo_map(), &document.time_signature, document.framerate)).max(0.0);
                                 }
-                                let ci_duration = ci.total_duration(clip_dur);
+                                let ci_duration = ci.total_duration(clip_dur, document.tempo_map());
                                 let ci_end = ci_start + ci_duration;
 
                                 let sx = self.time_to_x(ci_start);
@@ -3052,9 +3005,9 @@ impl TimelinePane {
                                 let clip_dur = audio_clip.duration;
                                 let mut ci_start = ci.effective_start();
                                 if is_move_drag && selection.contains_clip_instance(&ci.id) {
-                                    ci_start = (ci_start + self.snapped_move_offset(document.bpm, &document.time_signature, document.framerate)).max(0.0);
+                                    ci_start = (ci_start + self.snapped_move_offset(document.tempo_map(), &document.time_signature, document.framerate)).max(0.0);
                                 }
-                                let ci_duration = ci.total_duration(clip_dur);
+                                let ci_duration = ci.total_duration(clip_dur, document.tempo_map());
 
                                 let ci_screen_start = rect.min.x + self.time_to_x(ci_start);
                                 let ci_screen_end = ci_screen_start + (ci_duration * self.pixels_per_second as f64) as f32;
@@ -3150,11 +3103,11 @@ impl TimelinePane {
                     .filter(|ci| selection.contains_clip_instance(&ci.id))
                     .filter_map(|ci| {
                         let dur = document.get_clip_duration(&ci.clip_id)?;
-                        Some((ci.id, ci.effective_start(), ci.total_duration(dur)))
+                        Some((ci.id, ci.effective_start(), ci.total_duration(dur, document.tempo_map())))
                     })
                     .collect();
                 if !group.is_empty() {
-                    Some(document.clamp_group_move_offset(&layer.id(), &group, self.snapped_move_offset(document.bpm, &document.time_signature, document.framerate)))
+                    Some(document.clamp_group_move_offset(&layer.id(), &group, self.snapped_move_offset(document.tempo_map(), &document.time_signature, document.framerate)))
                 } else {
                     None
                 }
@@ -3167,7 +3120,7 @@ impl TimelinePane {
                 let preview_ranges: Vec<(f64, f64)> = clip_instances.iter().map(|ci| {
                     let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(0.0);
                     let mut start = ci.effective_start();
-                    let mut duration = ci.total_duration(clip_dur);
+                    let mut duration = ci.total_duration(clip_dur, document.tempo_map());
 
                     let is_selected = selection.contains_clip_instance(&ci.id);
                     let is_linked = if self.clip_drag_state.is_some() {
@@ -3187,7 +3140,7 @@ impl TimelinePane {
                                     }
                                 }
                                 ClipDragType::TrimLeft => {
-                                    let new_trim = self.snap_to_grid(ci.trim_start + self.drag_offset, document.bpm, &document.time_signature, document.framerate).max(0.0).min(clip_dur);
+                                    let new_trim = self.snap_to_grid(ci.trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate).max(0.0).min(clip_dur);
                                     let offset = new_trim - ci.trim_start;
                                     start = (ci.timeline_start + offset).max(0.0);
                                     duration = (clip_dur - new_trim).max(0.0);
@@ -3197,7 +3150,7 @@ impl TimelinePane {
                                 }
                                 ClipDragType::TrimRight => {
                                     let old_trim_end = ci.trim_end.unwrap_or(clip_dur);
-                                    let new_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, document.bpm, &document.time_signature, document.framerate).max(ci.trim_start).min(clip_dur);
+                                    let new_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate).max(ci.trim_start).min(clip_dur);
                                     duration = (new_trim_end - ci.trim_start).max(0.0);
                                 }
                                 ClipDragType::LoopExtendRight => {
@@ -3205,7 +3158,7 @@ impl TimelinePane {
                                     let content_window = (trim_end - ci.trim_start).max(0.0);
                                     let current_right = ci.timeline_duration.unwrap_or(content_window);
                                     let right_edge = ci.timeline_start + current_right + self.drag_offset;
-                                    let snapped_edge = self.snap_to_grid(right_edge, document.bpm, &document.time_signature, document.framerate);
+                                    let snapped_edge = self.snap_to_grid(right_edge, document.tempo_map(), &document.time_signature, document.framerate);
                                     let new_right = (snapped_edge - ci.timeline_start).max(content_window);
                                     let loop_before = ci.loop_before.unwrap_or(0.0);
                                     duration = loop_before + new_right;
@@ -3217,7 +3170,7 @@ impl TimelinePane {
                                     let desired = (current_loop_before - self.drag_offset).max(0.0);
                                     let snapped = (desired / content_window).round() * content_window;
                                     start = ci.timeline_start - snapped;
-                                    duration = snapped + ci.effective_duration(clip_dur);
+                                    duration = snapped + ci.effective_duration(clip_dur, document.tempo_map());
                                 }
                             }
                         }
@@ -3236,13 +3189,13 @@ impl TimelinePane {
                 if let Some(clip_duration) = clip_duration {
                     // Calculate effective duration accounting for trimming.
                     // In Measures mode, uses beats fields so width tracks BPM during live drag.
-                    let mut instance_duration = self.instance_display_duration(clip_instance, clip_duration, document.bpm);
+                    let mut instance_duration = self.instance_display_duration(clip_instance, clip_duration, document.tempo_map());
 
                     // Instance positioned on the layer's timeline using timeline_start.
                     // In Measures mode, uses timeline_start_beats so clips stay at their beat
                     // position during live BPM drag preview.
                     let _layer_data = layer.layer();
-                    let mut instance_start = self.instance_display_start(clip_instance, document.bpm);
+                    let mut instance_start = self.instance_display_start(clip_instance, document.tempo_map());
 
                     // Apply drag offset preview for selected clips with snapping
                     let is_selected = selection.contains_clip_instance(&clip_instance.id);
@@ -3267,7 +3220,7 @@ impl TimelinePane {
 
                     // Track preview trim values for note/waveform rendering.
                     // In Measures mode, derive from beats so they track BPM during live drag.
-                    let (base_trim_start, base_clip_duration) = self.content_display_range(clip_instance, clip_duration, document.bpm);
+                    let (base_trim_start, base_clip_duration) = self.content_display_range(clip_instance, clip_duration, document.bpm());
                     let mut preview_trim_start = base_trim_start;
                     let mut preview_clip_duration = base_clip_duration;
 
@@ -3282,7 +3235,7 @@ impl TimelinePane {
                                 }
                                 ClipDragType::TrimLeft => {
                                     // Trim left: calculate new trim_start with snap to adjacent clips
-                                    let desired_trim_start = self.snap_to_grid(clip_instance.trim_start + self.drag_offset, document.bpm, &document.time_signature, document.framerate)
+                                    let desired_trim_start = self.snap_to_grid(clip_instance.trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate)
                                         .max(0.0)
                                         .min(clip_duration);
 
@@ -3322,7 +3275,7 @@ impl TimelinePane {
                                 ClipDragType::TrimRight => {
                                     // Trim right: extend or reduce duration with snap to adjacent clips
                                     let old_trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
-                                    let desired_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, document.bpm, &document.time_signature, document.framerate)
+                                    let desired_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate)
                                         .max(clip_instance.trim_start)
                                         .min(clip_duration);
 
@@ -3356,7 +3309,7 @@ impl TimelinePane {
                                     let content_window = (trim_end - clip_instance.trim_start).max(0.0);
                                     let current_right = clip_instance.timeline_duration.unwrap_or(content_window);
                                     let right_edge = clip_instance.timeline_start + current_right + self.drag_offset;
-                                    let snapped_edge = self.snap_to_grid(right_edge, document.bpm, &document.time_signature, document.framerate);
+                                    let snapped_edge = self.snap_to_grid(right_edge, document.tempo_map(), &document.time_signature, document.framerate);
                                     let desired_right = (snapped_edge - clip_instance.timeline_start).max(content_window);
 
                                     let new_right = if desired_right > current_right {
@@ -3404,7 +3357,7 @@ impl TimelinePane {
                                     };
 
                                     // Recompute instance_start and instance_duration
-                                    let right_duration = clip_instance.effective_duration(clip_duration);
+                                    let right_duration = clip_instance.effective_duration(clip_duration, document.tempo_map());
                                     instance_start = clip_instance.timeline_start - new_loop_before;
                                     instance_duration = new_loop_before + right_duration;
                                     content_origin = clip_instance.timeline_start;
@@ -3525,7 +3478,7 @@ impl TimelinePane {
                                                     if iter_duration <= 0.0 { continue; }
 
                                                     let note_bpm = if self.time_display_format == lightningbeam_core::document::TimelineMode::Measures {
-                                                        Some(document.bpm)
+                                                        Some(document.bpm())
                                                     } else {
                                                         None
                                                     };
@@ -3547,7 +3500,7 @@ impl TimelinePane {
                                                 }
                                             } else {
                                                 let note_bpm = if self.time_display_format == lightningbeam_core::document::TimelineMode::Measures {
-                                                    Some(document.bpm)
+                                                    Some(document.bpm())
                                                 } else {
                                                     None
                                                 };
@@ -4066,7 +4019,7 @@ impl TimelinePane {
                                 let clip_duration = effective_clip_duration(document, layer, clip_instance);
 
                                 if let Some(clip_duration) = clip_duration {
-                                    let instance_duration = clip_instance.total_duration(clip_duration);
+                                    let instance_duration = clip_instance.total_duration(clip_duration, document.tempo_map());
                                     let instance_start = clip_instance.effective_start();
                                     let instance_end = instance_start + instance_duration;
 
@@ -4419,7 +4372,7 @@ impl TimelinePane {
                     HashMap::new();
 
                 // Compute snapped offset once for all selected clips (preserves relative spacing)
-                let move_offset = self.snapped_move_offset(document.bpm, &document.time_signature, document.framerate);
+                let move_offset = self.snapped_move_offset(document.tempo_map(), &document.time_signature, document.framerate);
 
                 // Iterate through all layers (including group children) to find selected clip instances
                 for (layer, clip_instances) in all_layer_clip_instances(context_layers, &audio_cache) {
@@ -4481,8 +4434,7 @@ impl TimelinePane {
 
                                                     // New trim_start is snapped then clamped to valid range
                                                     let desired_trim_start = self.snap_to_grid(
-                                                        old_trim_start + self.drag_offset,
-                                                        document.bpm, &document.time_signature, document.framerate,
+                                                        old_trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate,
                                                     ).max(0.0).min(clip_duration);
 
                                                     // Apply overlap prevention when extending left
@@ -4525,11 +4477,10 @@ impl TimelinePane {
 
                                                     // Calculate new trim_end based on current duration
                                                     let current_duration =
-                                                        clip_instance.effective_duration(clip_duration);
+                                                        clip_instance.effective_duration(clip_duration, document.tempo_map());
                                                     let old_trim_end_val = clip_instance.trim_end.unwrap_or(clip_duration);
                                                     let desired_trim_end = self.snap_to_grid(
-                                                        old_trim_end_val + self.drag_offset,
-                                                        document.bpm, &document.time_signature, document.framerate,
+                                                        old_trim_end_val + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate,
                                                     ).max(clip_instance.trim_start).min(clip_duration);
 
                                                     // Apply overlap prevention when extending right
@@ -4607,7 +4558,7 @@ impl TimelinePane {
                                             let content_window = (trim_end - clip_instance.trim_start).max(0.0);
                                             let current_right = clip_instance.timeline_duration.unwrap_or(content_window);
                                             let right_edge = clip_instance.timeline_start + current_right + self.drag_offset;
-                                            let snapped_edge = self.snap_to_grid(right_edge, document.bpm, &document.time_signature, document.framerate);
+                                            let snapped_edge = self.snap_to_grid(right_edge, document.tempo_map(), &document.time_signature, document.framerate);
                                             let desired_right = snapped_edge - clip_instance.timeline_start;
 
                                             let new_right = if desired_right > current_right {
@@ -4785,7 +4736,7 @@ impl TimelinePane {
         if cursor_over_ruler && !alt_held && (response.clicked() || (response.dragged() && !self.is_panning)) {
             if let Some(pos) = response.interact_pointer_pos() {
                 let x = (pos.x - content_rect.min.x).max(0.0);
-                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.bpm, &document.time_signature, document.framerate);
+                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.tempo_map(), &document.time_signature, document.framerate);
                 *playback_time = new_time;
                 self.is_scrubbing = true;
                 // Seek immediately so it works while playing
@@ -4799,7 +4750,7 @@ impl TimelinePane {
         else if self.is_scrubbing && response.dragged() && !self.is_panning {
             if let Some(pos) = response.interact_pointer_pos() {
                 let x = (pos.x - content_rect.min.x).max(0.0);
-                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.bpm, &document.time_signature, document.framerate);
+                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.tempo_map(), &document.time_signature, document.framerate);
                 *playback_time = new_time;
                 if let Some(controller_arc) = audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
@@ -5092,9 +5043,9 @@ impl PaneRenderer for TimelinePane {
 
         // Time display (format-dependent)
         {
-            let (bpm, time_sig_num, time_sig_den, framerate) = {
+            let (tempo_map, bpm, time_sig_num, time_sig_den, framerate) = {
                 let doc = shared.action_executor.document();
-                (doc.bpm, doc.time_signature.numerator, doc.time_signature.denominator, doc.framerate)
+                (doc.tempo_map().clone(), doc.bpm(), doc.time_signature.numerator, doc.time_signature.denominator, doc.framerate)
             };
 
             match self.time_display_format {
@@ -5104,7 +5055,7 @@ impl PaneRenderer for TimelinePane {
                 TimelineMode::Measures => {
                     let time_sig = lightningbeam_core::document::TimeSignature { numerator: time_sig_num, denominator: time_sig_den };
                     let pos = lightningbeam_core::beat_time::time_to_measure(
-                        *shared.playback_time, bpm, &time_sig,
+                        *shared.playback_time, &tempo_map, &time_sig,
                     );
                     ui.colored_label(text_color, format!(
                         "BAR: {}.{}  |  BPM: {:.0}  |  {}/{}",
@@ -5204,7 +5155,7 @@ impl PaneRenderer for TimelinePane {
                     self.bpm_drag_start = Some(bpm);
                 }
                 // Live preview: update document directly so grid reflows immediately
-                shared.action_executor.document_mut().bpm = bpm_val;
+                shared.action_executor.document_mut().set_bpm(bpm_val);
                 if let Some(controller_arc) = shared.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
                     controller.set_tempo(bpm_val as f32, (time_sig_num, time_sig_den));
@@ -5214,35 +5165,17 @@ impl PaneRenderer for TimelinePane {
             // On commit, dispatch a single ChangeBpmAction (single undo entry)
             if bpm_response.drag_stopped() || bpm_response.lost_focus() {
                 if let Some(start_bpm) = self.bpm_drag_start.take() {
-                    let new_bpm = shared.action_executor.document().bpm;
+                    let new_bpm = shared.action_executor.document().bpm();
                     if (start_bpm - new_bpm).abs() > 1e-6
                         && self.time_display_format == lightningbeam_core::document::TimelineMode::Measures
                     {
                         use lightningbeam_core::actions::ChangeBpmAction;
-                        // document.bpm is already new_bpm from the live preview — keep it.
-                        // ChangeBpmAction::new uses the passed old/new params, not document.bpm,
-                        // so we don't need to revert (which would cause a one-frame flash).
+                        // document.bpm() is already new_bpm from the live preview — build action
+                        // with new_bpm so it records the correct undo state.
                         let action = ChangeBpmAction::new(
-                            start_bpm,
                             new_bpm,
                             shared.action_executor.document(),
-                            shared.midi_event_cache,
                         );
-                        // Immediately update midi_event_cache for rendering
-                        for (clip_id, events) in action.new_midi_events() {
-                            shared.midi_event_cache.insert(clip_id, events.clone());
-                        }
-                        // Optimistically rescale automation keyframe times in the cache.
-                        // The backend rescales asynchronously via ApplyBpmChange; this keeps
-                        // the cache consistent without waiting for the engine to round-trip.
-                        let scale = start_bpm / new_bpm;
-                        for lanes in self.automation_cache.values_mut() {
-                            for lane in lanes.iter_mut() {
-                                for kf in lane.keyframes.iter_mut() {
-                                    kf.time *= scale;
-                                }
-                            }
-                        }
                         shared.pending_actions.push(Box::new(action));
                     }
                 }
@@ -5271,7 +5204,7 @@ impl PaneRenderer for TimelinePane {
                             doc.time_signature.denominator = *den;
                             if let Some(controller_arc) = shared.audio_controller {
                                 let mut controller = controller_arc.lock().unwrap();
-                                controller.set_tempo(doc.bpm as f32, (*num, *den));
+                                controller.set_tempo(doc.bpm() as f32, (*num, *den));
                             }
                         }
                     }
@@ -5331,7 +5264,7 @@ impl PaneRenderer for TimelinePane {
                 let clip_duration = effective_clip_duration(document, layer, clip_instance);
 
                 if let Some(clip_duration) = clip_duration {
-                    let instance_duration = clip_instance.effective_duration(clip_duration);
+                    let instance_duration = clip_instance.effective_duration(clip_duration, document.tempo_map());
                     let instance_end = clip_instance.timeline_start + instance_duration;
                     max_endpoint = max_endpoint.max(instance_end);
                 }
@@ -5390,7 +5323,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
-        self.render_ruler(ui, ruler_rect, shared.theme, document.bpm, &document.time_signature, document.framerate);
+        self.render_ruler(ui, ruler_rect, shared.theme, document.tempo_map(), &document.time_signature, document.framerate);
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
@@ -5486,8 +5419,8 @@ impl PaneRenderer for TimelinePane {
         // Invalidate automation cache when BPM changes (but not during a live drag —
         // during drag the backend hasn't rescaled yet so re-querying would give stale data).
         let bpm_committed = self.bpm_drag_start.is_none();
-        if bpm_committed && (document.bpm - self.automation_cache_bpm).abs() > 1e-9 {
-            self.automation_cache_bpm = document.bpm;
+        if bpm_committed && (document.bpm() - self.automation_cache_bpm).abs() > 1e-9 {
+            self.automation_cache_bpm = document.bpm();
             self.automation_cache.clear();
         }
 
@@ -5631,7 +5564,7 @@ impl PaneRenderer for TimelinePane {
                         for inst in instances {
                             if !shared.selection.contains_clip_instance(&inst.id) { continue; }
                             if let Some(dur) = document.get_clip_duration(&inst.clip_id) {
-                                let eff = inst.effective_duration(dur);
+                                let eff = inst.effective_duration(dur, document.tempo_map());
                                 let start = inst.timeline_start;
                                 let end = start + eff;
                                 let min_dist = min_split_px as f64 / self.pixels_per_second as f64;
@@ -5657,7 +5590,7 @@ impl PaneRenderer for TimelinePane {
                             .filter(|ci| shared.selection.contains_clip_instance(&ci.id))
                             .all(|ci| {
                                 if let Some(dur) = document.get_clip_duration(&ci.clip_id) {
-                                    let eff = ci.effective_duration(dur);
+                                    let eff = ci.effective_duration(dur, document.tempo_map());
                                     let max_extend = document.find_max_trim_extend_right(
                                         &layer_id, &ci.id, ci.timeline_start, eff,
                                     );
@@ -5696,7 +5629,7 @@ impl PaneRenderer for TimelinePane {
                                         enabled = instances.iter().all(|ci| {
                                             let paste_start = (ci.timeline_start + offset).max(0.0);
                                             if let Some(dur) = document.get_clip_duration(&ci.clip_id) {
-                                                let eff = ci.effective_duration(dur);
+                                                let eff = ci.effective_duration(dur, document.tempo_map());
                                                 document
                                                     .find_nearest_valid_position(
                                                         &layer_id,

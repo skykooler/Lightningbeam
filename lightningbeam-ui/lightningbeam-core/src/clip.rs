@@ -98,15 +98,20 @@ impl VectorClip {
     ///
     /// The `clip_duration_fn` resolves referenced clip durations for non-vector layers.
     /// Falls back to the stored `duration` field if no content exists.
-    pub fn content_duration(&self, framerate: f64) -> f64 {
-        self.content_duration_with(framerate, |_| None)
+    pub fn content_duration(&self, framerate: f64, tempo_map: &crate::tempo_map::TempoMap) -> f64 {
+        self.content_duration_with(framerate, tempo_map, |_| None)
     }
 
     /// Like `content_duration`, but with a closure that resolves clip durations
     /// for audio/video/effect clip instances inside this movie clip.
-    pub fn content_duration_with(&self, framerate: f64, clip_duration_fn: impl Fn(&Uuid) -> Option<f64>) -> f64 {
+    ///
+    /// `clip_duration_fn` returns clip content duration **in seconds**.
+    /// Result is in **seconds**.
+    pub fn content_duration_with(&self, framerate: f64, tempo_map: &crate::tempo_map::TempoMap, clip_duration_fn: impl Fn(&Uuid) -> Option<f64>) -> f64 {
         let frame_duration = 1.0 / framerate;
-        let mut last_time: Option<f64> = None;
+        // Work in beats, convert to seconds at the end.
+        let mut last_beats: Option<f64> = None;
+        let mut last_secs: Option<f64> = None;
 
         for layer_node in self.layers.iter() {
             // Check clip instances on ALL layer types (vector, audio, video, effect)
@@ -119,33 +124,38 @@ impl VectorClip {
                 AnyLayer::Raster(_) => &[],
             };
             for ci in clip_instances {
-                let end = if let Some(td) = ci.timeline_duration {
-                    ci.timeline_start + td
+                // Compute end position of this clip instance in beats
+                let end_beats = if let Some(td_beats) = ci.timeline_duration {
+                    ci.timeline_start + td_beats
                 } else if let Some(te) = ci.trim_end {
-                    ci.timeline_start + (te - ci.trim_start).max(0.0)
-                } else if let Some(clip_dur) = clip_duration_fn(&ci.clip_id) {
-                    ci.timeline_start + (clip_dur - ci.trim_start).max(0.0)
+                    let secs = (te - ci.trim_start).max(0.0);
+                    ci.timeline_start + tempo_map.inverse_transform(tempo_map.transform(ci.timeline_start) + secs) - ci.timeline_start
+                } else if let Some(clip_dur_secs) = clip_duration_fn(&ci.clip_id) {
+                    let secs = (clip_dur_secs - ci.trim_start).max(0.0);
+                    ci.timeline_start + tempo_map.inverse_transform(tempo_map.transform(ci.timeline_start) + secs) - ci.timeline_start
                 } else {
                     continue;
                 };
-                last_time = Some(match last_time {
-                    Some(t) => t.max(end),
-                    None => end,
-                });
+                last_beats = Some(last_beats.map_or(end_beats, |t: f64| t.max(end_beats)));
             }
 
-            // Also check vector layer keyframes
+            // Vector layer keyframes are in seconds
             if let AnyLayer::Vector(vector_layer) = &layer_node.data {
                 if let Some(last_kf) = vector_layer.keyframes.last() {
-                    last_time = Some(match last_time {
-                        Some(t) => t.max(last_kf.time),
-                        None => last_kf.time,
-                    });
+                    last_secs = Some(last_secs.map_or(last_kf.time, |t: f64| t.max(last_kf.time)));
                 }
             }
         }
 
-        match last_time {
+        let from_clips = last_beats.map(|b| tempo_map.transform(b));
+        let combined = match (from_clips, last_secs) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+
+        match combined {
             Some(t) => t + frame_duration,
             None => self.duration,
         }
@@ -186,9 +196,10 @@ impl VectorClip {
 
                 // Handle nested clip instances recursively
                 for clip_instance in &vector_layer.clip_instances {
-                    // Convert parent clip time to nested clip local time
-                    // Apply timeline offset and playback speed, then add trim offset
-                    let nested_clip_time = ((clip_time - clip_instance.timeline_start) * clip_instance.playback_speed) + clip_instance.trim_start;
+                    // Convert parent clip time (seconds) to nested clip local time (seconds).
+                    // timeline_start is in beats; convert to seconds using document BPM.
+                    let start_secs = document.tempo_map().transform(clip_instance.timeline_start);
+                    let nested_clip_time = ((clip_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start;
 
                     // Look up the nested clip definition
                     let nested_bounds = if let Some(nested_clip) = document.get_vector_clip(&clip_instance.clip_id) {
@@ -485,12 +496,12 @@ impl AudioClip {
     pub fn new_midi(
         name: impl Into<String>,
         midi_clip_id: u32,
-        duration: f64,
+        duration: daw_backend::Beats,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
             name: name.into(),
-            duration,
+            duration: duration.beats_to_f64(),
             clip_type: AudioClipType::Midi { midi_clip_id },
             folder_id: None,
         }
@@ -589,6 +600,12 @@ impl AnyClip {
 /// - Timeline placement (when this instance appears on the parent layer's timeline)
 /// - Trimming (trim_start, trim_end within the clip's internal content)
 /// - Playback speed (time remapping)
+///
+/// ## Coordinate systems
+/// - `timeline_start` / `timeline_duration` are in **beats** (quarter-note beats).
+///   Use [`crate::tempo_map::TempoMap::beats_to_seconds`] to convert to seconds.
+/// - `trim_start` / `trim_end` are in **seconds** (audio/video file seek offsets;
+///   not affected by BPM changes).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClipInstance {
     /// Unique identifier for this instance
@@ -606,52 +623,25 @@ pub struct ClipInstance {
     /// Optional name for this instance
     pub name: Option<String>,
 
-    /// When this instance starts on the timeline (in seconds, relative to parent layer)
-    /// This is the external positioning - where the instance appears on the timeline
-    /// Default: 0.0 (start at beginning of layer)
+    /// When this instance starts on the timeline, in **beats**.
+    /// Default: 0.0
     pub timeline_start: f64,
-    /// timeline_start in beats (quarter-note beats); derived from timeline_start
-    #[serde(default)]
-    pub timeline_start_beats: f64,
-    /// timeline_start in frames; derived from timeline_start
-    #[serde(default)]
-    pub timeline_start_frames: f64,
 
-    /// How long this instance appears on the timeline (in seconds)
-    /// If timeline_duration > (trim_end - trim_start), the trimmed content will loop
+    /// How long this instance appears on the timeline, in **beats**.
+    /// If set and longer than the trimmed content, the content will loop.
     /// Default: None (use trimmed clip duration, no looping)
     pub timeline_duration: Option<f64>,
-    /// timeline_duration in beats; derived from timeline_duration
-    #[serde(default)]
-    pub timeline_duration_beats: Option<f64>,
-    /// timeline_duration in frames; derived from timeline_duration
-    #[serde(default)]
-    pub timeline_duration_frames: Option<f64>,
 
-    /// Trim start: offset into the clip's internal content (in seconds)
-    /// Allows trimming the beginning of the clip
-    /// - For audio: offset into the audio file
-    /// - For video: offset into the video file
-    /// - For vector: offset into the animation timeline
-    /// Default: 0.0 (start at beginning of clip)
+    /// Trim start: offset into the clip's internal content, in **seconds**.
+    /// - For audio: byte-offset into the audio file
+    /// - For video: seek position in the video file
+    /// - For vector: time offset into the animation
+    /// Default: 0.0
     pub trim_start: f64,
-    /// trim_start in beats; derived from trim_start
-    #[serde(default)]
-    pub trim_start_beats: f64,
-    /// trim_start in frames; derived from trim_start
-    #[serde(default)]
-    pub trim_start_frames: f64,
 
-    /// Trim end: offset into the clip's internal content (in seconds)
-    /// Allows trimming the end of the clip
+    /// Trim end: offset into the clip's internal content, in **seconds**.
     /// Default: None (use full clip duration)
     pub trim_end: Option<f64>,
-    /// trim_end in beats; derived from trim_end
-    #[serde(default)]
-    pub trim_end_beats: Option<f64>,
-    /// trim_end in frames; derived from trim_end
-    #[serde(default)]
-    pub trim_end_frames: Option<f64>,
 
     /// Playback speed multiplier
     /// 1.0 = normal speed, 0.5 = half speed, 2.0 = double speed
@@ -663,7 +653,7 @@ pub struct ClipInstance {
     /// Default: 1.0
     pub gain: f32,
 
-    /// How far (in seconds) the looped content extends before timeline_start.
+    /// How far (in beats) the looped content extends before timeline_start.
     /// When set, loop iterations are drawn/played before the content start.
     /// Default: None (no pre-loop)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -720,17 +710,9 @@ impl ClipInstance {
             opacity: 1.0,
             name: None,
             timeline_start: 0.0,
-            timeline_start_beats: 0.0,
-            timeline_start_frames: 0.0,
             timeline_duration: None,
-            timeline_duration_beats: None,
-            timeline_duration_frames: None,
             trim_start: 0.0,
-            trim_start_beats: 0.0,
-            trim_start_frames: 0.0,
             trim_end: None,
-            trim_end_beats: None,
-            trim_end_frames: None,
             playback_speed: 1.0,
             gain: 1.0,
             loop_before: None,
@@ -746,68 +728,12 @@ impl ClipInstance {
             opacity: 1.0,
             name: None,
             timeline_start: 0.0,
-            timeline_start_beats: 0.0,
-            timeline_start_frames: 0.0,
             timeline_duration: None,
-            timeline_duration_beats: None,
-            timeline_duration_frames: None,
             trim_start: 0.0,
-            trim_start_beats: 0.0,
-            trim_start_frames: 0.0,
             trim_end: None,
-            trim_end_beats: None,
-            trim_end_frames: None,
             playback_speed: 1.0,
             gain: 1.0,
             loop_before: None,
-        }
-    }
-
-    /// Sync beats and frames from the seconds fields (call after any seconds-based write).
-    pub fn sync_from_seconds(&mut self, bpm: f64, fps: f64) {
-        self.timeline_start_beats = self.timeline_start * bpm / 60.0;
-        self.timeline_start_frames = self.timeline_start * fps;
-        self.trim_start_beats = self.trim_start * bpm / 60.0;
-        self.trim_start_frames = self.trim_start * fps;
-        self.trim_end_beats = self.trim_end.map(|v| v * bpm / 60.0);
-        self.trim_end_frames = self.trim_end.map(|v| v * fps);
-        self.timeline_duration_beats = self.timeline_duration.map(|v| v * bpm / 60.0);
-        self.timeline_duration_frames = self.timeline_duration.map(|v| v * fps);
-    }
-
-    /// Recompute seconds and frames from beats (call when BPM changes in Measures mode).
-    pub fn apply_beats(&mut self, bpm: f64, fps: f64) {
-        self.timeline_start = self.timeline_start_beats * 60.0 / bpm;
-        self.timeline_start_frames = self.timeline_start * fps;
-        self.trim_start = self.trim_start_beats * 60.0 / bpm;
-        self.trim_start_frames = self.trim_start * fps;
-        if let Some(b) = self.trim_end_beats {
-            let s = b * 60.0 / bpm;
-            self.trim_end = Some(s);
-            self.trim_end_frames = Some(s * fps);
-        }
-        if let Some(b) = self.timeline_duration_beats {
-            let s = b * 60.0 / bpm;
-            self.timeline_duration = Some(s);
-            self.timeline_duration_frames = Some(s * fps);
-        }
-    }
-
-    /// Recompute seconds and beats from frames (call when FPS changes in Frames mode).
-    pub fn apply_frames(&mut self, fps: f64, bpm: f64) {
-        self.timeline_start = self.timeline_start_frames / fps;
-        self.timeline_start_beats = self.timeline_start * bpm / 60.0;
-        self.trim_start = self.trim_start_frames / fps;
-        self.trim_start_beats = self.trim_start * bpm / 60.0;
-        if let Some(f) = self.trim_end_frames {
-            let s = f / fps;
-            self.trim_end = Some(s);
-            self.trim_end_beats = Some(s * bpm / 60.0);
-        }
-        if let Some(f) = self.timeline_duration_frames {
-            let s = f / fps;
-            self.timeline_duration = Some(s);
-            self.timeline_duration_beats = Some(s * bpm / 60.0);
         }
     }
 
@@ -861,81 +787,81 @@ impl ClipInstance {
         self
     }
 
-    /// Set explicit timeline duration by setting trim_end
-    ///
-    /// For effect instances, this effectively sets the duration since
-    /// effects have infinite internal duration (trim_start defaults to 0).
-    pub fn with_timeline_duration(mut self, duration: f64) -> Self {
-        self.trim_end = Some(self.trim_start + duration);
+    /// Set explicit timeline duration (in beats) by directly setting `timeline_duration`.
+    pub fn with_timeline_duration(mut self, duration_beats: f64) -> Self {
+        self.timeline_duration = Some(duration_beats);
         self
     }
 
-    /// Get the effective duration of this instance (accounting for trimming and looping)
-    /// If timeline_duration is set, returns that (enabling content looping)
-    /// Otherwise returns the trimmed content duration
-    pub fn effective_duration(&self, clip_duration: f64) -> f64 {
-        // If timeline_duration is explicitly set, use that (for looping)
-        if let Some(timeline_dur) = self.timeline_duration {
-            return timeline_dur;
-        }
-
-        // Otherwise, return the trimmed content duration
-        let end = self.trim_end.unwrap_or(clip_duration);
+    /// Content window size in seconds: `trim_end - trim_start`.
+    /// Used for internal looping calculations.
+    pub fn content_window_secs(&self, clip_duration_secs: f64) -> f64 {
+        let end = self.trim_end.unwrap_or(clip_duration_secs);
         (end - self.trim_start).max(0.0)
     }
 
-    /// Get the effective start position on the timeline, accounting for loop_before.
-    /// This is the left edge of the clip's visual extent.
+    /// How long this instance appears on the timeline, in **beats**.
+    ///
+    /// If `timeline_duration` is set, returns that (enabling content looping).
+    /// Otherwise converts the content window from seconds to beats using the tempo map.
+    pub fn effective_duration_beats(&self, clip_duration_secs: f64, tempo_map: &crate::tempo_map::TempoMap) -> f64 {
+        if let Some(td) = self.timeline_duration {
+            return td;
+        }
+        let window_secs = self.content_window_secs(clip_duration_secs);
+        let start_secs = tempo_map.transform(self.timeline_start);
+        tempo_map.inverse_transform(start_secs + window_secs) - self.timeline_start
+    }
+
+    /// Left edge of the clip's visual extent on the timeline, in **beats**.
     pub fn effective_start(&self) -> f64 {
         self.timeline_start - self.loop_before.unwrap_or(0.0)
     }
 
-    /// Get the total visual duration including both loop_before and effective_duration.
-    pub fn total_duration(&self, clip_duration: f64) -> f64 {
-        self.loop_before.unwrap_or(0.0) + self.effective_duration(clip_duration)
+    /// Total visual duration (loop_before + effective_duration), in **beats**.
+    pub fn total_duration(&self, clip_duration_secs: f64, tempo_map: &crate::tempo_map::TempoMap) -> f64 {
+        self.loop_before.unwrap_or(0.0) + self.effective_duration_beats(clip_duration_secs, tempo_map)
     }
 
-    /// Remap timeline time to clip content time
+    /// Map a playback time (in **seconds**) to clip-local content time (in **seconds**).
     ///
-    /// Takes a global timeline time and returns the corresponding time within this
-    /// clip's content, accounting for:
-    /// - Instance position (timeline_start)
-    /// - Playback speed
-    /// - Trimming (trim_start, trim_end)
-    /// - Looping (if timeline_duration > content window)
-    ///
-    /// Returns None if the clip instance is not active at the given timeline time.
-    pub fn remap_time(&self, timeline_time: f64, clip_duration: f64) -> Option<f64> {
-        // Check if clip instance is active at this time
-        let instance_end = self.timeline_start + self.effective_duration(clip_duration);
-        if timeline_time < self.timeline_start || timeline_time >= instance_end {
+    /// Returns `None` if the clip instance is not active at `time_secs`.
+    pub fn remap_time_secs(&self, time_secs: f64, clip_duration_secs: f64, tempo_map: &crate::tempo_map::TempoMap) -> Option<f64> {
+        let start_secs = tempo_map.transform(self.timeline_start);
+        let dur_beats = self.effective_duration_beats(clip_duration_secs, tempo_map);
+        let end_secs = tempo_map.transform(self.timeline_start + dur_beats);
+
+        if time_secs < start_secs || time_secs >= end_secs {
             return None;
         }
 
-        // Calculate relative time within the instance (0.0 = start of instance)
-        let relative_time = timeline_time - self.timeline_start;
+        let relative_secs = time_secs - start_secs;
+        let content_time = relative_secs * self.playback_speed;
+        let content_window = self.content_window_secs(clip_duration_secs);
 
-        // Account for playback speed
-        let content_time = relative_time * self.playback_speed;
-
-        // Get the content window size (the portion of clip we're sampling)
-        let trim_end = self.trim_end.unwrap_or(clip_duration);
-        let content_window = (trim_end - self.trim_start).max(0.0);
-
-        // If content_window is zero, can't sample anything
         if content_window == 0.0 {
             return Some(self.trim_start);
         }
 
-        // Apply looping if content exceeds the window
         let looped_time = if content_time > content_window {
             content_time % content_window
         } else {
             content_time
         };
 
-        // Add trim_start offset to get final clip time
         Some(self.trim_start + looped_time)
+    }
+
+    /// Alias for `remap_time_secs`.
+    #[inline]
+    pub fn remap_time(&self, time_secs: f64, clip_duration_secs: f64, tempo_map: &crate::tempo_map::TempoMap) -> Option<f64> {
+        self.remap_time_secs(time_secs, clip_duration_secs, tempo_map)
+    }
+
+    /// Alias for `effective_duration_beats`.
+    #[inline]
+    pub fn effective_duration(&self, clip_duration_secs: f64, tempo_map: &crate::tempo_map::TempoMap) -> f64 {
+        self.effective_duration_beats(clip_duration_secs, tempo_map)
     }
 
     /// Convert to affine transform

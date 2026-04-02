@@ -1,5 +1,6 @@
 /// Automation system for parameter modulation over time
 use serde::{Deserialize, Serialize};
+use crate::time::Beats;
 
 /// Unique identifier for automation lanes
 pub type AutomationLaneId = u32;
@@ -35,17 +36,13 @@ pub enum CurveType {
 /// A single automation point
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AutomationPoint {
-    /// Time in seconds
-    pub time: f64,
-    /// Parameter value (normalized 0.0 to 1.0, or actual value depending on parameter)
+    pub time: Beats,
     pub value: f32,
-    /// Curve type to next point
     pub curve: CurveType,
 }
 
 impl AutomationPoint {
-    /// Create a new automation point
-    pub fn new(time: f64, value: f32, curve: CurveType) -> Self {
+    pub fn new(time: Beats, value: f32, curve: CurveType) -> Self {
         Self { time, value, curve }
     }
 }
@@ -93,8 +90,7 @@ impl AutomationLane {
         }
     }
 
-    /// Remove point at specific time
-    pub fn remove_point_at_time(&mut self, time: f64, tolerance: f64) -> bool {
+    pub fn remove_point_at_time(&mut self, time: Beats, tolerance: Beats) -> bool {
         if let Some(idx) = self.points.iter().position(|p| (p.time - time).abs() < tolerance) {
             self.points.remove(idx);
             true
@@ -113,8 +109,7 @@ impl AutomationLane {
         &self.points
     }
 
-    /// Get value at a specific time with interpolation
-    pub fn evaluate(&self, time: f64) -> Option<f32> {
+    pub fn evaluate(&self, time: Beats) -> Option<f32> {
         if !self.enabled || self.points.is_empty() {
             return None;
         }
@@ -148,14 +143,12 @@ impl AutomationLane {
     }
 }
 
-/// Interpolate between two automation points based on curve type
-fn interpolate(p1: &AutomationPoint, p2: &AutomationPoint, time: f64) -> f32 {
-    // Calculate normalized position between points (0.0 to 1.0)
+fn interpolate(p1: &AutomationPoint, p2: &AutomationPoint, time: Beats) -> f32 {
     let t = if p2.time == p1.time {
-        0.0
+        0.0f64
     } else {
-        ((time - p1.time) / (p2.time - p1.time)) as f32
-    };
+        (time - p1.time) / (p2.time - p1.time)
+    } as f32;
 
     // Apply curve
     let curved_t = match p1.curve {

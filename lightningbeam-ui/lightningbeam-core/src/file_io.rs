@@ -491,6 +491,8 @@ pub fn load_beam(path: &Path) -> Result<LoadedProject, String> {
     // 5. Extract document and audio backend state
     let step5_start = std::time::Instant::now();
     let mut document = beam_project.ui_state;
+    // Rebuild derived seconds cache on all TempoMap entries after deserialization.
+    document.tempo_map_mut().rebuild_seconds();
     let mut audio_project = beam_project.audio_backend.project;
     let audio_pool_entries = beam_project.audio_backend.audio_pool_entries;
     let layer_to_track_map = beam_project.audio_backend.layer_to_track_map;

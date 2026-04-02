@@ -1,5 +1,6 @@
 use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType, cv_input_or_default};
 use crate::audio::midi::MidiEvent;
+use crate::time::Beats;
 
 const PARAM_MODE: u32 = 0;
 const PARAM_STEPS: u32 = 1;
@@ -244,14 +245,14 @@ impl AudioNode for SequencerNode {
                 // Note-off for notes no longer active
                 for &note in &self.prev_active_notes {
                     if !new_notes.contains(&note) {
-                        midi_outputs[0].push(MidiEvent::note_off(0.0, 0, note, 0));
+                        midi_outputs[0].push(MidiEvent::note_off(Beats::ZERO, 0, note, 0));
                     }
                 }
 
                 // Note-on for newly active notes
                 for &note in &new_notes {
                     if !self.prev_active_notes.contains(&note) {
-                        midi_outputs[0].push(MidiEvent::note_on(0.0, 0, note, self.velocity));
+                        midi_outputs[0].push(MidiEvent::note_on(Beats::ZERO, 0, note, self.velocity));
                     }
                 }
 

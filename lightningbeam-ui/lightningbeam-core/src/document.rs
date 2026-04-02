@@ -6,10 +6,11 @@
 use crate::asset_folder::AssetFolderTree;
 use crate::clip::{AudioClip, ClipInstance, ImageAsset, VideoClip, VectorClip};
 use crate::effect::EffectDefinition;
-use crate::layer::AnyLayer;
+use crate::layer::{AnyLayer, GroupLayer};
 use crate::script::ScriptDefinition;
 use crate::layout::LayoutNode;
 use crate::shape::ShapeColor;
+use crate::tempo_map::TempoMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -131,6 +132,8 @@ impl Default for TimeSignature {
     }
 }
 
+// Keep for backward serde compat (old files may have a `bpm` field); no longer used.
+#[allow(dead_code)]
 fn default_bpm() -> f64 { 120.0 }
 
 /// How time is displayed in the timeline
@@ -173,13 +176,15 @@ pub struct Document {
     /// Framerate (frames per second)
     pub framerate: f64,
 
-    /// Tempo in beats per minute
-    #[serde(default = "default_bpm")]
-    pub bpm: f64,
-
     /// Time signature
     #[serde(default)]
     pub time_signature: TimeSignature,
+
+    /// Master track (master bus + tempo automation lane).
+    /// Stored separately from the root layer tree; shown in timeline when
+    /// `show_master_track` is enabled in the editor state.
+    #[serde(default)]
+    pub master_layer: GroupLayer,
 
     /// Duration in seconds
     pub duration: f64,
@@ -266,8 +271,12 @@ impl Default for Document {
             width: 1920.0,
             height: 1080.0,
             framerate: 60.0,
-            bpm: 120.0,
             time_signature: TimeSignature::default(),
+            master_layer: {
+                let mut ml = GroupLayer::new_master(120.0);
+                ml.layer.id = uuid::Uuid::new_v4();
+                ml
+            },
             duration: 10.0,
             root: GraphicsObject::default(),
             vector_clips: HashMap::new(),
@@ -309,6 +318,28 @@ impl Document {
             height,
             ..Default::default()
         }
+    }
+
+    /// Reference to the document's tempo map (stored on the master layer).
+    pub fn tempo_map(&self) -> &TempoMap {
+        self.master_layer.tempo_map.as_ref()
+            .expect("master_layer always has a tempo_map")
+    }
+
+    /// Mutable reference to the document's tempo map.
+    pub fn tempo_map_mut(&mut self) -> &mut TempoMap {
+        self.master_layer.tempo_map.as_mut()
+            .expect("master_layer always has a tempo_map")
+    }
+
+    /// Convenience accessor for the global BPM (first entry of the tempo map).
+    pub fn bpm(&self) -> f64 {
+        self.tempo_map().global_bpm()
+    }
+
+    /// Set the global BPM.  Rebuilds the tempo map's seconds cache.
+    pub fn set_bpm(&mut self, bpm: f64) {
+        self.tempo_map_mut().set_global_bpm(bpm);
     }
 
     /// Rebuild the layer→clip reverse lookup map from all vector clips.
@@ -619,56 +650,6 @@ impl Document {
         layers
     }
 
-    /// Migrate old documents: compute beats/frames from seconds for any ClipInstance whose
-    /// derived fields are still zero (i.e., documents saved before triple-representation).
-    /// Call once after loading a document.
-    pub fn sync_all_clip_positions(&mut self) {
-        let bpm = self.bpm;
-        let fps = self.framerate;
-
-        fn sync_list(list: &mut [crate::layer::AnyLayer], bpm: f64, fps: f64) {
-            for layer in list.iter_mut() {
-                match layer {
-                    crate::layer::AnyLayer::Vector(vl) => {
-                        for ci in &mut vl.clip_instances {
-                            if ci.timeline_start_beats == 0.0 { ci.sync_from_seconds(bpm, fps); }
-                        }
-                    }
-                    crate::layer::AnyLayer::Audio(al) => {
-                        for ci in &mut al.clip_instances {
-                            if ci.timeline_start_beats == 0.0 { ci.sync_from_seconds(bpm, fps); }
-                        }
-                    }
-                    crate::layer::AnyLayer::Video(vl) => {
-                        for ci in &mut vl.clip_instances {
-                            if ci.timeline_start_beats == 0.0 { ci.sync_from_seconds(bpm, fps); }
-                        }
-                    }
-                    crate::layer::AnyLayer::Effect(el) => {
-                        for ci in &mut el.clip_instances {
-                            if ci.timeline_start_beats == 0.0 { ci.sync_from_seconds(bpm, fps); }
-                        }
-                    }
-                    crate::layer::AnyLayer::Group(g) => {
-                        sync_list(&mut g.children, bpm, fps);
-                    }
-                    crate::layer::AnyLayer::Raster(_) => {}
-                }
-            }
-        }
-
-        sync_list(&mut self.root.children, bpm, fps);
-        for clip in self.vector_clips.values_mut() {
-            for node in &mut clip.layers.roots {
-                if let crate::layer::AnyLayer::Vector(vl) = &mut node.data {
-                    for ci in &mut vl.clip_instances {
-                        if ci.timeline_start_beats == 0.0 { ci.sync_from_seconds(bpm, fps); }
-                    }
-                }
-            }
-        }
-    }
-
     // === CLIP LIBRARY METHODS ===
 
     /// Add a vector clip to the library
@@ -866,11 +847,12 @@ impl Document {
             if clip.is_group {
                 Some(clip.duration)
             } else {
-                Some(clip.content_duration_with(self.framerate, |id| {
+                let tempo_map = self.tempo_map();
+                Some(clip.content_duration_with(self.framerate, tempo_map, |id| {
                     // Resolve nested clip durations (audio, video, other vector clips)
                     if let Some(vc) = self.vector_clips.get(id) {
                         // Avoid deep recursion — use stored duration for nested vector clips
-                        Some(vc.content_duration(self.framerate))
+                        Some(vc.content_duration(self.framerate, tempo_map))
                     } else if let Some(ac) = self.audio_clips.get(id) {
                         Some(ac.duration)
                     } else if let Some(vc) = self.video_clips.get(id) {
@@ -961,7 +943,7 @@ impl Document {
             };
 
             let instance_start = instance.effective_start();
-            let instance_end = instance.timeline_start + instance.effective_duration(clip_duration);
+            let instance_end = instance.timeline_start + instance.effective_duration(clip_duration, self.tempo_map());
 
             // Check overlap: start_a < end_b AND start_b < end_a
             if start_time < instance_end && instance_start < end_time {
@@ -1019,7 +1001,7 @@ impl Document {
 
             if let Some(clip_dur) = self.get_clip_duration(&instance.clip_id) {
                 let inst_start = instance.effective_start();
-                let inst_end = instance.timeline_start + instance.effective_duration(clip_dur);
+                let inst_end = instance.timeline_start + instance.effective_duration(clip_dur, self.tempo_map());
                 occupied_ranges.push((inst_start, inst_end, instance.id));
             }
         }
@@ -1114,7 +1096,7 @@ impl Document {
             }
             if let Some(dur) = self.get_clip_duration(&inst.clip_id) {
                 let start = inst.effective_start();
-                let end = inst.timeline_start + inst.effective_duration(dur);
+                let end = inst.timeline_start + inst.effective_duration(dur, self.tempo_map());
                 non_group.push((start, end));
             }
         }
@@ -1184,7 +1166,7 @@ impl Document {
 
             // Calculate other clip's extent (accounting for loop_before)
             if let Some(clip_duration) = self.get_clip_duration(&other.clip_id) {
-                let other_end = other.timeline_start + other.effective_duration(clip_duration);
+                let other_end = other.timeline_start + other.effective_duration(clip_duration, self.tempo_map());
 
                 // If this clip is to the left and closer than current nearest
                 if other_end <= current_timeline_start && other_end > nearest_end {
@@ -1280,7 +1262,7 @@ impl Document {
             }
 
             if let Some(clip_duration) = self.get_clip_duration(&other.clip_id) {
-                let other_end = other.timeline_start + other.effective_duration(clip_duration);
+                let other_end = other.timeline_start + other.effective_duration(clip_duration, self.tempo_map());
 
                 if other_end <= current_effective_start && other_end > nearest_end {
                     nearest_end = other_end;

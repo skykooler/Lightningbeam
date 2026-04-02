@@ -696,8 +696,9 @@ impl ExportOrchestrator {
             channels: settings.channels,
             bit_depth: settings.bit_depth,
             mp3_bitrate: settings.bitrate_kbps,
-            start_time: settings.start_time,
-            end_time: settings.end_time,
+            start_time: daw_backend::Seconds(settings.start_time),
+            end_time: daw_backend::Seconds(settings.end_time),
+            tempo_map: daw_backend::TempoMap::constant(settings.bpm),
         };
 
         // Use DAW backend export for all formats

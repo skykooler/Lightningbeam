@@ -79,8 +79,6 @@ impl Action for AddClipInstanceAction {
         if let Some(valid_start) = adjusted_start {
             // Update instance to use the valid position
             self.clip_instance.timeline_start = valid_start;
-            let (bpm, fps) = (document.bpm, document.framerate);
-            self.clip_instance.sync_from_seconds(bpm, fps);
         } else {
             // No valid position found - reject the operation
             return Err("Cannot add clip: no valid position found on layer (layer is full)".to_string());
@@ -210,10 +208,10 @@ impl Action for AddClipInstanceAction {
                 let instance = daw_backend::MidiClipInstance::new(
                     0, // Instance ID will be assigned by backend
                     *midi_clip_id,
-                    internal_start,
-                    internal_end,
-                    external_start,
-                    external_duration,
+                    daw_backend::Beats(internal_start),
+                    daw_backend::Beats(internal_end),
+                    daw_backend::Beats(external_start),
+                    daw_backend::Beats(external_duration),
                 );
 
                 // Send query to add instance and get instance ID

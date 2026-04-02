@@ -391,10 +391,10 @@ fn generate_midi_thumbnail(
 
     // Draw note events
     for event in events {
-        if !event.is_note_on() || event.timestamp > preview_duration {
+        if !event.is_note_on() || event.timestamp.beats_to_f64() > preview_duration {
             continue;
         }
-        let (timestamp, note_number) = (event.timestamp, event.data1);
+        let (timestamp, note_number) = (event.timestamp.beats_to_f64(), event.data1);
 
         let x = ((timestamp / preview_duration) * size as f64) as usize;
 

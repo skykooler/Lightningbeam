@@ -1,6 +1,7 @@
 use super::node_trait::AudioNode;
 use super::types::{ConnectionError, SignalType};
 use crate::audio::midi::MidiEvent;
+use crate::time::Beats;
 use petgraph::algo::has_path_connecting;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
@@ -93,8 +94,8 @@ pub struct AudioGraph {
     /// UI positions for nodes (node_index -> (x, y))
     node_positions: std::collections::HashMap<u32, (f32, f32)>,
 
-    /// Current playback time (for automation nodes)
-    playback_time: f64,
+    /// Current playback time in beats (for automation nodes)
+    playback_time: Beats,
 
     /// Project tempo (synced from Engine via SetTempo)
     bpm: f32,
@@ -123,7 +124,7 @@ impl AudioGraph {
             // Pre-allocate MIDI input buffers (max 128 events per port)
             midi_input_buffers: (0..16).map(|_| Vec::with_capacity(128)).collect(),
             node_positions: std::collections::HashMap::new(),
-            playback_time: 0.0,
+            playback_time: Beats::ZERO,
             bpm: 120.0,
             beats_per_bar: 4,
             topo_cache: None,
@@ -475,7 +476,7 @@ impl AudioGraph {
     }
 
     /// Process the graph and produce audio output
-    pub fn process(&mut self, output_buffer: &mut [f32], midi_events: &[MidiEvent], playback_time: f64) {
+    pub fn process(&mut self, output_buffer: &mut [f32], midi_events: &[MidiEvent], playback_time: Beats) {
         // Update playback time
         self.playback_time = playback_time;
 
@@ -484,6 +485,7 @@ impl AudioGraph {
         for node in self.graph.node_weights_mut() {
             if let Some(auto_node) = node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
                 auto_node.set_playback_time(playback_time);
+                auto_node.set_bpm(self.bpm as f64);
             } else if let Some(beat_node) = node.node.as_any_mut().downcast_mut::<BeatNode>() {
                 beat_node.set_playback_time(playback_time);
                 beat_node.set_tempo(self.bpm, self.beats_per_bar);
@@ -735,18 +737,6 @@ impl AudioGraph {
     /// Get all node indices
     pub fn node_indices(&self) -> impl Iterator<Item = NodeIndex> + '_ {
         self.graph.node_indices()
-    }
-
-    /// BPM changed: rescale all AutomationInput keyframe times to preserve beat positions.
-    /// `from_bpm` is the BPM before the change (used to bootstrap beats if not yet populated).
-    /// `to_bpm` is the new BPM (used to re-derive seconds from beats).
-    pub fn apply_beats_to_automation_keyframes(&mut self, from_bpm: f64, to_bpm: f64, fps: f64) {
-        use super::nodes::AutomationInputNode;
-        for node in self.graph.node_weights_mut() {
-            if let Some(auto_node) = node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
-                auto_node.apply_beats_to_keyframes(from_bpm, to_bpm, fps);
-            }
-        }
     }
 
     /// Reallocate a node's output buffers to match its current port list.
@@ -1029,7 +1019,7 @@ impl AudioGraph {
                         serialized.automation_display_name = Some(auto_node.display_name().to_string());
                         serialized.automation_keyframes = auto_node.keyframes().iter().map(|kf| {
                             SerializedKeyframe {
-                                time: kf.time,
+                                time: kf.time.0,
                                 value: kf.value,
                                 interpolation: match kf.interpolation {
                                     InterpolationType::Linear => "linear",
@@ -1369,9 +1359,7 @@ impl AudioGraph {
                             auto_node.clear_keyframes();
                             for kf in &serialized_node.automation_keyframes {
                                 auto_node.add_keyframe(AutomationKeyframe {
-                                    time: kf.time,
-                                    time_beats: 0.0,
-                                    time_frames: 0.0,
+                                    time: crate::time::Beats(kf.time),
                                     value: kf.value,
                                     interpolation: match kf.interpolation.as_str() {
                                         "bezier" => InterpolationType::Bezier,

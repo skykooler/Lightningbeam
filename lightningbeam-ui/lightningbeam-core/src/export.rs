@@ -76,6 +76,9 @@ pub struct AudioExportSettings {
 
     /// End time in seconds
     pub end_time: f64,
+
+    /// Project BPM (for beat-position scheduling during export)
+    pub bpm: f64,
 }
 
 impl Default for AudioExportSettings {
@@ -88,6 +91,7 @@ impl Default for AudioExportSettings {
             bitrate_kbps: 320,
             start_time: 0.0,
             end_time: 60.0,
+            bpm: 120.0,
         }
     }
 }

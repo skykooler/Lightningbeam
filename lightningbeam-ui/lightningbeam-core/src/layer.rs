@@ -3,6 +3,7 @@
 //! Layers organize objects and shapes, and contain animation data.
 
 use crate::animation::AnimationData;
+use crate::tempo_map::TempoMap;
 use crate::clip::ClipInstance;
 use crate::vector_graph::VectorGraph;
 use crate::effect_layer::EffectLayer;
@@ -720,6 +721,12 @@ pub struct GroupLayer {
     /// Whether the group is expanded in the timeline
     #[serde(default = "default_true")]
     pub expanded: bool,
+
+    /// Optional tempo map for this group. When `Some`, the group's children use
+    /// this tempo map for beat-to-parent-time conversion. The master group always
+    /// has `Some`; regular groups default to `None` (inherit parent tempo).
+    #[serde(default)]
+    pub tempo_map: Option<TempoMap>,
 }
 
 fn default_true() -> bool {
@@ -746,6 +753,12 @@ impl LayerTrait for GroupLayer {
     fn set_locked(&mut self, locked: bool) { self.layer.locked = locked; }
 }
 
+impl Default for GroupLayer {
+    fn default() -> Self {
+        Self::new("Group")
+    }
+}
+
 impl GroupLayer {
     /// Create a new group layer
     pub fn new(name: impl Into<String>) -> Self {
@@ -753,6 +766,21 @@ impl GroupLayer {
             layer: Layer::new(LayerType::Group, name),
             children: Vec::new(),
             expanded: true,
+            tempo_map: None,
+        }
+    }
+
+    /// Create a master group layer with a constant tempo.
+    pub fn new_master(bpm: f64) -> Self {
+        Self {
+            layer: Layer::with_id(
+                uuid::Uuid::nil(), // replaced by Document::new
+                LayerType::Group,
+                "Master",
+            ),
+            children: Vec::new(),
+            expanded: true,
+            tempo_map: Some(TempoMap::constant(bpm)),
         }
     }
 
@@ -773,7 +801,7 @@ impl GroupLayer {
                 AnyLayer::Effect(l) => &l.clip_instances,
                 AnyLayer::Group(_) => &[], // no nested groups
                 AnyLayer::Raster(_) => &[], // raster layers have no clip instances
-            };
+                };
             for ci in instances {
                 result.push((child_id, ci));
             }

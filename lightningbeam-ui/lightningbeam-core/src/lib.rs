@@ -2,6 +2,7 @@
 // Shared data structures and types
 
 pub mod beat_time;
+pub mod tempo_map;
 pub mod gpu;
 pub mod layout;
 pub mod pane;

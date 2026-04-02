@@ -1,6 +1,7 @@
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use super::midi::{MidiClip, MidiClipId, MidiEvent};
+use crate::time::Beats;
 
 /// Pool for storing MIDI clip content
 /// Similar to AudioClipPool but for MIDI data
@@ -21,7 +22,7 @@ impl MidiClipPool {
 
     /// Add a new clip to the pool with the given events and duration
     /// Returns the ID of the newly created clip
-    pub fn add_clip(&mut self, events: Vec<MidiEvent>, duration: f64, name: String) -> MidiClipId {
+    pub fn add_clip(&mut self, events: Vec<MidiEvent>, duration: Beats, name: String) -> MidiClipId {
         let id = self.next_id;
         self.next_id += 1;
 

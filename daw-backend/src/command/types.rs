@@ -6,6 +6,7 @@ use crate::audio::midi::MidiEvent;
 use crate::audio::buffer_pool::BufferPoolStats;
 use crate::audio::node_graph::nodes::LoopMode;
 use crate::io::WaveformPeak;
+use crate::time::{Beats, Seconds};
 
 /// Commands sent from UI/control thread to audio thread
 #[derive(Debug, Clone)]
@@ -113,7 +114,7 @@ pub enum Command {
 
     // Recording commands
     /// Start recording on a track (track_id, start_time)
-    StartRecording(TrackId, f64),
+    StartRecording(TrackId, Beats),
     /// Stop the current recording
     StopRecording,
     /// Pause the current recording
@@ -123,7 +124,7 @@ pub enum Command {
 
     // MIDI Recording commands
     /// Start MIDI recording on a track (track_id, clip_id, start_time)
-    StartMidiRecording(TrackId, MidiClipId, f64),
+    StartMidiRecording(TrackId, MidiClipId, Beats),
     /// Stop the current MIDI recording
     StopMidiRecording,
 
@@ -144,11 +145,6 @@ pub enum Command {
     SetMetronomeEnabled(bool),
     /// Set project tempo and time signature (bpm, (numerator, denominator))
     SetTempo(f32, (u32, u32)),
-    /// After a BPM change: update MIDI clip durations, sync clip beats/frames, and rescale
-    /// automation keyframe times to preserve beat positions.
-    /// (from_bpm, to_bpm, fps, midi_durations: Vec<(clip_id, new_duration_seconds)>)
-    ApplyBpmChange(f64, f64, f64, Vec<(MidiClipId, f64)>),
-
     // Node graph commands
     /// Add a node to a track's instrument graph (track_id, node_type, position_x, position_y)
     GraphAddNode(TrackId, String, f32, f32),
@@ -290,7 +286,7 @@ pub enum AudioEvent {
     /// Recording started (track_id, clip_id, sample_rate, channels)
     RecordingStarted(TrackId, ClipId, u32, u32),
     /// Recording progress update (clip_id, current_duration)
-    RecordingProgress(ClipId, f64),
+    RecordingProgress(ClipId, Seconds),
     /// Recording stopped (clip_id, pool_index, waveform)
     RecordingStopped(ClipId, usize, Vec<WaveformPeak>),
     /// Recording error (error_message)
@@ -298,8 +294,8 @@ pub enum AudioEvent {
     /// MIDI recording stopped (track_id, clip_id, note_count)
     MidiRecordingStopped(TrackId, MidiClipId, usize),
     /// MIDI recording progress (track_id, clip_id, duration, notes)
-    /// Notes format: (start_time, note, velocity, duration)
-    MidiRecordingProgress(TrackId, MidiClipId, f64, Vec<(f64, u8, u8, f64)>),
+    /// Notes format: (start_time, note, velocity, duration) — all times in beats
+    MidiRecordingProgress(TrackId, MidiClipId, Beats, Vec<(Beats, u8, u8, Beats)>),
     /// Project has been reset
     ProjectReset,
     /// MIDI note started playing (note, velocity)

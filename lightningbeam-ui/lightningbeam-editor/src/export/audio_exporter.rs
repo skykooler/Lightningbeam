@@ -69,8 +69,9 @@ fn export_audio_daw_backend<P: AsRef<Path>>(
         channels: settings.channels,
         bit_depth: settings.bit_depth,
         mp3_bitrate: 320, // Not used for WAV/FLAC
-        start_time: settings.start_time,
-        end_time: settings.end_time,
+        start_time: daw_backend::Seconds(settings.start_time),
+        end_time: daw_backend::Seconds(settings.end_time),
+        tempo_map: daw_backend::TempoMap::constant(settings.bpm),
     };
 
     // Use the existing DAW backend export function
@@ -105,8 +106,9 @@ fn export_audio_ffmpeg_mp3<P: AsRef<Path>>(
         channels: settings.channels,
         bit_depth: 16, // Unused
         mp3_bitrate: settings.bitrate_kbps,
-        start_time: settings.start_time,
-        end_time: settings.end_time,
+        start_time: daw_backend::Seconds(settings.start_time),
+        end_time: daw_backend::Seconds(settings.end_time),
+        tempo_map: daw_backend::TempoMap::constant(settings.bpm),
     };
 
     // Step 1: Render audio to memory
@@ -294,8 +296,9 @@ fn export_audio_ffmpeg_aac<P: AsRef<Path>>(
         channels: settings.channels,
         bit_depth: 16, // Unused
         mp3_bitrate: settings.bitrate_kbps,
-        start_time: settings.start_time,
-        end_time: settings.end_time,
+        start_time: daw_backend::Seconds(settings.start_time),
+        end_time: daw_backend::Seconds(settings.end_time),
+        tempo_map: daw_backend::TempoMap::constant(settings.bpm),
     };
 
     // Step 1: Render audio to memory

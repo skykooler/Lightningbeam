@@ -1438,7 +1438,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             let effect_inst = lightningbeam_core::effect::EffectInstance::new(
                                 effect_def,
                                 effect_instance.timeline_start,
-                                effect_instance.timeline_start + effect_instance.effective_duration(lightningbeam_core::effect::EFFECT_DURATION),
+                                effect_instance.timeline_start + effect_instance.effective_duration(lightningbeam_core::effect::EFFECT_DURATION, self.ctx.document.tempo_map()),
                             );
 
                             // Acquire temp buffer for effect output (HDR format)
@@ -1793,7 +1793,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == clip_id) {
                                 // Skip clip instances not active at current time
                                 let clip_dur = self.ctx.document.get_clip_duration(&clip_instance.clip_id).unwrap_or(0.0);
-                                let instance_end = clip_instance.timeline_start + clip_instance.effective_duration(clip_dur);
+                                let instance_end = clip_instance.timeline_start + clip_instance.effective_duration(clip_dur, self.ctx.document.tempo_map());
                                 if self.ctx.playback_time < clip_instance.timeline_start || self.ctx.playback_time >= instance_end {
                                     continue;
                                 }
@@ -2214,7 +2214,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         // Find clip instance visible at playback time
                         let visible_clip = video_layer.clip_instances.iter().find(|inst| {
                             let clip_duration = self.ctx.document.get_clip_duration(&inst.clip_id).unwrap_or(0.0);
-                            let effective_duration = inst.effective_duration(clip_duration);
+                            let effective_duration = inst.effective_duration(clip_duration, self.ctx.document.tempo_map());
                             playback_time >= inst.timeline_start && playback_time < inst.timeline_start + effective_duration
                         });
 
@@ -10287,7 +10287,7 @@ impl StagePane {
             if let Some(AnyLayer::Video(video_layer)) = document.get_layer(layer_id) {
                 video_layer.clip_instances.iter().find(|inst| {
                     let clip_duration = document.get_clip_duration(&inst.clip_id).unwrap_or(0.0);
-                    let effective_duration = inst.effective_duration(clip_duration);
+                    let effective_duration = inst.effective_duration(clip_duration, document.tempo_map());
                     playback_time >= inst.timeline_start && playback_time < inst.timeline_start + effective_duration
                 }).map(|inst| inst.id)
             } else {

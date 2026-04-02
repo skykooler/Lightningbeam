@@ -255,10 +255,10 @@ impl PianoRollPane {
         for event in events {
             let channel = event.status & 0x0F;
             if event.is_note_on() {
-                active.insert(event.data1, (event.timestamp, event.data2, channel));
+                active.insert(event.data1, (event.timestamp.beats_to_f64(), event.data2, channel));
             } else if event.is_note_off() {
                 if let Some((start, vel, ch)) = active.remove(&event.data1) {
-                    let duration = (event.timestamp - start).max(MIN_NOTE_DURATION);
+                    let duration = (event.timestamp.beats_to_f64() - start).max(MIN_NOTE_DURATION);
                     notes.push(ResolvedNote {
                         note: event.data1,
                         channel: ch,
@@ -292,13 +292,13 @@ impl PianoRollPane {
 
     // ── Ruler interval calculation ───────────────────────────────────────
 
-    fn ruler_interval(&self, bpm: f64, time_sig: &lightningbeam_core::document::TimeSignature) -> f64 {
+    fn ruler_interval(&self, tempo_map: &daw_backend::TempoMap, time_sig: &lightningbeam_core::document::TimeSignature) -> f64 {
         let min_pixel_gap = 80.0;
         let min_seconds = (min_pixel_gap / self.pixels_per_second) as f64;
 
         // Use beat-aligned intervals
-        let beat_dur = lightningbeam_core::beat_time::beat_duration(bpm);
-        let measure_dur = lightningbeam_core::beat_time::measure_duration(bpm, time_sig);
+        let beat_dur = lightningbeam_core::beat_time::beat_duration(0.0, tempo_map);
+        let measure_dur = lightningbeam_core::beat_time::measure_duration(0.0, tempo_map, time_sig);
         let beat_intervals = [
             beat_dur / 4.0, beat_dur / 2.0, beat_dur, beat_dur * 2.0,
             measure_dur, measure_dur * 2.0, measure_dur * 4.0,
@@ -315,8 +315,8 @@ impl PianoRollPane {
 
 } // end impl PianoRollPane (snap helpers follow as free functions)
 
-fn snap_to_value(t: f64, snap: SnapValue, bpm: f64) -> f64 {
-    let beat = 60.0 / bpm;
+fn snap_to_value(t: f64, snap: SnapValue, tempo_map: &daw_backend::TempoMap) -> f64 {
+    let beat = lightningbeam_core::beat_time::beat_duration(0.0, tempo_map);
     match snap {
         SnapValue::None                => t,
         SnapValue::Whole               => round_to_grid(t, beat * 4.0),
@@ -347,7 +347,7 @@ fn snap_swing(t: f64, cell: f64, ratio: f64) -> f64 {
     *cands.iter().min_by(|&&a, &&b| (a - t).abs().partial_cmp(&(b - t).abs()).unwrap()).unwrap()
 }
 
-fn detect_snap(notes: &[&ResolvedNote], bpm: f64) -> SnapValue {
+fn detect_snap(notes: &[&ResolvedNote], tempo_map: &daw_backend::TempoMap) -> SnapValue {
     const EPS: f64 = 0.002;
     if notes.is_empty() { return SnapValue::None; }
     let order = [
@@ -359,7 +359,7 @@ fn detect_snap(notes: &[&ResolvedNote], bpm: f64) -> SnapValue {
         SnapValue::SixteenthTriplet, SnapValue::ThirtySecondTriplet,
     ];
     for &sv in &order {
-        if notes.iter().all(|n| (snap_to_value(n.start_time, sv, bpm) - n.start_time).abs() < EPS) {
+        if notes.iter().all(|n| (snap_to_value(n.start_time, sv, tempo_map) - n.start_time).abs() < EPS) {
             return sv;
         }
     }
@@ -425,7 +425,7 @@ impl PianoRollPane {
                     let clip_doc_id = clip_doc_id; // doc-side AudioClip uuid
                     let duration = mc.external_duration;
                     let instance_uuid = Uuid::nil(); // no doc-side instance uuid yet
-                    clip_data.push((mc.clip_id, mc.external_start, mc.internal_start, duration, instance_uuid));
+                    clip_data.push((mc.clip_id, mc.external_start.beats_to_f64(), mc.internal_start.beats_to_f64(), duration.beats_to_f64(), instance_uuid));
                     let _ = clip_doc_id; // used above for the if-let pattern
                 }
             }
@@ -435,7 +435,7 @@ impl PianoRollPane {
                 for instance in &audio_layer.clip_instances {
                     if let Some(clip) = document.audio_clips.get(&instance.clip_id) {
                         if let AudioClipType::Midi { midi_clip_id } = clip.clip_type {
-                            let duration = instance.effective_duration(clip.duration);
+                            let duration = instance.effective_duration(clip.duration, document.tempo_map());
                             clip_data.push((midi_clip_id, instance.timeline_start, instance.trim_start, duration, instance.id));
                         }
                     }
@@ -456,8 +456,8 @@ impl PianoRollPane {
             self.snap_user_changed = false;
             if self.snap_value != SnapValue::None && !self.selected_note_indices.is_empty() {
                 if let Some(clip_id) = self.selected_clip_id {
-                    let bpm = shared.action_executor.document().bpm;
-                    self.quantize_selected_notes(clip_id, bpm, shared);
+                    let tempo_map = shared.action_executor.document().tempo_map().clone();
+                    self.quantize_selected_notes(clip_id, &tempo_map, shared);
                 }
             }
         }
@@ -484,11 +484,11 @@ impl PianoRollPane {
 
         // Render grid (clipped to grid area)
         let grid_painter = ui.painter_at(grid_rect);
-        let (grid_bpm, grid_time_sig) = {
+        let (grid_tempo_map, grid_time_sig) = {
             let doc = shared.action_executor.document();
-            (doc.bpm, doc.time_signature.clone())
+            (doc.tempo_map().clone(), doc.time_signature.clone())
         };
-        self.render_grid(&grid_painter, grid_rect, grid_bpm, &grid_time_sig);
+        self.render_grid(&grid_painter, grid_rect, &grid_tempo_map, &grid_time_sig);
 
         // Render clip boundaries and notes
         for &(midi_clip_id, timeline_start, trim_start, duration, _instance_id) in &clip_data {
@@ -621,7 +621,7 @@ impl PianoRollPane {
     }
 
     fn render_grid(&self, painter: &egui::Painter, grid_rect: Rect,
-                   bpm: f64, time_sig: &lightningbeam_core::document::TimeSignature) {
+                   tempo_map: &daw_backend::TempoMap, time_sig: &lightningbeam_core::document::TimeSignature) {
         // Horizontal lines (note separators)
         for note in MIN_NOTE..=MAX_NOTE {
             let y = self.note_to_y(note, grid_rect);
@@ -648,9 +648,9 @@ impl PianoRollPane {
         }
 
         // Vertical lines (beat-aligned time grid)
-        let interval = self.ruler_interval(bpm, time_sig);
-        let beat_dur = lightningbeam_core::beat_time::beat_duration(bpm);
-        let measure_dur = lightningbeam_core::beat_time::measure_duration(bpm, time_sig);
+        let interval = self.ruler_interval(tempo_map, time_sig);
+        let beat_dur = lightningbeam_core::beat_time::beat_duration(0.0, tempo_map);
+        let measure_dur = lightningbeam_core::beat_time::measure_duration(0.0, tempo_map, time_sig);
 
         let start = (self.viewport_start_time / interval).floor() as i64;
         let end_time = self.viewport_start_time + (grid_rect.width() / self.pixels_per_second) as f64;
@@ -675,7 +675,7 @@ impl PianoRollPane {
 
             // Labels at measure boundaries
             if is_measure && x > grid_rect.min.x + 20.0 {
-                let pos = lightningbeam_core::beat_time::time_to_measure(time, bpm, time_sig);
+                let pos = lightningbeam_core::beat_time::time_to_measure(time, tempo_map, time_sig);
                 painter.text(
                     pos2(x + 2.0, grid_rect.min.y + 2.0),
                     Align2::LEFT_TOP,
@@ -685,7 +685,7 @@ impl PianoRollPane {
                 );
             } else if is_beat && !is_measure && x > grid_rect.min.x + 20.0
                 && beat_dur as f32 * self.pixels_per_second > 40.0 {
-                let pos = lightningbeam_core::beat_time::time_to_measure(time, bpm, time_sig);
+                let pos = lightningbeam_core::beat_time::time_to_measure(time, tempo_map, time_sig);
                 painter.text(
                     pos2(x + 2.0, grid_rect.min.y + 2.0),
                     Align2::LEFT_TOP,
@@ -708,8 +708,8 @@ impl PianoRollPane {
     ) -> f32 {
         let mut peak = 0.0f32;
         for ev in events {
-            if ev.timestamp > note_end + 0.01 { break; }
-            if ev.timestamp >= note_start - 0.01
+            if ev.timestamp.beats_to_f64() > note_end + 0.01 { break; }
+            if ev.timestamp.beats_to_f64() >= note_start - 0.01
                 && (ev.status & 0xF0) == 0xE0
                 && (ev.status & 0x0F) == channel
             {
@@ -770,7 +770,7 @@ impl PianoRollPane {
             };
             let timestamp = note_start + t * note_duration;
             let (lsb, msb) = encode_bend(normalized);
-            events.push(MidiEvent::new(timestamp, 0xE0 | channel, lsb, msb));
+            events.push(MidiEvent::new(daw_backend::Beats(timestamp), 0xE0 | channel, lsb, msb));
         }
         events
     }
@@ -794,11 +794,11 @@ impl PianoRollPane {
             let ch = ev.status & 0x0F;
             let msg = ev.status & 0xF0;
             if msg == 0x90 && ev.data2 > 0 {
-                active.insert((ev.data1, ch), ev.timestamp);
+                active.insert((ev.data1, ch), ev.timestamp.beats_to_f64());
             } else if msg == 0x80 || (msg == 0x90 && ev.data2 == 0) {
                 if let Some(start) = active.remove(&(ev.data1, ch)) {
                     // Overlaps target range and is NOT the note we're assigning
-                    if start < note_end && ev.timestamp > note_start
+                    if start < note_end && ev.timestamp.beats_to_f64() > note_start
                         && !(ev.data1 == note_pitch && ch == current_channel)
                     {
                         used[ch as usize] = true;
@@ -828,9 +828,9 @@ impl PianoRollPane {
     fn find_cc1_for_note(events: &[daw_backend::audio::midi::MidiEvent], note_start: f64, note_end: f64, channel: u8) -> u8 {
         let mut cc1 = 0u8;
         for ev in events {
-            if ev.timestamp > note_end { break; }
+            if ev.timestamp.beats_to_f64() > note_end { break; }
             if (ev.status & 0xF0) == 0xB0 && (ev.status & 0x0F) == channel && ev.data1 == 1 {
-                if ev.timestamp <= note_start {
+                if ev.timestamp.beats_to_f64() <= note_start {
                     cc1 = ev.data2;
                 }
             }
@@ -950,7 +950,7 @@ impl PianoRollPane {
                                 let ts = note.start_time + t as f64 * note.duration;
                                 let mut existing_norm = 0.0f32;
                                 for ev in events {
-                                    if ev.timestamp > ts { break; }
+                                    if ev.timestamp.beats_to_f64() > ts { break; }
                                     if (ev.status & 0xF0) == 0xE0 && (ev.status & 0x0F) == drag_ch {
                                         let raw = ((ev.data2 as i16) << 7) | (ev.data1 as i16);
                                         existing_norm = (raw - 8192) as f32 / 8192.0;
@@ -991,7 +991,7 @@ impl PianoRollPane {
                         // Find last pitch bend event at or before ts
                         let mut bend_norm = 0.0f32;
                         for ev in events {
-                            if ev.timestamp > ts { break; }
+                            if ev.timestamp.beats_to_f64() > ts { break; }
                             if (ev.status & 0xF0) == 0xE0 && (ev.status & 0x0F) == note.channel {
                                 let raw = ((ev.data2 as i16) << 7) | (ev.data1 as i16);
                                 bend_norm = (raw - 8192) as f32 / 8192.0;
@@ -1037,9 +1037,9 @@ impl PianoRollPane {
     }
 
     fn render_dot_grid(&self, painter: &egui::Painter, grid_rect: Rect,
-                       bpm: f64, time_sig: &lightningbeam_core::document::TimeSignature) {
+                       tempo_map: &daw_backend::TempoMap, time_sig: &lightningbeam_core::document::TimeSignature) {
         // Collect visible time grid positions
-        let interval = self.ruler_interval(bpm, time_sig);
+        let interval = self.ruler_interval(tempo_map, time_sig);
         let start = (self.viewport_start_time / interval).floor() as i64;
         let end_time = self.viewport_start_time + (grid_rect.width() / self.pixels_per_second) as f64;
         let end = (end_time / interval).ceil() as i64;
@@ -1374,10 +1374,10 @@ impl PianoRollPane {
             if let Some(selected_clip) = clip_data.iter().find(|c| Some(c.0) == self.selected_clip_id) {
                 let clip_start = selected_clip.1;
                 let trim_start = selected_clip.2;
-                let bpm = shared.action_executor.document().bpm;
+                let tempo_map = shared.action_executor.document().tempo_map();
                 let clip_local_time = snap_to_value(
                     (time - clip_start).max(0.0) + trim_start,
-                    self.snap_value, bpm,
+                    self.snap_value, tempo_map,
                 );
                 self.creating_note = Some(TempNote {
                     note,
@@ -1395,8 +1395,8 @@ impl PianoRollPane {
             self.selection_rect = Some((pos, pos));
             self.drag_mode = Some(DragMode::SelectRect);
 
-            let bpm = shared.action_executor.document().bpm;
-            let seek_time = snap_to_value(time.max(0.0), self.snap_value, bpm);
+            let tempo_map = shared.action_executor.document().tempo_map();
+            let seek_time = snap_to_value(time.max(0.0), self.snap_value, tempo_map);
             *shared.playback_time = seek_time;
             if let Some(ctrl) = shared.audio_controller.as_ref() {
                 if let Ok(mut c) = ctrl.lock() { c.seek(seek_time); }
@@ -1538,7 +1538,7 @@ impl PianoRollPane {
                             let ts = note_start + t * note_duration;
                             let mut bend = 0.0f32;
                             for ev in &new_events {
-                                if ev.timestamp > ts { break; }
+                                if ev.timestamp.beats_to_f64() > ts { break; }
                                 if (ev.status & 0xF0) == 0xE0 && (ev.status & 0x0F) == target_channel {
                                     let raw = ((ev.data2 as i16) << 7) | (ev.data1 as i16);
                                     bend = (raw - 8192) as f32 / 8192.0;
@@ -1550,7 +1550,8 @@ impl PianoRollPane {
                         // Remove old bend events in range before writing combined
                         new_events.retain(|ev| {
                             let is_bend = (ev.status & 0xF0) == 0xE0 && (ev.status & 0x0F) == target_channel;
-                            let in_range = ev.timestamp >= note_start - 0.001 && ev.timestamp <= note_start + note_duration + 0.01;
+                            let ts = ev.timestamp.beats_to_f64();
+                            let in_range = ts >= note_start - 0.001 && ts <= note_start + note_duration + 0.01;
                             !(is_bend && in_range)
                         });
 
@@ -1568,20 +1569,15 @@ impl PianoRollPane {
                             let combined = (existing_norm[i] + zone_norm).clamp(-1.0, 1.0);
                             let (lsb, msb) = encode_bend(combined);
                             let ts = note_start + i as f64 / num_steps as f64 * note_duration;
-                            new_events.push(daw_backend::audio::midi::MidiEvent::new(ts, 0xE0 | target_channel, lsb, msb));
+                            new_events.push(daw_backend::audio::midi::MidiEvent::new(daw_backend::Beats(ts), 0xE0 | target_channel, lsb, msb));
                         }
                         // For End zone: reset just after note ends so it doesn't bleed into next note
                         if zone == PitchBendZone::End {
                             let (lsb, msb) = encode_bend(0.0);
-                            new_events.push(daw_backend::audio::midi::MidiEvent::new(note_start + note_duration + 0.005, 0xE0 | target_channel, lsb, msb));
+                            new_events.push(daw_backend::audio::midi::MidiEvent::new(daw_backend::Beats(note_start + note_duration + 0.005), 0xE0 | target_channel, lsb, msb));
                         }
 
                         new_events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
-                        {
-                            let doc = shared.action_executor.document();
-                            let bpm = doc.bpm; let fps = doc.framerate;
-                            for ev in &mut new_events { ev.sync_from_seconds(bpm, fps); }
-                        }
                         self.push_events_action("Set pitch bend", clip_id, old_events, new_events.clone(), shared);
                         shared.midi_event_cache.insert(clip_id, new_events);
                     }
@@ -1737,8 +1733,8 @@ impl PianoRollPane {
     fn update_cache_from_resolved(clip_id: u32, resolved: &[ResolvedNote], shared: &mut SharedPaneState) {
         let mut events: Vec<daw_backend::audio::midi::MidiEvent> = Vec::with_capacity(resolved.len() * 2);
         for n in resolved {
-            events.push(daw_backend::audio::midi::MidiEvent::note_on(n.start_time, 0, n.note, n.velocity));
-            events.push(daw_backend::audio::midi::MidiEvent::note_off(n.start_time + n.duration, 0, n.note, 0));
+            events.push(daw_backend::audio::midi::MidiEvent::note_on(daw_backend::Beats(n.start_time), 0, n.note, n.velocity));
+            events.push(daw_backend::audio::midi::MidiEvent::note_off(daw_backend::Beats(n.start_time + n.duration), 0, n.note, 0));
         }
         events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
         shared.midi_event_cache.insert(clip_id, events);
@@ -1787,12 +1783,12 @@ impl PianoRollPane {
         let resolved = Self::resolve_notes(events);
         let old_notes = Self::notes_to_backend_format(&resolved);
 
-        let bpm = shared.action_executor.document().bpm;
+        let tempo_map = shared.action_executor.document().tempo_map();
         let mut new_resolved = resolved.clone();
         for &idx in &self.selected_note_indices {
             if idx < new_resolved.len() {
                 let raw_time = (new_resolved[idx].start_time + dt).max(0.0);
-                new_resolved[idx].start_time = snap_to_value(raw_time, self.snap_value, bpm);
+                new_resolved[idx].start_time = snap_to_value(raw_time, self.snap_value, tempo_map);
                 new_resolved[idx].note = (new_resolved[idx].note as i32 + dn).clamp(0, 127) as u8;
             }
         }
@@ -1968,7 +1964,7 @@ impl PianoRollPane {
         shared.pending_actions.push(Box::new(action));
     }
 
-    fn quantize_selected_notes(&mut self, clip_id: u32, bpm: f64, shared: &mut SharedPaneState) {
+    fn quantize_selected_notes(&mut self, clip_id: u32, tempo_map: &daw_backend::TempoMap, shared: &mut SharedPaneState) {
         let events = match shared.midi_event_cache.get(&clip_id) { Some(e) => e, None => return };
         let resolved = Self::resolve_notes(events);
         let old_notes = Self::notes_to_backend_format(&resolved);
@@ -1976,7 +1972,7 @@ impl PianoRollPane {
         for &idx in &self.selected_note_indices {
             if idx < new_resolved.len() {
                 new_resolved[idx].start_time =
-                    snap_to_value(new_resolved[idx].start_time, self.snap_value, bpm).max(0.0);
+                    snap_to_value(new_resolved[idx].start_time, self.snap_value, tempo_map).max(0.0);
             }
         }
         let new_notes = Self::notes_to_backend_format(&new_resolved);
@@ -2075,11 +2071,11 @@ impl PianoRollPane {
         // Dot grid background (visible where the spectrogram doesn't draw)
         let grid_painter = ui.painter_at(view_rect);
         {
-            let (dot_bpm, dot_ts) = {
+            let (dot_tempo_map, dot_ts) = {
                 let doc = shared.action_executor.document();
-                (doc.bpm, doc.time_signature.clone())
+                (doc.tempo_map().clone(), doc.time_signature.clone())
             };
-            self.render_dot_grid(&grid_painter, view_rect, dot_bpm, &dot_ts);
+            self.render_dot_grid(&grid_painter, view_rect, &dot_tempo_map, &dot_ts);
         }
 
         // Find audio pool index for the active layer's clips
@@ -2323,7 +2319,7 @@ impl PaneRenderer for PianoRollPane {
                                                 for ev in cached.iter_mut() {
                                                     if ev.is_note_on() && ev.data1 == sn.note
                                                         && (ev.status & 0x0F) == sn.channel
-                                                        && (ev.timestamp - sn.start_time).abs() < 1e-6
+                                                        && (ev.timestamp.beats_to_f64() - sn.start_time).abs() < 1e-6
                                                     {
                                                         ev.data2 = new_vel;
                                                     }
@@ -2360,21 +2356,16 @@ impl PaneRenderer for PianoRollPane {
                                                 let is_cc1 = (ev.status & 0xF0) == 0xB0
                                                     && (ev.status & 0x0F) == sn.channel
                                                     && ev.data1 == 1;
-                                                let at_start = (ev.timestamp - sn.start_time).abs() < 0.001;
+                                                let at_start = (ev.timestamp.beats_to_f64() - sn.start_time).abs() < 0.001;
                                                 !(is_cc1 && at_start)
                                             });
                                             if new_cc1 > 0 {
                                                 new_events.push(daw_backend::audio::midi::MidiEvent::new(
-                                                    sn.start_time, 0xB0 | sn.channel, 1, new_cc1,
+                                                    daw_backend::Beats(sn.start_time), 0xB0 | sn.channel, 1, new_cc1,
                                                 ));
                                             }
                                         }
                                         new_events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
-                                        {
-                                            let doc = shared.action_executor.document();
-                                            let bpm = doc.bpm; let fps = doc.framerate;
-                                            for ev in &mut new_events { ev.sync_from_seconds(bpm, fps); }
-                                        }
                                         self.push_events_action("Set modulation", clip_id, old_events, new_events.clone(), shared);
                                         shared.midi_event_cache.insert(clip_id, new_events);
                                     }
@@ -2416,7 +2407,7 @@ impl PaneRenderer for PianoRollPane {
             // Snap-to dropdown — only in Measures mode
             let doc = shared.action_executor.document();
             let is_measures = doc.timeline_mode == lightningbeam_core::document::TimelineMode::Measures;
-            let bpm = doc.bpm;
+            let tempo_map = doc.tempo_map();
             drop(doc);
 
             if is_measures {
@@ -2429,7 +2420,7 @@ impl PaneRenderer for PianoRollPane {
                                 let sel: Vec<&ResolvedNote> = self.selected_note_indices.iter()
                                     .filter_map(|&i| resolved.get(i))
                                     .collect();
-                                self.snap_value = detect_snap(&sel, bpm);
+                                self.snap_value = detect_snap(&sel, tempo_map);
                             }
                         }
                     }

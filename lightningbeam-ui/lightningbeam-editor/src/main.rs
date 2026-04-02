@@ -1844,7 +1844,7 @@ impl EditorApp {
             let mut result = Vec::new();
             for instance in clip_instances {
                 if let Some(clip_duration) = document.get_clip_duration(&instance.clip_id) {
-                    let effective_duration = instance.effective_duration(clip_duration);
+                    let effective_duration = instance.effective_duration(clip_duration, document.tempo_map());
                     let timeline_end = instance.timeline_start + effective_duration;
 
                     const EPSILON: f64 = 0.001;
@@ -2698,7 +2698,7 @@ impl EditorApp {
                 let mut duplicate = original.clone();
                 duplicate.id = uuid::Uuid::new_v4();
                 let clip_duration = document.get_clip_duration(&original.clip_id).unwrap_or(1.0);
-                let effective_duration = original.effective_duration(clip_duration);
+                let effective_duration = original.effective_duration(clip_duration, document.tempo_map());
                 duplicate.timeline_start = original.timeline_start + effective_duration;
                 if let Some((new_clip_def_id, _)) = midi_clip_replacements.get(&original.clip_id) {
                     duplicate.clip_id = *new_clip_def_id;
@@ -3771,7 +3771,7 @@ impl EditorApp {
             // Sync BPM/time signature to metronome
             let doc = self.action_executor.document();
             controller.set_tempo(
-                doc.bpm as f32,
+                doc.bpm() as f32,
                 (doc.time_signature.numerator, doc.time_signature.denominator),
             );
         }
@@ -3834,9 +3834,6 @@ impl EditorApp {
 
         // Rebuild MIDI event cache for all MIDI clips (needed for timeline/piano roll rendering)
         let step8_start = std::time::Instant::now();
-        // Migrate old documents: compute beats/frames derived fields
-        self.action_executor.document_mut().sync_all_clip_positions();
-
         self.midi_event_cache.clear();
         let midi_clip_ids: Vec<u32> = self.action_executor.document()
             .audio_clips.values()
@@ -3858,19 +3855,6 @@ impl EditorApp {
             }
         }
         eprintln!("📊 [APPLY] Step 8: Rebuilt MIDI event cache for {} clips in {:.2}ms", midi_fetched, step8_start.elapsed().as_secs_f64() * 1000.0);
-
-        // Sync beats/frames derived fields on MIDI events (migration for old documents)
-        {
-            let bpm = self.action_executor.document().bpm;
-            let fps = self.action_executor.document().framerate;
-            for events in self.midi_event_cache.values_mut() {
-                for ev in events.iter_mut() {
-                    if ev.timestamp_beats == 0.0 && ev.timestamp.abs() > 1e-9 {
-                        ev.sync_from_seconds(bpm, fps);
-                    }
-                }
-            }
-        }
 
         // Reset playback state
         self.playback_time = 0.0;
@@ -4002,15 +3986,11 @@ impl EditorApp {
     /// Rebuild a MIDI event cache entry from backend note format.
     /// Called after undo/redo to keep the cache consistent with the backend.
     fn rebuild_midi_cache_entry(&mut self, clip_id: u32, notes: &[(f64, u8, u8, f64)]) {
-        let bpm = self.action_executor.document().bpm;
-        let fps = self.action_executor.document().framerate;
         let mut events: Vec<daw_backend::audio::midi::MidiEvent> = Vec::with_capacity(notes.len() * 2);
         for &(start_time, note, velocity, duration) in notes {
-            let mut on = daw_backend::audio::midi::MidiEvent::note_on(start_time, 0, note, velocity);
-            on.sync_from_seconds(bpm, fps);
+            let on = daw_backend::audio::midi::MidiEvent::note_on(daw_backend::Beats(start_time), 0, note, velocity);
             events.push(on);
-            let mut off = daw_backend::audio::midi::MidiEvent::note_off(start_time + duration, 0, note, 0);
-            off.sync_from_seconds(bpm, fps);
+            let off = daw_backend::audio::midi::MidiEvent::note_off(daw_backend::Beats(start_time + duration), 0, note, 0);
             events.push(off);
         }
         events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
@@ -4048,14 +4028,14 @@ impl EditorApp {
                     let frontend_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
 
                     println!("Imported MIDI '{}' ({:.1}s, {} total events) - Frontend ID: {}, Backend ID: {}",
-                        name, duration, event_count, frontend_clip_id, backend_clip_id);
+                        name, duration.beats_to_f64(), event_count, frontend_clip_id, backend_clip_id);
 
                     Some(ImportedAssetInfo {
                         clip_id: frontend_clip_id,
                         clip_type: panes::DragClipType::AudioMidi,
                         name,
                         dimensions: None,
-                        duration,
+                        duration: duration.beats_to_f64(),
                         linked_audio_clip_id: None,
                     })
                 } else {
@@ -5032,7 +5012,7 @@ impl eframe::App for EditorApp {
                                 if let Some(doc_clip_id) = doc_clip_id {
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
                                         if clip.is_recording() {
-                                            clip.duration = duration;
+                                            clip.duration = duration.seconds_to_f64();
                                         }
                                     }
                                 }
@@ -5202,24 +5182,18 @@ impl eframe::App for EditorApp {
                                     }
                                     // Update the clip's duration so the timeline bar grows
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
-                                        clip.duration = duration;
+                                        clip.duration = duration.beats_to_f64();
                                     }
                                 }
                             }
 
-                            // Update midi_event_cache with notes captured so far
-                            // (inlined to avoid conflicting &mut self borrow)
+                            // Update midi_event_cache with notes captured so far.
+                            // Notes from get_notes_with_active() are already in beats.
                             {
-                                let bpm = self.action_executor.document().bpm;
-                                let fps = self.action_executor.document().framerate;
                                 let mut events: Vec<daw_backend::audio::midi::MidiEvent> = Vec::with_capacity(notes.len() * 2);
-                                for &(start_time, note, velocity, dur) in &notes {
-                                    let mut on = daw_backend::audio::midi::MidiEvent::note_on(start_time, 0, note, velocity);
-                                    on.sync_from_seconds(bpm, fps);
-                                    events.push(on);
-                                    let mut off = daw_backend::audio::midi::MidiEvent::note_off(start_time + dur, 0, note, 0);
-                                    off.sync_from_seconds(bpm, fps);
-                                    events.push(off);
+                                for &(start_beats, note, velocity, dur_beats) in &notes {
+                                    events.push(daw_backend::audio::midi::MidiEvent::note_on(start_beats, 0, note, velocity));
+                                    events.push(daw_backend::audio::midi::MidiEvent::note_off(start_beats + dur_beats, 0, note, 0));
                                 }
                                 events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
                                 self.midi_event_cache.insert(clip_id, events);
@@ -5236,13 +5210,7 @@ impl eframe::App for EditorApp {
                                 match controller.query_midi_clip(track_id, clip_id) {
                                     Ok(midi_clip_data) => {
                                         drop(controller);
-                                        let bpm = self.action_executor.document().bpm;
-                                        let fps = self.action_executor.document().framerate;
-                                        let mut final_events = midi_clip_data.events.clone();
-                                        for ev in &mut final_events {
-                                            ev.sync_from_seconds(bpm, fps);
-                                        }
-                                        self.midi_event_cache.insert(clip_id, final_events);
+                                        self.midi_event_cache.insert(clip_id, midi_clip_data.events.clone());
 
                                         // Update document clip with final duration and name
                                         let doc_clip_id = self.action_executor.document()

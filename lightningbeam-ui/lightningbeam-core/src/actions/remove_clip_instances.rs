@@ -177,10 +177,10 @@ impl Action for RemoveClipInstancesAction {
                     let midi_instance = daw_backend::MidiClipInstance::new(
                         0,
                         *midi_clip_id,
-                        internal_start,
-                        internal_end,
-                        external_start,
-                        external_duration,
+                        daw_backend::Beats(internal_start),
+                        daw_backend::Beats(internal_end),
+                        daw_backend::Beats(external_start),
+                        daw_backend::Beats(external_duration),
                     );
 
                     let query = Query::AddMidiClipInstanceSync(track_id, midi_instance);

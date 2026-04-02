@@ -882,7 +882,7 @@ fn composite_document_to_hdr(
                     let effect_inst = lightningbeam_core::effect::EffectInstance::new(
                         effect_def,
                         effect_instance.timeline_start,
-                        effect_instance.timeline_start + effect_instance.effective_duration(lightningbeam_core::effect::EFFECT_DURATION),
+                        effect_instance.timeline_start + effect_instance.effective_duration(lightningbeam_core::effect::EFFECT_DURATION, document.tempo_map()),
                     );
                     let effect_output_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
                     if let Some(effect_output_view) = gpu_resources.buffer_pool.get_view(effect_output_handle) {

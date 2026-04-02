@@ -1147,7 +1147,7 @@ impl InfopanelPane {
 
                             let clip_dur = document.get_clip_duration(&ci.clip_id)
                                 .unwrap_or_else(|| ci.trim_end.unwrap_or(1.0) - ci.trim_start);
-                            let total_dur = ci.total_duration(clip_dur);
+                            let total_dur = ci.total_duration(clip_dur, document.tempo_map());
                             ui.horizontal(|ui| {
                                 ui.label("Duration:");
                                 ui.label(format!("{:.2}s", total_dur));
@@ -1215,10 +1215,10 @@ impl InfopanelPane {
                         let mut pending: std::collections::HashMap<u8, (f64, u8)> = std::collections::HashMap::new();
                         for event in events {
                             if event.is_note_on() {
-                                pending.insert(event.data1, (event.timestamp, event.data2));
+                                pending.insert(event.data1, (event.timestamp.beats_to_f64(), event.data2));
                             } else if event.is_note_off() {
                                 if let Some((start, v)) = pending.remove(&event.data1) {
-                                    notes.push((start, event.data1, v, event.timestamp - start));
+                                    notes.push((start, event.data1, v, event.timestamp.beats_to_f64() - start));
                                 }
                             }
                         }

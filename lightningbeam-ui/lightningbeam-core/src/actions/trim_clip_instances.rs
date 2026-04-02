@@ -101,7 +101,7 @@ impl Action for TrimClipInstancesAction {
                                                 AnyLayer::Effect(el) => &el.clip_instances,
                                                 AnyLayer::Group(_) => &[],
                                                 AnyLayer::Raster(_) => &[],
-                                            };
+                                                        };
 
                                             if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
                                                 let member_old_trim = instance.trim_start;
@@ -138,7 +138,7 @@ impl Action for TrimClipInstancesAction {
                                             AnyLayer::Effect(el) => &el.clip_instances,
                                             AnyLayer::Group(_) => &[],
                                             AnyLayer::Raster(_) => &[],
-                                        };
+                                                };
 
                                         if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
                                             let member_old_trim_end = instance.trim_end;
@@ -182,7 +182,7 @@ impl Action for TrimClipInstancesAction {
                     AnyLayer::Effect(el) => &el.clip_instances,
                     AnyLayer::Group(_) => &[],
                     AnyLayer::Raster(_) => &[],
-                };
+                    };
 
                 let instance = clip_instances.iter()
                     .find(|ci| &ci.id == instance_id)
@@ -260,9 +260,6 @@ impl Action for TrimClipInstancesAction {
         // Store clamped trims for rollback
         self.layer_trims = clamped_trims.clone();
 
-        let bpm = document.bpm;
-        let fps = document.framerate;
-
         // Apply all clamped trims
         for (layer_id, trims) in &clamped_trims {
             let layer = match document.get_layer_mut(layer_id) {
@@ -297,7 +294,6 @@ impl Action for TrimClipInstancesAction {
                             clip_instance.trim_end = new.trim_value;
                         }
                     }
-                    clip_instance.sync_from_seconds(bpm, fps);
                 }
             }
         }
@@ -305,8 +301,6 @@ impl Action for TrimClipInstancesAction {
     }
 
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
-        let bpm = document.bpm;
-        let fps = document.framerate;
         for (layer_id, trims) in &self.layer_trims {
             let layer = match document.get_layer_mut(layer_id) {
                 Some(l) => l,
@@ -340,7 +334,6 @@ impl Action for TrimClipInstancesAction {
                             clip_instance.trim_end = old.trim_value;
                         }
                     }
-                    clip_instance.sync_from_seconds(bpm, fps);
                 }
             }
         }

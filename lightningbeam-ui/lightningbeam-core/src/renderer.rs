@@ -391,9 +391,10 @@ pub fn render_layer_isolated(
             let mut video_mgr = video_manager.lock().unwrap();
             let mut instances = Vec::new();
 
+            let tempo_map = document.tempo_map();
             for clip_instance in &video_layer.clip_instances {
                 let Some(video_clip) = document.video_clips.get(&clip_instance.clip_id) else { continue };
-                let Some(clip_time) = clip_instance.remap_time(time, video_clip.duration) else { continue };
+                let Some(clip_time) = clip_instance.remap_time(time, video_clip.duration, tempo_map) else { continue };
                 let Some(frame) = video_mgr.get_frame(&clip_instance.clip_id, clip_time) else { continue };
 
                 // Evaluate animated transform properties.
@@ -458,8 +459,9 @@ pub fn render_layer_isolated(
         AnyLayer::Effect(effect_layer) => {
             // Effect layers are processed during compositing, not rendered to scene
             // Return early with a dedicated effect layer type
+            let tempo_map = document.tempo_map();
             let active_effects: Vec<ClipInstance> = effect_layer
-                .active_clip_instances_at(time)
+                .active_clip_instances_at(time, tempo_map)
                 .into_iter()
                 .cloned()
                 .collect();
@@ -728,16 +730,19 @@ fn render_clip_instance(
     };
 
     // Remap timeline time to clip's internal time
+    let tempo_map = document.tempo_map();
     let clip_time = if vector_clip.is_group {
-        // Groups are static — visible from timeline_start to the next keyframe boundary
-        let end = group_end_time.unwrap_or(clip_instance.timeline_start);
-        if time < clip_instance.timeline_start || time >= end {
+        // Groups are static — visible from timeline_start to the next keyframe boundary.
+        // timeline_start is in beats; group_end_time is in seconds (render time).
+        let start_secs = tempo_map.transform(clip_instance.timeline_start);
+        let end = group_end_time.unwrap_or(start_secs);
+        if time < start_secs || time >= end {
             return;
         }
         0.0
     } else {
         let clip_dur = document.get_clip_duration(&vector_clip.id).unwrap_or(vector_clip.duration);
-        let Some(t) = clip_instance.remap_time(time, clip_dur) else {
+        let Some(t) = clip_instance.remap_time(time, clip_dur, tempo_map) else {
             return; // Clip instance not active at this time
         };
         t
@@ -889,7 +894,8 @@ fn render_video_layer(
         };
 
         // Remap timeline time to clip's internal time
-        let Some(clip_time) = clip_instance.remap_time(time, video_clip.duration) else {
+        let tempo_map = document.tempo_map();
+        let Some(clip_time) = clip_instance.remap_time(time, video_clip.duration, tempo_map) else {
             continue; // Clip instance not active at this time
         };
 
@@ -1553,13 +1559,15 @@ fn render_clip_instance_cpu(
 ) {
     let Some(vector_clip) = document.vector_clips.get(&clip_instance.clip_id) else { return };
 
+    let tempo_map = document.tempo_map();
     let clip_time = if vector_clip.is_group {
-        let end = group_end_time.unwrap_or(clip_instance.timeline_start);
-        if time < clip_instance.timeline_start || time >= end { return; }
+        let start_secs = tempo_map.transform(clip_instance.timeline_start);
+        let end = group_end_time.unwrap_or(start_secs);
+        if time < start_secs || time >= end { return; }
         0.0
     } else {
         let clip_dur = document.get_clip_duration(&vector_clip.id).unwrap_or(vector_clip.duration);
-        let Some(t) = clip_instance.remap_time(time, clip_dur) else { return };
+        let Some(t) = clip_instance.remap_time(time, clip_dur, tempo_map) else { return };
         t
     };
 

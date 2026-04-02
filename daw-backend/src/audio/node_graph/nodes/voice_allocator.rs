@@ -348,7 +348,7 @@ impl AudioNode for VoiceAllocatorNode {
 
                 // Process this voice's graph with its MIDI events
                 // Note: playback_time is 0.0 since voice allocator doesn't track time
-                self.voice_instances[voice_idx].process(mix_slice, &midi_events, 0.0);
+                self.voice_instances[voice_idx].process(mix_slice, &midi_events, crate::time::Beats::ZERO);
 
                 // Auto-deactivate releasing voices that have gone silent
                 if voice_state.releasing {
