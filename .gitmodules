@@ -1,0 +1,3 @@
+[submodule "vendor/NeuralAudio"]
+	path = vendor/NeuralAudio
+	url = https://github.com/mikeoliphant/NeuralAudio.git

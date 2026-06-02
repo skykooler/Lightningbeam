@@ -1,0 +1,134 @@
+[package]
+name = "lightningbeam-editor"
+version = "1.0.3-alpha"
+edition = "2021"
+description = "Multimedia editor for audio, video and 2D animation"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+lightningbeam-core = { path = "../lightningbeam-core" }
+daw-backend = { path = "../../daw-backend" }
+beamdsp = { path = "../beamdsp" }
+rtrb = "0.3"
+cpal = "0.17"
+ffmpeg-next = { version = "8.0", features = ["static"] }
+
+# UI Framework
+eframe = { workspace = true }
+egui_extras = { workspace = true }
+egui-wgpu = { workspace = true }
+egui_code_editor = { workspace = true }
+egui_node_graph2 = { path = "../egui_node_graph2" }
+
+# GPU
+wgpu = { workspace = true }
+vello = { workspace = true }
+half = { version = "2.4", features = ["bytemuck"] }
+bytemuck = { version = "1.14", features = ["derive"] }
+kurbo = { workspace = true }
+peniko = { workspace = true }
+
+# Windowing
+winit = { workspace = true }
+
+# Native menus
+muda = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Image loading
+image = { workspace = true }
+resvg = { workspace = true }
+tiny-skia = "0.11"
+
+# Utilities
+pollster = { workspace = true }
+lightningcss = "1.0.0-alpha.68"
+clap = { version = "4.5", features = ["derive"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+petgraph = "0.6"
+rayon = "1.10"
+
+# Native file dialogs
+rfd = "0.15"
+
+# Cross-platform config paths
+directories = "5.0"
+
+# Desktop notifications
+notify-rust = { workspace = true }
+
+# Debug overlay - memory tracking
+memory-stats = "1.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client   = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-backend  = { version = "0.3", features = ["client_system"] }
+wayland-sys      = { version = "0.31", features = ["client"] }
+x11rb            = { version = "0.13", features = ["xinput"] }
+
+[package.metadata.deb]
+name = "lightningbeam-editor"
+maintainer = "Skyler"
+copyright = "2025-2026"
+extended-description = "GPU-accelerated multimedia editor for audio, video and 2D animation"
+license-file = ["../../LICENSE", "0"]
+section = "video"
+priority = "optional"
+depends = "libasound2, libwayland-client0, libx11-6, libvulkan1"
+assets = [
+    ["target/release/lightningbeam-editor", "usr/bin/", "755"],
+    ["assets/com.lightningbeam.editor.desktop", "usr/share/applications/", "644"],
+    ["assets/com.lightningbeam.editor.appdata.xml", "usr/share/metainfo/", "644"],
+    ["assets/icons/32x32.png", "usr/share/icons/hicolor/32x32/apps/lightningbeam-editor.png", "644"],
+    ["assets/icons/128x128.png", "usr/share/icons/hicolor/128x128/apps/lightningbeam-editor.png", "644"],
+    ["assets/icons/256x256.png", "usr/share/icons/hicolor/256x256/apps/lightningbeam-editor.png", "644"],
+    # Factory instrument presets and samples — copied to share dir, preserving directory tree
+    ["target/release/presets/**/*", "usr/share/lightningbeam-editor/presets/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "lightningbeam-editor"
+license = "GPL-3.0-or-later"
+summary = "Multimedia editor for audio, video and 2D animation"
+
+[package.metadata.generate-rpm.requires]
+alsa-lib = "*"
+wayland = "*"
+libX11 = "*"
+vulkan-loader = "*"
+
+[[package.metadata.generate-rpm.assets]]
+source = "target/release/lightningbeam-editor"
+dest = "/usr/bin/lightningbeam-editor"
+mode = "755"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/com.lightningbeam.editor.desktop"
+dest = "/usr/share/applications/com.lightningbeam.editor.desktop"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/com.lightningbeam.editor.appdata.xml"
+dest = "/usr/share/metainfo/com.lightningbeam.editor.appdata.xml"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/32x32.png"
+dest = "/usr/share/icons/hicolor/32x32/apps/lightningbeam-editor.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/128x128.png"
+dest = "/usr/share/icons/hicolor/128x128/apps/lightningbeam-editor.png"
+mode = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/256x256.png"
+dest = "/usr/share/icons/hicolor/256x256/apps/lightningbeam-editor.png"
+mode = "644"
+
+# Factory preset entries are injected by CI (see build.yml "Inject preset entries" step)

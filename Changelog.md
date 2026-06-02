@@ -1,3 +1,73 @@
+# 1.0.3-alpha:
+Changes:
+- Add gradient support to vector graphics
+- Add "frames" timeline mode
+- Reduce CPU usage at idle
+- Allow group tracks' audio node graphs to be edited
+
+Bugfixes:
+- Support Vello CPU fallback on systems with older GPUs
+
+# 1.0.2-alpha:
+Changes:
+- All vector shapes on a layer go into a unified shape rather than separate shapes
+- Keyboard shortcuts are now user-configurable
+- Added webcam support in video editor
+- Background can now be transparent
+- Video thumbnails are now displayed on the clip
+- Virtual keyboard, piano roll and node editor now have a quick switcher
+- Add electric guitar preset
+- Layers can now be grouped
+- Layers can be reordered by dragging
+- Added VU meters to audio layers and mix
+- Added raster image editing
+- Added brush, airbrush, dodge/burn, sponge, pattern stamp, healing brush, clone stamp, blur/sharpen, magic wand and quick select tools
+- Added support for MyPaint .myb brushes
+- UI now uses CSS styling to support future user styles
+- Added image export
+
+Bugfixes:
+- Toolbar now only shows tools that can be used on the current layer
+- Fix NAM model loading
+- Fix menu width and mouse following
+- Export dialog now remembers the previous export filename
+
+# 1.0.1-alpha:
+Changes:
+- Added real-time amp simulation via NAM
+- Added beat mode to the timeline
+- Changed shape drawing from making separate shapes to making shapes in the layer using a DCEL graph
+- Licensed under GPLv3
+- Added snapping for vector editing
+- Added organ instrument and vibrato node
+
+Bugfixes:
+- Fix preset loading not updating node graph editor
+- Fix stroke intersections not splitting strokes
+- Fix paint bucket fill not attaching to existing strokes
+
+# 1.0.0-alpha:
+Changes:
+- New native GUI built with egui + wgpu (replaces Tauri/web frontend)
+- GPU-accelerated canvas with vello rendering
+- MIDI input and node-based audio graph improvements
+- Factory instrument presets
+- Video import and high performance playback
+
+# 0.8.1-alpha:
+Changes:
+- Rewrite timeline UI
+- Add start screen
+- Move audio engine to backend
+- Add node editor for audio synthesis
+- Add factory presets for instruments
+- Add MIDI input support
+- Add BPM handling and time signature
+- Add metronome
+- Add preset layouts for different tasks
+- Add video import
+- Add animation curves for object properties
+
 # 0.7.14-alpha:
 Changes:
 - Moving frames can now be undone

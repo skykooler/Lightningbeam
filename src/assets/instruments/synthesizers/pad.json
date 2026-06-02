@@ -1,0 +1,420 @@
+{
+  "metadata": {
+    "name": "Lush Pad",
+    "description": "Ambient pad with reverb and chorus (polyphonic)",
+    "author": "Lightningbeam",
+    "version": 2,
+    "tags": [
+      "pad",
+      "ambient",
+      "synth"
+    ]
+  },
+  "midi_targets": [
+    0
+  ],
+  "output_node": 4,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [
+        100.0,
+        150.0
+      ]
+    },
+    {
+      "id": 1,
+      "node_type": "VoiceAllocator",
+      "name": "Voice Allocator",
+      "parameters": {
+        "0": 8.0
+      },
+      "position": [
+        400.0,
+        150.0
+      ],
+      "template_graph": {
+        "metadata": {
+          "name": "Voice Template",
+          "description": "Per-voice pad patch",
+          "author": "Lightningbeam",
+          "version": 1,
+          "tags": []
+        },
+        "midi_targets": [
+          0
+        ],
+        "output_node": 8,
+        "nodes": [
+          {
+            "id": 0,
+            "node_type": "TemplateInput",
+            "name": "Template Input",
+            "parameters": {},
+            "position": [
+              -200.0,
+              0.0
+            ]
+          },
+          {
+            "id": 1,
+            "node_type": "MidiToCV",
+            "name": "MIDI\u2192CV",
+            "parameters": {},
+            "position": [
+              100.0,
+              0.0
+            ]
+          },
+          {
+            "id": 2,
+            "node_type": "Oscillator",
+            "name": "Osc 1",
+            "parameters": {
+              "0": 440.0,
+              "1": 0.4,
+              "2": 0.0
+            },
+            "position": [
+              400.0,
+              -100.0
+            ]
+          },
+          {
+            "id": 3,
+            "node_type": "Oscillator",
+            "name": "Osc 2",
+            "parameters": {
+              "0": 442.0,
+              "1": 0.4,
+              "2": 0.0
+            },
+            "position": [
+              400.0,
+              200.0
+            ]
+          },
+          {
+            "id": 4,
+            "node_type": "Mixer",
+            "name": "Osc Mix",
+            "parameters": {
+              "0": 1.0,
+              "1": 1.0,
+              "2": 0.0,
+              "3": 0.0
+            },
+            "position": [
+              700.0,
+              50.0
+            ]
+          },
+          {
+            "id": 5,
+            "node_type": "Filter",
+            "name": "LP Filter",
+            "parameters": {
+              "0": 1500.0,
+              "1": 0.707,
+              "2": 0.0
+            },
+            "position": [
+              900.0,
+              -50.0
+            ]
+          },
+          {
+            "id": 6,
+            "node_type": "ADSR",
+            "name": "Amp Env",
+            "parameters": {
+              "0": 0.5,
+              "1": 0.3,
+              "2": 0.7,
+              "3": 1.0
+            },
+            "position": [
+              900.0,
+              200.0
+            ]
+          },
+          {
+            "id": 7,
+            "node_type": "Gain",
+            "name": "VCA",
+            "parameters": {
+              "0": 1.0
+            },
+            "position": [
+              1100.0,
+              50.0
+            ]
+          },
+          {
+            "id": 8,
+            "node_type": "TemplateOutput",
+            "name": "Template Output",
+            "parameters": {},
+            "position": [
+              1300.0,
+              50.0
+            ]
+          }
+        ],
+        "connections": [
+          {
+            "from_node": 0,
+            "from_port": 0,
+            "to_node": 1,
+            "to_port": 0
+          },
+          {
+            "from_node": 1,
+            "from_port": 0,
+            "to_node": 2,
+            "to_port": 0
+          },
+          {
+            "from_node": 1,
+            "from_port": 0,
+            "to_node": 3,
+            "to_port": 0
+          },
+          {
+            "from_node": 1,
+            "from_port": 1,
+            "to_node": 6,
+            "to_port": 0
+          },
+          {
+            "from_node": 2,
+            "from_port": 0,
+            "to_node": 4,
+            "to_port": 0
+          },
+          {
+            "from_node": 3,
+            "from_port": 0,
+            "to_node": 4,
+            "to_port": 1
+          },
+          {
+            "from_node": 4,
+            "from_port": 0,
+            "to_node": 5,
+            "to_port": 0
+          },
+          {
+            "from_node": 5,
+            "from_port": 0,
+            "to_node": 7,
+            "to_port": 0
+          },
+          {
+            "from_node": 6,
+            "from_port": 0,
+            "to_node": 7,
+            "to_port": 1
+          },
+          {
+            "from_node": 7,
+            "from_port": 0,
+            "to_node": 8,
+            "to_port": 0
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "node_type": "Chorus",
+      "name": "Chorus",
+      "parameters": {
+        "0": 0.5,
+        "1": 0.6,
+        "2": 0.4
+      },
+      "position": [
+        700.0,
+        150.0
+      ]
+    },
+    {
+      "id": 3,
+      "node_type": "Reverb",
+      "name": "Reverb",
+      "parameters": {
+        "0": 0.7,
+        "1": 0.5,
+        "2": 0.5
+      },
+      "position": [
+        1000.0,
+        150.0
+      ]
+    },
+    {
+      "id": 4,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [
+        1990.0,
+        150.0
+      ]
+    },
+    {
+      "id": 5,
+      "node_type": "Compressor",
+      "parameters": {
+        "0": -18.0,
+        "1": 4.0,
+        "2": 5.0,
+        "3": 50.0,
+        "4": 3.0,
+        "5": 3.0
+      },
+      "position": [
+        1300.0,
+        150.0
+      ]
+    },
+    {
+      "id": 6,
+      "node_type": "Pan",
+      "parameters": {
+        "0": 0.0
+      },
+      "position": [
+        1530.0,
+        150.0
+      ]
+    },
+    {
+      "id": 7,
+      "node_type": "Gain",
+      "parameters": {
+        "0": 1.0
+      },
+      "position": [
+        1760.0,
+        150.0
+      ]
+    },
+    {
+      "id": 8,
+      "node_type": "AutomationInput",
+      "parameters": {
+        "0": 0.0,
+        "1": 2.0
+      },
+      "automation_display_name": "Volume",
+      "automation_keyframes": [
+        {
+          "time": 0.0,
+          "value": 1.0,
+          "interpolation": "linear",
+          "ease_out": [
+            0.58,
+            1.0
+          ],
+          "ease_in": [
+            0.42,
+            0.0
+          ]
+        }
+      ],
+      "position": [
+        1530.0,
+        380.0
+      ]
+    },
+    {
+      "id": 9,
+      "node_type": "AutomationInput",
+      "parameters": {
+        "0": -1.0,
+        "1": 1.0
+      },
+      "automation_display_name": "Pan",
+      "automation_keyframes": [
+        {
+          "time": 0.0,
+          "value": 0.0,
+          "interpolation": "linear",
+          "ease_out": [
+            0.58,
+            1.0
+          ],
+          "ease_in": [
+            0.42,
+            0.0
+          ]
+        }
+      ],
+      "position": [
+        1300.0,
+        380.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from_node": 0,
+      "from_port": 0,
+      "to_node": 1,
+      "to_port": 0
+    },
+    {
+      "from_node": 1,
+      "from_port": 0,
+      "to_node": 2,
+      "to_port": 0
+    },
+    {
+      "from_node": 2,
+      "from_port": 0,
+      "to_node": 3,
+      "to_port": 0
+    },
+    {
+      "from_node": 3,
+      "from_port": 0,
+      "to_node": 5,
+      "to_port": 0
+    },
+    {
+      "from_node": 5,
+      "from_port": 0,
+      "to_node": 6,
+      "to_port": 0
+    },
+    {
+      "from_node": 6,
+      "from_port": 0,
+      "to_node": 7,
+      "to_port": 0
+    },
+    {
+      "from_node": 7,
+      "from_port": 0,
+      "to_node": 4,
+      "to_port": 0
+    },
+    {
+      "from_node": 8,
+      "from_port": 0,
+      "to_node": 7,
+      "to_port": 1
+    },
+    {
+      "from_node": 9,
+      "from_port": 0,
+      "to_node": 6,
+      "to_port": 1
+    }
+  ]
+}

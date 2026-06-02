@@ -1,0 +1,341 @@
+{
+  "metadata": {
+    "name": "Harp",
+    "description": "Concert harp",
+    "author": "Virtual Playing Orchestra 3",
+    "version": 1,
+    "tags": [
+      "strings",
+      "harp",
+      "orchestral"
+    ]
+  },
+  "midi_targets": [
+    0
+  ],
+  "output_node": 2,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [
+        100.0,
+        100.0
+      ]
+    },
+    {
+      "id": 1,
+      "node_type": "MultiSampler",
+      "name": "Harp Sampler",
+      "parameters": {
+        "0": 1.0,
+        "1": 0.001,
+        "2": 0.8,
+        "3": 0.0
+      },
+      "sample_data": {
+        "type": "multi_sampler",
+        "layers": [
+          {
+            "file_path": "samples/D2.mp3",
+            "root_key": 38,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 0,
+            "key_max": 39
+          },
+          {
+            "file_path": "samples/F2.mp3",
+            "root_key": 41,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 40,
+            "key_max": 44
+          },
+          {
+            "file_path": "samples/C3.mp3",
+            "root_key": 48,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 45,
+            "key_max": 50
+          },
+          {
+            "file_path": "samples/E3.mp3",
+            "root_key": 52,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 51,
+            "key_max": 53
+          },
+          {
+            "file_path": "samples/G3.mp3",
+            "root_key": 55,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 54,
+            "key_max": 57
+          },
+          {
+            "file_path": "samples/B3.mp3",
+            "root_key": 59,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 58,
+            "key_max": 60
+          },
+          {
+            "file_path": "samples/D4.mp3",
+            "root_key": 62,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 61,
+            "key_max": 63
+          },
+          {
+            "file_path": "samples/F4.mp3",
+            "root_key": 65,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 64,
+            "key_max": 67
+          },
+          {
+            "file_path": "samples/A4.mp3",
+            "root_key": 69,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 68,
+            "key_max": 70
+          },
+          {
+            "file_path": "samples/C5.mp3",
+            "root_key": 72,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 71,
+            "key_max": 74
+          },
+          {
+            "file_path": "samples/E5.mp3",
+            "root_key": 76,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 75,
+            "key_max": 77
+          },
+          {
+            "file_path": "samples/G5.mp3",
+            "root_key": 79,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 78,
+            "key_max": 81
+          },
+          {
+            "file_path": "samples/B5.mp3",
+            "root_key": 83,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 82,
+            "key_max": 84
+          },
+          {
+            "file_path": "samples/D6.mp3",
+            "root_key": 86,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 85,
+            "key_max": 87
+          },
+          {
+            "file_path": "samples/F6.mp3",
+            "root_key": 89,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 88,
+            "key_max": 91
+          },
+          {
+            "file_path": "samples/A6.mp3",
+            "root_key": 93,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 92,
+            "key_max": 95
+          },
+          {
+            "file_path": "samples/D7.mp3",
+            "root_key": 98,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 96,
+            "key_max": 99
+          },
+          {
+            "file_path": "samples/F7.mp3",
+            "root_key": 101,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "key_min": 100,
+            "key_max": 127
+          }
+        ]
+      },
+      "position": [
+        350.0,
+        0.0
+      ]
+    },
+    {
+      "id": 2,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [
+        1390.0,
+        100.0
+      ]
+    },
+    {
+      "id": 3,
+      "node_type": "Compressor",
+      "parameters": {
+        "0": -18.0,
+        "1": 4.0,
+        "2": 5.0,
+        "3": 50.0,
+        "4": 3.0,
+        "5": 3.0
+      },
+      "position": [
+        700.0,
+        100.0
+      ]
+    },
+    {
+      "id": 4,
+      "node_type": "Pan",
+      "parameters": {
+        "0": 0.0
+      },
+      "position": [
+        930.0,
+        100.0
+      ]
+    },
+    {
+      "id": 5,
+      "node_type": "Gain",
+      "parameters": {
+        "0": 1.0
+      },
+      "position": [
+        1160.0,
+        100.0
+      ]
+    },
+    {
+      "id": 6,
+      "node_type": "AutomationInput",
+      "parameters": {
+        "0": 0.0,
+        "1": 2.0
+      },
+      "automation_display_name": "Volume",
+      "automation_keyframes": [
+        {
+          "time": 0.0,
+          "value": 1.0,
+          "interpolation": "linear",
+          "ease_out": [
+            0.58,
+            1.0
+          ],
+          "ease_in": [
+            0.42,
+            0.0
+          ]
+        }
+      ],
+      "position": [
+        930.0,
+        330.0
+      ]
+    },
+    {
+      "id": 7,
+      "node_type": "AutomationInput",
+      "parameters": {
+        "0": -1.0,
+        "1": 1.0
+      },
+      "automation_display_name": "Pan",
+      "automation_keyframes": [
+        {
+          "time": 0.0,
+          "value": 0.0,
+          "interpolation": "linear",
+          "ease_out": [
+            0.58,
+            1.0
+          ],
+          "ease_in": [
+            0.42,
+            0.0
+          ]
+        }
+      ],
+      "position": [
+        700.0,
+        330.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from_node": 0,
+      "from_port": 0,
+      "to_node": 1,
+      "to_port": 0
+    },
+    {
+      "from_node": 1,
+      "from_port": 0,
+      "to_node": 3,
+      "to_port": 0
+    },
+    {
+      "from_node": 3,
+      "from_port": 0,
+      "to_node": 4,
+      "to_port": 0
+    },
+    {
+      "from_node": 4,
+      "from_port": 0,
+      "to_node": 5,
+      "to_port": 0
+    },
+    {
+      "from_node": 5,
+      "from_port": 0,
+      "to_node": 2,
+      "to_port": 0
+    },
+    {
+      "from_node": 6,
+      "from_port": 0,
+      "to_node": 5,
+      "to_port": 1
+    },
+    {
+      "from_node": 7,
+      "from_port": 0,
+      "to_node": 4,
+      "to_port": 1
+    }
+  ]
+}

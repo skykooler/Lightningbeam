@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+members = [
+    "lightningbeam-editor",
+    "lightningbeam-core",
+    "beamdsp",
+]
+
+[workspace.dependencies]
+# UI Framework (using eframe for simplified integration)
+# Note: Upgraded from 0.29 to 0.31 to fix Linux IME/keyboard input issues
+# See: https://github.com/emilk/egui/pull/5198
+# Upgraded to 0.33 for shader editor (egui_code_editor) and continued bug fixes
+egui = "0.33.3"
+eframe = { version = "0.33.3", default-features = true, features = ["wgpu"] }
+egui_extras = { version = "0.33.3", features = ["image", "svg", "syntect"] }
+egui-wgpu = "0.33.3"
+egui_code_editor = "0.2"
+
+# GPU Rendering
+# vello from git uses wgpu 27, matching eframe 0.33
+vello = { git = "https://github.com/linebender/vello", branch = "main" }
+wgpu = { version = "27", features = ["vulkan", "metal", "gles"] }
+kurbo = { version = "0.12", features = ["serde"] }
+peniko = "0.5"
+
+# Windowing
+winit = "0.30"
+
+# Native menus
+muda = "0.15"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Image loading
+image = "0.25"
+resvg = "0.42"
+
+# Utilities
+pollster = "0.3"
+
+# Desktop notifications
+notify-rust = "4.11"
+
+# Optimize the audio backend even in debug builds — the audio callback
+# runs on a real-time thread with ~1.5ms deadlines at small buffer sizes,
+# so it cannot tolerate unoptimized code.
+[profile.dev.package.daw-backend]
+opt-level = 2
+
+[profile.dev.package.nam-ffi]
+opt-level = 2
+
+[profile.dev.package.beamdsp]
+opt-level = 2
+
+# Also optimize symphonia (audio decoder) and cpal (audio I/O) — these
+# run in the audio callback path and are heavily numeric.
+[profile.dev.package.symphonia]
+opt-level = 2
+[profile.dev.package.symphonia-core]
+opt-level = 2
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 2
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 2
+[profile.dev.package.symphonia-format-ogg]
+opt-level = 2
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 2
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 2
+[profile.dev.package.symphonia-format-isomp4]
+opt-level = 2
+[profile.dev.package.cpal]
+opt-level = 2
+
+# Use local egui fork with ibus/Wayland text input fix
+[patch.crates-io]
+egui = { path = "../../egui-fork/crates/egui" }
+eframe = { path = "../../egui-fork/crates/eframe" }
+egui_extras = { path = "../../egui-fork/crates/egui_extras" }
+egui-wgpu = { path = "../../egui-fork/crates/egui-wgpu" }
+egui-winit = { path = "../../egui-fork/crates/egui-winit" }
+epaint = { path = "../../egui-fork/crates/epaint" }
+ecolor = { path = "../../egui-fork/crates/ecolor" }
+emath = { path = "../../egui-fork/crates/emath" }

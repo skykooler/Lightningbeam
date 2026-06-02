@@ -1,0 +1,72 @@
+[package]
+name = "lightningbeam-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# UI framework (for Color32 conversion)
+egui = { workspace = true }
+
+# GPU rendering infrastructure
+wgpu = { workspace = true }
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# Geometry and rendering
+kurbo = { workspace = true }
+vello = { workspace = true }
+
+# Image decoding for image fills
+image = { workspace = true }
+
+# Unique identifiers
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Audio backend
+daw-backend = { path = "../../daw-backend" }
+
+# Video decoding
+ffmpeg-next = "8.0"
+lru = "0.12"
+
+# File I/O
+zip = "0.6"
+chrono = "0.4"
+base64 = "0.21"
+pathdiff = "0.2"
+
+# Audio encoding for embedded files
+flacenc = "0.4" # For FLAC encoding (lossless)
+claxon = "0.4" # For FLAC decoding
+
+# Spatial indexing for DCEL vertex snapping
+rstar = "0.12"
+
+# System clipboard
+arboard = "3"
+
+# ── Temporary: platform-native custom MIME type clipboard ─────────────────────
+# These deps exist because arboard does not yet support custom MIME types.
+# Remove once arboard gains that feature (https://github.com/1Password/arboard/issues/14).
+[target.'cfg(target_os = "linux")'.dependencies]
+wl-clipboard-rs = "0.9"
+x11-clipboard = "0.9"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSPasteboard"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSData"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+] }
+
+[dependencies.tiny-skia]
+version = "0.11"
+
+[dev-dependencies]

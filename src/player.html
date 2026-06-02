@@ -158,7 +158,7 @@ class GraphicsObject {
         this.currentFrameNum = 0;
         this.currentLayer = 0;
         this.layers = []
-        this.audioLayers = []
+        this.audioTracks = []
     }
     static fromJSON(json) {
         const graphicsObject = new GraphicsObject(json.idx)
@@ -174,8 +174,8 @@ class GraphicsObject {
         for (let layer of json.layers) {
           graphicsObject.layers.push(Layer.fromJSON(layer))
         }
-        for (let audioLayer of json.audioLayers) {
-          graphicsObject.audioLayers.push(AudioLayer.fromJSON(audioLayer))
+        for (let audioLayer of json.audioTracks) {
+          graphicsObject.audioTracks.push(AudioTrack.fromJSON(audioLayer))
         }
         return graphicsObject
     }

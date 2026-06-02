@@ -62,6 +62,38 @@ function createNewFileDialog(newFileCallback, openFileCallback, config) {
     fpsInput.value = config.framerate;
     newFileDialog.appendChild(fpsInput);
 
+    // Create Project Type selector
+    const projectTypeLabel = document.createElement('label');
+    projectTypeLabel.setAttribute('for', 'projectType');
+    projectTypeLabel.classList.add('dialog-label');
+    projectTypeLabel.textContent = 'Project Type:';
+    newFileDialog.appendChild(projectTypeLabel);
+
+    const projectTypeSelect = document.createElement('select');
+    projectTypeSelect.id = 'projectType';
+    projectTypeSelect.classList.add('dialog-input');
+
+    const projectTypes = [
+        { value: 'animation', label: '🎬 Animation - Drawing tools and timeline' },
+        { value: 'videoEditing', label: '🎥 Video - Clip timeline and effects' },
+        { value: 'audioDaw', label: '🎵 Music - Audio tracks and mixer' },
+        { value: 'scripting', label: '💻 Scripting - Code editor and console' },
+        { value: 'drawingPainting', label: '🎨 Drawing - Minimal UI for sketching' },
+        { value: 'threeD', label: '🧊 3D - Viewport and camera controls' }
+    ];
+
+    projectTypes.forEach(type => {
+        const option = document.createElement('option');
+        option.value = type.value;
+        option.textContent = type.label;
+        if (type.value === config.defaultLayout) {
+            option.selected = true;
+        }
+        projectTypeSelect.appendChild(option);
+    });
+
+    newFileDialog.appendChild(projectTypeSelect);
+
     // Create Create button
     const createButton = document.createElement('button');
     createButton.textContent = 'Create';
@@ -82,8 +114,9 @@ function createNewFileDialog(newFileCallback, openFileCallback, config) {
         const width = parseInt(document.getElementById('width').value);
         const height = parseInt(document.getElementById('height').value);
         const fps = parseInt(document.getElementById('fps').value);
-        console.log(`New file created with width: ${width} and height: ${height}`);
-        newFileCallback(width, height, fps)
+        const projectType = document.getElementById('projectType').value;
+        console.log(`New file created with width: ${width}, height: ${height}, fps: ${fps}, layout: ${projectType}`);
+        newFileCallback(width, height, fps, projectType)
         closeDialog();
     }
 

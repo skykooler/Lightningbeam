@@ -1,0 +1,137 @@
+[
+  {
+    "name": "Animation",
+    "description": "Drawing tools, timeline, and layers front and center",
+    "layout": {
+      "type": "horizontal-grid",
+      "percent": 10,
+      "children": [
+        { "type": "pane", "name": "toolbar" },
+        {
+          "type": "vertical-grid",
+          "percent": 70,
+          "children": [
+            {
+              "type": "vertical-grid",
+              "percent": 30,
+              "children": [
+                { "type": "pane", "name": "timelineV2" },
+                { "type": "pane", "name": "stage" }
+              ]
+            },
+            { "type": "pane", "name": "infopanel" }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "Video Editing",
+    "description": "Clip timeline, source monitor, and effects panel",
+    "layout": {
+      "type": "vertical-grid",
+      "percent": 10,
+      "children": [
+        { "type": "pane", "name": "infopanel" },
+        {
+          "type": "vertical-grid",
+          "percent": 65,
+          "children": [
+            {
+              "type": "horizontal-grid",
+              "percent": 50,
+              "children": [
+                { "type": "pane", "name": "stage" },
+                { "type": "pane", "name": "assetLibrary" }
+              ]
+            },
+            { "type": "pane", "name": "timelineV2" }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "Audio/DAW",
+    "description": "Audio tracks prominent with mixer, virtual piano, and preset browser",
+    "layout": {
+      "type": "horizontal-grid",
+      "percent": 75,
+      "children": [
+        {
+          "type": "vertical-grid",
+          "percent": 60,
+          "children": [
+            { "type": "pane", "name": "timelineV2" },
+            { "type": "pane", "name": "virtualPiano" }
+          ]
+        },
+        { "type": "pane", "name": "presetBrowser" }
+      ]
+    }
+  },
+  {
+    "name": "Scripting",
+    "description": "Script editor with stage preview and timeline",
+    "layout": {
+      "type": "horizontal-grid",
+      "percent": 50,
+      "children": [
+        {
+          "type": "vertical-grid",
+          "percent": 60,
+          "children": [
+            { "type": "pane", "name": "stage" },
+            { "type": "pane", "name": "timelineV2" }
+          ]
+        },
+        { "type": "pane", "name": "scriptEditor" }
+      ]
+    }
+  },
+  {
+    "name": "Rigging",
+    "description": "Viewport focused with bone controls and weight painting",
+    "layout": {
+      "type": "vertical-grid",
+      "percent": 10,
+      "children": [
+        { "type": "pane", "name": "toolbar" },
+        {
+          "type": "horizontal-grid",
+          "percent": 75,
+          "children": [
+            { "type": "pane", "name": "stage" },
+            {
+              "type": "vertical-grid",
+              "percent": 50,
+              "children": [
+                { "type": "pane", "name": "infopanel" },
+                { "type": "pane", "name": "timelineV2" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "Drawing/Painting",
+    "description": "Minimal UI - just canvas and drawing tools",
+    "layout": {
+      "type": "horizontal-grid",
+      "percent": 15,
+      "children": [
+        {
+          "type": "vertical-grid",
+          "percent": 67,
+          "children": [
+            { "type": "pane", "name": "toolbar" },
+            { "type": "pane", "name": "infopanel" }
+          ]
+        },
+        { "type": "pane", "name": "stage" }
+      ]
+    }
+  }
+]
