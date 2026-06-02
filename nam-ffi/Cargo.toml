@@ -1,0 +1,8 @@
+[package]
+name = "nam-ffi"
+version = "0.1.0"
+edition = "2021"
+links = "neuralaudio"
+
+[build-dependencies]
+cmake = "0.1"

@@ -1,0 +1,434 @@
+/* Lightningbeam Editor Styles
+ * CSS with variables and selector-based theming
+ *
+ * Tier 1: :root variables (design tokens)
+ * Tier 2: Class selectors (.button, .layer-header)
+ * Tier 3: Compound/contextual (#timeline .layer-header)
+ *
+ * Pseudo-states: .hover, .selected, .active, .pressed, .disabled
+ */
+
+/* ============================================
+   LIGHT MODE VARIABLES (design tokens)
+   ============================================ */
+:root {
+  /* Semantic text colors */
+  --text-primary: #0f0f0f;
+  --text-secondary: #666;
+  --text-tertiary: #999;
+  --text-disabled: #bbb;
+  --text-on-accent: #fff;
+
+  /* App backgrounds */
+  --bg-app: #e0e0e0;
+  --bg-panel: #aaa;
+  --bg-header: #ddd;
+  --bg-surface: #ccc;
+  --bg-surface-raised: #ddd;
+  --bg-surface-sunken: #bbb;
+
+  /* Legacy compat aliases */
+  --bg-primary: #f6f6f6;
+  --bg-secondary: #ccc;
+  --background-color: #ccc;
+  --foreground-color: #ddd;
+  --highlight: #ddd;
+  --shadow: #999;
+  --shade: #aaa;
+
+  /* Borders */
+  --border-subtle: #bbb;
+  --border-default: #999;
+  --border-strong: #555;
+  /* Legacy aliases */
+  --border-light: #bbb;
+  --border-medium: #999;
+  --border-dark: #555;
+
+  /* Accent */
+  --accent: #396cd8;
+  --accent-hover: #4a7de9;
+  --accent-active: #2a5cc8;
+
+  /* Grid */
+  --grid-bg: #555;
+  --grid-hover: #666;
+
+  /* Layer type colors */
+  --layer-vector: #ffb464;
+  --layer-audio: #64b4ff;
+  --layer-midi: #64ff96;
+  --layer-video: #b464ff;
+  --layer-effect: #ff64b4;
+  --layer-group: #00b4b4;
+  --layer-raster: #a064c8;
+
+  /* Status */
+  --status-error: #dc3232;
+  --status-warning: #dcc832;
+  --status-success: #32c850;
+  --scrubber: #cc2222;
+
+  /* Piano */
+  --piano-white-key: #ffffff;
+  --piano-white-key-pressed: #6496ff;
+  --piano-black-key: #000000;
+  --piano-black-key-pressed: #3264c8;
+  --piano-key-border: #000000;
+  --piano-white-label: #333333;
+  --piano-black-label: #ffffffb2;
+  --piano-sustain-on: #64c864;
+  --piano-sustain-off: #808080;
+
+  /* Toolbar */
+  --tool-selected-bg: #466496;
+  --tool-unselected-bg: #999;
+  --tool-hover-border: #b4b4b4;
+  --tool-selected-border: #6496ff;
+  --tool-arrow-color: #c8c8c8;
+  --color-swatch-border: #555;
+  --checkerboard-light: #b4b4b4;
+  --checkerboard-dark: #787878;
+
+  /* Dimensions */
+  --header-height: 40px;
+  --layer-height: 60px;
+  --ruler-height: 30px;
+  --layer-header-width: 200px;
+  --border-radius: 4px;
+  --font-size-small: 11px;
+  --font-size-default: 13px;
+  --pane-border-width: 1px;
+}
+
+/* ============================================
+   DARK MODE VARIABLES
+   ============================================ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* Semantic text colors */
+    --text-primary: #f6f6f6;
+    --text-secondary: #aaa;
+    --text-tertiary: #777;
+    --text-disabled: #555;
+    --text-on-accent: #fff;
+
+    /* App backgrounds */
+    --bg-app: #2a2a2a;
+    --bg-panel: #222;
+    --bg-header: #353535;
+    --bg-surface: #2f2f2f;
+    --bg-surface-raised: #3f3f3f;
+    --bg-surface-sunken: #1a1a1a;
+
+    /* Legacy compat aliases */
+    --bg-primary: #2f2f2f;
+    --bg-secondary: #3f3f3f;
+    --background-color: #333;
+    --foreground-color: #888;
+    --highlight: #4f4f4f;
+    --shadow: #111;
+    --shade: #222;
+
+    /* Borders */
+    --border-subtle: #333;
+    --border-default: #444;
+    --border-strong: #555;
+    /* Legacy aliases */
+    --border-light: #555;
+    --border-medium: #444;
+    --border-dark: #333;
+
+    /* Accent */
+    --accent: #396cd8;
+    --accent-hover: #4a7de9;
+    --accent-active: #2a5cc8;
+
+    /* Grid */
+    --grid-bg: #0f0f0f;
+    --grid-hover: #1a1a1a;
+
+    /* Piano */
+    --piano-white-key: #ffffff;
+    --piano-white-key-pressed: #6496ff;
+    --piano-black-key: #000000;
+    --piano-black-key-pressed: #3264c8;
+    --piano-key-border: #000000;
+    --piano-white-label: #333333;
+    --piano-black-label: #ffffffb2;
+    --piano-sustain-on: #64c864;
+    --piano-sustain-off: #808080;
+
+    /* Toolbar */
+    --tool-selected-bg: #466496;
+    --tool-unselected-bg: #323232;
+    --tool-hover-border: #b4b4b4;
+    --tool-selected-border: #6496ff;
+    --tool-arrow-color: #c8c8c8;
+    --color-swatch-border: #505050;
+    --checkerboard-light: #b4b4b4;
+    --checkerboard-dark: #787878;
+  }
+}
+
+/* ============================================
+   COMPONENT STYLES
+   ============================================ */
+
+/* Pane headers */
+.pane-header {
+  background-color: var(--bg-header);
+  color: var(--text-primary);
+  height: var(--header-height);
+  border-color: var(--border-default);
+}
+
+/* Pane content areas */
+.pane-content {
+  background-color: var(--bg-primary);
+  border-color: var(--border-subtle);
+}
+
+/* Generic panel */
+.panel {
+  background-color: var(--bg-panel);
+  border-color: var(--border-default);
+}
+
+/* Grid */
+.grid {
+  background-color: var(--grid-bg);
+}
+
+.grid-hover {
+  background-color: var(--grid-hover);
+}
+
+/* ============================================
+   PANE-SPECIFIC STYLES
+   ============================================ */
+
+#stage {
+  background-color: var(--bg-primary);
+}
+
+#timeline {
+  background-color: var(--shade);
+}
+
+#toolbar {
+  background-color: var(--bg-secondary);
+}
+
+#infopanel {
+  background-color: var(--bg-panel);
+}
+
+#node-editor {
+  background-color: #2d2d2d;
+  border-color: #4d4d4d;
+}
+
+#shader-editor {
+  background-color: #19191e;
+}
+
+#outliner {
+  background-color: #283219;
+}
+
+#piano-roll {
+  background-color: #1e1e23;
+}
+
+/* ============================================
+   TIMELINE ELEMENTS
+   ============================================ */
+
+.timeline-background {
+  background-color: var(--shade);
+}
+
+.timeline-header {
+  background-color: var(--shadow);
+}
+
+.timeline-spacer {
+  background-color: var(--shadow);
+}
+
+.timeline-scrubber {
+  background-color: var(--scrubber);
+  border-color: var(--scrubber);
+}
+
+.timeline-layer-active {
+  background-color: var(--highlight);
+}
+
+.timeline-layer-inactive {
+  background-color: var(--background-color);
+}
+
+.timeline-row-active {
+  background-color: var(--grid-bg);
+}
+
+.timeline-row-inactive {
+  background-color: var(--foreground-color);
+}
+
+.timeline-note {
+  background-color: #000000;
+}
+
+/* Layer type badges */
+.layer-type-vector {
+  background-color: var(--layer-vector);
+}
+
+.layer-type-audio {
+  background-color: var(--layer-audio);
+}
+
+.layer-type-midi {
+  background-color: var(--layer-midi);
+}
+
+.layer-type-video {
+  background-color: var(--layer-video);
+}
+
+.layer-type-effect {
+  background-color: var(--layer-effect);
+}
+
+.layer-type-group {
+  background-color: var(--layer-group);
+}
+
+.layer-type-raster {
+  background-color: var(--layer-raster);
+}
+
+/* ============================================
+   BUTTONS
+   ============================================ */
+
+.button {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+
+.button.hover {
+  border-color: var(--accent);
+}
+
+.button.selected {
+  background-color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Tool buttons */
+.tool-button {
+  background-color: var(--tool-unselected-bg);
+}
+
+.tool-button.selected {
+  background-color: var(--tool-selected-bg);
+}
+
+.tool-button.hover {
+  border-color: var(--tool-hover-border);
+}
+
+/* ============================================
+   TEXT
+   ============================================ */
+
+.text-primary {
+  color: var(--text-primary);
+}
+
+.text-secondary {
+  color: var(--text-secondary);
+}
+
+.text-disabled {
+  color: var(--text-disabled);
+}
+
+/* ============================================
+   STATUS
+   ============================================ */
+
+.status-error {
+  color: var(--status-error);
+}
+
+.status-warning {
+  color: var(--status-warning);
+}
+
+.status-success {
+  color: var(--status-success);
+}
+
+/* ============================================
+   PANE CHROME (borders, icon buttons)
+   ============================================ */
+
+.pane-chrome {
+  background-color: #232323;
+  border-color: #505050;
+}
+
+.pane-chrome-separator {
+  border-color: #323232;
+}
+
+.pane-icon-button {
+  background-color: #323232c8;
+}
+
+/* ============================================
+   NODE EDITOR
+   ============================================ */
+
+#node-editor .grid {
+  background-color: #373737;
+}
+
+/* ============================================
+   VIRTUAL PIANO
+   ============================================ */
+
+.piano-white-key {
+  background-color: var(--piano-white-key);
+  border-color: var(--piano-key-border);
+  color: var(--piano-white-label);
+}
+
+.piano-white-key.pressed {
+  background-color: var(--piano-white-key-pressed);
+  color: #000000;
+}
+
+.piano-black-key {
+  background-color: var(--piano-black-key);
+  color: var(--piano-black-label);
+}
+
+.piano-black-key.pressed {
+  background-color: var(--piano-black-key-pressed);
+  color: #ffffff;
+}
+
+.sustain-indicator.active {
+  color: var(--piano-sustain-on);
+}
+
+.sustain-indicator {
+  color: var(--piano-sustain-off);
+}

@@ -1,0 +1,62 @@
+// Lightningbeam Core Library
+// Shared data structures and types
+
+pub mod beat_time;
+pub mod tempo_map;
+pub mod gpu;
+pub mod layout;
+pub mod pane;
+pub mod tool;
+pub mod animation;
+pub mod path_interpolation;
+pub mod path_fitting;
+pub mod shape;
+pub mod bezier_vertex;
+pub mod bezpath_editing;
+pub mod object;
+pub mod layer;
+pub mod layer_tree;
+pub mod clip;
+pub mod asset_folder;
+pub mod instance_group;
+pub mod effect;
+pub mod effect_layer;
+pub mod effect_registry;
+pub mod script;
+pub mod document;
+pub mod renderer;
+pub mod video;
+pub mod action;
+pub mod actions;
+pub mod selection;
+pub mod hit_test;
+pub mod quadtree;
+pub mod tolerance_quadtree;
+pub mod curve_segment;
+pub mod curve_intersection;
+pub mod curve_intersections;
+pub mod flood_fill;
+pub mod gap_handling;
+pub mod intersection_graph;
+pub mod segment_builder;
+pub mod planar_graph;
+pub mod file_types;
+pub mod file_io;
+pub mod export;
+pub mod clipboard;
+pub(crate) mod clipboard_platform;
+pub mod region_select;
+pub mod dcel2;
+pub use dcel2 as dcel;
+pub mod vector_graph;
+pub mod svg_export;
+pub mod snap;
+pub mod webcam;
+pub mod raster_layer;
+pub mod brush_settings;
+pub mod brush_engine;
+pub mod raster_draw;
+pub mod gradient;
+
+#[cfg(debug_assertions)]
+pub mod test_mode;

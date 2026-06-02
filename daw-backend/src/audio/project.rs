@@ -1,9 +1,12 @@
 use super::buffer_pool::BufferPool;
-use super::clip::Clip;
+use super::clip::{AudioClipInstanceId, Clip};
 use super::midi::{MidiClip, MidiClipId, MidiClipInstance, MidiClipInstanceId, MidiEvent};
 use super::midi_pool::MidiClipPool;
 use super::pool::AudioClipPool;
 use super::track::{AudioTrack, Metatrack, MidiTrack, RenderContext, TrackId, TrackNode};
+use crate::tempo_map::TempoMap;
+use crate::time::{Beats, Seconds};
+use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 
 /// Project manages the hierarchical track structure and clip pools
@@ -13,6 +16,7 @@ use std::collections::HashMap;
 ///
 /// Clip content is stored in pools (MidiClipPool), while tracks store
 /// clip instances that reference the pool content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     tracks: HashMap<TrackId, TrackNode>,
     next_track_id: TrackId,
@@ -80,7 +84,7 @@ impl Project {
     /// The new group's ID
     pub fn add_group_track(&mut self, name: String, parent_id: Option<TrackId>) -> TrackId {
         let id = self.next_id();
-        let group = Metatrack::new(id, name);
+        let group = Metatrack::new(id, name, self.sample_rate);
         self.tracks.insert(id, TrackNode::Group(group));
 
         if let Some(parent) = parent_id {
@@ -209,6 +213,11 @@ impl Project {
         self.tracks.get_mut(&track_id)
     }
 
+    /// Iterate over all tracks in the project.
+    pub fn track_iter(&self) -> impl Iterator<Item = (TrackId, &TrackNode)> {
+        self.tracks.iter().map(|(&id, node)| (id, node))
+    }
+
     /// Get oscilloscope data from a node in a track's graph
     pub fn get_oscilloscope_data(&self, track_id: TrackId, node_id: u32, sample_count: usize) -> Option<(Vec<f32>, Vec<f32>)> {
         if let Some(TrackNode::Midi(track)) = self.tracks.get(&track_id) {
@@ -222,6 +231,18 @@ impl Project {
             let cv = graph.get_oscilloscope_cv_data(node_idx, sample_count).unwrap_or_default();
 
             return Some((audio, cv));
+        }
+        None
+    }
+
+    /// Get oscilloscope data from a node inside a VoiceAllocator's best voice
+    pub fn get_voice_oscilloscope_data(&self, track_id: TrackId, va_node_id: u32, inner_node_id: u32, sample_count: usize) -> Option<(Vec<f32>, Vec<f32>)> {
+        if let Some(TrackNode::Midi(track)) = self.tracks.get(&track_id) {
+            let graph = &track.instrument_graph;
+            let va_idx = petgraph::stable_graph::NodeIndex::new(va_node_id as usize);
+            let node = graph.get_node(va_idx)?;
+            let va = node.as_any().downcast_ref::<crate::audio::node_graph::nodes::VoiceAllocatorNode>()?;
+            return va.get_voice_oscilloscope_data(inner_node_id, sample_count);
         }
         None
     }
@@ -242,10 +263,11 @@ impl Project {
     }
 
     /// Add a clip to an audio track
-    pub fn add_clip(&mut self, track_id: TrackId, clip: Clip) -> Result<(), &'static str> {
+    pub fn add_clip(&mut self, track_id: TrackId, clip: Clip) -> Result<AudioClipInstanceId, &'static str> {
         if let Some(TrackNode::Audio(track)) = self.tracks.get_mut(&track_id) {
+            let instance_id = clip.id;
             track.add_clip(clip);
-            Ok(())
+            Ok(instance_id)
         } else {
             Err("Track not found or is not an audio track")
         }
@@ -268,9 +290,9 @@ impl Project {
         &mut self,
         track_id: TrackId,
         events: Vec<MidiEvent>,
-        duration: f64,
+        duration: Beats,
         name: String,
-        external_start: f64,
+        external_start: Beats,
     ) -> Result<(MidiClipId, MidiClipInstanceId), &'static str> {
         // Verify track exists and is a MIDI track
         if !matches!(self.tracks.get(&track_id), Some(TrackNode::Midi(_))) {
@@ -302,12 +324,12 @@ impl Project {
     }
 
     /// Legacy method for backwards compatibility - creates clip and instance from old MidiClip format
-    pub fn add_midi_clip(&mut self, track_id: TrackId, clip: MidiClip) -> Result<(), &'static str> {
-        self.add_midi_clip_at(track_id, clip, 0.0)
+    pub fn add_midi_clip(&mut self, track_id: TrackId, clip: MidiClip) -> Result<MidiClipInstanceId, &'static str> {
+        self.add_midi_clip_at(track_id, clip, Beats::ZERO)
     }
 
     /// Add a MIDI clip to the pool and create an instance at the given timeline position
-    pub fn add_midi_clip_at(&mut self, track_id: TrackId, clip: MidiClip, start_time: f64) -> Result<(), &'static str> {
+    pub fn add_midi_clip_at(&mut self, track_id: TrackId, clip: MidiClip, start_time: Beats) -> Result<MidiClipInstanceId, &'static str> {
         // Add the clip to the pool (it already has events and duration)
         let duration = clip.duration;
         let clip_id = clip.id;
@@ -317,39 +339,63 @@ impl Project {
         let instance_id = self.next_midi_clip_instance_id();
         let instance = MidiClipInstance::from_full_clip(instance_id, clip_id, duration, start_time);
 
-        self.add_midi_clip_instance(track_id, instance)
+        self.add_midi_clip_instance(track_id, instance)?;
+        Ok(instance_id)
     }
 
-    /// Render all root tracks into the output buffer
+    /// Remove a MIDI clip instance from a track (for undo/redo support)
+    pub fn remove_midi_clip(&mut self, track_id: TrackId, instance_id: MidiClipInstanceId) -> Result<(), &'static str> {
+        if let Some(track) = self.get_track_mut(track_id) {
+            track.remove_midi_clip_instance(instance_id);
+            Ok(())
+        } else {
+            Err("Track not found")
+        }
+    }
+
+    /// Remove an audio clip instance from a track (for undo/redo support)
+    pub fn remove_audio_clip(&mut self, track_id: TrackId, instance_id: AudioClipInstanceId) -> Result<(), &'static str> {
+        if let Some(track) = self.get_track_mut(track_id) {
+            track.remove_audio_clip_instance(instance_id);
+            Ok(())
+        } else {
+            Err("Track not found")
+        }
+    }
+
+    /// Render all root tracks into the output buffer.
+    ///
+    /// When `live_only` is true, MIDI tracks skip clip event collection and only process
+    /// their live MIDI queue (note-off tails + keyboard input). Audio tracks produce silence.
+    /// This lets the caller use the same group-hierarchy render path regardless of play state.
     pub fn render(
         &mut self,
         output: &mut [f32],
         audio_pool: &AudioClipPool,
-        midi_pool: &MidiClipPool,
         buffer_pool: &mut BufferPool,
-        playhead_seconds: f64,
+        playhead_seconds: Seconds,
+        tempo_map: &TempoMap,
         sample_rate: u32,
         channels: u32,
+        live_only: bool,
     ) {
         output.fill(0.0);
 
         let any_solo = self.any_solo();
 
         // Create initial render context
-        let ctx = RenderContext::new(
-            playhead_seconds,
-            sample_rate,
-            channels,
-            output.len(),
-        );
+        let ctx = RenderContext {
+            live_only,
+            ..RenderContext::new(playhead_seconds, tempo_map, sample_rate, channels, output.len())
+        };
 
-        // Render each root track
-        for &track_id in &self.root_tracks.clone() {
+        // Render each root track (index-based to avoid clone)
+        for i in 0..self.root_tracks.len() {
+            let track_id = self.root_tracks[i];
             self.render_track(
                 track_id,
                 output,
                 audio_pool,
-                midi_pool,
                 buffer_pool,
                 ctx,
                 any_solo,
@@ -364,7 +410,6 @@ impl Project {
         track_id: TrackId,
         output: &mut [f32],
         audio_pool: &AudioClipPool,
-        midi_pool: &MidiClipPool,
         buffer_pool: &mut BufferPool,
         ctx: RenderContext,
         any_solo: bool,
@@ -407,52 +452,144 @@ impl Project {
         // Handle audio track vs MIDI track vs group track
         match self.tracks.get_mut(&track_id) {
             Some(TrackNode::Audio(track)) => {
-                // Render audio track directly into output
-                track.render(output, audio_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
+                // Audio tracks have no live input; skip in live_only mode.
+                if ctx.live_only {
+                    return;
+                }
+                // Render audio track into a temp buffer for peak measurement
+                let mut track_buffer = buffer_pool.acquire();
+                track_buffer.resize(output.len(), 0.0);
+                track_buffer.fill(0.0);
+                track.render(&mut track_buffer, audio_pool, ctx);
+                // Accumulate peak level for VU metering (max over meter interval)
+                let buffer_peak = track_buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                track.peak_level = track.peak_level.max(buffer_peak);
+                // Mix into output
+                for (out, src) in output.iter_mut().zip(track_buffer.iter()) {
+                    *out += src;
+                }
+                buffer_pool.release(track_buffer);
             }
             Some(TrackNode::Midi(track)) => {
-                // Render MIDI track directly into output
-                track.render(output, midi_pool, ctx.playhead_seconds, ctx.sample_rate, ctx.channels);
+                // Render MIDI track into a temp buffer for peak measurement
+                let mut track_buffer = buffer_pool.acquire();
+                track_buffer.resize(output.len(), 0.0);
+                track_buffer.fill(0.0);
+                track.render(&mut track_buffer, &self.midi_clip_pool, ctx);
+                // Accumulate peak level for VU metering (max over meter interval)
+                let buffer_peak = track_buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                track.peak_level = track.peak_level.max(buffer_peak);
+                // Mix into output
+                for (out, src) in output.iter_mut().zip(track_buffer.iter()) {
+                    *out += src;
+                }
+                buffer_pool.release(track_buffer);
             }
             Some(TrackNode::Group(group)) => {
-                // Get children IDs, check if this group is soloed, and transform context
-                let children: Vec<TrackId> = group.children.clone();
+                // Skip rendering if playhead is outside the metatrack's trim window.
+                // In live_only mode always render so note-off tails pass through the mixer.
+                if !ctx.live_only && !group.is_active_at_time(ctx.playhead_seconds) {
+                    return;
+                }
+
+                // Read group properties and transform context before any mutable borrows
+                let num_children = group.children.len();
                 let this_group_is_soloed = group.solo;
                 let child_ctx = group.transform_context(ctx);
-
-                // Acquire a temporary buffer for the group mix
-                let mut group_buffer = buffer_pool.acquire();
-                group_buffer.resize(output.len(), 0.0);
-                group_buffer.fill(0.0);
-
-                // Recursively render all children into the group buffer
-                // If this group is soloed (or parent was soloed), children inherit that state
                 let children_parent_soloed = parent_is_soloed || this_group_is_soloed;
-                for &child_id in &children {
+
+                // Render each child into its own buffer and inject into SubtrackInputsNode.
+                // One pool buffer is reused per child (no extra allocation per frame).
+                for i in 0..num_children {
+                    let child_id = match self.tracks.get(&track_id) {
+                        Some(TrackNode::Group(g)) => g.children[i],
+                        _ => break,
+                    };
+
+                    let mut child_buffer = buffer_pool.acquire();
+                    child_buffer.resize(output.len(), 0.0);
+                    child_buffer.fill(0.0);
+
                     self.render_track(
                         child_id,
-                        &mut group_buffer,
+                        &mut child_buffer,
                         audio_pool,
-                        midi_pool,
                         buffer_pool,
                         child_ctx,
                         any_solo,
                         children_parent_soloed,
                     );
-                }
 
-                // Apply group volume and mix into output
-                if let Some(TrackNode::Group(group)) = self.tracks.get_mut(&track_id) {
-                    for (out_sample, group_sample) in output.iter_mut().zip(group_buffer.iter()) {
-                        *out_sample += group_sample * group.volume;
+                    // Inject into the SubtrackInputsNode slot for this child
+                    if let Some(TrackNode::Group(group)) = self.tracks.get_mut(&track_id) {
+                        use super::node_graph::nodes::SubtrackInputsNode;
+                        let node_indices: Vec<_> = group.audio_graph.node_indices().collect();
+                        for node_idx in node_indices {
+                            if let Some(gn) = group.audio_graph.get_graph_node_mut(node_idx) {
+                                if gn.node.node_type() == "SubtrackInputs" {
+                                    if let Some(si) = gn.node.as_any_mut()
+                                        .downcast_mut::<SubtrackInputsNode>()
+                                    {
+                                        if let Some(slot) = si.subtrack_index_for(child_id) {
+                                            si.inject_subtrack_audio(slot, &child_buffer);
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
                     }
+
+                    buffer_pool.release(child_buffer);
                 }
 
-                // Release buffer back to pool
-                buffer_pool.release(group_buffer);
+                // Process children's audio through the metatrack's mixing graph
+                if let Some(TrackNode::Group(group)) = self.tracks.get_mut(&track_id) {
+                    let mut graph_output = buffer_pool.acquire();
+                    graph_output.resize(output.len(), 0.0);
+                    graph_output.fill(0.0);
+                    group.audio_graph.process(&mut graph_output, &[], ctx.playhead_beats());
+
+                    for (out_sample, graph_sample) in output.iter_mut().zip(graph_output.iter()) {
+                        *out_sample += graph_sample * group.volume;
+                    }
+                    buffer_pool.release(graph_output);
+                }
             }
             None => {}
         }
+    }
+
+    /// Reset all per-clip read-ahead target frames before a new render cycle.
+    pub fn reset_read_ahead_targets(&self) {
+        for track in self.tracks.values() {
+            if let TrackNode::Audio(audio_track) = track {
+                for clip in &audio_track.clips {
+                    if let Some(ra) = clip.read_ahead.as_deref() {
+                        ra.reset_target_frame();
+                    }
+                }
+            }
+        }
+    }
+
+    /// Collect per-track peak levels for VU metering and reset accumulators
+    pub fn collect_track_peaks(&mut self) -> Vec<(TrackId, f32)> {
+        let mut levels = Vec::new();
+        for (id, track) in &mut self.tracks {
+            match track {
+                TrackNode::Audio(t) => {
+                    levels.push((*id, t.peak_level));
+                    t.peak_level = 0.0;
+                }
+                TrackNode::Midi(t) => {
+                    levels.push((*id, t.peak_level));
+                    t.peak_level = 0.0;
+                }
+                TrackNode::Group(_) => {}
+            }
+        }
+        levels
     }
 
     /// Stop all notes on all MIDI tracks
@@ -464,13 +601,39 @@ impl Project {
         }
     }
 
-    /// Process live MIDI input from all MIDI tracks (called even when not playing)
-    pub fn process_live_midi(&mut self, output: &mut [f32], sample_rate: u32, channels: u32) {
-        // Process all MIDI tracks to handle queued live input events
+    /// Set export (blocking) mode on all clip read-ahead buffers.
+    /// When enabled, `render_from_file` blocks until the disk reader
+    /// has filled the needed frames instead of returning silence.
+    pub fn set_export_mode(&self, export: bool) {
+        for track in self.tracks.values() {
+            if let TrackNode::Audio(t) = track {
+                for clip in &t.clips {
+                    if let Some(ref ra) = clip.read_ahead {
+                        ra.set_export_mode(export);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reset all node graphs (clears effect buffers on seek)
+    pub fn reset_all_graphs(&mut self) {
         for track in self.tracks.values_mut() {
-            if let TrackNode::Midi(midi_track) = track {
-                // Process only queued live events, not clips
-                midi_track.process_live_input(output, sample_rate, channels);
+            match track {
+                TrackNode::Audio(t) => t.effects_graph.reset(),
+                TrackNode::Midi(t) => t.instrument_graph.reset(),
+                TrackNode::Group(_) => {}
+            }
+        }
+    }
+
+    /// Propagate tempo to all audio graphs (for BeatNode sync)
+    pub fn set_tempo(&mut self, bpm: f32, beats_per_bar: u32) {
+        for track in self.tracks.values_mut() {
+            match track {
+                TrackNode::Audio(t) => t.effects_graph.set_tempo(bpm, beats_per_bar),
+                TrackNode::Midi(t) => t.instrument_graph.set_tempo(bpm, beats_per_bar),
+                TrackNode::Group(g) => g.audio_graph.set_tempo(bpm, beats_per_bar),
             }
         }
     }
@@ -480,7 +643,7 @@ impl Project {
     pub fn send_midi_note_on(&mut self, track_id: TrackId, note: u8, velocity: u8) {
         // Queue the MIDI note-on event to the track's live MIDI queue
         if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
-            let event = MidiEvent::note_on(0.0, 0, note, velocity);
+            let event = MidiEvent::note_on(Beats::ZERO, 0, note, velocity);
             track.queue_live_midi(event);
         }
     }
@@ -489,9 +652,50 @@ impl Project {
     pub fn send_midi_note_off(&mut self, track_id: TrackId, note: u8) {
         // Queue the MIDI note-off event to the track's live MIDI queue
         if let Some(TrackNode::Midi(track)) = self.tracks.get_mut(&track_id) {
-            let event = MidiEvent::note_off(0.0, 0, note, 0);
+            let event = MidiEvent::note_off(Beats::ZERO, 0, note, 0);
             track.queue_live_midi(event);
         }
+    }
+
+    /// Prepare all tracks for serialization by saving their audio graphs as presets
+    pub fn prepare_for_save(&mut self) {
+        for track in self.tracks.values_mut() {
+            match track {
+                TrackNode::Audio(audio_track) => {
+                    audio_track.prepare_for_save();
+                }
+                TrackNode::Midi(midi_track) => {
+                    midi_track.prepare_for_save();
+                }
+                TrackNode::Group(group) => {
+                    group.prepare_for_save();
+                }
+            }
+        }
+    }
+
+    /// Rebuild all audio graphs from presets after deserialization
+    ///
+    /// This should be called after deserializing a Project to reconstruct
+    /// the AudioGraph instances from their stored presets.
+    ///
+    /// # Arguments
+    /// * `buffer_size` - Buffer size for audio processing (typically 8192)
+    pub fn rebuild_audio_graphs(&mut self, buffer_size: usize) -> Result<(), String> {
+        for track in self.tracks.values_mut() {
+            match track {
+                TrackNode::Audio(audio_track) => {
+                    audio_track.rebuild_audio_graph(self.sample_rate, buffer_size)?;
+                }
+                TrackNode::Midi(midi_track) => {
+                    midi_track.rebuild_audio_graph(self.sample_rate, buffer_size)?;
+                }
+                TrackNode::Group(group) => {
+                    group.rebuild_audio_graph(self.sample_rate, buffer_size)?;
+                }
+            }
+        }
+        Ok(())
     }
 }
 

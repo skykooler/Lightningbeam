@@ -1,6 +1,7 @@
 use super::node_trait::AudioNode;
 use super::types::{ConnectionError, SignalType};
 use crate::audio::midi::MidiEvent;
+use crate::time::Beats;
 use petgraph::algo::has_path_connecting;
 use petgraph::stable_graph::{NodeIndex, StableGraph};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
@@ -20,6 +21,16 @@ pub struct GraphNode {
     pub output_buffers: Vec<Vec<f32>>,
     /// Buffers for each MIDI output port
     pub midi_output_buffers: Vec<Vec<MidiEvent>>,
+}
+
+impl std::fmt::Debug for GraphNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphNode")
+            .field("node", &"<AudioNode>")
+            .field("output_buffers_len", &self.output_buffers.len())
+            .field("midi_output_buffers_len", &self.midi_output_buffers.len())
+            .finish()
+    }
 }
 
 impl GraphNode {
@@ -57,6 +68,7 @@ impl GraphNode {
 }
 
 /// Audio processing graph for instruments/effects
+#[derive(Debug)]
 pub struct AudioGraph {
     /// The audio graph (StableGraph allows node removal without index invalidation)
     graph: StableGraph<GraphNode, Connection>,
@@ -82,8 +94,19 @@ pub struct AudioGraph {
     /// UI positions for nodes (node_index -> (x, y))
     node_positions: std::collections::HashMap<u32, (f32, f32)>,
 
-    /// Current playback time (for automation nodes)
-    playback_time: f64,
+    /// Current playback time in beats (for automation nodes)
+    playback_time: Beats,
+
+    /// Project tempo (synced from Engine via SetTempo)
+    bpm: f32,
+    /// Beats per bar (time signature numerator)
+    beats_per_bar: u32,
+
+    /// Cached topological sort order (invalidated on graph mutation)
+    topo_cache: Option<Vec<NodeIndex>>,
+
+    /// Frontend-only group definitions (stored opaquely for persistence)
+    frontend_groups: Vec<crate::audio::node_graph::preset::SerializedGroup>,
 }
 
 impl AudioGraph {
@@ -101,13 +124,24 @@ impl AudioGraph {
             // Pre-allocate MIDI input buffers (max 128 events per port)
             midi_input_buffers: (0..16).map(|_| Vec::with_capacity(128)).collect(),
             node_positions: std::collections::HashMap::new(),
-            playback_time: 0.0,
+            playback_time: Beats::ZERO,
+            bpm: 120.0,
+            beats_per_bar: 4,
+            topo_cache: None,
+            frontend_groups: Vec::new(),
         }
+    }
+
+    /// Set the project tempo and time signature for BeatNodes
+    pub fn set_tempo(&mut self, bpm: f32, beats_per_bar: u32) {
+        self.bpm = bpm;
+        self.beats_per_bar = beats_per_bar;
     }
 
     /// Add a node to the graph
     pub fn add_node(&mut self, node: Box<dyn AudioNode>) -> NodeIndex {
         let graph_node = GraphNode::new(node, self.buffer_size);
+        self.topo_cache = None;
         self.graph.add_node(graph_node)
     }
 
@@ -145,8 +179,29 @@ impl AudioGraph {
         // Validate the connection
         self.validate_connection(from, from_port, to, to_port)?;
 
+        // Remove any existing connection to the same input port (replace semantics).
+        // The frontend UI enforces single-connection inputs, so when a new connection
+        // targets the same port, the old one should be replaced.
+        let edges_to_remove: Vec<_> = self.graph.edges_directed(to, petgraph::Direction::Incoming)
+            .filter(|e| e.weight().to_port == to_port)
+            .map(|e| e.id())
+            .collect();
+        for edge_id in edges_to_remove {
+            self.graph.remove_edge(edge_id);
+        }
+
         // Add the edge
         self.graph.add_edge(from, to, Connection { from_port, to_port });
+        self.topo_cache = None;
+
+        // Auto-grow MixerNode: always keep one spare port beyond the connected count
+        let n_incoming = self.graph.edges_directed(to, petgraph::Direction::Incoming).count();
+        if let Some(graph_node) = self.graph.node_weight_mut(to) {
+            use crate::audio::node_graph::nodes::MixerNode;
+            if let Some(mixer) = graph_node.node.as_any_mut().downcast_mut::<MixerNode>() {
+                mixer.ensure_min_ports(n_incoming + 1);
+            }
+        }
 
         Ok(())
     }
@@ -159,11 +214,24 @@ impl AudioGraph {
         to: NodeIndex,
         to_port: usize,
     ) {
-        // Find and remove the edge
+        let mut did_remove = false;
         if let Some(edge_idx) = self.graph.find_edge(from, to) {
             let conn = &self.graph[edge_idx];
             if conn.from_port == from_port && conn.to_port == to_port {
                 self.graph.remove_edge(edge_idx);
+                self.topo_cache = None;
+                did_remove = true;
+            }
+        }
+
+        // Shrink MixerNode back to n_remaining + 1 spare after a disconnect
+        if did_remove {
+            let n_remaining = self.graph.edges_directed(to, petgraph::Direction::Incoming).count();
+            if let Some(graph_node) = self.graph.node_weight_mut(to) {
+                use crate::audio::node_graph::nodes::MixerNode;
+                if let Some(mixer) = graph_node.node.as_any_mut().downcast_mut::<MixerNode>() {
+                    mixer.resize(n_remaining + 1);
+                }
             }
         }
     }
@@ -171,6 +239,7 @@ impl AudioGraph {
     /// Remove a node from the graph
     pub fn remove_node(&mut self, node: NodeIndex) {
         self.graph.remove_node(node);
+        self.topo_cache = None;
 
         // Update MIDI targets
         self.midi_targets.retain(|&idx| idx != node);
@@ -251,29 +320,19 @@ impl AudioGraph {
             // This is tricky with trait objects, so we'll need to use Any
             // For now, let's use a different approach - store the node pointer temporarily
 
-            // Check node type first
-            if graph_node.node.node_type() != "VoiceAllocator" {
-                return Err("Node is not a VoiceAllocator".to_string());
-            }
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            let va = graph_node.node.as_any_mut()
+                .downcast_mut::<VoiceAllocatorNode>()
+                .ok_or_else(|| "Node is not a VoiceAllocator".to_string())?;
 
-            // Get mutable reference and downcast using raw pointers
-            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
+            // Add node to template graph
+            let node_idx = va.template_graph_mut().add_node(node);
+            let node_id = node_idx.index() as u32;
 
-            // SAFETY: We just checked that this is a VoiceAllocator
-            // This is safe because we know the concrete type
-            unsafe {
-                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
-                let va = &mut *va_ptr;
+            // Rebuild voice instances from template
+            va.rebuild_voices();
 
-                // Add node to template graph
-                let node_idx = va.template_graph_mut().add_node(node);
-                let node_id = node_idx.index() as u32;
-
-                // Rebuild voice instances from template
-                va.rebuild_voices();
-
-                return Ok(node_id);
-            }
+            return Ok(node_id);
         }
 
         Err("VoiceAllocator node not found".to_string())
@@ -292,52 +351,151 @@ impl AudioGraph {
 
         // Get the VoiceAllocator node
         if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
-            // Check node type first
-            if graph_node.node.node_type() != "VoiceAllocator" {
-                return Err("Node is not a VoiceAllocator".to_string());
-            }
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            let va = graph_node.node.as_any_mut()
+                .downcast_mut::<VoiceAllocatorNode>()
+                .ok_or_else(|| "Node is not a VoiceAllocator".to_string())?;
 
-            // Get mutable reference and downcast using raw pointers
-            let node_ptr = &mut *graph_node.node as *mut dyn AudioNode;
+            // Connect in template graph
+            let from_idx = NodeIndex::new(from_node as usize);
+            let to_idx = NodeIndex::new(to_node as usize);
 
-            // SAFETY: We just checked that this is a VoiceAllocator
-            unsafe {
-                let va_ptr = node_ptr as *mut VoiceAllocatorNode;
-                let va = &mut *va_ptr;
+            va.template_graph_mut().connect(from_idx, from_port, to_idx, to_port)
+                .map_err(|e| format!("{:?}", e))?;
 
-                // Connect in template graph
-                let from_idx = NodeIndex::new(from_node as usize);
-                let to_idx = NodeIndex::new(to_node as usize);
+            // Rebuild voice instances from template
+            va.rebuild_voices();
 
-                va.template_graph_mut().connect(from_idx, from_port, to_idx, to_port)
-                    .map_err(|e| format!("{:?}", e))?;
-
-                // Rebuild voice instances from template
-                va.rebuild_voices();
-
-                return Ok(());
-            }
+            return Ok(());
         }
 
         Err("VoiceAllocator node not found".to_string())
     }
 
+    /// Disconnect two nodes in a VoiceAllocator's template graph
+    pub fn disconnect_in_voice_allocator_template(
+        &mut self,
+        voice_allocator_idx: NodeIndex,
+        from_node: u32,
+        from_port: usize,
+        to_node: u32,
+        to_port: usize,
+    ) -> Result<(), String> {
+        use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+
+        if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            let va = graph_node.node.as_any_mut()
+                .downcast_mut::<VoiceAllocatorNode>()
+                .ok_or_else(|| "Node is not a VoiceAllocator".to_string())?;
+
+            let from_idx = NodeIndex::new(from_node as usize);
+            let to_idx = NodeIndex::new(to_node as usize);
+
+            va.template_graph_mut().disconnect(from_idx, from_port, to_idx, to_port);
+            va.rebuild_voices();
+
+            return Ok(());
+        }
+
+        Err("VoiceAllocator node not found".to_string())
+    }
+
+    /// Remove a node from a VoiceAllocator's template graph
+    pub fn remove_node_from_voice_allocator_template(
+        &mut self,
+        voice_allocator_idx: NodeIndex,
+        node_id: u32,
+    ) -> Result<(), String> {
+        use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+
+        if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            let va = graph_node.node.as_any_mut()
+                .downcast_mut::<VoiceAllocatorNode>()
+                .ok_or_else(|| "Node is not a VoiceAllocator".to_string())?;
+
+            let node_idx = NodeIndex::new(node_id as usize);
+            va.template_graph_mut().remove_node(node_idx);
+            va.rebuild_voices();
+
+            return Ok(());
+        }
+
+        Err("VoiceAllocator node not found".to_string())
+    }
+
+    /// Set a parameter on a node in a VoiceAllocator's template graph
+    pub fn set_parameter_in_voice_allocator_template(
+        &mut self,
+        voice_allocator_idx: NodeIndex,
+        node_id: u32,
+        param_id: u32,
+        value: f32,
+    ) -> Result<(), String> {
+        use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+
+        if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            let va = graph_node.node.as_any_mut()
+                .downcast_mut::<VoiceAllocatorNode>()
+                .ok_or_else(|| "Node is not a VoiceAllocator".to_string())?;
+
+            let node_idx = NodeIndex::new(node_id as usize);
+            if let Some(template_node) = va.template_graph_mut().get_graph_node_mut(node_idx) {
+                template_node.node.set_parameter(param_id, value);
+            } else {
+                return Err("Node not found in template".to_string());
+            }
+
+            va.rebuild_voices();
+
+            return Ok(());
+        }
+
+        Err("VoiceAllocator node not found".to_string())
+    }
+
+    /// Set the position of a node in a VoiceAllocator's template graph
+    pub fn set_position_in_voice_allocator_template(
+        &mut self,
+        voice_allocator_idx: NodeIndex,
+        node_id: u32,
+        x: f32,
+        y: f32,
+    ) {
+        use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+
+        if let Some(graph_node) = self.graph.node_weight_mut(voice_allocator_idx) {
+            // Downcast to VoiceAllocatorNode using safe Any trait
+            if let Some(va) = graph_node.node.as_any_mut().downcast_mut::<VoiceAllocatorNode>() {
+                let node_idx = NodeIndex::new(node_id as usize);
+                va.template_graph_mut().set_node_position(node_idx, x, y);
+            }
+        }
+    }
+
     /// Process the graph and produce audio output
-    pub fn process(&mut self, output_buffer: &mut [f32], midi_events: &[MidiEvent], playback_time: f64) {
+    pub fn process(&mut self, output_buffer: &mut [f32], midi_events: &[MidiEvent], playback_time: Beats) {
         // Update playback time
         self.playback_time = playback_time;
 
-        // Update playback time for all automation nodes before processing
-        use super::nodes::AutomationInputNode;
+        // Update playback time for all time-dependent nodes before processing
+        use super::nodes::{AutomationInputNode, BeatNode};
         for node in self.graph.node_weights_mut() {
-            // Try to downcast to AutomationInputNode and update its playback time
             if let Some(auto_node) = node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
                 auto_node.set_playback_time(playback_time);
+                auto_node.set_bpm(self.bpm as f64);
+            } else if let Some(beat_node) = node.node.as_any_mut().downcast_mut::<BeatNode>() {
+                beat_node.set_playback_time(playback_time);
+                beat_node.set_tempo(self.bpm, self.beats_per_bar);
             }
         }
 
         // Use the requested output buffer size for processing
+        // process_size is stereo (interleaved L/R), frame_count is mono
         let process_size = output_buffer.len();
+        let frame_count = process_size / 2;
 
         // Clear all output buffers (audio/CV and MIDI)
         for node in self.graph.node_weights_mut() {
@@ -361,24 +519,44 @@ impl AudioGraph {
             }
         }
 
-        // Topological sort for processing order
-        let topo = petgraph::algo::toposort(&self.graph, None)
-            .unwrap_or_else(|_| {
-                // If there's a cycle (shouldn't happen due to validation), just process in index order
-                self.graph.node_indices().collect()
-            });
+        // Topological sort for processing order (cached, recomputed only on graph mutation)
+        if self.topo_cache.is_none() {
+            self.topo_cache = Some(
+                petgraph::algo::toposort(&self.graph, None)
+                    .unwrap_or_else(|_| {
+                        // If there's a cycle (shouldn't happen due to validation), just process in index order
+                        self.graph.node_indices().collect()
+                    })
+            );
+        }
+        let topo_len = self.topo_cache.as_ref().unwrap().len();
 
         // Process nodes in topological order
-        for node_idx in topo {
+        for topo_i in 0..topo_len {
+            let node_idx = self.topo_cache.as_ref().unwrap()[topo_i];
             // Get input port information
             let inputs = self.graph[node_idx].node.inputs();
             let num_audio_cv_inputs = inputs.iter().filter(|p| p.signal_type != SignalType::Midi).count();
             let num_midi_inputs = inputs.iter().filter(|p| p.signal_type == SignalType::Midi).count();
+            // Collect audio/CV input signal types for correct buffer sizing
+            let audio_cv_input_types: Vec<SignalType> = inputs.iter()
+                .filter(|p| p.signal_type != SignalType::Midi)
+                .map(|p| p.signal_type)
+                .collect();
 
-            // Clear audio/CV input buffers
-            for i in 0..num_audio_cv_inputs {
-                if i < self.input_buffers.len() {
-                    self.input_buffers[i].fill(0.0);
+            // Clear input buffers
+            // - Audio inputs: fill with 0.0 (silence) when unconnected
+            // - CV inputs: fill with NaN to indicate "no connection" (allows nodes to use parameter values)
+            let mut audio_cv_idx = 0;
+            for port in inputs.iter().filter(|p| p.signal_type != SignalType::Midi) {
+                if audio_cv_idx < self.input_buffers.len() {
+                    let fill_value = match port.signal_type {
+                        SignalType::Audio => 0.0,  // Silence for audio
+                        SignalType::CV => f32::NAN, // Sentinel for CV
+                        SignalType::Midi => unreachable!(), // Already filtered out
+                    };
+                    self.input_buffers[audio_cv_idx].fill(fill_value);
+                    audio_cv_idx += 1;
                 }
             }
 
@@ -389,26 +567,46 @@ impl AudioGraph {
                 }
             }
 
-            // Collect inputs from connected nodes
-            let incoming = self.graph.edges_directed(node_idx, Direction::Incoming).collect::<Vec<_>>();
+            // Collect edge info into stack array to avoid heap allocation
+            // (need to collect because we borrow graph immutably for source node data)
+            const MAX_EDGES: usize = 32;
+            let mut edge_info: [(NodeIndex, usize, usize); MAX_EDGES] = [(NodeIndex::new(0), 0, 0); MAX_EDGES];
+            let mut edge_count = 0;
+            for edge in self.graph.edges_directed(node_idx, Direction::Incoming) {
+                if edge_count < MAX_EDGES {
+                    edge_info[edge_count] = (edge.source(), edge.weight().from_port, edge.weight().to_port);
+                    edge_count += 1;
+                }
+            }
 
-            for edge in incoming {
-                let source_idx = edge.source();
-                let conn = edge.weight();
+            for ei in 0..edge_count {
+                let (source_idx, from_port, to_port) = edge_info[ei];
                 let source_node = &self.graph[source_idx];
 
                 // Determine source port type
-                if conn.from_port < source_node.node.outputs().len() {
-                    let source_port_type = source_node.node.outputs()[conn.from_port].signal_type;
+                if from_port < source_node.node.outputs().len() {
+                    let source_port_type = source_node.node.outputs()[from_port].signal_type;
 
                     match source_port_type {
                         SignalType::Audio | SignalType::CV => {
+                            // Map from global port index to audio/CV-only port index
+                            // (input_buffers only contains audio/CV entries, not MIDI)
+                            let audio_cv_port_idx = inputs.iter()
+                                .take(to_port + 1)
+                                .filter(|p| p.signal_type != SignalType::Midi)
+                                .count().saturating_sub(1);
+
                             // Copy audio/CV data
-                            if conn.to_port < num_audio_cv_inputs && conn.from_port < source_node.output_buffers.len() {
-                                let source_buffer = &source_node.output_buffers[conn.from_port];
-                                if conn.to_port < self.input_buffers.len() {
-                                    for (dst, src) in self.input_buffers[conn.to_port].iter_mut().zip(source_buffer.iter()) {
-                                        *dst += src;
+                            if audio_cv_port_idx < num_audio_cv_inputs && from_port < source_node.output_buffers.len() {
+                                let source_buffer = &source_node.output_buffers[from_port];
+                                if audio_cv_port_idx < self.input_buffers.len() {
+                                    for (dst, src) in self.input_buffers[audio_cv_port_idx].iter_mut().zip(source_buffer.iter()) {
+                                        // If dst is NaN (unconnected), replace it; otherwise add (for mixing)
+                                        if dst.is_nan() {
+                                            *dst = *src;
+                                        } else {
+                                            *dst += src;
+                                        }
                                     }
                                 }
                             }
@@ -417,12 +615,12 @@ impl AudioGraph {
                             // Copy MIDI events
                             // Map from global port index to MIDI-only port index
                             let midi_port_idx = inputs.iter()
-                                .take(conn.to_port + 1)
+                                .take(to_port + 1)
                                 .filter(|p| p.signal_type == SignalType::Midi)
                                 .count() - 1;
 
                             let source_midi_idx = source_node.node.outputs().iter()
-                                .take(conn.from_port + 1)
+                                .take(from_port + 1)
                                 .filter(|p| p.signal_type == SignalType::Midi)
                                 .count() - 1;
 
@@ -436,11 +634,15 @@ impl AudioGraph {
                 }
             }
 
-            // Prepare audio/CV input slices
+            // Prepare audio/CV input slices (Audio=stereo process_size, CV=mono frame_count)
             let input_slices: Vec<&[f32]> = (0..num_audio_cv_inputs)
                 .map(|i| {
                     if i < self.input_buffers.len() {
-                        &self.input_buffers[i][..process_size.min(self.input_buffers[i].len())]
+                        let slice_size = match audio_cv_input_types.get(i) {
+                            Some(&SignalType::Audio) => process_size,
+                            _ => frame_count,
+                        };
+                        &self.input_buffers[i][..slice_size.min(self.input_buffers[i].len())]
                     } else {
                         &[][..]
                     }
@@ -461,34 +663,28 @@ impl AudioGraph {
             // Get mutable access to output buffers
             let node = &mut self.graph[node_idx];
             let outputs = node.node.outputs();
-            let num_audio_cv_outputs = outputs.iter().filter(|p| p.signal_type != SignalType::Midi).count();
             let num_midi_outputs = outputs.iter().filter(|p| p.signal_type == SignalType::Midi).count();
+            // Collect output signal types for correct buffer sizing
+            let output_signal_types: Vec<SignalType> = outputs.iter().map(|p| p.signal_type).collect();
 
-            // Create mutable slices for audio/CV outputs
-            let mut output_slices: Vec<&mut [f32]> = Vec::with_capacity(num_audio_cv_outputs);
-            for i in 0..num_audio_cv_outputs {
-                if i < node.output_buffers.len() {
-                    // Safety: We need to work around borrowing rules here
-                    // This is safe because each output buffer is independent
-                    let buffer = &mut node.output_buffers[i] as *mut Vec<f32>;
-                    unsafe {
-                        let slice = &mut (&mut *buffer)[..process_size.min((*buffer).len())];
-                        output_slices.push(slice);
-                    }
-                }
+            // Create mutable slices for audio/CV outputs (Audio=stereo, CV=mono)
+            let mut output_slices: Vec<&mut [f32]> = Vec::new();
+            for (i, buf) in node.output_buffers.iter_mut().enumerate() {
+                let signal_type = output_signal_types.get(i).copied().unwrap_or(SignalType::CV);
+                if signal_type == SignalType::Midi { continue; }
+                let slice_size = match signal_type {
+                    SignalType::Audio => process_size,
+                    _ => frame_count,
+                };
+                let len = buf.len();
+                output_slices.push(&mut buf[..slice_size.min(len)]);
             }
 
             // Create mutable references for MIDI outputs
-            let mut midi_output_refs: Vec<&mut Vec<MidiEvent>> = Vec::with_capacity(num_midi_outputs);
-            for i in 0..num_midi_outputs {
-                if i < node.midi_output_buffers.len() {
-                    // Safety: Similar to above
-                    let buffer = &mut node.midi_output_buffers[i] as *mut Vec<MidiEvent>;
-                    unsafe {
-                        midi_output_refs.push(&mut *buffer);
-                    }
-                }
-            }
+            let mut midi_output_refs: Vec<&mut Vec<MidiEvent>> = node.midi_output_buffers
+                .iter_mut()
+                .take(num_midi_outputs)
+                .collect();
 
             // Process the node with both audio/CV and MIDI
             node.node.process(&input_slices, &mut output_slices, &midi_input_slices, &mut midi_output_refs, self.sample_rate);
@@ -510,6 +706,10 @@ impl AudioGraph {
     /// Get node by index
     pub fn get_node(&self, idx: NodeIndex) -> Option<&dyn AudioNode> {
         self.graph.node_weight(idx).map(|n| &*n.node)
+    }
+
+    pub fn get_node_mut(&mut self, idx: NodeIndex) -> Option<&mut (dyn AudioNode + 'static)> {
+        self.graph.node_weight_mut(idx).map(|n| &mut *n.node)
     }
 
     /// Get oscilloscope data from a specific node
@@ -537,6 +737,50 @@ impl AudioGraph {
     /// Get all node indices
     pub fn node_indices(&self) -> impl Iterator<Item = NodeIndex> + '_ {
         self.graph.node_indices()
+    }
+
+    /// Reallocate a node's output buffers to match its current port list.
+    ///
+    /// Must be called after `SubtrackInputsNode::update_subtracks` changes the port count,
+    /// since `GraphNode.output_buffers` was allocated at `add_node` time.
+    pub fn reallocate_node_output_buffers(&mut self, idx: NodeIndex, buffer_size: usize) {
+        if let Some(graph_node) = self.graph.node_weight_mut(idx) {
+            let outputs = graph_node.node.outputs();
+            graph_node.output_buffers.clear();
+            for port in outputs.iter() {
+                match port.signal_type {
+                    super::types::SignalType::Audio => graph_node.output_buffers.push(vec![0.0; buffer_size * 2]),
+                    super::types::SignalType::CV    => graph_node.output_buffers.push(vec![0.0; buffer_size]),
+                    super::types::SignalType::Midi  => graph_node.output_buffers.push(vec![]),
+                }
+            }
+            self.topo_cache = None;
+        }
+    }
+
+    /// Remove all edges going OUT of a specific output port of a node.
+    pub fn disconnect_output_port(&mut self, node: NodeIndex, port: usize) {
+        let edges: Vec<_> = self.graph
+            .edges_directed(node, petgraph::Direction::Outgoing)
+            .filter(|e| e.weight().from_port == port)
+            .map(|e| e.id())
+            .collect();
+        for edge_id in edges {
+            self.graph.remove_edge(edge_id);
+        }
+        self.topo_cache = None;
+    }
+
+    /// Remove all edges going INTO a node (all input connections).
+    pub fn disconnect_all_inputs(&mut self, node: NodeIndex) {
+        let edges: Vec<_> = self.graph
+            .edges_directed(node, petgraph::Direction::Incoming)
+            .map(|e| e.id())
+            .collect();
+        for edge_id in edges {
+            self.graph.remove_edge(edge_id);
+        }
+        self.topo_cache = None;
     }
 
     /// Get all connections
@@ -596,13 +840,21 @@ impl AudioGraph {
             }
         }
 
+        // Clone frontend groups
+        new_graph.frontend_groups = self.frontend_groups.clone();
+
         new_graph
+    }
+
+    /// Set frontend-only group definitions (stored opaquely for persistence)
+    pub fn set_frontend_groups(&mut self, groups: Vec<crate::audio::node_graph::preset::SerializedGroup>) {
+        self.frontend_groups = groups;
     }
 
     /// Serialize the graph to a preset
     pub fn to_preset(&self, name: impl Into<String>) -> crate::audio::node_graph::preset::GraphPreset {
         use crate::audio::node_graph::preset::{GraphPreset, SerializedConnection, SerializedNode};
-        use crate::audio::node_graph::nodes::VoiceAllocatorNode;
+        use crate::audio::node_graph::nodes::{VoiceAllocatorNode, MixerNode, SubtrackInputsNode};
 
         let mut preset = GraphPreset::new(name);
 
@@ -620,15 +872,23 @@ impl AudioGraph {
                     serialized.set_parameter(param.id, value);
                 }
 
+                // Save port count for dynamic-port nodes so they round-trip correctly
+                if node.node_type() == "Mixer" {
+                    if let Some(mixer) = node.as_any().downcast_ref::<MixerNode>() {
+                        serialized.num_ports = Some(mixer.num_inputs() as u32);
+                    }
+                }
+                if node.node_type() == "SubtrackInputs" {
+                    if let Some(si) = node.as_any().downcast_ref::<SubtrackInputsNode>() {
+                        serialized.num_ports = Some(si.num_subtracks() as u32);
+                        serialized.port_names = si.subtracks().iter().map(|(_, name)| name.clone()).collect();
+                    }
+                }
+
                 // For VoiceAllocator nodes, serialize the template graph
-                // We need to downcast to access template_graph()
-                // This is safe because we know the node type
                 if node.node_type() == "VoiceAllocator" {
-                    // Use Any to downcast
-                    let node_ptr = &**node as *const dyn crate::audio::node_graph::AudioNode;
-                    let node_ptr = node_ptr as *const VoiceAllocatorNode;
-                    unsafe {
-                        let va_node = &*node_ptr;
+                    // Downcast using safe Any trait
+                    if let Some(va_node) = node.as_any().downcast_ref::<VoiceAllocatorNode>() {
                         let template_preset = va_node.template_graph().to_preset("template");
                         serialized.template_graph = Some(Box::new(template_preset));
                     }
@@ -640,10 +900,8 @@ impl AudioGraph {
                     use crate::audio::node_graph::preset::{EmbeddedSampleData, SampleData};
                     use base64::{Engine as _, engine::general_purpose};
 
-                    let node_ptr = &**node as *const dyn crate::audio::node_graph::AudioNode;
-                    let node_ptr = node_ptr as *const SimpleSamplerNode;
-                    unsafe {
-                        let sampler_node = &*node_ptr;
+                    // Downcast using safe Any trait
+                    if let Some(sampler_node) = node.as_any().downcast_ref::<SimpleSamplerNode>() {
                         if let Some(sample_path) = sampler_node.get_sample_path() {
                             // Check file size
                             let should_embed = std::fs::metadata(sample_path)
@@ -687,10 +945,8 @@ impl AudioGraph {
                     use crate::audio::node_graph::preset::{EmbeddedSampleData, LayerData, SampleData};
                     use base64::{Engine as _, engine::general_purpose};
 
-                    let node_ptr = &**node as *const dyn crate::audio::node_graph::AudioNode;
-                    let node_ptr = node_ptr as *const MultiSamplerNode;
-                    unsafe {
-                        let multi_sampler_node = &*node_ptr;
+                    // Downcast using safe Any trait
+                    if let Some(multi_sampler_node) = node.as_any().downcast_ref::<MultiSamplerNode>() {
                         let layers_info = multi_sampler_node.get_layers_info();
                         if !layers_info.is_empty() {
                             let layers: Vec<LayerData> = layers_info
@@ -744,6 +1000,48 @@ impl AudioGraph {
                     }
                 }
 
+                // For Script nodes, serialize the source code
+                if node.node_type() == "Script" {
+                    use crate::audio::node_graph::nodes::ScriptNode;
+                    if let Some(script_node) = node.as_any().downcast_ref::<ScriptNode>() {
+                        let source = script_node.source_code();
+                        if !source.is_empty() {
+                            serialized.script_source = Some(source.to_string());
+                        }
+                    }
+                }
+
+                // For AutomationInput nodes, serialize display name and keyframes
+                if node.node_type() == "AutomationInput" {
+                    use crate::audio::node_graph::nodes::{AutomationInputNode, InterpolationType};
+                    use crate::audio::node_graph::preset::SerializedKeyframe;
+                    if let Some(auto_node) = node.as_any().downcast_ref::<AutomationInputNode>() {
+                        serialized.automation_display_name = Some(auto_node.display_name().to_string());
+                        serialized.automation_keyframes = auto_node.keyframes().iter().map(|kf| {
+                            SerializedKeyframe {
+                                time: kf.time.0,
+                                value: kf.value,
+                                interpolation: match kf.interpolation {
+                                    InterpolationType::Linear => "linear",
+                                    InterpolationType::Bezier => "bezier",
+                                    InterpolationType::Step   => "step",
+                                    InterpolationType::Hold   => "hold",
+                                }.to_string(),
+                                ease_out: kf.ease_out,
+                                ease_in: kf.ease_in,
+                            }
+                        }).collect();
+                    }
+                }
+
+                // For AmpSim nodes, serialize the model path
+                if node.node_type() == "AmpSim" {
+                    use crate::audio::node_graph::nodes::AmpSimNode;
+                    if let Some(amp_sim) = node.as_any().downcast_ref::<AmpSimNode>() {
+                        serialized.nam_model_path = amp_sim.model_path().map(|s| s.to_string());
+                    }
+                }
+
                 // Save position if available
                 if let Some(pos) = self.get_node_position(node_idx) {
                     serialized.set_position(pos.0, pos.1);
@@ -773,11 +1071,14 @@ impl AudioGraph {
         // Output node
         preset.output_node = self.output_node.map(|idx| idx.index() as u32);
 
+        // Frontend groups (stored opaquely)
+        preset.groups = self.frontend_groups.clone();
+
         preset
     }
 
     /// Deserialize a preset into the graph
-    pub fn from_preset(preset: &crate::audio::node_graph::preset::GraphPreset, sample_rate: u32, buffer_size: usize, preset_base_path: Option<&std::path::Path>) -> Result<Self, String> {
+    pub fn from_preset(preset: &crate::audio::node_graph::preset::GraphPreset, sample_rate: u32, buffer_size: usize, preset_base_path: Option<&std::path::Path>, embedded_assets: Option<&std::collections::HashMap<String, Vec<u8>>>) -> Result<Self, String> {
         use crate::audio::node_graph::nodes::*;
         use petgraph::stable_graph::NodeIndex;
         use std::collections::HashMap;
@@ -804,70 +1105,76 @@ impl AudioGraph {
         let mut graph = Self::new(sample_rate, buffer_size);
         let mut index_map: HashMap<u32, NodeIndex> = HashMap::new();
 
+        // Pre-pass: compute required min port count for dynamic-port nodes from the connection list.
+        // This ensures old presets (without num_ports) still size correctly regardless of
+        // connection-restoration order.
+        let mut required_ports: HashMap<u32, usize> = HashMap::new();
+        for conn in &preset.connections {
+            let entry = required_ports.entry(conn.to_node).or_insert(0);
+            *entry = (*entry).max(conn.to_port + 2); // port N + 1 spare
+        }
+
         // Create all nodes
         for serialized_node in &preset.nodes {
             // Create the node based on type
-            let node: Box<dyn crate::audio::node_graph::AudioNode> = match serialized_node.node_type.as_str() {
-                "Oscillator" => Box::new(OscillatorNode::new("Oscillator")),
-                "Gain" => Box::new(GainNode::new("Gain")),
-                "Mixer" => Box::new(MixerNode::new("Mixer")),
-                "Filter" => Box::new(FilterNode::new("Filter")),
-                "ADSR" => Box::new(ADSRNode::new("ADSR")),
-                "LFO" => Box::new(LFONode::new("LFO")),
-                "NoiseGenerator" => Box::new(NoiseGeneratorNode::new("Noise")),
-                "Splitter" => Box::new(SplitterNode::new("Splitter")),
-                "Pan" => Box::new(PanNode::new("Pan")),
-                "Quantizer" => Box::new(QuantizerNode::new("Quantizer")),
-                "Delay" => Box::new(DelayNode::new("Delay")),
-                "Distortion" => Box::new(DistortionNode::new("Distortion")),
-                "Reverb" => Box::new(ReverbNode::new("Reverb")),
-                "Chorus" => Box::new(ChorusNode::new("Chorus")),
-                "Compressor" => Box::new(CompressorNode::new("Compressor")),
-                "Constant" => Box::new(ConstantNode::new("Constant")),
-                "EnvelopeFollower" => Box::new(EnvelopeFollowerNode::new("Envelope Follower")),
-                "Limiter" => Box::new(LimiterNode::new("Limiter")),
-                "Math" => Box::new(MathNode::new("Math")),
-                "EQ" => Box::new(EQNode::new("EQ")),
-                "Flanger" => Box::new(FlangerNode::new("Flanger")),
-                "FMSynth" => Box::new(FMSynthNode::new("FM Synth")),
-                "Phaser" => Box::new(PhaserNode::new("Phaser")),
-                "BitCrusher" => Box::new(BitCrusherNode::new("Bit Crusher")),
-                "Vocoder" => Box::new(VocoderNode::new("Vocoder")),
-                "RingModulator" => Box::new(RingModulatorNode::new("Ring Modulator")),
-                "SampleHold" => Box::new(SampleHoldNode::new("Sample & Hold")),
-                "WavetableOscillator" => Box::new(WavetableOscillatorNode::new("Wavetable")),
-                "SimpleSampler" => Box::new(SimpleSamplerNode::new("Sampler")),
-                "SlewLimiter" => Box::new(SlewLimiterNode::new("Slew Limiter")),
-                "MultiSampler" => Box::new(MultiSamplerNode::new("Multi Sampler")),
-                "MidiInput" => Box::new(MidiInputNode::new("MIDI Input")),
-                "MidiToCV" => Box::new(MidiToCVNode::new("MIDI→CV")),
-                "AudioToCV" => Box::new(AudioToCVNode::new("Audio→CV")),
-                "AudioInput" => Box::new(AudioInputNode::new("Audio Input")),
-                "AutomationInput" => Box::new(AutomationInputNode::new("Automation")),
-                "Oscilloscope" => Box::new(OscilloscopeNode::new("Oscilloscope")),
-                "TemplateInput" => Box::new(TemplateInputNode::new("Template Input")),
-                "TemplateOutput" => Box::new(TemplateOutputNode::new("Template Output")),
-                "VoiceAllocator" => {
-                    let mut va = VoiceAllocatorNode::new("VoiceAllocator", sample_rate, buffer_size);
+            let mut node = crate::audio::node_graph::nodes::create_node(&serialized_node.node_type, sample_rate, buffer_size)
+                .ok_or_else(|| format!("Unknown node type: {}", serialized_node.node_type))?;
 
-                    // If there's a template graph, deserialize and set it
-                    if let Some(ref template_preset) = serialized_node.template_graph {
-                        let template_graph = Self::from_preset(template_preset, sample_rate, buffer_size, preset_base_path)?;
-                        // Set the template graph (we'll need to add this method to VoiceAllocator)
+            // Pre-size dynamic-port nodes before graph.add_node() so output buffers are
+            // allocated at the correct size. num_ports takes priority; fall back to
+            // connection-count inference so old presets without num_ports still work.
+            if serialized_node.node_type == "Mixer" {
+                use crate::audio::node_graph::nodes::MixerNode;
+                if let Some(mixer) = node.as_any_mut().downcast_mut::<MixerNode>() {
+                    let from_conns = required_ports.get(&serialized_node.id).copied().unwrap_or(1);
+                    let target = serialized_node.num_ports.map(|n| n as usize).unwrap_or(0).max(from_conns).max(1);
+                    mixer.resize(target);
+                }
+            }
+            if serialized_node.node_type == "SubtrackInputs" {
+                use crate::audio::node_graph::nodes::SubtrackInputsNode;
+                if let Some(si) = node.as_any_mut().downcast_mut::<SubtrackInputsNode>() {
+                    let from_conns = required_ports.get(&serialized_node.id).copied().unwrap_or(0);
+                    let target = serialized_node.num_ports.map(|n| n as usize).unwrap_or(0).max(from_conns);
+                    if target > 0 {
+                        let subtracks = (0..target)
+                            .map(|i| (0u32, format!("Subtrack {}", i + 1)))
+                            .collect();
+                        si.update_subtracks(subtracks, buffer_size);
+                    }
+                }
+            }
+
+            // VoiceAllocator needs its template graph deserialized and set
+            if serialized_node.node_type == "VoiceAllocator" {
+                if let Some(ref template_preset) = serialized_node.template_graph {
+                    if let Some(va) = node.as_any_mut().downcast_mut::<VoiceAllocatorNode>() {
+                        let template_graph = Self::from_preset(template_preset, sample_rate, buffer_size, preset_base_path, embedded_assets)?;
                         *va.template_graph_mut() = template_graph;
                         va.rebuild_voices();
                     }
-
-                    Box::new(va)
                 }
-                "AudioOutput" => Box::new(AudioOutputNode::new("Output")),
-                _ => return Err(format!("Unknown node type: {}", serialized_node.node_type)),
-            };
+            }
 
             let node_idx = graph.add_node(node);
             index_map.insert(serialized_node.id, node_idx);
 
-            // Set parameters
+            // Restore script source for Script nodes (must come before parameter setting
+            // since set_script rebuilds parameters)
+            if let Some(ref source) = serialized_node.script_source {
+                if serialized_node.node_type == "Script" {
+                    use crate::audio::node_graph::nodes::ScriptNode;
+                    if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
+                        if let Some(script_node) = graph_node.node.as_any_mut().downcast_mut::<ScriptNode>() {
+                            if let Err(e) = script_node.set_script(source) {
+                                eprintln!("Warning: failed to compile script for node {}: {}", serialized_node.id, e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Set parameters (after script compilation so param slots exist)
             for (&param_id, &value) in &serialized_node.parameters {
                 if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
                     graph_node.node.set_parameter(param_id, value);
@@ -880,10 +1187,8 @@ impl AudioGraph {
                     crate::audio::node_graph::preset::SampleData::SimpleSampler { file_path, embedded_data } => {
                         // Load sample into SimpleSampler
                         if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
-                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                            let node_ptr = node_ptr as *mut SimpleSamplerNode;
-                            unsafe {
-                                let sampler_node = &mut *node_ptr;
+                            // Downcast using safe Any trait
+                            if let Some(sampler_node) = graph_node.node.as_any_mut().downcast_mut::<SimpleSamplerNode>() {
 
                                 // Try embedded data first, then fall back to file path
                                 if let Some(ref embedded) = embedded_data {
@@ -902,10 +1207,28 @@ impl AudioGraph {
                                         sampler_node.set_sample(samples, embedded.sample_rate as f32);
                                     }
                                 } else if let Some(ref path) = file_path {
-                                    // Fall back to loading from file (resolve path relative to preset)
-                                    let resolved_path = resolve_sample_path(path);
-                                    if let Err(e) = sampler_node.load_sample_from_file(&resolved_path) {
-                                        eprintln!("Failed to load sample from {}: {}", resolved_path, e);
+                                    // Check embedded assets map first (from .lbins bundle)
+                                    let loaded = if let Some(assets) = embedded_assets {
+                                        if let Some(bytes) = assets.get(path.as_str()) {
+                                            match crate::audio::sample_loader::load_audio_from_bytes(bytes, path) {
+                                                Ok(data) => {
+                                                    sampler_node.set_sample(data.samples, data.sample_rate as f32);
+                                                    true
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("Failed to decode bundled sample {}: {}", path, e);
+                                                    false
+                                                }
+                                            }
+                                        } else { false }
+                                    } else { false };
+
+                                    if !loaded {
+                                        // Fall back to loading from filesystem
+                                        let resolved_path = resolve_sample_path(path);
+                                        if let Err(e) = sampler_node.load_sample_from_file(&resolved_path) {
+                                            eprintln!("Failed to load sample from {}: {}", resolved_path, e);
+                                        }
                                     }
                                 }
                             }
@@ -914,10 +1237,8 @@ impl AudioGraph {
                     crate::audio::node_graph::preset::SampleData::MultiSampler { layers } => {
                         // Load layers into MultiSampler
                         if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
-                            let node_ptr = &mut *graph_node.node as *mut dyn crate::audio::node_graph::AudioNode;
-                            let node_ptr = node_ptr as *mut MultiSamplerNode;
-                            unsafe {
-                                let multi_sampler_node = &mut *node_ptr;
+                            // Downcast using safe Any trait
+                            if let Some(multi_sampler_node) = graph_node.node.as_any_mut().downcast_mut::<MultiSamplerNode>() {
                                 for layer in layers {
                                     // Try embedded data first, then fall back to file path
                                     if let Some(ref embedded) = layer.embedded_data {
@@ -947,23 +1268,108 @@ impl AudioGraph {
                                             );
                                         }
                                     } else if let Some(ref path) = layer.file_path {
-                                        // Fall back to loading from file (resolve path relative to preset)
-                                        let resolved_path = resolve_sample_path(path);
-                                        if let Err(e) = multi_sampler_node.load_layer_from_file(
-                                            &resolved_path,
-                                            layer.key_min,
-                                            layer.key_max,
-                                            layer.root_key,
-                                            layer.velocity_min,
-                                            layer.velocity_max,
-                                            layer.loop_start,
-                                            layer.loop_end,
-                                            layer.loop_mode,
-                                        ) {
-                                            eprintln!("Failed to load sample layer from {}: {}", resolved_path, e);
+                                        // Check embedded assets map first (from .lbins bundle)
+                                        let loaded = if let Some(assets) = embedded_assets {
+                                            if let Some(bytes) = assets.get(path.as_str()) {
+                                                match crate::audio::sample_loader::load_audio_from_bytes(bytes, path) {
+                                                    Ok(data) => {
+                                                        multi_sampler_node.add_layer(
+                                                            data.samples,
+                                                            data.sample_rate as f32,
+                                                            layer.key_min,
+                                                            layer.key_max,
+                                                            layer.root_key,
+                                                            layer.velocity_min,
+                                                            layer.velocity_max,
+                                                            layer.loop_start,
+                                                            layer.loop_end,
+                                                            layer.loop_mode,
+                                                        );
+                                                        true
+                                                    }
+                                                    Err(e) => {
+                                                        eprintln!("Failed to decode bundled sample layer {}: {}", path, e);
+                                                        false
+                                                    }
+                                                }
+                                            } else { false }
+                                        } else { false };
+
+                                        if !loaded {
+                                            // Fall back to loading from filesystem
+                                            let resolved_path = resolve_sample_path(path);
+                                            if let Err(e) = multi_sampler_node.load_layer_from_file(
+                                                &resolved_path,
+                                                layer.key_min,
+                                                layer.key_max,
+                                                layer.root_key,
+                                                layer.velocity_min,
+                                                layer.velocity_max,
+                                                layer.loop_start,
+                                                layer.loop_end,
+                                                layer.loop_mode,
+                                            ) {
+                                                eprintln!("Failed to load sample layer from {}: {}", resolved_path, e);
+                                            }
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Restore NAM model for AmpSim nodes
+            if let Some(ref model_path) = serialized_node.nam_model_path {
+                if serialized_node.node_type == "AmpSim" {
+                    use crate::audio::node_graph::nodes::AmpSimNode;
+                    eprintln!("[AmpSim] Preset restore: nam_model_path={:?}", model_path);
+                    if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
+                        if let Some(amp_sim) = graph_node.node.as_any_mut().downcast_mut::<AmpSimNode>() {
+                            let result = if let Some(bundled_name) = model_path.strip_prefix("bundled:") {
+                                eprintln!("[AmpSim] Preset: loading bundled model {:?}", bundled_name);
+                                amp_sim.load_bundled_model(bundled_name)
+                            } else if let Some(bytes) = embedded_assets.and_then(|a| a.get(model_path.as_str())) {
+                                eprintln!("[AmpSim] Preset: loading from bundle {:?}", model_path);
+                                amp_sim.load_model_from_bytes(model_path, bytes)
+                            } else {
+                                let resolved_path = resolve_sample_path(model_path);
+                                eprintln!("[AmpSim] Preset: loading from file {:?}", resolved_path);
+                                amp_sim.load_model(&resolved_path)
+                            };
+                            match &result {
+                                Ok(()) => eprintln!("[AmpSim] Preset: model loaded successfully"),
+                                Err(e) => eprintln!("[AmpSim] Preset: failed to load NAM model: {}", e),
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Restore AutomationInput display name and keyframes
+            if serialized_node.node_type == "AutomationInput" {
+                use crate::audio::node_graph::nodes::{AutomationInputNode, AutomationKeyframe, InterpolationType};
+                if let Some(graph_node) = graph.graph.node_weight_mut(node_idx) {
+                    if let Some(auto_node) = graph_node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
+                        if let Some(ref name) = serialized_node.automation_display_name {
+                            auto_node.set_display_name(name.clone());
+                        }
+                        if !serialized_node.automation_keyframes.is_empty() {
+                            auto_node.clear_keyframes();
+                            for kf in &serialized_node.automation_keyframes {
+                                auto_node.add_keyframe(AutomationKeyframe {
+                                    time: crate::time::Beats(kf.time),
+                                    value: kf.value,
+                                    interpolation: match kf.interpolation.as_str() {
+                                        "bezier" => InterpolationType::Bezier,
+                                        "step"   => InterpolationType::Step,
+                                        "hold"   => InterpolationType::Hold,
+                                        _        => InterpolationType::Linear,
+                                    },
+                                    ease_out: kf.ease_out,
+                                    ease_in: kf.ease_in,
+                                });
                             }
                         }
                     }
@@ -998,6 +1404,9 @@ impl AudioGraph {
                 graph.output_node = Some(output_idx);
             }
         }
+
+        // Restore frontend groups (stored opaquely)
+        graph.frontend_groups = preset.groups.clone();
 
         Ok(graph)
     }

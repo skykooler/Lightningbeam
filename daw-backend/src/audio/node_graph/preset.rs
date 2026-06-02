@@ -67,6 +67,10 @@ pub struct GraphPreset {
 
     /// Which node index is the audio output (None if not set)
     pub output_node: Option<u32>,
+
+    /// Frontend-only group definitions (backend stores opaquely, does not interpret)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<SerializedGroup>,
 }
 
 /// Metadata about the preset
@@ -96,6 +100,16 @@ fn default_version() -> u32 {
     1
 }
 
+/// Serialized keyframe for AutomationInput nodes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedKeyframe {
+    pub time: f64,
+    pub value: f32,
+    pub interpolation: String,
+    pub ease_out: (f32, f32),
+    pub ease_in: (f32, f32),
+}
+
 /// Serialized node representation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SerializedNode {
@@ -119,6 +133,58 @@ pub struct SerializedNode {
     /// For sampler nodes: loaded sample data
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sample_data: Option<SampleData>,
+
+    /// For Script nodes: BeamDSP source code
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script_source: Option<String>,
+
+    /// For AmpSim nodes: path to the .nam model file
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nam_model_path: Option<String>,
+
+    /// For dynamic-port nodes (Mixer, SubtrackInputs): saved port count so ports
+    /// round-trip correctly through save/load independent of connection order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_ports: Option<u32>,
+
+    /// For SubtrackInputs: ordered port names (one per subtrack slot).
+    /// Allows the UI to display actual track names on the node's output ports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub port_names: Vec<String>,
+
+    /// For AutomationInput nodes: user-visible display name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub automation_display_name: Option<String>,
+
+    /// For AutomationInput nodes: saved keyframes
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automation_keyframes: Vec<SerializedKeyframe>,
+}
+
+/// Serialized group definition (frontend-only visual grouping, stored opaquely by backend)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedGroup {
+    pub id: u32,
+    pub name: String,
+    pub member_nodes: Vec<u32>,
+    pub position: (f32, f32),
+    pub boundary_inputs: Vec<SerializedBoundaryConnection>,
+    pub boundary_outputs: Vec<SerializedBoundaryConnection>,
+    /// Parent group ID for nested groups (None = top-level group)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_group_id: Option<u32>,
+}
+
+/// Serialized boundary connection for group definitions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedBoundaryConnection {
+    pub external_node: u32,
+    pub external_port: usize,
+    pub internal_node: u32,
+    pub internal_port: usize,
+    pub port_name: String,
+    /// Signal type as string ("Audio", "Midi", "CV")
+    pub data_type: String,
 }
 
 /// Serialized connection between nodes
@@ -152,6 +218,7 @@ impl GraphPreset {
             connections: Vec::new(),
             midi_targets: Vec::new(),
             output_node: None,
+            groups: Vec::new(),
         }
     }
 
@@ -186,6 +253,12 @@ impl SerializedNode {
             position: (0.0, 0.0),
             template_graph: None,
             sample_data: None,
+            script_source: None,
+            nam_model_path: None,
+            num_ports: None,
+            port_names: Vec::new(),
+            automation_display_name: None,
+            automation_keyframes: Vec::new(),
         }
     }
 

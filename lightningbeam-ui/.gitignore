@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Cargo.lock for applications (keep for libraries)
+# We'll keep it since this is an application
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

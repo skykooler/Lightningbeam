@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType, cv_input_or_default};
 use crate::audio::midi::MidiEvent;
 use std::f32::consts::PI;
 
@@ -113,18 +113,10 @@ impl AudioNode for PanNode {
         let frames_to_process = frames.min(output_frames);
 
         for frame in 0..frames_to_process {
-            // Get base pan position
-            let mut pan = self.pan;
+            // Pan CV input: -1..+1 directly (0 = center), defaults to parameter value when unconnected
+            let pan = cv_input_or_default(inputs, 1, frame, self.pan).clamp(-1.0, 1.0);
 
-            // Add CV modulation if connected
-            if inputs.len() > 1 && frame < inputs[1].len() {
-                let cv = inputs[1][frame]; // CV is mono
-                // CV is 0-1, map to -1 to +1 range
-                pan += cv * 2.0 - 1.0;
-                pan = pan.clamp(-1.0, 1.0);
-            }
-
-            // Update gains if pan changed from CV
+            // Calculate gains using constant-power panning law
             let angle = (pan + 1.0) * 0.5 * PI / 2.0;
             let left_gain = angle.cos();
             let right_gain = angle.sin();

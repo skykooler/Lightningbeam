@@ -90,8 +90,9 @@ impl Metronome {
             self.last_beat = -1;  // Reset beat tracking when disabled
             self.click_position = 0;  // Stop any playing click
         } else {
-            // When enabling, don't trigger a click until the next beat
-            self.click_position = usize::MAX;  // Set to max to prevent immediate click
+            // Reset beat tracking so the next beat boundary (including beat 0) fires a click
+            self.last_beat = -1;
+            self.click_position = self.high_click.len();  // Idle (past end, nothing playing)
         }
     }
 
@@ -106,7 +107,7 @@ impl Metronome {
     pub fn process(
         &mut self,
         output: &mut [f32],
-        playhead_samples: u64,
+        playhead_samples: i64,
         playing: bool,
         sample_rate: u32,
         channels: u32,
@@ -119,31 +120,23 @@ impl Metronome {
         let frames = output.len() / channels as usize;
 
         for frame in 0..frames {
-            let current_sample = playhead_samples + frame as u64;
+            let current_sample = playhead_samples + frame as i64;
 
             // Calculate current beat number
             let current_time_seconds = current_sample as f64 / sample_rate as f64;
             let beats_per_second = self.bpm as f64 / 60.0;
             let current_beat = (current_time_seconds * beats_per_second).floor() as i64;
 
-            // Check if we crossed a beat boundary
-            if current_beat != self.last_beat && current_beat >= 0 {
+            // Check if we crossed a beat boundary (including negative beats during count-in pre-roll)
+            if current_beat != self.last_beat {
                 self.last_beat = current_beat;
 
-                // Only trigger a click if we're not in the "just enabled" state
-                if self.click_position != usize::MAX {
-                    // Determine which click to play
-                    // Beat 1 of each measure gets the accent (high click)
-                    let beat_in_measure = (current_beat as u32 % self.time_signature_numerator) as usize;
-                    let is_first_beat = beat_in_measure == 0;
-
-                    // Start playing the appropriate click
-                    self.playing_high_click = is_first_beat;
-                    self.click_position = 0;  // Start from beginning of click
-                } else {
-                    // We just got enabled - reset position but don't play yet
-                    self.click_position = self.high_click.len();  // Set past end so no click plays
-                }
+                // Determine which click to play.
+                // Beat 0 of each measure gets the accent (high click).
+                // Use rem_euclid so negative beat numbers map correctly (e.g. -4 % 4 = 0).
+                let beat_in_measure = current_beat.rem_euclid(self.time_signature_numerator as i64) as usize;
+                self.playing_high_click = beat_in_measure == 0;
+                self.click_position = 0;  // Start from beginning of click
             }
 
             // Continue playing click sample if we're currently in one

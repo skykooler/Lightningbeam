@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType, cv_input_or_default};
 use crate::audio::midi::MidiEvent;
 use std::sync::{Arc, Mutex};
 
@@ -25,6 +25,7 @@ pub struct SimpleSamplerNode {
     gain: f32,
     loop_enabled: bool,
     pitch_shift: f32,       // Additional pitch shift in semitones
+    root_note: u8,          // MIDI note for original pitch playback (default 69 = A4)
 
     inputs: Vec<NodePort>,
     outputs: Vec<NodePort>,
@@ -61,6 +62,7 @@ impl SimpleSamplerNode {
             gain: 1.0,
             loop_enabled: false,
             pitch_shift: 0.0,
+            root_note: 69, // A4 — V/Oct 0.0 from MIDI-to-CV
             inputs,
             outputs,
             parameters,
@@ -101,11 +103,23 @@ impl SimpleSamplerNode {
     }
 
     /// Convert V/oct CV to playback speed multiplier
-    /// 0V = 1.0 (original speed), +1V = 2.0 (one octave up), -1V = 0.5 (one octave down)
+    /// Accounts for root_note: when the incoming MIDI note matches root_note,
+    /// the sample plays at original speed. V/Oct 0.0 = A4 (MIDI 69) by convention.
     fn voct_to_speed(&self, voct: f32) -> f32 {
-        // Add pitch shift parameter
-        let total_semitones = voct * 12.0 + self.pitch_shift;
+        // Offset so root_note plays at original speed
+        let root_offset = (self.root_note as f32 - 69.0) / 12.0;
+        let total_semitones = (voct - root_offset) * 12.0 + self.pitch_shift;
         2.0_f32.powf(total_semitones / 12.0)
+    }
+
+    /// Set the root note (MIDI note number for original-pitch playback)
+    pub fn set_root_note(&mut self, note: u8) {
+        self.root_note = note.min(127);
+    }
+
+    /// Get the current root note
+    pub fn root_note(&self) -> u8 {
+        self.root_note
     }
 
     /// Read sample at playhead with linear interpolation
@@ -202,18 +216,11 @@ impl AudioNode for SimpleSamplerNode {
         let frames = output.len() / 2;
 
         for frame in 0..frames {
-            // Read CV inputs
-            let voct = if !inputs.is_empty() && !inputs[0].is_empty() {
-                inputs[0][frame.min(inputs[0].len() / 2 - 1) * 2]
-            } else {
-                0.0 // Default to original pitch
-            };
-
-            let gate = if inputs.len() > 1 && !inputs[1].is_empty() {
-                inputs[1][frame.min(inputs[1].len() / 2 - 1) * 2]
-            } else {
-                0.0
-            };
+            // Read CV inputs (both are mono signals)
+            // V/Oct: when unconnected, defaults to 0.0 (original pitch)
+            let voct = cv_input_or_default(inputs, 0, frame, 0.0);
+            // Gate: when unconnected, defaults to 0.0 (off)
+            let gate = cv_input_or_default(inputs, 1, frame, 0.0);
 
             // Detect gate trigger (rising edge)
             let gate_active = gate > 0.5;

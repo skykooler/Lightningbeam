@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType, cv_input_or_default};
 use crate::audio::midi::MidiEvent;
 use std::f32::consts::PI;
 
@@ -124,26 +124,28 @@ impl AudioNode for OscillatorNode {
         let frames = output.len() / 2;
 
         for frame in 0..frames {
-            // Start with base frequency
-            let mut frequency = self.frequency;
-
             // V/Oct input: Standard V/Oct (0V = A4 440Hz, ±1V per octave)
-            if !inputs.is_empty() && frame < inputs[0].len() {
-                let voct = inputs[0][frame]; // Read V/Oct CV (mono)
-                // Convert V/Oct to frequency: f = 440 * 2^(voct)
+            // Port 0: V/Oct CV input
+            // If connected, interprets the CV signal as V/Oct (440 * 2^voct)
+            // If unconnected, uses self.frequency directly as Hz
+            let voct = cv_input_or_default(inputs, 0, frame, f32::NAN);
+            let base_frequency = if voct.is_nan() {
+                // Unconnected: use frequency parameter directly
+                self.frequency
+            } else {
+                // Connected: convert V/Oct to frequency
                 // voct = 0.0 -> 440 Hz (A4)
                 // voct = 1.0 -> 880 Hz (A5)
                 // voct = -0.75 -> 261.6 Hz (C4, middle C)
-                frequency = 440.0 * 2.0_f32.powf(voct);
-            }
+                440.0 * 2.0_f32.powf(voct)
+            };
 
             // FM input: modulates the frequency
-            if inputs.len() > 1 && frame < inputs[1].len() {
-                let fm = inputs[1][frame]; // Read FM CV (mono)
-                frequency *= 1.0 + fm;
-            }
-
-            let freq_mod = frequency;
+            // Port 1: FM CV input
+            // If connected, applies FM modulation (multiply by 1 + fm)
+            // If unconnected, no modulation (fm = 0.0)
+            let fm = cv_input_or_default(inputs, 1, frame, 0.0);
+            let freq_mod = base_frequency * (1.0 + fm);
 
             // Generate waveform sample based on waveform type
             let sample = match self.waveform {

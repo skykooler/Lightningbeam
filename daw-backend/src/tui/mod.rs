@@ -859,7 +859,7 @@ fn execute_command(
 
                     for event in &midi_clip.events {
                         let status = event.status & 0xF0;
-                        let time_seconds = event.timestamp as f64 / sample_rate;
+                        let time_seconds = event.timestamp.beats_to_f64() / sample_rate;
 
                         match status {
                             0x90 if event.data2 > 0 => {
@@ -878,7 +878,7 @@ fn execute_command(
                     }
 
                     // Add to local UI state with note data
-                    app.add_clip(track_id, clip_id, start_time, duration, file_path.to_string(), notes);
+                    app.add_clip(track_id, clip_id, start_time, duration.beats_to_f64(), file_path.to_string(), notes);
                     app.next_clip_id += 1;
 
                     // Send to audio engine with the start_time (clip content is separate from timeline position)

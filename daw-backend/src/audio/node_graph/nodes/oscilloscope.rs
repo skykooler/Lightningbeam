@@ -87,8 +87,9 @@ pub struct OscilloscopeNode {
     trigger_period: usize, // Period in samples for V/oct triggering
 
     // Shared buffers for reading from Tauri commands
-    buffer: Arc<Mutex<CircularBuffer>>,       // Audio buffer
+    buffer: Arc<Mutex<CircularBuffer>>,       // Audio buffer (mono downmix)
     cv_buffer: Arc<Mutex<CircularBuffer>>,    // CV buffer
+    mono_buf: Vec<f32>,                       // Scratch buffer for stereo-to-mono downmix
 
     inputs: Vec<NodePort>,
     outputs: Vec<NodePort>,
@@ -101,8 +102,7 @@ impl OscilloscopeNode {
 
         let inputs = vec![
             NodePort::new("Audio In", SignalType::Audio, 0),
-            NodePort::new("V/oct", SignalType::CV, 1),
-            NodePort::new("CV In", SignalType::CV, 2),
+            NodePort::new("CV In", SignalType::CV, 1),
         ];
 
         let outputs = vec![
@@ -126,6 +126,7 @@ impl OscilloscopeNode {
             trigger_period: 480, // Default to ~100Hz at 48kHz
             buffer: Arc::new(Mutex::new(CircularBuffer::new(BUFFER_SIZE))),
             cv_buffer: Arc::new(Mutex::new(CircularBuffer::new(BUFFER_SIZE))),
+            mono_buf: vec![0.0; 2048],
             inputs,
             outputs,
             parameters,
@@ -221,41 +222,50 @@ impl AudioNode for OscilloscopeNode {
 
         let input = inputs[0];
         let output = &mut outputs[0];
-        let len = input.len().min(output.len());
+        let stereo_len = input.len().min(output.len());
+        let frame_count = stereo_len / 2;
 
-        // Read V/oct input if available and update trigger period
+        // Read CV input if available (port 1) — used for both display and V/Oct triggering
         if inputs.len() > 1 && !inputs[1].is_empty() {
-            self.voct_value = inputs[1][0]; // Use first sample of V/oct input
-            let frequency = Self::voct_to_frequency(self.voct_value);
-            // Calculate period in samples, clamped to reasonable range
-            let period_samples = (sample_rate as f32 / frequency).max(1.0);
-            self.trigger_period = period_samples as usize;
+            let cv_input = inputs[1];
+            let cv_len = frame_count.min(cv_input.len());
+
+            // Check if connected (not NaN sentinel)
+            if cv_len > 0 && !cv_input[0].is_nan() {
+                // Update V/Oct trigger period from CV value
+                self.voct_value = cv_input[0];
+                let frequency = Self::voct_to_frequency(self.voct_value);
+                let period_samples = (sample_rate as f32 / frequency).max(1.0);
+                self.trigger_period = period_samples as usize;
+
+                // Capture CV samples to buffer
+                if let Ok(mut cv_buffer) = self.cv_buffer.lock() {
+                    cv_buffer.write(&cv_input[..cv_len]);
+                }
+            }
         }
 
         // Update sample counter for V/oct triggering
         if self.trigger_mode == TriggerMode::VoltPerOctave {
-            self.sample_counter = (self.sample_counter + len) % self.trigger_period;
+            self.sample_counter = (self.sample_counter + frame_count) % self.trigger_period;
         }
 
         // Pass through audio (copy input to output)
-        output[..len].copy_from_slice(&input[..len]);
+        output[..stereo_len].copy_from_slice(&input[..stereo_len]);
 
-        // Capture audio samples to buffer
+        // Capture audio as mono downmix to match CV time scale
         if let Ok(mut buffer) = self.buffer.lock() {
-            buffer.write(&input[..len]);
-        }
-
-        // Capture CV samples if CV input is connected (input 2)
-        if inputs.len() > 2 && !inputs[2].is_empty() {
-            let cv_input = inputs[2];
-            if let Ok(mut cv_buffer) = self.cv_buffer.lock() {
-                cv_buffer.write(&cv_input[..len.min(cv_input.len())]);
+            for frame in 0..frame_count {
+                let left = input[frame * 2];
+                let right = input[frame * 2 + 1];
+                self.mono_buf[frame] = (left + right) * 0.5;
             }
+            buffer.write(&self.mono_buf[..frame_count]);
         }
 
-        // Update last sample for trigger detection (use left channel, frame 0)
-        if !input.is_empty() {
-            self.last_sample = input[0];
+        // Update last sample for trigger detection
+        if frame_count > 0 {
+            self.last_sample = (input[0] + input[1]) * 0.5;
         }
     }
 
@@ -286,6 +296,7 @@ impl AudioNode for OscilloscopeNode {
             trigger_period: 480,
             buffer: Arc::new(Mutex::new(CircularBuffer::new(BUFFER_SIZE))),
             cv_buffer: Arc::new(Mutex::new(CircularBuffer::new(BUFFER_SIZE))),
+            mono_buf: vec![0.0; 2048],
             inputs: self.inputs.clone(),
             outputs: self.outputs.clone(),
             parameters: self.parameters.clone(),

@@ -1,0 +1,62 @@
+FROM ubuntu:24.04
+
+# Avoid interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Build essentials + Rust build deps
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    clang \
+    nasm \
+    curl \
+    git \
+    rsync \
+    wget \
+    file \
+    squashfs-tools \
+    # ALSA (cpal)
+    libasound2-dev \
+    # Wayland (winit/eframe)
+    libwayland-dev \
+    libwayland-cursor0 \
+    # X11 (winit/eframe)
+    libx11-dev \
+    libxkbcommon-dev \
+    libxcb-shape0-dev \
+    libxcb-xfixes0-dev \
+    # Clipboard (arboard)
+    libxdo-dev \
+    # GLib (rfd/muda/gio)
+    libglib2.0-dev \
+    libgtk-3-dev \
+    # Vulkan headers (wgpu)
+    libvulkan-dev \
+    # FFmpeg build-from-source deps (ffmpeg-sys-next build feature)
+    yasm \
+    libx264-dev \
+    libx265-dev \
+    libvpx-dev \
+    libmp3lame-dev \
+    libopus-dev \
+    # PulseAudio (cpal optional backend)
+    libpulse-dev \
+    # Packaging tools
+    dpkg \
+    rpm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install cargo packaging tools
+RUN cargo install cargo-deb cargo-generate-rpm
+
+# Download AppImage runtime for building AppImages
+RUN wget "https://github.com/AppImage/AppImageKit/releases/download/continuous/runtime-x86_64" \
+        -O /opt/appimage-runtime && \
+    chmod +x /opt/appimage-runtime && \
+    echo "Runtime size: $(wc -c < /opt/appimage-runtime) bytes"
+
+WORKDIR /build

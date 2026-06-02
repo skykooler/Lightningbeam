@@ -1,4 +1,4 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType, cv_input_or_default};
 use crate::audio::midi::MidiEvent;
 use std::f32::consts::PI;
 
@@ -243,14 +243,11 @@ impl AudioNode for WavetableOscillatorNode {
         let frames = output.len() / 2;
 
         for frame in 0..frames {
-            // Read V/Oct input
-            let voct = if !inputs.is_empty() && !inputs[0].is_empty() {
-                inputs[0][frame.min(inputs[0].len() / 2 - 1) * 2]
-            } else {
-                0.0 // Default to A4 (440 Hz)
-            };
+            // V/Oct input: when unconnected, defaults to 0.0 (A4 440 Hz)
+            // CV signals are mono, so read from frame index directly
+            let voct = cv_input_or_default(inputs, 0, frame, 0.0);
 
-            // Calculate frequency
+            // Calculate frequency from V/Oct
             let freq = self.voct_to_freq(voct);
 
             // Read from wavetable

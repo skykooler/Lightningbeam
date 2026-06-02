@@ -1,0 +1,307 @@
+{
+  "metadata": {
+    "name": "Bass Section",
+    "description": "Orchestral double bass section with sustained bowing",
+    "author": "Virtual Playing Orchestra 3",
+    "version": 1,
+    "tags": [
+      "strings",
+      "bass",
+      "contrabass",
+      "section",
+      "orchestral"
+    ]
+  },
+  "midi_targets": [
+    0
+  ],
+  "output_node": 2,
+  "nodes": [
+    {
+      "id": 0,
+      "node_type": "MidiInput",
+      "name": "MIDI In",
+      "parameters": {},
+      "position": [
+        100.0,
+        100.0
+      ]
+    },
+    {
+      "id": 1,
+      "node_type": "MultiSampler",
+      "name": "Bass Section Sampler",
+      "parameters": {
+        "0": 1.0,
+        "1": 0.08,
+        "2": 0.5,
+        "3": 0.0
+      },
+      "sample_data": {
+        "type": "multi_sampler",
+        "layers": [
+          {
+            "file_path": "samples/C1.mp3",
+            "root_key": 24,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 0,
+            "key_max": 27
+          },
+          {
+            "file_path": "samples/F#1.mp3",
+            "root_key": 30,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 28,
+            "key_max": 31
+          },
+          {
+            "file_path": "samples/A1.mp3",
+            "root_key": 33,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 32,
+            "key_max": 34
+          },
+          {
+            "file_path": "samples/C2.mp3",
+            "root_key": 36,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 35,
+            "key_max": 37
+          },
+          {
+            "file_path": "samples/D#2.mp3",
+            "root_key": 39,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 38,
+            "key_max": 40
+          },
+          {
+            "file_path": "samples/F#2.mp3",
+            "root_key": 42,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 41,
+            "key_max": 43
+          },
+          {
+            "file_path": "samples/A2.mp3",
+            "root_key": 45,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 44,
+            "key_max": 46
+          },
+          {
+            "file_path": "samples/C3.mp3",
+            "root_key": 48,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 47,
+            "key_max": 49
+          },
+          {
+            "file_path": "samples/D#3.mp3",
+            "root_key": 51,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 50,
+            "key_max": 52
+          },
+          {
+            "file_path": "samples/F#3.mp3",
+            "root_key": 54,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 53,
+            "key_max": 55
+          },
+          {
+            "file_path": "samples/A3.mp3",
+            "root_key": 57,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 56,
+            "key_max": 58
+          },
+          {
+            "file_path": "samples/C4.mp3",
+            "root_key": 60,
+            "velocity_min": 0,
+            "velocity_max": 127,
+            "loop_mode": "continuous",
+            "key_min": 59,
+            "key_max": 127
+          }
+        ]
+      },
+      "position": [
+        350.0,
+        0.0
+      ]
+    },
+    {
+      "id": 2,
+      "node_type": "AudioOutput",
+      "name": "Out",
+      "parameters": {},
+      "position": [
+        1390.0,
+        100.0
+      ]
+    },
+    {
+      "id": 3,
+      "node_type": "Compressor",
+      "parameters": {
+        "0": -18.0,
+        "1": 4.0,
+        "2": 5.0,
+        "3": 50.0,
+        "4": 3.0,
+        "5": 3.0
+      },
+      "position": [
+        700.0,
+        100.0
+      ]
+    },
+    {
+      "id": 4,
+      "node_type": "Pan",
+      "parameters": {
+        "0": 0.0
+      },
+      "position": [
+        930.0,
+        100.0
+      ]
+    },
+    {
+      "id": 5,
+      "node_type": "Gain",
+      "parameters": {
+        "0": 1.0
+      },
+      "position": [
+        1160.0,
+        100.0
+      ]
+    },
+    {
+      "id": 6,
+      "node_type": "AutomationInput",
+      "parameters": {
+        "0": 0.0,
+        "1": 2.0
+      },
+      "automation_display_name": "Volume",
+      "automation_keyframes": [
+        {
+          "time": 0.0,
+          "value": 1.0,
+          "interpolation": "linear",
+          "ease_out": [
+            0.58,
+            1.0
+          ],
+          "ease_in": [
+            0.42,
+            0.0
+          ]
+        }
+      ],
+      "position": [
+        930.0,
+        330.0
+      ]
+    },
+    {
+      "id": 7,
+      "node_type": "AutomationInput",
+      "parameters": {
+        "0": -1.0,
+        "1": 1.0
+      },
+      "automation_display_name": "Pan",
+      "automation_keyframes": [
+        {
+          "time": 0.0,
+          "value": 0.0,
+          "interpolation": "linear",
+          "ease_out": [
+            0.58,
+            1.0
+          ],
+          "ease_in": [
+            0.42,
+            0.0
+          ]
+        }
+      ],
+      "position": [
+        700.0,
+        330.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from_node": 0,
+      "from_port": 0,
+      "to_node": 1,
+      "to_port": 0
+    },
+    {
+      "from_node": 1,
+      "from_port": 0,
+      "to_node": 3,
+      "to_port": 0
+    },
+    {
+      "from_node": 3,
+      "from_port": 0,
+      "to_node": 4,
+      "to_port": 0
+    },
+    {
+      "from_node": 4,
+      "from_port": 0,
+      "to_node": 5,
+      "to_port": 0
+    },
+    {
+      "from_node": 5,
+      "from_port": 0,
+      "to_node": 2,
+      "to_port": 0
+    },
+    {
+      "from_node": 6,
+      "from_port": 0,
+      "to_node": 5,
+      "to_port": 1
+    },
+    {
+      "from_node": 7,
+      "from_port": 0,
+      "to_node": 4,
+      "to_port": 1
+    }
+  ]
+}

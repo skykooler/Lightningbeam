@@ -13,6 +13,7 @@ import {
   getShapeAtPoint,
   generateWaveform
 } from '../utils.js';
+import { frameReceiver } from '../frame-receiver.js';
 
 // External libraries (globals)
 const Tone = window.Tone;
@@ -1284,6 +1285,10 @@ class VideoLayer extends Widget {
     this.useJpegCompression = false;  // JPEG compression adds more overhead than it saves (default: false)
     this.prefetchCount = 3;  // Number of frames to prefetch ahead of playhead
 
+    // WebSocket streaming (experimental - zero-copy RGBA frames from Rust)
+    this.useWebSocketStreaming = true;  // Use WebSocket streaming (enabled for testing)
+    this.wsConnected = false;  // Track WebSocket connection status
+
     // Timeline display
     this.collapsed = false;
     this.curvesMode = 'segment';
@@ -1319,8 +1324,38 @@ class VideoLayer extends Widget {
 
     console.log(`Video clip added: ${name}, ${width}x${height}, duration: ${duration}s, browser-compatible: ${clip.isBrowserCompatible}, http_url: ${clip.httpUrl}`);
 
-    // If HTTP URL is available, create video element immediately
-    if (clip.httpUrl) {
+    // If using WebSocket streaming, connect and subscribe
+    if (this.useWebSocketStreaming) {
+      // Connect to WebSocket if not already connected
+      if (!this.wsConnected) {
+        try {
+          await frameReceiver.connect();
+          this.wsConnected = true;
+          console.log(`[Video] WebSocket connected for streaming`);
+        } catch (error) {
+          console.error('[Video] Failed to connect WebSocket, falling back to browser video:', error);
+          this.useWebSocketStreaming = false;
+        }
+      }
+
+      // Subscribe to frames for this pool
+      if (this.wsConnected) {
+        frameReceiver.subscribe(poolIndex, (imageData, timestamp) => {
+          // Store received frame
+          clip.wsCurrentFrame = imageData;
+          clip.wsLastTimestamp = timestamp;
+          // console.log(`[Video WS] Received frame ${width}x${height} @ ${timestamp.toFixed(3)}s`);
+
+          // Trigger UI redraw
+          if (updateUI) {
+            updateUI();
+          }
+        });
+        console.log(`[Video] Subscribed to WebSocket frames for pool ${poolIndex}`);
+      }
+    }
+    // Otherwise use browser video if available
+    else if (clip.httpUrl) {
       await this._createVideoElement(clip);
       clip.useBrowserVideo = true;
     }
@@ -1440,6 +1475,7 @@ class VideoLayer extends Widget {
         if (currentTime < clip.startTime ||
             currentTime >= clip.startTime + clip.duration) {
           clip.currentFrame = null;
+          clip.wsCurrentFrame = null;
 
           // Pause video element if we left its time range
           if (clip.videoElement && clip.isPlaying) {
@@ -1448,6 +1484,24 @@ class VideoLayer extends Widget {
           }
 
           continue;
+        }
+
+        // If using WebSocket streaming
+        if (this.useWebSocketStreaming && this.wsConnected) {
+          const videoTime = clip.offset + (currentTime - clip.startTime);
+
+          // Request frame via WebSocket streaming (non-blocking)
+          // The frame will arrive via the subscription callback and trigger a redraw
+          try {
+            await invoke('video_stream_frame', {
+              poolIndex: clip.poolIndex,
+              timestamp: videoTime
+            });
+          } catch (error) {
+            console.error('[Video WS] Failed to stream frame:', error);
+          }
+
+          continue;  // Skip other frame fetching methods
         }
 
         // If using browser video element
@@ -1687,13 +1741,50 @@ class VideoLayer extends Widget {
       }
 
       // Debug: log what path we're taking
-      if (!clip._drawPathLogged) {
-        console.log(`[Video Draw] useBrowserVideo=${clip.useBrowserVideo}, videoElement=${!!clip.videoElement}, currentFrame=${!!clip.currentFrame}`);
-        clip._drawPathLogged = true;
-      }
+      // if (!clip._drawPathLogged) {
+      //   console.log(`[Video Draw] useWebSocketStreaming=${this.useWebSocketStreaming}, wsCurrentFrame=${!!clip.wsCurrentFrame}, useBrowserVideo=${clip.useBrowserVideo}, videoElement=${!!clip.videoElement}, currentFrame=${!!clip.currentFrame}`);
+      //   clip._drawPathLogged = true;
+      // }
 
+      // Prefer WebSocket streaming if available
+      if (this.useWebSocketStreaming && clip.wsCurrentFrame) {
+        try {
+          // Create a temporary canvas to hold the ImageData
+          if (!clip._wsCanvas) {
+            clip._wsCanvas = document.createElement('canvas');
+          }
+          const tempCanvas = clip._wsCanvas;
+
+          // Set temp canvas size to match ImageData dimensions
+          if (tempCanvas.width !== clip.wsCurrentFrame.width || tempCanvas.height !== clip.wsCurrentFrame.height) {
+            tempCanvas.width = clip.wsCurrentFrame.width;
+            tempCanvas.height = clip.wsCurrentFrame.height;
+          }
+
+          // Put ImageData on temp canvas (zero-copy)
+          const tempCtx = tempCanvas.getContext('2d');
+          tempCtx.putImageData(clip.wsCurrentFrame, 0, 0);
+
+          // Scale to fit canvas while maintaining aspect ratio
+          const canvasWidth = config.fileWidth;
+          const canvasHeight = config.fileHeight;
+          const scale = Math.min(
+            canvasWidth / clip.width,
+            canvasHeight / clip.height
+          );
+          const scaledWidth = clip.width * scale;
+          const scaledHeight = clip.height * scale;
+          const x = (canvasWidth - scaledWidth) / 2;
+          const y = (canvasHeight - scaledHeight) / 2;
+
+          // Draw scaled to main canvas (GPU-accelerated)
+          ctx.drawImage(tempCanvas, x, y, scaledWidth, scaledHeight);
+        } catch (error) {
+          console.error('[Video WS Draw] Failed to draw WebSocket frame:', error);
+        }
+      }
       // Prefer browser video element if available
-      if (clip.useBrowserVideo && clip.videoElement) {
+      else if (clip.useBrowserVideo && clip.videoElement) {
         // Debug: log readyState issues
         if (clip.videoElement.readyState < 2) {
           if (!clip._readyStateWarned) {

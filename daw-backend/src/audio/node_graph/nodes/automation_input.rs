@@ -1,5 +1,6 @@
-use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, SignalType};
+use crate::audio::node_graph::{AudioNode, NodeCategory, NodePort, Parameter, ParameterUnit, SignalType};
 use crate::audio::midi::MidiEvent;
+use crate::time::Beats;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 
@@ -16,8 +17,7 @@ pub enum InterpolationType {
 /// A single keyframe in an automation curve
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutomationKeyframe {
-    /// Time in seconds (absolute project time)
-    pub time: f64,
+    pub time: Beats,
     /// CV output value
     pub value: f32,
     /// Interpolation type to next keyframe
@@ -29,7 +29,7 @@ pub struct AutomationKeyframe {
 }
 
 impl AutomationKeyframe {
-    pub fn new(time: f64, value: f32) -> Self {
+    pub fn new(time: Beats, value: f32) -> Self {
         Self {
             time,
             value,
@@ -47,8 +47,14 @@ pub struct AutomationInputNode {
     keyframes: Vec<AutomationKeyframe>,
     outputs: Vec<NodePort>,
     parameters: Vec<Parameter>,
-    /// Shared playback time (set by the graph before processing)
-    playback_time: Arc<RwLock<f64>>,
+    /// Shared playback time in beats (set by the graph before processing)
+    playback_time: Arc<RwLock<Beats>>,
+    /// Current BPM (set by the graph before processing, used for per-sample beat advancement)
+    bpm: f64,
+    /// Minimum output value (for UI display range)
+    pub value_min: f32,
+    /// Maximum output value (for UI display range)
+    pub value_max: f32,
 }
 
 impl AutomationInputNode {
@@ -59,21 +65,32 @@ impl AutomationInputNode {
             NodePort::new("CV Out", SignalType::CV, 0),
         ];
 
+        let parameters = vec![
+            Parameter::new(0, "Min", f32::NEG_INFINITY, f32::INFINITY, -1.0, ParameterUnit::Generic),
+            Parameter::new(1, "Max", f32::NEG_INFINITY, f32::INFINITY,  1.0, ParameterUnit::Generic),
+        ];
+
         Self {
             name: name.clone(),
             display_name: "Automation".to_string(),
-            keyframes: Vec::new(),
+            keyframes: vec![AutomationKeyframe::new(Beats::ZERO, 0.0)],
             outputs,
-            parameters: Vec::new(),
-            playback_time: Arc::new(RwLock::new(0.0)),
+            parameters,
+            playback_time: Arc::new(RwLock::new(Beats::ZERO)),
+            bpm: 120.0,
+            value_min: -1.0,
+            value_max: 1.0,
         }
     }
 
-    /// Set the playback time (called by graph before processing)
-    pub fn set_playback_time(&mut self, time: f64) {
+    pub fn set_playback_time(&mut self, time: Beats) {
         if let Ok(mut playback) = self.playback_time.write() {
             *playback = time;
         }
+    }
+
+    pub fn set_bpm(&mut self, bpm: f64) {
+        self.bpm = bpm;
     }
 
     /// Get the display name (shown in UI)
@@ -105,8 +122,7 @@ impl AutomationInputNode {
         }
     }
 
-    /// Remove keyframe at specific time (with tolerance)
-    pub fn remove_keyframe_at_time(&mut self, time: f64, tolerance: f64) -> bool {
+    pub fn remove_keyframe_at_time(&mut self, time: Beats, tolerance: Beats) -> bool {
         if let Some(idx) = self.keyframes.iter().position(|kf| (kf.time - time).abs() < tolerance) {
             self.keyframes.remove(idx);
             true
@@ -115,10 +131,8 @@ impl AutomationInputNode {
         }
     }
 
-    /// Update an existing keyframe
     pub fn update_keyframe(&mut self, keyframe: AutomationKeyframe) {
-        // Remove old keyframe at this time, then add new one
-        self.remove_keyframe_at_time(keyframe.time, 0.001);
+        self.remove_keyframe_at_time(keyframe.time, Beats(0.001));
         self.add_keyframe(keyframe);
     }
 
@@ -132,24 +146,20 @@ impl AutomationInputNode {
         self.keyframes.clear();
     }
 
-    /// Evaluate curve at a specific time
-    fn evaluate_at_time(&self, time: f64) -> f32 {
+    fn evaluate_at_time(&self, time: Beats) -> f32 {
         if self.keyframes.is_empty() {
             return 0.0;
         }
 
-        // Before first keyframe
         if time <= self.keyframes[0].time {
             return self.keyframes[0].value;
         }
 
-        // After last keyframe
         let last_idx = self.keyframes.len() - 1;
         if time >= self.keyframes[last_idx].time {
             return self.keyframes[last_idx].value;
         }
 
-        // Find bracketing keyframes
         for i in 0..self.keyframes.len() - 1 {
             let kf1 = &self.keyframes[i];
             let kf2 = &self.keyframes[i + 1];
@@ -162,14 +172,12 @@ impl AutomationInputNode {
         0.0
     }
 
-    /// Interpolate between two keyframes
-    fn interpolate(&self, kf1: &AutomationKeyframe, kf2: &AutomationKeyframe, time: f64) -> f32 {
-        // Calculate normalized position between keyframes (0.0 to 1.0)
+    fn interpolate(&self, kf1: &AutomationKeyframe, kf2: &AutomationKeyframe, time: Beats) -> f32 {
         let t = if kf2.time == kf1.time {
-            0.0
+            0.0f64
         } else {
-            ((time - kf1.time) / (kf2.time - kf1.time)) as f32
-        };
+            (time - kf1.time) / (kf2.time - kf1.time)
+        } as f32;
 
         match kf1.interpolation {
             InterpolationType::Linear => {
@@ -215,12 +223,20 @@ impl AudioNode for AutomationInputNode {
         &self.parameters
     }
 
-    fn set_parameter(&mut self, _id: u32, _value: f32) {
-        // No parameters
+    fn set_parameter(&mut self, id: u32, value: f32) {
+        match id {
+            0 => self.value_min = value,
+            1 => self.value_max = value,
+            _ => {}
+        }
     }
 
-    fn get_parameter(&self, _id: u32) -> f32 {
-        0.0
+    fn get_parameter(&self, id: u32) -> f32 {
+        match id {
+            0 => self.value_min,
+            1 => self.value_max,
+            _ => 0.0,
+        }
     }
 
     fn process(
@@ -238,19 +254,17 @@ impl AudioNode for AutomationInputNode {
         let output = &mut outputs[0];
         let length = output.len();
 
-        // Get the starting playback time
         let playhead = if let Ok(playback) = self.playback_time.read() {
             *playback
         } else {
-            0.0
+            Beats::ZERO
         };
 
-        // Calculate time per sample
-        let sample_duration = 1.0 / sample_rate as f64;
+        // Advance per sample in beats: beats_per_sample = bpm / 60 / sample_rate
+        let beats_per_sample = self.bpm / 60.0 / sample_rate as f64;
 
-        // Evaluate curve for each sample
         for i in 0..length {
-            let time = playhead + (i as f64 * sample_duration);
+            let time = playhead + Beats(i as f64 * beats_per_sample);
             output[i] = self.evaluate_at_time(time);
         }
     }
@@ -274,7 +288,10 @@ impl AudioNode for AutomationInputNode {
             keyframes: self.keyframes.clone(),
             outputs: self.outputs.clone(),
             parameters: self.parameters.clone(),
-            playback_time: Arc::new(RwLock::new(0.0)),
+            playback_time: Arc::new(RwLock::new(Beats::ZERO)),
+            bpm: self.bpm,
+            value_min: self.value_min,
+            value_max: self.value_max,
         })
     }
 
