@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: ubuntu-22.04
+          - platform: ubuntu-24.04
             target: ''
             artifact-name: linux-x86_64
           - platform: macos-latest
@@ -62,7 +62,7 @@ jobs:
 
       # ── Linux dependencies ──
       - name: Install dependencies (Linux)
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -74,7 +74,7 @@ jobs:
             libpulse-dev squashfs-tools dpkg rpm
 
       - name: Install cargo packaging tools (Linux)
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-deb,cargo-generate-rpm
@@ -135,7 +135,7 @@ jobs:
           rm -f lightningbeam-ui/lightningbeam-editor/assets/presets/README.md
 
       - name: Inject preset entries into RPM metadata (Linux)
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         shell: bash
         run: |
           cd lightningbeam-ui
@@ -190,7 +190,7 @@ jobs:
       #  Linux Packaging
       # ══════════════════════════════════════════════
       - name: Build .deb package
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         shell: bash
         run: |
           cd lightningbeam-ui
@@ -206,14 +206,15 @@ jobs:
           rm -rf "$WORK"
 
       - name: Build .rpm package
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         shell: bash
         run: |
           cd lightningbeam-ui
-          cargo generate-rpm -p lightningbeam-editor
+          RPM_VERSION=$(grep '^version' lightningbeam-editor/Cargo.toml | sed 's/.*"\(.*\)"/\1/' | tr '-' '~')
+          cargo generate-rpm -p lightningbeam-editor --set-metadata="version = \"$RPM_VERSION\""
 
       - name: Build AppImage
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         shell: bash
         run: |
           cd lightningbeam-ui
@@ -259,7 +260,7 @@ jobs:
           chmod +x "Lightningbeam_Editor-${VERSION}-x86_64.AppImage"
 
       - name: Upload .deb
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         uses: actions/upload-artifact@v4
         with:
           name: deb-package
@@ -267,7 +268,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload .rpm
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         uses: actions/upload-artifact@v4
         with:
           name: rpm-package
@@ -275,7 +276,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload AppImage
-        if: matrix.platform == 'ubuntu-22.04'
+        if: matrix.platform == 'ubuntu-24.04'
         uses: actions/upload-artifact@v4
         with:
           name: appimage
@@ -380,7 +381,7 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

@@ -213,7 +213,7 @@ impl TabletInput {
         let pressure = ctx.input(|i| {
             i.events.iter().rev().find_map(|e| {
                 if let egui::Event::Touch {
-                    force: Some(egui::TouchForce::Normalized(f)),
+                    force: Some(f),
                     ..
                 } = e
                 {
