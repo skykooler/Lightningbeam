@@ -1538,6 +1538,21 @@ impl EditorApp {
     fn sync_audio_layers_to_backend(&mut self) {
         use lightningbeam_core::layer::{AnyLayer, AudioLayerType};
 
+        // Ensure the master layer has a backend group track.
+        let master_layer_id = self.action_executor.document().master_layer.layer.id;
+        if !self.layer_to_track_map.contains_key(&master_layer_id) {
+            if let Some(ref controller_arc) = self.audio_controller {
+                let track_id_result = {
+                    let mut controller = controller_arc.lock().unwrap();
+                    controller.create_group_track_sync("[Master]".to_string(), None)
+                };
+                if let Ok(track_id) = track_id_result {
+                    self.layer_to_track_map.insert(master_layer_id, track_id);
+                    println!("✅ Created master bus track (TrackId: {})", track_id);
+                }
+            }
+        }
+
         // Collect audio layers from root and inside vector clips
         // Each entry: (layer_id, layer_name, audio_type, parent_clip_id)
         let mut audio_layers_to_sync: Vec<(uuid::Uuid, String, AudioLayerType, Option<uuid::Uuid>)> = Vec::new();
@@ -1705,6 +1720,17 @@ impl EditorApp {
                     let subtracks = self.build_subtrack_list_for_group(children);
                     controller.set_metatrack_subtrack_graph(metatrack_id, subtracks);
                 }
+            }
+        }
+
+        // Push subtrack graph for the master bus (all root-level tracks as its inputs).
+        let master_layer_id = self.action_executor.document().master_layer.layer.id;
+        if let Some(&master_track_id) = self.layer_to_track_map.get(&master_layer_id) {
+            let root_children = self.action_executor.document().root.children.clone();
+            let master_subtracks = self.build_subtrack_list_for_group(&root_children);
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                controller.set_metatrack_subtrack_graph(master_track_id, master_subtracks);
             }
         }
     }
@@ -3482,6 +3508,14 @@ impl EditorApp {
             MenuAction::ToggleLayerVisibility => {
                 println!("Menu: Toggle Layer Visibility");
                 // TODO: Implement toggle layer visibility
+            }
+            MenuAction::ShowMasterTrack => {
+                // Toggle show_master_track on all Timeline pane instances
+                for pane in self.pane_instances.values_mut() {
+                    if let panes::PaneInstance::Timeline(t) = pane {
+                        t.show_master_track = !t.show_master_track;
+                    }
+                }
             }
 
             // Timeline menu
@@ -5623,10 +5657,14 @@ impl eframe::App for EditorApp {
                 });
 
                 // Checked actions show "✔ Label"; hidden actions are not rendered at all
-                let checked: &[crate::menu::MenuAction] = if self.count_in_enabled && self.metronome_enabled {
-                    &[crate::menu::MenuAction::ToggleCountIn]
-                } else {
-                    &[]
+                let master_track_shown = self.pane_instances.values().any(|p| {
+                    if let panes::PaneInstance::Timeline(t) = p { t.show_master_track } else { false }
+                });
+                let checked: &[crate::menu::MenuAction] = match (self.count_in_enabled && self.metronome_enabled, master_track_shown) {
+                    (true, true) => &[crate::menu::MenuAction::ToggleCountIn, crate::menu::MenuAction::ShowMasterTrack],
+                    (true, false) => &[crate::menu::MenuAction::ToggleCountIn],
+                    (false, true) => &[crate::menu::MenuAction::ShowMasterTrack],
+                    (false, false) => &[],
                 };
                 let hidden: &[crate::menu::MenuAction] = if timeline_is_measures && self.metronome_enabled {
                     &[]

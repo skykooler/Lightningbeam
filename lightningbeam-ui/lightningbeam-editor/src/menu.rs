@@ -313,6 +313,7 @@ pub enum MenuAction {
     AddTestClip, // For testing: adds a test clip to the asset library
     DeleteLayer,
     ToggleLayerVisibility,
+    ShowMasterTrack,
 
     // Timeline menu
     NewKeyframe,
@@ -412,6 +413,7 @@ impl MenuItemDef {
     const ADD_TEST_CLIP: Self = Self { label: "Add Test Clip to Library", action: MenuAction::AddTestClip, shortcut: None };
     const DELETE_LAYER: Self = Self { label: "Delete Layer", action: MenuAction::DeleteLayer, shortcut: None };
     const TOGGLE_LAYER_VISIBILITY: Self = Self { label: "Hide/Show Layer", action: MenuAction::ToggleLayerVisibility, shortcut: None };
+    const SHOW_MASTER_TRACK: Self = Self { label: "Show Master Track", action: MenuAction::ShowMasterTrack, shortcut: None };
 
     // Timeline menu items
     const NEW_KEYFRAME: Self = Self { label: "New Keyframe", action: MenuAction::NewKeyframe, shortcut: Some(Shortcut::new(ShortcutKey::K, NO_CTRL, NO_SHIFT, NO_ALT)) };
@@ -533,6 +535,8 @@ impl MenuItemDef {
                     MenuDef::Separator,
                     MenuDef::Item(&Self::DELETE_LAYER),
                     MenuDef::Item(&Self::TOGGLE_LAYER_VISIBILITY),
+                    MenuDef::Separator,
+                    MenuDef::Item(&Self::SHOW_MASTER_TRACK),
                 ],
             },
             // Timeline menu

@@ -145,6 +145,8 @@ pub enum Command {
     SetMetronomeEnabled(bool),
     /// Set project tempo and time signature (bpm, (numerator, denominator))
     SetTempo(f32, (u32, u32)),
+    /// Replace the entire tempo map (multi-entry variable tempo support)
+    SetTempoMap(crate::TempoMap),
     // Node graph commands
     /// Add a node to a track's instrument graph (track_id, node_type, position_x, position_y)
     GraphAddNode(TrackId, String, f32, f32),

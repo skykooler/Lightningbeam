@@ -330,6 +330,7 @@ impl From<MenuAction> for AppAction {
             MenuAction::AddTestClip => Self::AddTestClip,
             MenuAction::DeleteLayer => Self::DeleteLayer,
             MenuAction::ToggleLayerVisibility => Self::ToggleLayerVisibility,
+            MenuAction::ShowMasterTrack => Self::ToggleLayerVisibility, // not directly mappable
             MenuAction::NewKeyframe => Self::NewKeyframe,
             MenuAction::NewBlankKeyframe => Self::NewBlankKeyframe,
             MenuAction::DeleteFrame => Self::DeleteFrame,

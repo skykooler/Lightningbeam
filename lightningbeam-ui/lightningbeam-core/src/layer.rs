@@ -779,7 +779,7 @@ impl GroupLayer {
                 "Master",
             ),
             children: Vec::new(),
-            expanded: true,
+            expanded: false, // collapsed so it always renders a visible header row
             tempo_map: Some(TempoMap::constant(bpm)),
         }
     }

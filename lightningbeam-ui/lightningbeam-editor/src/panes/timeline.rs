@@ -228,6 +228,9 @@ pub struct TimelinePane {
 
     /// BPM value captured when a drag/focus-in starts (for single-undo-action on commit)
     bpm_drag_start: Option<f64>,
+
+    /// Whether to show the master track row in the timeline
+    pub show_master_track: bool,
 }
 
 /// Deferred recording start created during count-in pre-roll
@@ -355,12 +358,25 @@ fn flatten_layer<'a>(
 }
 
 /// Cached automation lane data for timeline rendering
+/// Distinguishes special master-track lanes from regular AutomationInput node lanes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AutomationLaneKind {
+    /// Standard AutomationInput node in the audio graph
+    Regular,
+    /// Master track tempo lane — x-axis is beats, y-axis is BPM; purple accent
+    MasterTempo,
+}
+
+/// Sentinel node_id value for the master tempo virtual lane (never used by audio graph nodes)
+const MASTER_TEMPO_NODE_ID: u32 = u32::MAX;
+
 struct AutomationLaneInfo {
     node_id: u32,
     name: String,
     keyframes: Vec<crate::curve_editor::CurvePoint>,
     value_min: f32,
     value_max: f32,
+    kind: AutomationLaneKind,
 }
 
 /// Data collected during render_layers for a single automation lane, used to call
@@ -374,6 +390,7 @@ struct AutomationLaneRender {
     value_max: f32,
     accent_color: egui::Color32,
     playback_time: f64,
+    kind: AutomationLaneKind,
 }
 
 /// Pending automation keyframe edit action from curve lane interaction
@@ -689,11 +706,12 @@ impl TimelinePane {
             pending_automation_actions: Vec::new(),
             automation_cache_generation: u64::MAX,
             automation_topology_generation: u64::MAX,
-            automation_cache_bpm: f64::NAN,
+            automation_cache_bpm: 0.0,
             metronome_icon: None,
             pending_recording_start: None,
             renaming_layer: None,
             bpm_drag_start: None,
+            show_master_track: false,
         }
     }
 
@@ -755,6 +773,8 @@ impl TimelinePane {
         layer_id: uuid::Uuid,
         controller: &mut daw_backend::EngineController,
         layer_to_track_map: &std::collections::HashMap<uuid::Uuid, daw_backend::TrackId>,
+        master_layer_id: uuid::Uuid,
+        tempo_map: &daw_backend::TempoMap,
     ) {
         let track_id = match layer_to_track_map.get(&layer_id) {
             Some(t) => *t,
@@ -785,7 +805,7 @@ impl TimelinePane {
                 .unwrap_or_default()
                 .iter()
                 .map(|k| crate::curve_editor::CurvePoint {
-                    time: k.time,
+                    time: k.time,  // beats (backend stores beats; curve editor x-axis is beats)
                     value: k.value,
                     interpolation: match k.interpolation.as_str() {
                         "bezier" => crate::curve_editor::CurveInterpolation::Bezier,
@@ -800,8 +820,33 @@ impl TimelinePane {
             let (value_min, value_max) = controller
                 .query_automation_range(track_id, node.id)
                 .unwrap_or((-1.0, 1.0));
-            lanes.push(AutomationLaneInfo { node_id: node.id, name, keyframes, value_min, value_max });
+            lanes.push(AutomationLaneInfo { node_id: node.id, name, keyframes, value_min, value_max, kind: AutomationLaneKind::Regular });
         }
+
+        // For the master layer, append the special Tempo virtual lane after the regular lanes.
+        if layer_id == master_layer_id {
+            let tempo_keyframes = tempo_map.entries.iter().map(|entry| {
+                crate::curve_editor::CurvePoint {
+                    time: entry.beat,  // beats (not seconds); beat-based closures in render_curve_lane
+                    value: entry.bpm as f32,
+                    interpolation: match entry.interpolation {
+                        daw_backend::TempoInterpolation::Linear => crate::curve_editor::CurveInterpolation::Linear,
+                        daw_backend::TempoInterpolation::Step => crate::curve_editor::CurveInterpolation::Step,
+                    },
+                    ease_out: (0.0, 0.0),
+                    ease_in: (0.0, 0.0),
+                }
+            }).collect();
+            lanes.push(AutomationLaneInfo {
+                node_id: MASTER_TEMPO_NODE_ID,
+                name: "Tempo".to_string(),
+                keyframes: tempo_keyframes,
+                value_min: 20.0,
+                value_max: 300.0,
+                kind: AutomationLaneKind::MasterTempo,
+            });
+        }
+
         self.automation_cache.insert(layer_id, lanes);
     }
 
@@ -1528,21 +1573,23 @@ impl TimelinePane {
                 }
             }
             TimelineMode::Measures => {
-                let beats_per_second = tempo_map.bpm_at(daw_backend::Beats(0.0)) / 60.0;
-                let beat_dur = lightningbeam_core::beat_time::beat_duration(0.0, tempo_map);
                 let bpm_count = time_sig.numerator;
-                let px_per_beat = beat_dur as f32 * self.pixels_per_second;
 
-                let start_beat = (self.viewport_start_time.max(0.0) * beats_per_second).floor() as i64;
-                let end_beat = (self.x_to_time(rect.width()) * beats_per_second).ceil() as i64;
+                // Find beat range from viewport using the actual tempo map
+                let viewport_end_secs = self.viewport_start_time + (rect.width() / self.pixels_per_second) as f64;
+                let start_beat = tempo_map.inverse_transform(self.viewport_start_time.max(0.0)).floor() as i64;
+                let end_beat = tempo_map.inverse_transform(viewport_end_secs).ceil() as i64 + 1;
 
-                // Adaptive: how often to label measures
+                // Estimate px_per_beat for adaptive labeling (sample two adjacent beats near the start)
+                let ref_beat = start_beat.max(0) as f64;
+                let px_per_beat = (self.time_to_x(tempo_map.transform(ref_beat + 1.0))
+                    - self.time_to_x(tempo_map.transform(ref_beat))).abs();
                 let measure_px = px_per_beat * bpm_count as f32;
                 let label_every = if measure_px > 60.0 { 1u32 } else if measure_px > 20.0 { 4 } else { 16 };
 
                 for beat_idx in start_beat..=end_beat {
                     if beat_idx < 0 { continue; }
-                    let x = self.time_to_x(beat_idx as f64 / beats_per_second);
+                    let x = self.time_to_x(tempo_map.transform(beat_idx as f64));
                     if x < 0.0 || x > rect.width() { continue; }
 
                     let beat_in_measure = (beat_idx as u32) % bpm_count;
@@ -1673,7 +1720,7 @@ impl TimelinePane {
         theme: &crate::theme::Theme,
         ctx: &egui::Context,
         faded: bool,
-        display_bpm: Option<f64>,
+        tempo_map: &daw_backend::TempoMap,
     ) {
         let clip_height = clip_rect.height();
         let note_height = clip_height / 12.0; // 12 semitones per octave
@@ -1682,8 +1729,7 @@ impl TimelinePane {
         let note_style = theme.style(".timeline-midi-note", ctx);
         let note_color = note_style.background_color().unwrap_or(egui::Color32::BLACK);
 
-        // `timestamp` is in beats; convert to display-seconds using the current (preview) BPM.
-        let tempo_map = daw_backend::TempoMap::constant(display_bpm.unwrap_or(120.0));
+        // `timestamp` is in beats; convert to display-seconds using the full tempo map.
         let event_display_time = |ev: &daw_backend::audio::midi::MidiEvent| -> f64 {
             tempo_map.transform(ev.timestamp.beats_to_f64())
         };
@@ -1788,7 +1834,7 @@ impl TimelinePane {
         active_layer_id: &Option<uuid::Uuid>,
         focus: &lightningbeam_core::selection::FocusSelection,
         pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
-        _document: &lightningbeam_core::document::Document,
+        document: &lightningbeam_core::document::Document,
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
         layer_to_track_map: &std::collections::HashMap<uuid::Uuid, daw_backend::TrackId>,
         track_levels: &std::collections::HashMap<daw_backend::TrackId, f32>,
@@ -2106,7 +2152,8 @@ impl TimelinePane {
                     }
                     Some((nid, kfs)) => {
                         // Multiple keyframes — slider is read-only; show the curve value at playback pos
-                        let v = crate::curve_editor::evaluate_curve(kfs, playback_time);
+                        let playback_beats = document.tempo_map().inverse_transform(playback_time);
+                        let v = crate::curve_editor::evaluate_curve(kfs, playback_beats);
                         (Some(*nid), Some(v as f64), true)
                     }
                 };
@@ -2386,13 +2433,14 @@ impl TimelinePane {
                 egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".separator"], ui.ctx(), egui::Color32::from_gray(20))),
             );
 
-            // Automation expand/collapse button for Audio/MIDI layers
+            // Automation expand/collapse button for Audio/MIDI layers and the master layer
+            let is_master_layer = matches!(row, TimelineRow::CollapsedGroup { group: g, .. } if g.layer.id == document.master_layer.layer.id);
             let is_audio_or_midi = matches!(
                 row,
                 TimelineRow::Normal(AnyLayer::Audio(_))
                     | TimelineRow::GroupChild { child: AnyLayer::Audio(_), .. }
             );
-            if is_audio_or_midi {
+            if is_audio_or_midi || is_master_layer {
                 let btn_rect = egui::Rect::from_min_size(
                     egui::pos2(rect.min.x + 4.0, y + LAYER_HEIGHT - 18.0),
                     egui::vec2(16.0, 14.0),
@@ -2735,13 +2783,14 @@ impl TimelinePane {
                     }
                 }
                 TimelineMode::Measures => {
-                    let beats_per_second = document.tempo_map().bpm_at(daw_backend::Beats(0.0)) / 60.0;
+                    let tm = document.tempo_map();
                     let bpm_count = document.time_signature.numerator;
-                    let start_beat = (self.viewport_start_time.max(0.0) * beats_per_second).floor() as i64;
-                    let end_beat = (self.x_to_time(rect.width()) * beats_per_second).ceil() as i64;
+                    let viewport_end_secs = self.viewport_start_time + (rect.width() / self.pixels_per_second) as f64;
+                    let start_beat = tm.inverse_transform(self.viewport_start_time.max(0.0)).floor() as i64;
+                    let end_beat = tm.inverse_transform(viewport_end_secs).ceil() as i64 + 1;
                     for beat_idx in start_beat..=end_beat {
                         if beat_idx < 0 { continue; }
-                        let x = self.time_to_x(beat_idx as f64 / beats_per_second);
+                        let x = self.time_to_x(tm.transform(beat_idx as f64));
                         if x < 0.0 || x > rect.width() { continue; }
                         let is_measure_boundary = (beat_idx as u32) % bpm_count == 0;
                         let gray = if is_measure_boundary { 45 } else { 25 };
@@ -3084,6 +3133,39 @@ impl TimelinePane {
                     ],
                     egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".separator"], ui.ctx(), egui::Color32::from_gray(20))),
                 );
+
+                // Collect automation lane renders for collapsed groups (e.g. master track)
+                if self.automation_expanded.contains(&row_layer_id) {
+                    if let Some(lanes) = self.automation_cache.get(&row_layer_id) {
+                        let group_color = theme.bg_color(&["#timeline", ".layer-type-group"], ui.ctx(), egui::Color32::from_rgb(0, 180, 180));
+                        for (lane_idx, lane) in lanes.iter().enumerate() {
+                            let lane_top = y + LAYER_HEIGHT + lane_idx as f32 * AUTOMATION_LANE_HEIGHT;
+                            if lane_top + AUTOMATION_LANE_HEIGHT < rect.min.y || lane_top > rect.max.y {
+                                continue;
+                            }
+                            let lane_rect = egui::Rect::from_min_size(
+                                egui::pos2(rect.min.x, lane_top),
+                                egui::vec2(rect.width(), AUTOMATION_LANE_HEIGHT),
+                            );
+                            let lane_accent = match lane.kind {
+                                AutomationLaneKind::MasterTempo => egui::Color32::from_rgb(160, 80, 220),
+                                AutomationLaneKind::Regular => group_color,
+                            };
+                            pending_lane_renders.push(AutomationLaneRender {
+                                layer_id: row_layer_id,
+                                node_id: lane.node_id,
+                                lane_rect,
+                                keyframes: lane.keyframes.clone(),
+                                value_min: lane.value_min,
+                                value_max: lane.value_max,
+                                accent_color: lane_accent,
+                                playback_time,
+                                kind: lane.kind,
+                            });
+                        }
+                    }
+                }
+
                 continue; // Skip normal clip rendering for collapsed groups
             }
 
@@ -3477,11 +3559,6 @@ impl TimelinePane {
                                                     let iter_duration = iter_end - iter_start;
                                                     if iter_duration <= 0.0 { continue; }
 
-                                                    let note_bpm = if self.time_display_format == lightningbeam_core::document::TimelineMode::Measures {
-                                                        Some(document.bpm())
-                                                    } else {
-                                                        None
-                                                    };
                                                     Self::render_midi_piano_roll(
                                                         &painter,
                                                         clip_rect,
@@ -3495,15 +3572,10 @@ impl TimelinePane {
                                                         theme,
                                                         ui.ctx(),
                                                         si != 0, // fade non-content iterations
-                                                        note_bpm,
+                                                        document.tempo_map(),
                                                     );
                                                 }
                                             } else {
-                                                let note_bpm = if self.time_display_format == lightningbeam_core::document::TimelineMode::Measures {
-                                                    Some(document.bpm())
-                                                } else {
-                                                    None
-                                                };
                                                 Self::render_midi_piano_roll(
                                                     &painter,
                                                     clip_rect,
@@ -3517,7 +3589,7 @@ impl TimelinePane {
                                                     theme,
                                                     ui.ctx(),
                                                     false,
-                                                    note_bpm,
+                                                    document.tempo_map(),
                                                 );
                                             }
                                         }
@@ -3899,6 +3971,10 @@ impl TimelinePane {
                             egui::pos2(rect.min.x, lane_top),
                             egui::vec2(rect.width(), AUTOMATION_LANE_HEIGHT),
                         );
+                        let lane_accent = match lane.kind {
+                            AutomationLaneKind::MasterTempo => egui::Color32::from_rgb(160, 80, 220),
+                            AutomationLaneKind::Regular => tc,
+                        };
                         pending_lane_renders.push(AutomationLaneRender {
                             layer_id: row_layer_id,
                             node_id: lane.node_id,
@@ -3906,8 +3982,9 @@ impl TimelinePane {
                             keyframes: lane.keyframes.clone(),
                             value_min: lane.value_min,
                             value_max: lane.value_max,
-                            accent_color: tc,
+                            accent_color: lane_accent,
                             playback_time,
+                            kind: lane.kind,
                         });
                     }
                 }
@@ -5133,50 +5210,56 @@ impl PaneRenderer for TimelinePane {
 
             ui.separator();
 
-            // BPM control
+            // BPM control — disabled when tempo automation has been edited (multiple entries)
+            let tempo_is_automated = tempo_map.entries.len() > 1;
             let mut bpm_val = bpm;
             ui.label("BPM:");
-            let bpm_response = ui.add(egui::DragValue::new(&mut bpm_val)
-                .range(20.0..=300.0)
-                .speed(0.5)
-                .fixed_decimals(1));
+            let bpm_response = ui.add_enabled(
+                !tempo_is_automated,
+                egui::DragValue::new(&mut bpm_val)
+                    .range(20.0..=300.0)
+                    .speed(0.5)
+                    .fixed_decimals(1),
+            );
 
-            // Capture start BPM on drag/focus start
-            if bpm_response.gained_focus() || bpm_response.drag_started() {
-                if self.bpm_drag_start.is_none() {
-                    self.bpm_drag_start = Some(bpm);
+            if !tempo_is_automated {
+                // Capture start BPM on drag/focus start
+                if bpm_response.gained_focus() || bpm_response.drag_started() {
+                    if self.bpm_drag_start.is_none() {
+                        self.bpm_drag_start = Some(bpm);
+                    }
                 }
-            }
 
-            if bpm_response.changed() {
-                // Fallback capture: if gained_focus/drag_started didn't fire (e.g. rapid input),
-                // capture start BPM on the first change before updating the document.
-                if self.bpm_drag_start.is_none() {
-                    self.bpm_drag_start = Some(bpm);
+                if bpm_response.changed() {
+                    // Fallback capture: if gained_focus/drag_started didn't fire (e.g. rapid input),
+                    // capture start BPM on the first change before updating the document.
+                    if self.bpm_drag_start.is_none() {
+                        self.bpm_drag_start = Some(bpm);
+                    }
+                    // Live preview: update document directly so grid reflows immediately
+                    shared.action_executor.document_mut().set_bpm(bpm_val);
+                    if let Some(controller_arc) = shared.audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        controller.set_tempo(bpm_val as f32, (time_sig_num, time_sig_den));
+                    }
                 }
-                // Live preview: update document directly so grid reflows immediately
-                shared.action_executor.document_mut().set_bpm(bpm_val);
-                if let Some(controller_arc) = shared.audio_controller {
-                    let mut controller = controller_arc.lock().unwrap();
-                    controller.set_tempo(bpm_val as f32, (time_sig_num, time_sig_den));
-                }
-            }
 
-            // On commit, dispatch a single ChangeBpmAction (single undo entry)
-            if bpm_response.drag_stopped() || bpm_response.lost_focus() {
-                if let Some(start_bpm) = self.bpm_drag_start.take() {
-                    let new_bpm = shared.action_executor.document().bpm();
-                    if (start_bpm - new_bpm).abs() > 1e-6
-                        && self.time_display_format == lightningbeam_core::document::TimelineMode::Measures
-                    {
-                        use lightningbeam_core::actions::ChangeBpmAction;
-                        // document.bpm() is already new_bpm from the live preview — build action
-                        // with new_bpm so it records the correct undo state.
-                        let action = ChangeBpmAction::new(
-                            new_bpm,
-                            shared.action_executor.document(),
-                        );
-                        shared.pending_actions.push(Box::new(action));
+                // On commit, dispatch a single ChangeBpmAction (single undo entry)
+                if bpm_response.drag_stopped() || bpm_response.lost_focus() {
+                    if let Some(start_bpm) = self.bpm_drag_start.take() {
+                        let new_bpm = shared.action_executor.document().bpm();
+                        if (start_bpm - new_bpm).abs() > 1e-6
+                            && self.time_display_format == lightningbeam_core::document::TimelineMode::Measures
+                        {
+                            use lightningbeam_core::actions::ChangeBpmAction;
+                            // document.bpm() is already new_bpm from the live preview — build action
+                            // with new_bpm so it records the correct undo state.
+                            let action = ChangeBpmAction::new(
+                                new_bpm,
+                                shared.action_executor.document(),
+                            );
+                            shared.pending_actions.push(Box::new(action));
+                        }
                     }
                 }
             }
@@ -5230,7 +5313,15 @@ impl PaneRenderer for TimelinePane {
         // Get document from action executor
         let document = shared.action_executor.document();
         let editing_clip_id = shared.editing_clip_id;
-        let context_layers = document.context_layers(editing_clip_id.as_ref());
+        let mut context_layers = document.context_layers(editing_clip_id.as_ref());
+        // Prepend master track as the first row when enabled (only at root context, not inside clips)
+        let master_any_layer;
+        if self.show_master_track && editing_clip_id.is_none() {
+            master_any_layer = Some(AnyLayer::Group(document.master_layer.clone()));
+            context_layers.insert(0, master_any_layer.as_ref().unwrap());
+        } else {
+            master_any_layer = None;
+        }
         // Use virtual row count (includes expanded group children) for height calculations
         let layer_count = build_timeline_rows(&context_layers).len();
 
@@ -5339,17 +5430,30 @@ impl PaneRenderer for TimelinePane {
         // Process pending automation lane edit actions
         if !self.pending_automation_actions.is_empty() {
             let actions = std::mem::take(&mut self.pending_automation_actions);
+            let tempo_map = document.tempo_map().clone();
             if let Some(controller_arc) = shared.audio_controller {
                 let mut controller = controller_arc.lock().unwrap();
                 for action in actions {
                     match action {
                         AutomationLaneAction::AddKeyframe { layer_id, node_id, time, value } => {
-                            if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                            if node_id == MASTER_TEMPO_NODE_ID {
+                                // Tempo lane: `time` is beats (curve editor uses beat-based closures)
+                                let old_map = tempo_map.clone();
+                                let beat = time;
+                                let mut new_map = old_map.clone();
+                                new_map.entries.push(daw_backend::TempoEntry { beat, bpm: value as f64, seconds: 0.0, interpolation: daw_backend::TempoInterpolation::Linear });
+                                new_map.entries.sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
+                                new_map.rebuild_seconds();
+                                let bpm_action = lightningbeam_core::actions::ChangeBpmAction::from_maps(old_map, new_map);
+                                shared.pending_actions.push(Box::new(bpm_action));
+                                // Drop cache so it rebuilds (from updated tempo_map) after action executes
+                                self.automation_cache.remove(&layer_id);
+                            } else if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                                // time is already in beats (all automation x-axes use beats)
                                 controller.automation_add_keyframe(track_id, node_id, time, value, "linear".to_string(), (0.0, 0.0), (0.0, 0.0));
-                                // Optimistic cache update
+                                // Optimistic cache update (beats)
                                 if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
                                     if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
-                                        // Replace existing keyframe at same time, or insert new one
                                         if let Some(existing) = lane.keyframes.iter_mut().find(|k| (k.time - time).abs() < 0.001) {
                                             existing.value = value;
                                         } else {
@@ -5367,10 +5471,36 @@ impl PaneRenderer for TimelinePane {
                             }
                         }
                         AutomationLaneAction::MoveKeyframe { layer_id, node_id, old_time, new_time, new_value, interpolation, ease_out, ease_in } => {
-                            if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                            if node_id == MASTER_TEMPO_NODE_ID {
+                                // Tempo lane: old_time/new_time are beats (beat-based closures)
+                                let old_beat = old_time;
+                                let new_beat = new_time;
+                                let old_map = tempo_map.clone();
+                                let mut new_map = old_map.clone();
+                                if old_beat > 1e-9 {
+                                    // Non-anchor entry: remove old, add at new position (preserve interpolation)
+                                    let orig_interp = old_map.entries.iter()
+                                        .find(|e| (e.beat - old_beat).abs() < 1e-9)
+                                        .map(|e| e.interpolation.clone())
+                                        .unwrap_or(daw_backend::TempoInterpolation::Linear);
+                                    new_map.entries.retain(|e| (e.beat - old_beat).abs() >= 1e-9);
+                                    new_map.entries.push(daw_backend::TempoEntry { beat: new_beat.max(1e-9), bpm: new_value as f64, seconds: 0.0, interpolation: orig_interp });
+                                } else {
+                                    // Beat-0 anchor: only the BPM value can change, position is fixed at beat 0
+                                    if let Some(e) = new_map.entries.iter_mut().find(|e| e.beat < 1e-9) {
+                                        e.bpm = new_value as f64;
+                                    }
+                                }
+                                new_map.entries.sort_by(|a, b| a.beat.partial_cmp(&b.beat).unwrap_or(std::cmp::Ordering::Equal));
+                                new_map.rebuild_seconds();
+                                let bpm_action = lightningbeam_core::actions::ChangeBpmAction::from_maps(old_map, new_map);
+                                shared.pending_actions.push(Box::new(bpm_action));
+                                self.automation_cache.remove(&layer_id);
+                            } else if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                                // old_time / new_time are already in beats
                                 controller.automation_remove_keyframe(track_id, node_id, old_time);
                                 controller.automation_add_keyframe(track_id, node_id, new_time, new_value, interpolation.clone(), ease_out, ease_in);
-                                // Optimistic cache update
+                                // Optimistic cache update (beats)
                                 if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
                                     if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
                                         if let Some(kf) = lane.keyframes.iter_mut().find(|k| (k.time - old_time).abs() < 0.001) {
@@ -5383,9 +5513,22 @@ impl PaneRenderer for TimelinePane {
                             }
                         }
                         AutomationLaneAction::DeleteKeyframe { layer_id, node_id, time } => {
-                            if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                            if node_id == MASTER_TEMPO_NODE_ID {
+                                // Tempo lane: time is beats; never remove beat-0 anchor
+                                let old_map = tempo_map.clone();
+                                let beat = time;
+                                if beat > 1e-9 {
+                                    let mut new_map = old_map.clone();
+                                    new_map.entries.retain(|e| (e.beat - beat).abs() >= 1e-9);
+                                    new_map.rebuild_seconds();
+                                    let bpm_action = lightningbeam_core::actions::ChangeBpmAction::from_maps(old_map, new_map);
+                                    shared.pending_actions.push(Box::new(bpm_action));
+                                    self.automation_cache.remove(&layer_id);
+                                }
+                            } else if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                                // time is already in beats
                                 controller.automation_remove_keyframe(track_id, node_id, time);
-                                // Optimistic cache update
+                                // Optimistic cache update (beats)
                                 if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
                                     if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
                                         lane.keyframes.retain(|k| (k.time - time).abs() >= 0.001);
@@ -5394,13 +5537,15 @@ impl PaneRenderer for TimelinePane {
                             }
                         }
                         AutomationLaneAction::SetRange { layer_id, node_id, min, max } => {
-                            if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
-                                controller.automation_set_range(track_id, node_id, min, max);
-                                // Optimistic cache update
-                                if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
-                                    if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
-                                        lane.value_min = min;
-                                        lane.value_max = max;
+                            if node_id != MASTER_TEMPO_NODE_ID {
+                                if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
+                                    controller.automation_set_range(track_id, node_id, min, max);
+                                    // Optimistic cache update
+                                    if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
+                                        if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
+                                            lane.value_min = min;
+                                            lane.value_max = max;
+                                        }
                                     }
                                 }
                             }
@@ -5416,12 +5561,15 @@ impl PaneRenderer for TimelinePane {
             self.automation_cache.clear();
         }
 
-        // Invalidate automation cache when BPM changes (but not during a live drag —
-        // during drag the backend hasn't rescaled yet so re-querying would give stale data).
+        // Invalidate the master layer's tempo lane cache when BPM changes.
+        // Use `automation_cache_bpm` as a sentinel: if the document's global BPM differs from
+        // what was cached, drop the master layer entry so it rebuilds with the new tempo_map.
+        // We skip this during live BPM drag (bpm_drag_start.is_some()) to avoid flickering.
         let bpm_committed = self.bpm_drag_start.is_none();
         if bpm_committed && (document.bpm() - self.automation_cache_bpm).abs() > 1e-9 {
             self.automation_cache_bpm = document.bpm();
-            self.automation_cache.clear();
+            let master_layer_id_for_bpm = document.master_layer.layer.id;
+            self.automation_cache.remove(&master_layer_id_for_bpm);
         }
 
         // Refresh automation cache for expanded layers.
@@ -5433,11 +5581,13 @@ impl PaneRenderer for TimelinePane {
             self.automation_topology_generation = *shared.graph_topology_generation;
             self.automation_cache.clear();
         }
+        let master_layer_id = document.master_layer.layer.id;
+        let tempo_map_clone = document.tempo_map().clone();
         for layer_id in self.automation_expanded.iter().copied().collect::<Vec<_>>() {
             if !self.automation_cache.contains_key(&layer_id) {
                 if let Some(controller_arc) = shared.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
-                    self.refresh_automation_cache(layer_id, &mut controller, shared.layer_to_track_map);
+                    self.refresh_automation_cache(layer_id, &mut controller, shared.layer_to_track_map, master_layer_id, &tempo_map_clone);
                 }
             }
         }
@@ -5465,7 +5615,9 @@ impl PaneRenderer for TimelinePane {
 
         // Render automation lanes AFTER handle_input so our ui.interact registers last and wins
         // egui's interaction priority over handle_input's full-content-area allocation.
+        // All automation lanes use beats as the x-axis; convert via the tempo map.
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
+        let tempo_map_for_lanes = document.tempo_map().clone();
         for lane in &pending_lane_renders {
             let drag_key = (lane.layer_id, lane.node_id);
             let mut drag_state_local = self.automation_drag
@@ -5475,18 +5627,21 @@ impl PaneRenderer for TimelinePane {
                 .with(lane.layer_id)
                 .with(lane.node_id);
             let lane_min_x = lane.lane_rect.min.x;
+            let tm = &tempo_map_for_lanes;
+            // playback_time is seconds; convert to beats for the beat-axis curve editor
+            let playback_beats = tm.inverse_transform(lane.playback_time);
             let action = crate::curve_editor::render_curve_lane(
                 ui,
                 lane.lane_rect,
                 &lane.keyframes,
                 &mut drag_state_local,
-                lane.playback_time,
+                playback_beats,
                 lane.accent_color,
                 lane_id,
                 lane.value_min,
                 lane.value_max,
-                |t| lane_min_x + self.time_to_x(t),
-                |x| self.x_to_time(x - lane_min_x),
+                |beat| lane_min_x + self.time_to_x(tm.transform(beat)),
+                |x| tm.inverse_transform(self.x_to_time(x - lane_min_x)),
             );
             self.automation_drag.insert(drag_key, drag_state_local);
             let layer_id = lane.layer_id;

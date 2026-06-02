@@ -113,6 +113,8 @@ pub struct Engine {
     // Current tempo map — kept in sync with SetTempo/SetTempoMap commands.
     tempo_map: crate::TempoMap,
     current_fps: f64,
+    // Current time signature — updated by SetTempo, used when SetTempoMap fires.
+    time_sig: (u32, u32),
 }
 
 impl Engine {
@@ -191,6 +193,7 @@ impl Engine {
             timing_overrun_count: 0,
             tempo_map: crate::TempoMap::constant(120.0),
             current_fps: 30.0,
+            time_sig: (4, 4),
         }
     }
 
@@ -1290,9 +1293,17 @@ impl Engine {
             }
 
             Command::SetTempo(bpm, time_sig) => {
+                self.time_sig = time_sig;
                 self.metronome.update_timing(bpm, time_sig);
                 self.project.set_tempo(bpm, time_sig.0);
                 self.tempo_map.set_global_bpm(bpm as f64);
+            }
+
+            Command::SetTempoMap(map) => {
+                let bpm0 = map.global_bpm() as f32;
+                self.metronome.update_timing(bpm0, self.time_sig);
+                self.project.set_tempo(bpm0, self.time_sig.0);
+                self.tempo_map = map;
             }
 
             // Node graph commands
@@ -1846,9 +1857,17 @@ impl Engine {
                 let buffer_size = self.buffer_pool.buffer_size();
                 if let Some(TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
                     let current = metatrack.current_subtracks();
+                    let has_subtrack_node = metatrack.audio_graph.node_indices().any(|idx| {
+                        metatrack.audio_graph.get_graph_node(idx)
+                            .map(|n| n.node.node_type() == "SubtrackInputs")
+                            .unwrap_or(false)
+                    });
 
-                    // No-op if subtrack list is unchanged (prevents every-frame graph rebuilds)
-                    if current == subtracks {
+                    // No-op if subtrack list is unchanged AND the graph is already initialised.
+                    // Without the `has_subtrack_node` guard a freshly-created metatrack
+                    // (empty graph, no SubtrackInputs) with zero subtracks would never get
+                    // its default Volume automation node.
+                    if current == subtracks && has_subtrack_node {
                         return;
                     }
 
@@ -2156,8 +2175,13 @@ impl Engine {
                     }
                 };
 
-                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    let graph = &mut track.instrument_graph;
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(t)) => Some(&mut t.instrument_graph),
+                    Some(TrackNode::Audio(t)) => Some(&mut t.effects_graph),
+                    Some(TrackNode::Group(t)) => Some(&mut t.audio_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
                     let node_idx = NodeIndex::new(node_id as usize);
 
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
@@ -2181,8 +2205,13 @@ impl Engine {
             Command::AutomationRemoveKeyframe(track_id, node_id, time) => {
                 use crate::audio::node_graph::nodes::AutomationInputNode;
 
-                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    let graph = &mut track.instrument_graph;
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(t)) => Some(&mut t.instrument_graph),
+                    Some(TrackNode::Audio(t)) => Some(&mut t.effects_graph),
+                    Some(TrackNode::Group(t)) => Some(&mut t.audio_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
                     let node_idx = NodeIndex::new(node_id as usize);
 
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
@@ -2198,8 +2227,13 @@ impl Engine {
             Command::AutomationSetName(track_id, node_id, name) => {
                 use crate::audio::node_graph::nodes::AutomationInputNode;
 
-                if let Some(TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
-                    let graph = &mut track.instrument_graph;
+                let graph = match self.project.get_track_mut(track_id) {
+                    Some(TrackNode::Midi(t)) => Some(&mut t.instrument_graph),
+                    Some(TrackNode::Audio(t)) => Some(&mut t.effects_graph),
+                    Some(TrackNode::Group(t)) => Some(&mut t.audio_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
                     let node_idx = NodeIndex::new(node_id as usize);
 
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
@@ -2508,12 +2542,15 @@ impl Engine {
                 use crate::audio::node_graph::nodes::{AutomationInputNode, InterpolationType};
                 use crate::command::types::AutomationKeyframeData;
 
-                if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
-                    let graph = &track.instrument_graph;
+                let graph = match self.project.get_track(track_id) {
+                    Some(TrackNode::Midi(t)) => Some(&t.instrument_graph),
+                    Some(TrackNode::Audio(t)) => Some(&t.effects_graph),
+                    Some(TrackNode::Group(t)) => Some(&t.audio_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
                     let node_idx = NodeIndex::new(node_id as usize);
-
                     if let Some(graph_node) = graph.get_graph_node(node_idx) {
-                        // Downcast to AutomationInputNode
                         if let Some(auto_node) = graph_node.node.as_any().downcast_ref::<AutomationInputNode>() {
                             let keyframes: Vec<AutomationKeyframeData> = auto_node.keyframes()
                                 .iter()
@@ -2524,7 +2561,6 @@ impl Engine {
                                         InterpolationType::Step => "step",
                                         InterpolationType::Hold => "hold",
                                     }.to_string();
-
                                     AutomationKeyframeData {
                                         time: kf.time.0,
                                         value: kf.value,
@@ -2534,7 +2570,6 @@ impl Engine {
                                     }
                                 })
                                 .collect();
-
                             QueryResponse::AutomationKeyframes(Ok(keyframes))
                         } else {
                             QueryResponse::AutomationKeyframes(Err(format!("Node {} is not an AutomationInputNode", node_id)))
@@ -2543,19 +2578,22 @@ impl Engine {
                         QueryResponse::AutomationKeyframes(Err(format!("Node {} not found in track {}", node_id, track_id)))
                     }
                 } else {
-                    QueryResponse::AutomationKeyframes(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                    QueryResponse::AutomationKeyframes(Err(format!("Track {} not found", track_id)))
                 }
             }
 
             Query::GetAutomationName(track_id, node_id) => {
                 use crate::audio::node_graph::nodes::AutomationInputNode;
 
-                if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
-                    let graph = &track.instrument_graph;
+                let graph = match self.project.get_track(track_id) {
+                    Some(TrackNode::Midi(t)) => Some(&t.instrument_graph),
+                    Some(TrackNode::Audio(t)) => Some(&t.effects_graph),
+                    Some(TrackNode::Group(t)) => Some(&t.audio_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
                     let node_idx = NodeIndex::new(node_id as usize);
-
                     if let Some(graph_node) = graph.get_graph_node(node_idx) {
-                        // Downcast to AutomationInputNode
                         if let Some(auto_node) = graph_node.node.as_any().downcast_ref::<AutomationInputNode>() {
                             QueryResponse::AutomationName(Ok(auto_node.display_name().to_string()))
                         } else {
@@ -2565,17 +2603,21 @@ impl Engine {
                         QueryResponse::AutomationName(Err(format!("Node {} not found in track {}", node_id, track_id)))
                     }
                 } else {
-                    QueryResponse::AutomationName(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                    QueryResponse::AutomationName(Err(format!("Track {} not found", track_id)))
                 }
             }
 
             Query::GetAutomationRange(track_id, node_id) => {
                 use crate::audio::node_graph::nodes::AutomationInputNode;
 
-                if let Some(TrackNode::Midi(track)) = self.project.get_track(track_id) {
-                    let graph = &track.instrument_graph;
+                let graph = match self.project.get_track(track_id) {
+                    Some(TrackNode::Midi(t)) => Some(&t.instrument_graph),
+                    Some(TrackNode::Audio(t)) => Some(&t.effects_graph),
+                    Some(TrackNode::Group(t)) => Some(&t.audio_graph),
+                    _ => None,
+                };
+                if let Some(graph) = graph {
                     let node_idx = NodeIndex::new(node_id as usize);
-
                     if let Some(graph_node) = graph.get_graph_node(node_idx) {
                         if let Some(auto_node) = graph_node.node.as_any().downcast_ref::<AutomationInputNode>() {
                             QueryResponse::AutomationRange(Ok((auto_node.value_min, auto_node.value_max)))
@@ -2586,7 +2628,7 @@ impl Engine {
                         QueryResponse::AutomationRange(Err(format!("Node {} not found", node_id)))
                     }
                 } else {
-                    QueryResponse::AutomationRange(Err(format!("Track {} not found or is not a MIDI track", track_id)))
+                    QueryResponse::AutomationRange(Err(format!("Track {} not found", track_id)))
                 }
             }
 
@@ -3663,6 +3705,11 @@ impl EngineController {
     /// Set project tempo (BPM) and time signature
     pub fn set_tempo(&mut self, bpm: f32, time_signature: (u32, u32)) {
         let _ = self.command_tx.push(Command::SetTempo(bpm, time_signature));
+    }
+
+    /// Replace the full tempo map (multi-entry variable tempo)
+    pub fn set_tempo_map(&mut self, map: crate::TempoMap) {
+        let _ = self.command_tx.push(Command::SetTempoMap(map));
     }
 
     /// After a BPM change: update MIDI clip durations, sync clip beats/frames, and rescale

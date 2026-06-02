@@ -263,7 +263,11 @@ impl Metatrack {
         graph
     }
 
-    /// Build the explicit subtrack mixing graph: SubtrackInputs → Mixer → AudioOutput.
+    /// Build the default subtrack mixing graph: SubtrackInputs → Mixer → Gain → AudioOutput,
+    /// with an AutomationInput ("Volume", range 0..2) feeding the Gain's CV port.
+    ///
+    /// Existing Volume keyframes are preserved across rebuilds so that adding/removing
+    /// a child track doesn't reset the automation.
     ///
     /// `subtracks` is an ordered list of (backend TrackId, display name) for each child.
     /// Replaces the current graph and marks `graph_is_default = true`.
@@ -273,40 +277,81 @@ impl Metatrack {
         sample_rate: u32,
         buffer_size: usize,
     ) {
-        use super::node_graph::nodes::{SubtrackInputsNode, MixerNode};
+        use super::node_graph::nodes::{SubtrackInputsNode, MixerNode, GainNode, AutomationInputNode};
+        use super::node_graph::nodes::AutomationKeyframe;
+        use crate::time::Beats;
+
+        // Preserve existing Volume keyframes before rebuilding.
+        let existing_volume_kfs = self.get_volume_automation_keyframes();
 
         let n = subtracks.len();
         let mut graph = AudioGraph::new(sample_rate, buffer_size);
 
         // SubtrackInputs node (N outputs, one per child)
-        // NOTE: `new()` initialises buffers as zero-length; call `update_subtracks` immediately
-        // to allocate stereo interleaved buffers (buffer_size * 2 samples each).
         let mut inputs_node = SubtrackInputsNode::new("Subtrack Inputs", subtracks);
         let subtracks_copy = inputs_node.subtracks().to_vec();
         inputs_node.update_subtracks(subtracks_copy, buffer_size);
         let inputs_id = graph.add_node(Box::new(inputs_node));
         graph.set_node_position(inputs_id, 100.0, 150.0);
 
-        // Mixer node (starts with 1 spare; grows as connections are made)
+        // Mixer node
         let mixer_node = Box::new(MixerNode::new("Mixer"));
         let mixer_id = graph.add_node(mixer_node);
-        graph.set_node_position(mixer_id, 350.0, 150.0);
+        graph.set_node_position(mixer_id, 330.0, 150.0);
+
+        // Gain node — group volume control
+        let gain_id = graph.add_node(Box::new(GainNode::new("Volume")));
+        graph.set_node_position(gain_id, 520.0, 150.0);
+
+        // AutomationInput — drives the Gain's CV port
+        let mut auto_node = AutomationInputNode::new("Volume CV");
+        auto_node.set_display_name("Volume".to_string());
+        auto_node.value_min = 0.0;
+        auto_node.value_max = 2.0;
+        auto_node.clear_keyframes();
+        if existing_volume_kfs.is_empty() {
+            auto_node.add_keyframe(AutomationKeyframe::new(Beats::ZERO, 1.0));
+        } else {
+            for kf in existing_volume_kfs {
+                auto_node.add_keyframe(kf);
+            }
+        }
+        let auto_id = graph.add_node(Box::new(auto_node));
+        graph.set_node_position(auto_id, 520.0, 320.0);
 
         // AudioOutput node
         let output_node = Box::new(AudioOutputNode::new("Audio Output"));
         let output_id = graph.add_node(output_node);
-        graph.set_node_position(output_id, 600.0, 150.0);
+        graph.set_node_position(output_id, 720.0, 150.0);
 
         // Connect SubtrackInputs[i] → Mixer[i] for each subtrack
         for i in 0..n {
             let _ = graph.connect(inputs_id, i, mixer_id, i);
         }
-        let _ = graph.connect(mixer_id, 0, output_id, 0);
+        let _ = graph.connect(mixer_id, 0, gain_id, 0);    // Mixer → Gain audio
+        let _ = graph.connect(auto_id, 0, gain_id, 1);     // AutomationInput → Gain CV
+        let _ = graph.connect(gain_id, 0, output_id, 0);   // Gain → Audio Out
         graph.set_output_node(Some(output_id));
 
         self.audio_graph = graph;
         self.audio_graph_preset = None;
         self.graph_is_default = true;
+    }
+
+    /// Extract Volume AutomationInput keyframes from the current graph (if any),
+    /// so they can be preserved across `set_subtrack_graph` rebuilds.
+    fn get_volume_automation_keyframes(&self) -> Vec<super::node_graph::nodes::AutomationKeyframe> {
+        use super::node_graph::nodes::AutomationInputNode;
+        for idx in self.audio_graph.node_indices() {
+            if let Some(node) = self.audio_graph.get_graph_node(idx) {
+                if node.node.node_type() == "AutomationInput" {
+                    if let Some(auto_node) = node.node.as_any().downcast_ref::<AutomationInputNode>() {
+                        return auto_node.keyframes().to_vec();
+                    }
+                }
+            }
+        }
+        Vec::new()
     }
 
     /// Add a new subtrack port to the existing graph.

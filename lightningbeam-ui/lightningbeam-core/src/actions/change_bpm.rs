@@ -13,7 +13,6 @@ use crate::tempo_map::TempoMap;
 pub struct ChangeBpmAction {
     old_map: TempoMap,
     new_map: TempoMap,
-    time_sig: (u32, u32),
 }
 
 impl ChangeBpmAction {
@@ -22,14 +21,13 @@ impl ChangeBpmAction {
         let old_map = document.tempo_map().clone();
         let mut new_map = old_map.clone();
         new_map.set_global_bpm(new_bpm);
-        let time_sig = (document.time_signature.numerator, document.time_signature.denominator);
-        Self { old_map, new_map, time_sig }
+        Self { old_map, new_map }
     }
 
     /// Build from explicit old/new maps (used when the map already changed in-place,
     /// e.g., after live drag preview; the caller provides start and end states).
-    pub fn from_maps(old_map: TempoMap, new_map: TempoMap, time_sig: (u32, u32)) -> Self {
-        Self { old_map, new_map, time_sig }
+    pub fn from_maps(old_map: TempoMap, new_map: TempoMap) -> Self {
+        Self { old_map, new_map }
     }
 
     pub fn new_bpm(&self) -> f64 { self.new_map.global_bpm() }
@@ -60,7 +58,7 @@ impl Action for ChangeBpmAction {
             Some(c) => c,
             None => return Ok(()),
         };
-        controller.set_tempo(self.new_map.global_bpm() as f32, self.time_sig);
+        controller.set_tempo_map(self.new_map.clone());
         Ok(())
     }
 
@@ -73,7 +71,7 @@ impl Action for ChangeBpmAction {
             Some(c) => c,
             None => return Ok(()),
         };
-        controller.set_tempo(self.old_map.global_bpm() as f32, self.time_sig);
+        controller.set_tempo_map(self.old_map.clone());
         Ok(())
     }
 }

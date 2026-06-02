@@ -21,7 +21,7 @@ pub use audio::{
 };
 pub use audio::node_graph::{GraphPreset, AudioGraph, PresetMetadata, SerializedConnection, SerializedNode};
 pub use time::{Beats, Seconds};
-pub use tempo_map::{TempoEntry, TempoMap, beats_to_seconds_stack, seconds_to_beats_stack};
+pub use tempo_map::{TempoEntry, TempoInterpolation, TempoMap, beats_to_seconds_stack, seconds_to_beats_stack};
 pub use command::{AudioEvent, Command, OscilloscopeData};
 pub use command::types::AutomationKeyframeData;
 pub use io::{load_midi_file, AudioFile, WaveformChunk, WaveformChunkKey, WaveformPeak, WavWriter};
