@@ -16,8 +16,8 @@ echo "Updating version to $VERSION in $CARGO_TOML..."
 sed -i "0,/^version = .*/s/^version = .*/version = \"$VERSION\"/" "$CARGO_TOML"
 
 echo "Committing to $MAIN_BRANCH..."
-git add "$CARGO_TOML"
-git commit -m "Bump version to $VERSION"
+git add "$CARGO_TOML" Changelog.md
+git diff --cached --quiet || git commit -m "Bump version to $VERSION"
 
 echo "Checking out the release branch..."
 git checkout $RELEASE_BRANCH
