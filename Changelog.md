@@ -1,3 +1,24 @@
+# 1.0.4-alpha:
+Changes:
+- Beats are now the canonical time representation (replacing seconds)
+- Tempo can now be non-constant (variable BPM)
+- All events now have time references in seconds, measures/beats, and frames
+- Add piano roll note snapping
+- Snap to beats in measures mode
+- Add velocity and modulation editing
+- Add pitch bend support
+- Add automation inputs for audio graphs
+- Add automatable volume and pan controls to default instruments
+- Add count-in and metronome
+- Add drawing tablet input support
+- Set default timeline mode based on activity
+- Tweaked automation lane appearance
+- Double CPU rendering performance by switching to tiny-skia
+
+Bugfixes:
+- Fix MIDI track recording previews
+- Fix timeline elements not updating on BPM changes
+
 # 1.0.3-alpha:
 Changes:
 - Add gradient support to vector graphics
