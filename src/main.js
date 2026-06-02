@@ -78,6 +78,8 @@ const { Menu, MenuItem, PredefinedMenuItem, Submenu } = window.__TAURI__.menu;
 const { getCurrentWindow } = window.__TAURI__.window;
 const { getVersion } = window.__TAURI__.app;
 
+import init, { CoreInterface } from './pkg/lightningbeam_core.js';
+
 window.onerror = (message, source, lineno, colno, error) => {
   invoke("error", { msg: `${message} at ${source}:${lineno}:${colno}\n${error?.stack || ''}` });
 };
@@ -8408,3 +8410,35 @@ if (window.openedFiles?.length>0) {
     newWindow(window.openedFiles[i])
   }
 }
+
+async function testAudio() {
+  console.log("Starting rust")
+  await init();
+  console.log("Rust started")
+  const coreInterface = new CoreInterface(100, 100)
+  coreInterface.init()
+  coreInterface.play(0.0)
+  console.log(coreInterface)
+
+  let audioStarted = false;
+  const startCoreInterfaceAudio = () => {
+    if (!audioStarted) {
+      try {
+        coreInterface.resume_audio();
+        audioStarted = true;
+        console.log("Started CoreInterface Audio!")
+      } catch (err) {
+        console.error("Audio resume failed:", err);
+      }
+    }
+
+    // Remove the event listeners to prevent them from firing again
+    document.removeEventListener("click", startCoreInterfaceAudio);
+    document.removeEventListener("keydown", startCoreInterfaceAudio);
+  };
+
+  // Add event listeners for mouse click and key press
+  document.addEventListener("click", startCoreInterfaceAudio);
+  document.addEventListener("keydown", startCoreInterfaceAudio);
+}
+testAudio()

@@ -1,0 +1,14 @@
+{
+  "name": "lightningbeam-core",
+  "version": "0.1.0",
+  "files": [
+    "lightningbeam_core_bg.wasm",
+    "lightningbeam_core.js",
+    "lightningbeam_core.d.ts"
+  ],
+  "module": "lightningbeam_core.js",
+  "types": "lightningbeam_core.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
