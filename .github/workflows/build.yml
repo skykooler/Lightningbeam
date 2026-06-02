@@ -210,7 +210,8 @@ jobs:
         shell: bash
         run: |
           cd lightningbeam-ui
-          cargo generate-rpm -p lightningbeam-editor
+          RPM_VERSION=$(grep '^version' lightningbeam-editor/Cargo.toml | sed 's/.*"\(.*\)"/\1/' | tr '-' '~')
+          cargo generate-rpm -p lightningbeam-editor --set-metadata="version = \"$RPM_VERSION\""
 
       - name: Build AppImage
         if: matrix.platform == 'ubuntu-24.04'
