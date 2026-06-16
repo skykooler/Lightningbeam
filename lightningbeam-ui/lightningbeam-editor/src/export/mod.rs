@@ -113,10 +113,10 @@ struct ParallelExportState {
     video_progress_rx: Receiver<ExportProgress>,
     /// Audio progress channel
     audio_progress_rx: Receiver<ExportProgress>,
-    /// Video encoder thread handle
-    video_thread: std::thread::JoinHandle<()>,
-    /// Audio export thread handle
-    audio_thread: std::thread::JoinHandle<()>,
+    /// Video encoder thread handle (taken when the mux thread is spawned).
+    video_thread: Option<std::thread::JoinHandle<()>>,
+    /// Audio export thread handle (taken when the mux thread is spawned).
+    audio_thread: Option<std::thread::JoinHandle<()>>,
     /// Temporary video file path
     temp_video_path: PathBuf,
     /// Temporary audio file path
@@ -127,6 +127,9 @@ struct ParallelExportState {
     video_progress: Option<ExportProgress>,
     /// Latest audio progress
     audio_progress: Option<ExportProgress>,
+    /// Result channel for the background mux. `Some` once muxing has started; the
+    /// mux runs off the UI thread so the app stays responsive during finalization.
+    mux_rx: Option<Receiver<Result<(), String>>>,
 }
 
 impl ExportOrchestrator {
@@ -220,52 +223,62 @@ impl ExportOrchestrator {
             parallel.audio_progress = Some(progress);
         }
 
-        // Check if both are complete
-        let video_complete = matches!(parallel.video_progress, Some(ExportProgress::Complete { .. }));
-        let audio_complete = matches!(parallel.audio_progress, Some(ExportProgress::Complete { .. }));
-
-        if video_complete && audio_complete {
-            println!("🎬🎵 [PARALLEL] Both video and audio complete, starting mux");
-
-            // Take parallel state to extract file paths
-            let parallel_state = self.parallel_export.take().unwrap();
-
-            // Wait for threads to finish
-            parallel_state.video_thread.join().ok();
-            parallel_state.audio_thread.join().ok();
-
-            // Start muxing
-            match Self::mux_video_and_audio(
-                &parallel_state.temp_video_path,
-                &parallel_state.temp_audio_path,
-                &parallel_state.final_output_path,
-            ) {
-                Ok(()) => {
+        // If a background mux is already running, poll it without blocking the UI.
+        if parallel.mux_rx.is_some() {
+            match parallel.mux_rx.as_ref().unwrap().try_recv() {
+                Ok(Ok(())) => {
                     println!("✅ [MUX] Muxing complete, cleaning up temp files");
-
-                    // Clean up temp files
-                    std::fs::remove_file(&parallel_state.temp_video_path).ok();
-                    std::fs::remove_file(&parallel_state.temp_audio_path).ok();
-
-                    return Some(ExportProgress::Complete {
-                        output_path: parallel_state.final_output_path,
-                    });
+                    let state = self.parallel_export.take().unwrap();
+                    std::fs::remove_file(&state.temp_video_path).ok();
+                    std::fs::remove_file(&state.temp_audio_path).ok();
+                    return Some(ExportProgress::Complete { output_path: state.final_output_path });
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
                     println!("❌ [MUX] Muxing failed: {}", err);
-                    return Some(ExportProgress::Error {
-                        message: format!("Muxing failed: {}", err),
-                    });
+                    self.parallel_export = None;
+                    return Some(ExportProgress::Error { message: format!("Muxing failed: {}", err) });
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still muxing — keep the UI responsive and show finalizing state.
+                    return Some(ExportProgress::Finalizing);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.parallel_export = None;
+                    return Some(ExportProgress::Error { message: "Mux thread terminated unexpectedly".to_string() });
                 }
             }
         }
 
-        // Check for errors
+        // Check for errors before completion.
         if let Some(ExportProgress::Error { ref message }) = parallel.video_progress {
             return Some(ExportProgress::Error { message: format!("Video: {}", message) });
         }
         if let Some(ExportProgress::Error { ref message }) = parallel.audio_progress {
             return Some(ExportProgress::Error { message: format!("Audio: {}", message) });
+        }
+
+        // Both streams done → spawn the mux on a background thread (the previous
+        // implementation muxed synchronously here on the UI thread, which froze the
+        // app for the whole re-mux pass after progress already hit 100%).
+        let video_complete = matches!(parallel.video_progress, Some(ExportProgress::Complete { .. }));
+        let audio_complete = matches!(parallel.audio_progress, Some(ExportProgress::Complete { .. }));
+        if video_complete && audio_complete {
+            println!("🎬🎵 [PARALLEL] Both video and audio complete, starting background mux");
+            let video_thread = parallel.video_thread.take();
+            let audio_thread = parallel.audio_thread.take();
+            let video_path = parallel.temp_video_path.clone();
+            let audio_path = parallel.temp_audio_path.clone();
+            let output_path = parallel.final_output_path.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                // The export threads have signalled Complete; join is near-instant.
+                if let Some(t) = video_thread { t.join().ok(); }
+                if let Some(t) = audio_thread { t.join().ok(); }
+                let result = Self::mux_video_and_audio(&video_path, &audio_path, &output_path);
+                tx.send(result).ok();
+            });
+            parallel.mux_rx = Some(rx);
+            return Some(ExportProgress::Finalizing);
         }
 
         // Return combined progress
@@ -979,13 +992,14 @@ impl ExportOrchestrator {
         self.parallel_export = Some(ParallelExportState {
             video_progress_rx,
             audio_progress_rx,
-            video_thread,
-            audio_thread,
+            video_thread: Some(video_thread),
+            audio_thread: Some(audio_thread),
             temp_video_path,
             temp_audio_path,
             final_output_path: output_path,
             video_progress: None,
             audio_progress: None,
+            mux_rx: None,
         });
 
         println!("🎬🎵 [PARALLEL EXPORT] Both threads spawned, ready for frames");

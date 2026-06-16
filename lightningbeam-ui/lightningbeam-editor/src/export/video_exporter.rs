@@ -982,8 +982,18 @@ pub fn render_frame_to_rgba_hdr(
     // Set document time to the frame timestamp
     document.current_time = timestamp;
 
-    // Use identity transform for export (document coordinates = pixel coordinates)
-    let base_transform = Affine::IDENTITY;
+    // Scale the document to the export resolution. The core renderer bakes this
+    // base transform into every layer (vector scenes, raster and video layer
+    // transforms), so the whole stage scales up/down to fill the output. When the
+    // export size matches the document this is the identity.
+    let base_transform = if document.width > 0.0 && document.height > 0.0 {
+        Affine::scale_non_uniform(
+            width as f64 / document.width,
+            height as f64 / document.height,
+        )
+    } else {
+        Affine::IDENTITY
+    };
 
     // Render document for compositing (returns per-layer scenes)
     let composite_result = render_document_for_compositing(
@@ -1189,8 +1199,18 @@ pub fn render_frame_to_gpu_rgba(
     // Set document time to the frame timestamp
     document.current_time = timestamp;
 
-    // Use identity transform for export (document coordinates = pixel coordinates)
-    let base_transform = Affine::IDENTITY;
+    // Scale the document to the export resolution. The core renderer bakes this
+    // base transform into every layer (vector scenes, raster and video layer
+    // transforms), so the whole stage scales up/down to fill the output. When the
+    // export size matches the document this is the identity.
+    let base_transform = if document.width > 0.0 && document.height > 0.0 {
+        Affine::scale_non_uniform(
+            width as f64 / document.width,
+            height as f64 / document.height,
+        )
+    } else {
+        Affine::IDENTITY
+    };
 
     // Render document for compositing (returns per-layer scenes)
     let composite_result = render_document_for_compositing(
