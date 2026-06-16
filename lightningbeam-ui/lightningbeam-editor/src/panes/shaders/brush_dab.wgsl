@@ -37,7 +37,7 @@ struct Params {
 @group(0) @binding(0) var<storage, read> dabs:       array<GpuDab>;
 @group(0) @binding(1) var<uniform>       params:     Params;
 @group(0) @binding(2) var               canvas_src: texture_2d<f32>;
-@group(0) @binding(3) var               canvas_dst: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var               canvas_dst: texture_storage_2d<rgba16float, write>;
 
 // ---------------------------------------------------------------------------
 // Manual bilinear sample from canvas_src at sub-pixel coordinates (px, py).

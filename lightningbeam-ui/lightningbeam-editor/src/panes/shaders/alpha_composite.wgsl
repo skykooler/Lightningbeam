@@ -5,12 +5,12 @@
 //
 //   B[px] = C[px] + A[px] * (1 − C[px].a)    (Porter-Duff src-over, C over A)
 //
-// All textures are Rgba8Unorm, linear premultiplied RGBA.
+// All textures are Rgba16Float, linear premultiplied RGBA.
 // Dispatch: ceil(w/8) × ceil(h/8) × 1.
 
 @group(0) @binding(0) var tex_a: texture_2d<f32>;                        // source (A)
 @group(0) @binding(1) var tex_c: texture_2d<f32>;                        // accumulated dabs (C)
-@group(0) @binding(2) var tex_b: texture_storage_2d<rgba8unorm, write>;  // output (B)
+@group(0) @binding(2) var tex_b: texture_storage_2d<rgba16float, write>;  // output (B)
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {

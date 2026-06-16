@@ -84,6 +84,12 @@ fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
     );
 }
 
+// The HDR pipeline feeds this shader LINEAR light, but the HSL model (and the
+// lightness/saturation axes users expect) is defined on gamma-encoded sRGB.
+// Convert to sRGB, run the HSL adjustment there, then convert back to linear.
+// sRGB helpers (linear_to_srgb / srgb_to_linear) come from the prepended
+// COLOR_WGSL prelude.
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let src = textureSample(source_tex, source_sampler, in.uv);
@@ -91,8 +97,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let saturation = uniforms.params0.y;          // Multiplier (1.0 = no change)
     let lightness = uniforms.params0.z;           // Additive (-1 to 1)
 
+    let src_srgb = linear_to_srgb(src.rgb);
+
     // Convert to HSL
-    var hsl = rgb_to_hsl(src.rgb);
+    var hsl = rgb_to_hsl(src_srgb);
 
     // Apply adjustments
     hsl.x = fract(hsl.x + hue_shift);           // Shift hue (wrapping)
@@ -102,6 +110,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Convert back to RGB
     let adjusted = hsl_to_rgb(hsl);
 
-    let result = mix(src.rgb, adjusted, uniforms.mix);
-    return vec4<f32>(result, src.a);
+    let result_srgb = mix(src_srgb, adjusted, uniforms.mix);
+    return vec4<f32>(srgb_to_linear(result_srgb), src.a);
 }

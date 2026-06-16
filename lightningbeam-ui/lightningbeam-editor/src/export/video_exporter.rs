@@ -191,7 +191,9 @@ impl ExportGpuResources {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("linear_to_srgb_shader"),
-            source: wgpu::ShaderSource::Wgsl(LINEAR_TO_SRGB_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{}", lightningbeam_core::gpu::COLOR_WGSL, LINEAR_TO_SRGB_SHADER).into(),
+            ),
         });
 
         let linear_to_srgb_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -310,32 +312,24 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-// Linear to sRGB color space conversion (per channel)
-fn linear_to_srgb_channel(c: f32) -> f32 {
-    return select(
-        1.055 * pow(c, 1.0 / 2.4) - 0.055,
-        c * 12.92,
-        c <= 0.0031308
-    );
-}
-
-fn linear_to_srgb(color: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        linear_to_srgb_channel(color.r),
-        linear_to_srgb_channel(color.g),
-        linear_to_srgb_channel(color.b)
-    );
-}
+// linear_to_srgb / linear_to_srgb_channel are provided by the prepended
+// COLOR_WGSL prelude (see the create_shader_module call site).
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let src = textureSample(source_tex, source_sampler, in.uv);
 
-    // Convert linear HDR to sRGB
-    let srgb = linear_to_srgb(src.rgb);
+    // The compositor accumulates PREMULTIPLIED linear color. Unpremultiply
+    // before the sRGB OETF (srgb(rgb*a) != srgb(rgb)*a) and emit STRAIGHT
+    // alpha, which is what PNG export / the readback path expect. For opaque
+    // pixels (a == 1, the normal video case) this is an exact identity.
+    let a = src.a;
+    let straight = select(src.rgb / a, vec3<f32>(0.0), a <= 0.0);
 
-    // Alpha stays unchanged
-    return vec4<f32>(srgb, src.a);
+    // Convert linear HDR to sRGB
+    let srgb = linear_to_srgb(straight);
+
+    return vec4<f32>(srgb, a);
 }
 "#;
 
@@ -522,12 +516,27 @@ pub fn setup_video_encoder(
     encoder.set_bit_rate((bitrate_kbps * 1000) as usize);
     encoder.set_gop(framerate as u32); // 1 second GOP
 
+    // Tag the color metadata so players interpret the YUV correctly. Our
+    // RGB→YUV conversion uses the BT.709 matrix with FULL-range (0–255) luma
+    // and no transfer applied to the already-sRGB-encoded RGB. Tagging this
+    // as full-range BT.709 (matrix/primaries/transfer) prevents the level/
+    // hue shift that occurs when a player assumes limited-range or BT.601.
+    // colorspace (matrix) and range have safe setters; primaries and trc are
+    // generic AVCodecContext options set via the open dictionary below.
+    encoder.set_colorspace(ffmpeg::color::Space::BT709);
+    encoder.set_color_range(ffmpeg::color::Range::JPEG); // full range
+
     println!("📐 Video dimensions: {}×{} (aligned to {}×{} for H.264)",
              width, height, aligned_width, aligned_height);
 
-    // Open encoder with codec (like working MP3 export)
+    // Open encoder with codec (like working MP3 export). color_primaries and
+    // color_trc have no typed setter on the encoder, so pass them as generic
+    // AVCodecContext options (BT.709) through the open dictionary.
+    let mut color_opts = ffmpeg::Dictionary::new();
+    color_opts.set("color_primaries", "bt709");
+    color_opts.set("color_trc", "bt709");
     let encoder = encoder
-        .open_as(codec)
+        .open_as_with(codec, color_opts)
         .map_err(|e| format!("Failed to open video encoder: {}", e))?;
 
     Ok((encoder, codec))

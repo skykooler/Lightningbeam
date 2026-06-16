@@ -217,7 +217,9 @@ impl SharedVelloResources {
         // Uses linear_to_srgb.wgsl which reads from Rgba16Float HDR texture
         let hdr_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("hdr_blit_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/linear_to_srgb.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{}", lightningbeam_core::gpu::COLOR_WGSL, include_str!("shaders/linear_to_srgb.wgsl")).into(),
+            ),
         });
 
         let hdr_blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

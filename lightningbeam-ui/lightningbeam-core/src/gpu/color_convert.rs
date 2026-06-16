@@ -6,6 +6,41 @@
 
 use super::HDR_FORMAT;
 
+/// Shared WGSL sRGB transfer functions — the single source of the sRGB OETF/EOTF
+/// used by every gamma-aware shader. Prepend it to a shader's source (it defines
+/// the functions before the body, so call order doesn't matter):
+/// `srgb_to_linear_channel` / `linear_to_srgb_channel` (scalar) and
+/// `srgb_to_linear` / `linear_to_srgb` (vec3). `linear_to_srgb_channel` clamps to
+/// [0,1] (its outputs target 8-bit / SDR display surfaces).
+pub const COLOR_WGSL: &str = r#"
+fn srgb_to_linear_channel(c: f32) -> f32 {
+    return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
+fn linear_to_srgb_channel(c: f32) -> f32 {
+    let x = clamp(c, 0.0, 1.0);
+    return select(1.055 * pow(x, 1.0 / 2.4) - 0.055, x * 12.92, x <= 0.0031308);
+}
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(srgb_to_linear_channel(c.r), srgb_to_linear_channel(c.g), srgb_to_linear_channel(c.b));
+}
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(linear_to_srgb_channel(c.r), linear_to_srgb_channel(c.g), linear_to_srgb_channel(c.b));
+}
+"#;
+
+/// sRGB → linear for one channel in `[0, 1]` (CPU twin of the WGSL
+/// `srgb_to_linear_channel`). The single source of the EOTF for CPU code.
+pub fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// linear → sRGB for one channel, clamped to `[0, 1]` (CPU twin of the WGSL
+/// `linear_to_srgb_channel`). The single source of the OETF for CPU code.
+pub fn linear_to_srgb(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
+}
+
 /// GPU pipeline for sRGB to linear color space conversion
 ///
 /// Converts Rgba8Srgb textures to Rgba16Float linear textures.

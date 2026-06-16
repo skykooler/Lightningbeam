@@ -24,24 +24,94 @@ use lightningbeam_core::brush_engine::GpuDab;
 // Colour-space helpers
 // ---------------------------------------------------------------------------
 
-/// Decode one sRGB-encoded byte to linear float [0, 1].
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
+use lightningbeam_core::gpu::srgb_to_linear;
+
+// Lookup tables that keep the per-pixel `powf`/f16 conversions out of the canvas
+// upload/readback loops. Doing the sRGB transfer per pixel was ~110ms for an
+// 800x600 readback in a debug build; precomputing it once turns each channel
+// into a table index.
+
+/// Upload encode: sRGB byte → linear f16 little-endian bytes (for RGB channels).
+fn srgb_to_linear_f16_lut() -> &'static [[u8; 2]; 256] {
+    static LUT: std::sync::OnceLock<[[u8; 2]; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut lut = [[0u8; 2]; 256];
+        for (i, out) in lut.iter_mut().enumerate() {
+            *out = half::f16::from_f32(srgb_to_linear(i as f32 / 255.0)).to_le_bytes();
+        }
+        lut
+    })
 }
 
-/// Encode one linear float [0, 1] to an sRGB-encoded byte.
-fn linear_to_srgb_byte(c: u8) -> u8 {
-    let f = c as f32 / 255.0;
-    let encoded = if f <= 0.0031308 {
-        f * 12.92
-    } else {
-        1.055 * f.powf(1.0 / 2.4) - 0.055
-    };
-    (encoded * 255.0 + 0.5) as u8
+/// Upload encode: byte → linear f16 little-endian bytes (for the alpha channel,
+/// which is not gamma-encoded).
+fn linear_f16_lut() -> &'static [[u8; 2]; 256] {
+    static LUT: std::sync::OnceLock<[[u8; 2]; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut lut = [[0u8; 2]; 256];
+        for (i, out) in lut.iter_mut().enumerate() {
+            *out = half::f16::from_f32(i as f32 / 255.0).to_le_bytes();
+        }
+        lut
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Incremental ping-pong sync
+// ---------------------------------------------------------------------------
+
+/// Tile size (px) for incremental canvas sync copies between the ping-pong
+/// textures. The brush keeps both textures identical; each frame only the tiles
+/// touched by that frame's dabs are copied, so this bounds both the wasted bytes
+/// per touched tile and the number of copy regions.
+const SYNC_TILE: u32 = 128;
+
+/// Coalesced copy rectangles (x, y, w, h) covering the tiles touched by `dabs`,
+/// clamped to the canvas. Adjacent tiles in a row are merged into one rectangle
+/// to keep the number of `copy_texture_to_texture` calls small.
+fn dirty_tile_rects(dabs: &[GpuDab], canvas_w: u32, canvas_h: u32) -> Vec<(u32, u32, u32, u32)> {
+    if canvas_w == 0 || canvas_h == 0 || dabs.is_empty() {
+        return Vec::new();
+    }
+    let tiles_x = canvas_w.div_ceil(SYNC_TILE);
+    let tiles_y = canvas_h.div_ceil(SYNC_TILE);
+    let mut mask = vec![false; (tiles_x * tiles_y) as usize];
+
+    for d in dabs {
+        let r = d.radius + 1.0;
+        // Dab pixel bbox clamped to the canvas, then mapped to tile indices.
+        let px0 = (d.x - r).floor().clamp(0.0, (canvas_w - 1) as f32) as u32;
+        let py0 = (d.y - r).floor().clamp(0.0, (canvas_h - 1) as f32) as u32;
+        let px1 = (d.x + r).ceil().clamp(0.0, (canvas_w - 1) as f32) as u32;
+        let py1 = (d.y + r).ceil().clamp(0.0, (canvas_h - 1) as f32) as u32;
+        for ty in (py0 / SYNC_TILE)..=(py1 / SYNC_TILE) {
+            for tx in (px0 / SYNC_TILE)..=(px1 / SYNC_TILE) {
+                mask[(ty * tiles_x + tx) as usize] = true;
+            }
+        }
+    }
+
+    // Merge horizontal runs of set tiles in each tile-row into one rectangle.
+    let mut rects = Vec::new();
+    for ty in 0..tiles_y {
+        let mut tx = 0;
+        while tx < tiles_x {
+            if mask[(ty * tiles_x + tx) as usize] {
+                let run_start = tx;
+                while tx < tiles_x && mask[(ty * tiles_x + tx) as usize] {
+                    tx += 1;
+                }
+                let x = run_start * SYNC_TILE;
+                let y = ty * SYNC_TILE;
+                let w = (tx * SYNC_TILE).min(canvas_w) - x;
+                let h = ((ty + 1) * SYNC_TILE).min(canvas_h) - y;
+                rects.push((x, y, w, h));
+            } else {
+                tx += 1;
+            }
+        }
+    }
+    rects
 }
 
 // ---------------------------------------------------------------------------
@@ -68,7 +138,7 @@ impl CanvasPair {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage:  wgpu::TextureUsages::TEXTURE_BINDING
                   | wgpu::TextureUsages::STORAGE_BINDING
                   | wgpu::TextureUsages::COPY_SRC
@@ -93,18 +163,24 @@ impl CanvasPair {
     /// `pixels` is expected to be **sRGB-encoded premultiplied** (the format stored
     /// in `raw_pixels` / PNG files).  The values are decoded to linear premultiplied
     /// before being written to the canvas, which operates entirely in linear space.
+    /// The canvas is `Rgba16Float`, so linear values are stored at 16-bit float
+    /// precision — storing linear light in 8 bits would band badly in shadows.
     pub fn upload(&self, queue: &wgpu::Queue, pixels: &[u8]) {
-        // Decode sRGB-premultiplied → linear premultiplied for the GPU canvas.
+        // Decode sRGB-premultiplied → linear premultiplied f16 for the GPU canvas.
+        // LUT-driven so there is no per-pixel powf / float conversion.
+        let rgb_lut = srgb_to_linear_f16_lut();
+        let a_lut = linear_f16_lut();
         let linear: Vec<u8> = pixels.chunks_exact(4).flat_map(|p| {
-            let r = (srgb_to_linear(p[0] as f32 / 255.0) * 255.0 + 0.5) as u8;
-            let g = (srgb_to_linear(p[1] as f32 / 255.0) * 255.0 + 0.5) as u8;
-            let b = (srgb_to_linear(p[2] as f32 / 255.0) * 255.0 + 0.5) as u8;
-            [r, g, b, p[3]]
+            let r = rgb_lut[p[0] as usize];
+            let g = rgb_lut[p[1] as usize];
+            let b = rgb_lut[p[2] as usize];
+            let a = a_lut[p[3] as usize];
+            [r[0], r[1], g[0], g[1], b[0], b[1], a[0], a[1]]
         }).collect();
 
         let layout = wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(self.width * 4),
+            bytes_per_row: Some(self.width * 8), // Rgba16Float = 8 bytes/texel
             rows_per_image: Some(self.height),
         };
         let extent = wgpu::Extent3d {
@@ -204,7 +280,7 @@ impl RasterTransformPipeline {
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access:         wgpu::StorageTextureAccess::WriteOnly,
-                            format:         wgpu::TextureFormat::Rgba8Unorm,
+                            format:         wgpu::TextureFormat::Rgba16Float,
                             view_dimension: wgpu::TextureViewDimension::D2,
                         },
                         count: None,
@@ -384,7 +460,7 @@ impl WarpApplyPipeline {
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access:         wgpu::StorageTextureAccess::WriteOnly,
-                            format:         wgpu::TextureFormat::Rgba8Unorm,
+                            format:         wgpu::TextureFormat::Rgba16Float,
                             view_dimension: wgpu::TextureViewDimension::D2,
                         },
                         count: None,
@@ -596,7 +672,7 @@ impl LiquifyBrushPipeline {
 // Gradient-fill pipeline
 // ---------------------------------------------------------------------------
 
-/// One gradient stop on the GPU side.  Colors are linear straight-alpha [0..1].
+/// One gradient stop on the GPU side.  Colors are sRGB straight-alpha [0..1].
 /// Must be 32 bytes (8 × f32) to match `GradientStop` in `gradient_fill.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -611,13 +687,18 @@ pub struct GpuGradientStop {
 
 impl GpuGradientStop {
     /// Construct from sRGB u8 bytes (as stored in `ShapeColor`).
-    /// RGB is converted to linear; alpha is kept linear (not gamma-encoded).
+    ///
+    /// Stops are kept in sRGB (gamma) space so the shader interpolates between
+    /// them in gamma space — matching the CPU raster path (`Gradient::eval`) and
+    /// the vector/peniko path, and the gamma-space gradients users expect from
+    /// tools like Photoshop/Flash. The shader converts the interpolated color to
+    /// linear before compositing into the linear canvas.
     pub fn from_srgb_u8(position: f32, r: u8, g: u8, b: u8, a: u8) -> Self {
         Self {
             position,
-            r: srgb_to_linear(r as f32 / 255.0),
-            g: srgb_to_linear(g as f32 / 255.0),
-            b: srgb_to_linear(b as f32 / 255.0),
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
             a: a as f32 / 255.0,
             _pad: [0.0; 3],
         }
@@ -654,7 +735,7 @@ impl GradientFillPipeline {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label:  Some("gradient_fill_shader"),
             source: wgpu::ShaderSource::Wgsl(
-                include_str!("panes/shaders/gradient_fill.wgsl").into(),
+                color_wgsl(include_str!("panes/shaders/gradient_fill.wgsl")).into(),
             ),
         });
 
@@ -701,7 +782,7 @@ impl GradientFillPipeline {
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access:         wgpu::StorageTextureAccess::WriteOnly,
-                            format:         wgpu::TextureFormat::Rgba8Unorm,
+                            format:         wgpu::TextureFormat::Rgba16Float,
                             view_dimension: wgpu::TextureViewDimension::D2,
                         },
                         count: None,
@@ -780,9 +861,76 @@ impl GradientFillPipeline {
 /// Compute pipeline: composites the scratch buffer C over the source A → output B.
 ///
 /// Binding layout (see `alpha_composite.wgsl`):
-///   0 = tex_a (texture_2d<f32>, Rgba8Unorm, sampled, not filterable)
-///   1 = tex_c (texture_2d<f32>, Rgba8Unorm, sampled, not filterable)
+///   0 = tex_a (texture_2d<f32>, Rgba16Float, sampled, not filterable)
+///   1 = tex_c (texture_2d<f32>, Rgba16Float, sampled, not filterable)
 ///   2 = tex_b (texture_storage_2d<rgba8unorm, write>)
+/// Prepend the shared WGSL sRGB color functions ([`COLOR_WGSL`]) to a shader
+/// source so the OETF/EOTF live in exactly one place.
+fn color_wgsl(shader_src: &str) -> String {
+    format!("{}\n{}", lightningbeam_core::gpu::COLOR_WGSL, shader_src)
+}
+
+/// A compute `texture_2d<f32>` sampled binding (non-filterable).
+fn sampled_tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Texture {
+            sample_type:    wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled:   false,
+        },
+        count: None,
+    }
+}
+
+/// A compute write-only storage-texture binding of the given format.
+fn storage_tex_entry(binding: u32, format: wgpu::TextureFormat) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::StorageTexture {
+            access:         wgpu::StorageTextureAccess::WriteOnly,
+            format,
+            view_dimension: wgpu::TextureViewDimension::D2,
+        },
+        count: None,
+    }
+}
+
+/// Build a compute pipeline + matching bind-group layout from WGSL source and
+/// layout entries (entry point `main`). Collapses the otherwise-identical
+/// pipeline/layout construction boilerplate shared by the compute pipelines.
+fn build_compute_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    shader_src: &str,
+    entries: &[wgpu::BindGroupLayoutEntry],
+) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label:  Some(label),
+        source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+    });
+    let bg_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some(label),
+        entries,
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label:                Some(label),
+        bind_group_layouts:   &[&bg_layout],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label:               Some(label),
+        layout:              Some(&layout),
+        module:              &shader,
+        entry_point:         Some("main"),
+        compilation_options: Default::default(),
+        cache:               None,
+    });
+    (pipeline, bg_layout)
+}
+
 struct AlphaCompositePipeline {
     pipeline:  wgpu::ComputePipeline,
     bg_layout: wgpu::BindGroupLayout,
@@ -790,53 +938,75 @@ struct AlphaCompositePipeline {
 
 impl AlphaCompositePipeline {
     fn new(device: &wgpu::Device) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some("alpha_composite_shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("panes/shaders/alpha_composite.wgsl").into(),
-            ),
-        });
-        let sampled_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Texture {
-                sample_type:    wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled:   false,
-            },
-            count: None,
-        };
-        let bg_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label:   Some("alpha_composite_bgl"),
-            entries: &[
-                sampled_entry(0), // tex_a
-                sampled_entry(1), // tex_c
-                wgpu::BindGroupLayoutEntry {
-                    binding:    2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access:         wgpu::StorageTextureAccess::WriteOnly,
-                        format:         wgpu::TextureFormat::Rgba8Unorm,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
+        let (pipeline, bg_layout) = build_compute_pipeline(
+            device,
+            "alpha_composite",
+            include_str!("panes/shaders/alpha_composite.wgsl"),
+            &[
+                sampled_tex_entry(0), // tex_a
+                sampled_tex_entry(1), // tex_c
+                storage_tex_entry(2, wgpu::TextureFormat::Rgba16Float), // tex_b (out)
             ],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label:                Some("alpha_composite_layout"),
-            bind_group_layouts:   &[&bg_layout],
-            push_constant_ranges: &[],
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label:               Some("alpha_composite_pipeline"),
-            layout:              Some(&layout),
-            module:              &shader,
-            entry_point:         Some("main"),
-            compilation_options: Default::default(),
-            cache:               None,
-        });
+        );
         Self { pipeline, bg_layout }
+    }
+}
+
+/// Compute pipeline that converts the linear-premultiplied `Rgba16Float` canvas
+/// into an `Rgba8Unorm` sRGB-premultiplied texture for fast readback.
+struct ReadbackSrgbPipeline {
+    pipeline:  wgpu::ComputePipeline,
+    bg_layout: wgpu::BindGroupLayout,
+}
+
+impl ReadbackSrgbPipeline {
+    fn new(device: &wgpu::Device) -> Self {
+        let (pipeline, bg_layout) = build_compute_pipeline(
+            device,
+            "canvas_readback_srgb",
+            &color_wgsl(include_str!("panes/shaders/canvas_readback_srgb.wgsl")),
+            &[
+                sampled_tex_entry(0),                                  // src (linear)
+                storage_tex_entry(1, wgpu::TextureFormat::Rgba8Unorm), // dst (sRGB)
+            ],
+        );
+        Self { pipeline, bg_layout }
+    }
+}
+
+/// Reusable scratch for `readback_canvas`: the Rgba8Unorm conversion target plus
+/// its MAP_READ staging buffer, kept across calls and rebuilt only on size change.
+struct ReadbackScratch {
+    width:  u32,
+    height: u32,
+    view:   wgpu::TextureView,
+    tex:    wgpu::Texture,
+    staging: wgpu::Buffer,
+    /// 256-aligned bytes-per-row of the staging buffer (Rgba8 = 4 B/texel).
+    bytes_per_row_aligned: u32,
+}
+
+impl ReadbackScratch {
+    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("canvas_readback_srgb"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let bytes_per_row_aligned = ((width * 4 + 255) / 256) * 256;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label:              Some("canvas_readback_buf"),
+            size:               (bytes_per_row_aligned * height) as u64,
+            usage:              wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { width, height, view, tex, staging, bytes_per_row_aligned }
     }
 }
 
@@ -860,13 +1030,20 @@ pub struct GpuBrushEngine {
     /// Lazily created on first unified-tool composite dispatch.
     composite_pipeline: Option<AlphaCompositePipeline>,
 
+    /// Lazily-created pipeline converting the canvas to sRGB for fast readback.
+    readback_srgb_pipeline: Option<ReadbackSrgbPipeline>,
+
+    /// Reused scratch (texture + staging buffer) for `readback_canvas`, recreated
+    /// only when the canvas size changes, to avoid per-stroke GPU allocations.
+    readback_scratch: Option<ReadbackScratch>,
+
     /// Canvas texture pairs keyed by keyframe UUID.
     pub canvases: HashMap<Uuid, CanvasPair>,
 
     /// Displacement map buffers keyed by a caller-supplied UUID.
     pub displacement_bufs: HashMap<Uuid, DisplacementBuffer>,
 
-    /// Persistent `Rgba8Unorm` textures for idle raster layers.
+    /// Persistent `Rgba16Float` textures for idle raster layers.
     ///
     /// Keyed by keyframe UUID (same ID space as `canvases`).  Entries are uploaded
     /// once when `RasterKeyframe::texture_dirty` is set, then reused every frame.
@@ -890,7 +1067,7 @@ struct DabParams {
 
 impl GpuBrushEngine {
     /// Create the pipeline.  Returns `Err` if the device lacks the required
-    /// storage-texture capability for `Rgba8Unorm`.
+    /// storage-texture capability for `Rgba16Float`.
     pub fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label:  Some("brush_dab_shader"),
@@ -942,7 +1119,7 @@ impl GpuBrushEngine {
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::StorageTexture {
                             access:         wgpu::StorageTextureAccess::WriteOnly,
-                            format:         wgpu::TextureFormat::Rgba8Unorm,
+                            format:         wgpu::TextureFormat::Rgba16Float,
                             view_dimension: wgpu::TextureViewDimension::D2,
                         },
                         count: None,
@@ -978,6 +1155,8 @@ impl GpuBrushEngine {
             liquify_brush_pipeline: None,
             gradient_fill_pipeline: None,
             composite_pipeline: None,
+            readback_srgb_pipeline: None,
+            readback_scratch:   None,
             canvases:           HashMap::new(),
             displacement_bufs:  HashMap::new(),
             raster_layer_cache: HashMap::new(),
@@ -1022,12 +1201,14 @@ impl GpuBrushEngine {
     ) {
         if dabs.is_empty() { return; }
 
-        // Smudge dabs must be applied one at a time so each dab reads the canvas
-        // state written by the previous dab.  Use bbox-only copies (union of current
-        // and previous dab) to avoid an expensive full-canvas copy per dab.
+        // render_dabs_batch keeps both ping-pong textures identical after every
+        // call, so smudge — whose each dab must read the previous dab's output —
+        // simply dispatches one dab at a time: each per-dab call leaves src fully
+        // authoritative for the next. Paint/erase dabs are independent within a
+        // frame (the shader accumulates them over the shared source), so they
+        // dispatch together as one batch.
         let is_smudge = dabs.first().map(|d| d.blend_mode == 2).unwrap_or(false);
         if is_smudge {
-            let mut prev_bbox: Option<(i32, i32, i32, i32)> = None;
             for dab in dabs {
                 let r = dab.radius + 1.0;
                 let cur_bbox = (
@@ -1036,31 +1217,24 @@ impl GpuBrushEngine {
                     (dab.x + r).ceil()  as i32,
                     (dab.y + r).ceil()  as i32,
                 );
-                // Expand copy region to include the previous dab's bbox so the
-                // pixels it wrote are visible as the source for this dab's smudge.
-                let copy_bbox = match prev_bbox {
-                    Some(pb) => (cur_bbox.0.min(pb.0), cur_bbox.1.min(pb.1),
-                                 cur_bbox.2.max(pb.2), cur_bbox.3.max(pb.3)),
-                    None     => cur_bbox,
-                };
                 self.render_dabs_batch(device, queue, keyframe_id,
-                    std::slice::from_ref(dab), cur_bbox, Some(copy_bbox), canvas_w, canvas_h);
-                prev_bbox = Some(cur_bbox);
+                    std::slice::from_ref(dab), cur_bbox, canvas_w, canvas_h);
             }
         } else {
-            self.render_dabs_batch(device, queue, keyframe_id, dabs, bbox, None, canvas_w, canvas_h);
+            self.render_dabs_batch(device, queue, keyframe_id, dabs, bbox, canvas_w, canvas_h);
         }
     }
 
-    /// Inner batch dispatch.
+    /// Dispatch one batch of dabs and keep the ping-pong textures identical.
     ///
-    /// `dispatch_bbox` — region dispatched to the compute shader (usually the union of all dab bboxes).
-    /// `copy_bbox`     — region to copy src→dst before dispatch:
-    ///   - `None`      → copy the full canvas (required for paint/erase batches so
-    ///                   dabs outside the current frame's region are preserved).
-    ///   - `Some(r)`   → copy only region `r` (sufficient for sequential smudge dabs
-    ///                   because both textures hold identical data outside previously
-    ///                   touched regions, so no full copy is needed).
+    /// Reads `src` and writes the result over `dispatch_bbox` into `dst`, then
+    /// copies only the tiles the dabs touched back from `dst` to `src` so both
+    /// textures stay authoritative — no full-canvas copy. The textures start equal
+    /// (seeded by `upload` at stroke start) and this preserves that invariant, so a
+    /// single dab per call is enough for smudge's read-after-write dependency.
+    ///
+    /// `dispatch_bbox` is the region dispatched to the compute shader (the union of
+    /// the batch's dab bboxes).
     fn render_dabs_batch(
         &mut self,
         device: &wgpu::Device,
@@ -1068,7 +1242,6 @@ impl GpuBrushEngine {
         keyframe_id: Uuid,
         dabs:        &[GpuDab],
         dispatch_bbox: (i32, i32, i32, i32),
-        copy_bbox:   Option<(i32, i32, i32, i32)>,
         canvas_w: u32,
         canvas_h: u32,
     ) {
@@ -1088,61 +1261,7 @@ impl GpuBrushEngine {
         let bbox_w = x1 - x0;
         let bbox_h = y1 - y0;
 
-        // Step 1: Copy src→dst.
-        // For paint/erase batches (copy_bbox = None): copy the ENTIRE canvas so dst
-        //   starts with all previous dabs — a bbox-only copy would lose dabs outside
-        //   this frame's region after swap.
-        // For smudge (copy_bbox = Some(r)): copy only the union of the current and
-        //   previous dab bboxes.  Outside that region both textures hold identical
-        //   data so no full copy is needed.
-        let mut copy_enc = device.create_command_encoder(
-            &wgpu::CommandEncoderDescriptor { label: Some("canvas_copy_encoder") },
-        );
-        match copy_bbox {
-            None => {
-                copy_enc.copy_texture_to_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture:   canvas.src(),
-                        mip_level: 0,
-                        origin:    wgpu::Origin3d::ZERO,
-                        aspect:    wgpu::TextureAspect::All,
-                    },
-                    wgpu::TexelCopyTextureInfo {
-                        texture:   canvas.dst(),
-                        mip_level: 0,
-                        origin:    wgpu::Origin3d::ZERO,
-                        aspect:    wgpu::TextureAspect::All,
-                    },
-                    wgpu::Extent3d { width: canvas_w, height: canvas_h, depth_or_array_layers: 1 },
-                );
-            }
-            Some(cb) => {
-                let cx0 = cb.0.max(0) as u32;
-                let cy0 = cb.1.max(0) as u32;
-                let cx1 = (cb.2 as u32).min(canvas_w);
-                let cy1 = (cb.3 as u32).min(canvas_h);
-                if cx1 > cx0 && cy1 > cy0 {
-                    copy_enc.copy_texture_to_texture(
-                        wgpu::TexelCopyTextureInfo {
-                            texture:   canvas.src(),
-                            mip_level: 0,
-                            origin:    wgpu::Origin3d { x: cx0, y: cy0, z: 0 },
-                            aspect:    wgpu::TextureAspect::All,
-                        },
-                        wgpu::TexelCopyTextureInfo {
-                            texture:   canvas.dst(),
-                            mip_level: 0,
-                            origin:    wgpu::Origin3d { x: cx0, y: cy0, z: 0 },
-                            aspect:    wgpu::TextureAspect::All,
-                        },
-                        wgpu::Extent3d { width: cx1 - cx0, height: cy1 - cy0, depth_or_array_layers: 1 },
-                    );
-                }
-            }
-        }
-        queue.submit(Some(copy_enc.finish()));
-
-        // Step 2: Upload all dabs as a single storage buffer.
+        // Step 1: Upload all dabs as a single storage buffer.
         let dab_bytes = bytemuck::cast_slice(dabs);
         let dab_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label:              Some("dab_storage_buf"),
@@ -1181,7 +1300,7 @@ impl GpuBrushEngine {
             ],
         });
 
-        // Step 3: Single dispatch over the union bounding box.
+        // Step 2: Single dispatch over the union bounding box.
         let mut compute_enc = device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("brush_dab_encoder") },
         );
@@ -1193,52 +1312,98 @@ impl GpuBrushEngine {
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(bbox_w.div_ceil(8), bbox_h.div_ceil(8), 1);
         }
+
+        // Step 3: Sync only the tiles these dabs touched from dst back to src, so
+        // both ping-pong textures stay identical and authoritative — only the bytes
+        // that actually changed are moved (no full-canvas copy). The copies share
+        // the compute encoder, so wgpu orders them after the dispatch writes.
+        for (rx, ry, rw, rh) in dirty_tile_rects(dabs, canvas_w, canvas_h) {
+            compute_enc.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture:   canvas.dst(),
+                    mip_level: 0,
+                    origin:    wgpu::Origin3d { x: rx, y: ry, z: 0 },
+                    aspect:    wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture:   canvas.src(),
+                    mip_level: 0,
+                    origin:    wgpu::Origin3d { x: rx, y: ry, z: 0 },
+                    aspect:    wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d { width: rw, height: rh, depth_or_array_layers: 1 },
+            );
+        }
         queue.submit(Some(compute_enc.finish()));
 
         // Step 4: Swap once — dst (with all dabs applied) becomes the new src.
         canvas.swap();
     }
 
-    /// Read the current canvas back to a CPU `Vec<u8>` (raw RGBA, row-major).
+    /// Read the current canvas back to a CPU `Vec<u8>` (sRGB-premultiplied RGBA,
+    /// row-major).
     ///
-    /// **Blocks** until the GPU work is complete (`Maintain::Wait`).
-    /// Should only be called at stroke end, not every frame.
+    /// The linear→sRGB conversion runs on the GPU into an `Rgba8Unorm` scratch
+    /// texture, so the CPU side is just a per-row `memcpy` (no per-pixel decode).
+    /// **Blocks** until the GPU work is complete. Call at stroke end, not per frame.
     ///
     /// Returns `None` if no canvas exists for `keyframe_id`.
     pub fn readback_canvas(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue:  &wgpu::Queue,
         keyframe_id: Uuid,
     ) -> Option<Vec<u8>> {
+        // Lazily build the conversion pipeline and (re)create the cached scratch if
+        // the canvas size changed — these mutable borrows end before the shared
+        // borrows below.
+        if self.readback_srgb_pipeline.is_none() {
+            self.readback_srgb_pipeline = Some(ReadbackSrgbPipeline::new(device));
+        }
+        let (width, height) = {
+            let canvas = self.canvases.get(&keyframe_id)?;
+            (canvas.width, canvas.height)
+        };
+        if self.readback_scratch.as_ref().map_or(true, |s| s.width != width || s.height != height) {
+            self.readback_scratch = Some(ReadbackScratch::new(device, width, height));
+        }
+
+        let pipeline = self.readback_srgb_pipeline.as_ref().unwrap();
+        let scratch = self.readback_scratch.as_ref().unwrap();
         let canvas = self.canvases.get(&keyframe_id)?;
-        let width  = canvas.width;
-        let height = canvas.height;
 
-        // wgpu requires bytes_per_row to be a multiple of 256
-        let bytes_per_row_aligned =
-            ((width * 4 + 255) / 256) * 256;
-        let total_bytes = (bytes_per_row_aligned * height) as u64;
-
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label:              Some("canvas_readback_buf"),
-            size:               total_bytes,
-            usage:              wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        // GPU pass: linear-premultiplied Rgba16Float → sRGB-premultiplied Rgba8Unorm.
+        // Reading back 8-bit sRGB lets the CPU just memcpy each row.
+        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("canvas_readback_srgb_bg"),
+            layout:  &pipeline.bg_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(canvas.src_view()) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&scratch.view) },
+            ],
         });
 
+        let bytes_per_row_aligned = scratch.bytes_per_row_aligned;
         let mut encoder = device.create_command_encoder(
             &wgpu::CommandEncoderDescriptor { label: Some("canvas_readback_encoder") },
         );
+        {
+            let mut pass = encoder.begin_compute_pass(
+                &wgpu::ComputePassDescriptor { label: Some("canvas_readback_srgb_pass"), timestamp_writes: None },
+            );
+            pass.set_pipeline(&pipeline.pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+        }
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture:  canvas.src(),
+                texture:  &scratch.tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &staging,
+                buffer: &scratch.staging,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset:         0,
                     bytes_per_row:  Some(bytes_per_row_aligned),
@@ -1249,8 +1414,8 @@ impl GpuBrushEngine {
         );
         queue.submit(Some(encoder.finish()));
 
-        // Block until complete
-        let slice = staging.slice(..);
+        // Block until complete.
+        let slice = scratch.staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| { let _ = tx.send(r); });
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
@@ -1258,27 +1423,19 @@ impl GpuBrushEngine {
 
         let mapped = slice.get_mapped_range();
 
-        // De-stride: copy only `width * 4` bytes per row (drop alignment padding)
-        let bytes_per_row_tight = (width * 4) as usize;
-        let bytes_per_row_src   = bytes_per_row_aligned as usize;
+        // De-stride with a per-row memcpy (dropping the 256-byte row padding). The
+        // bytes are already sRGB-premultiplied RGBA8 from the GPU pass, which is
+        // what Vello expects (ImageAlphaType::Premultiplied with sRGB channels).
+        let row_tight = (width * 4) as usize;
+        let row_src   = bytes_per_row_aligned as usize;
         let mut pixels = vec![0u8; (width * height * 4) as usize];
         for row in 0..height as usize {
-            let src = &mapped[row * bytes_per_row_src .. row * bytes_per_row_src + bytes_per_row_tight];
-            let dst = &mut pixels[row * bytes_per_row_tight .. (row + 1) * bytes_per_row_tight];
-            dst.copy_from_slice(src);
+            let src = &mapped[row * row_src .. row * row_src + row_tight];
+            pixels[row * row_tight .. (row + 1) * row_tight].copy_from_slice(src);
         }
 
         drop(mapped);
-        staging.unmap();
-
-        // Encode linear premultiplied → sRGB-encoded premultiplied so the returned
-        // bytes match what Vello expects (ImageAlphaType::Premultiplied with sRGB
-        // channels).  Alpha is left unchanged.
-        for pixel in pixels.chunks_exact_mut(4) {
-            pixel[0] = linear_to_srgb_byte(pixel[0]);
-            pixel[1] = linear_to_srgb_byte(pixel[1]);
-            pixel[2] = linear_to_srgb_byte(pixel[2]);
-        }
+        scratch.staging.unmap();
 
         Some(pixels)
     }

@@ -75,7 +75,7 @@ impl EffectRegistry {
             INVERT_ID,
             "Invert",
             EffectCategory::Color,
-            include_str!("shaders/effect_invert.wgsl"),
+            format!("{}\n{}", crate::gpu::COLOR_WGSL, include_str!("shaders/effect_invert.wgsl")),
             vec![
                 EffectParameterDef::float_range("amount", "Amount", 1.0, 0.0, 1.0),
             ],
@@ -88,7 +88,7 @@ impl EffectRegistry {
             BRIGHTNESS_CONTRAST_ID,
             "Brightness/Contrast",
             EffectCategory::Color,
-            include_str!("shaders/effect_brightness_contrast.wgsl"),
+            format!("{}\n{}", crate::gpu::COLOR_WGSL, include_str!("shaders/effect_brightness_contrast.wgsl")),
             vec![
                 EffectParameterDef::float_range("brightness", "Brightness", 0.0, -1.0, 1.0),
                 EffectParameterDef::float_range("contrast", "Contrast", 1.0, 0.0, 3.0),
@@ -102,7 +102,7 @@ impl EffectRegistry {
             HUE_SATURATION_ID,
             "Hue/Saturation",
             EffectCategory::Color,
-            include_str!("shaders/effect_hue_saturation.wgsl"),
+            format!("{}\n{}", crate::gpu::COLOR_WGSL, include_str!("shaders/effect_hue_saturation.wgsl")),
             vec![
                 EffectParameterDef::angle("hue", "Hue Shift", 0.0),
                 EffectParameterDef::float_range("saturation", "Saturation", 1.0, 0.0, 3.0),

@@ -11,6 +11,36 @@ use uuid::Uuid;
 /// Size of effect thumbnails in pixels
 pub const EFFECT_THUMBNAIL_SIZE: u32 = 64;
 
+use lightningbeam_core::gpu::{srgb_to_linear, linear_to_srgb};
+
+/// sRGB-u8 RGBA → linear-`f16` RGBA bytes (little-endian). Feeds the effect
+/// shaders linear light at float precision, matching the live HDR pipeline (an
+/// 8-bit linear intermediate would band in shadows). RGB go through the sRGB
+/// EOTF; alpha is linear.
+fn srgb_image_to_linear_f16(rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len() * 2);
+    for px in rgba.chunks_exact(4) {
+        for &c in &px[..3] {
+            out.extend_from_slice(&half::f16::from_f32(srgb_to_linear(c as f32 / 255.0)).to_le_bytes());
+        }
+        out.extend_from_slice(&half::f16::from_f32(px[3] as f32 / 255.0).to_le_bytes());
+    }
+    out
+}
+
+/// linear-`f16` RGBA bytes → sRGB-u8 RGBA. Inverse of [`srgb_image_to_linear_f16`].
+fn linear_f16_to_srgb_image(f16_rgba: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(f16_rgba.len() / 2);
+    for texel in f16_rgba.chunks_exact(8) {
+        let ch = |i: usize| half::f16::from_le_bytes([texel[i], texel[i + 1]]).to_f32();
+        out.push((linear_to_srgb(ch(0)) * 255.0 + 0.5) as u8);
+        out.push((linear_to_srgb(ch(2)) * 255.0 + 0.5) as u8);
+        out.push((linear_to_srgb(ch(4)) * 255.0 + 0.5) as u8);
+        out.push((ch(6).clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+    }
+    out
+}
+
 /// Embedded still-life image for effect preview thumbnails
 const EFFECT_PREVIEW_IMAGE_BYTES: &[u8] = include_bytes!("../../../src/assets/still-life.jpg");
 
@@ -39,10 +69,18 @@ impl EffectThumbnailGenerator {
     /// Create a new effect thumbnail generator
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         // Load and decode the source image
-        let source_rgba = Self::load_source_image();
+        // The effect shaders operate in LINEAR light (matching the live HDR
+        // pipeline, which feeds them a linear Rgba16Float texture). The preview
+        // image is sRGB-encoded, so linearize it before upload and re-encode the
+        // result after readback. This keeps thumbnails consistent with the live
+        // render for every effect, including the gamma-space perceptual ones.
+        // Linearize to f16 (float precision — an 8-bit linear intermediate would
+        // band in shadows, the reason the live canvas is Rgba16Float).
+        let source_f16 = srgb_image_to_linear_f16(&Self::load_source_image());
 
-        // Create effect processor (using Rgba8Unorm for thumbnail output)
-        let effect_processor = EffectProcessor::new(device, wgpu::TextureFormat::Rgba8Unorm);
+        // Effect processor + textures use Rgba16Float linear, matching the live
+        // pipeline so thumbnails render identically to the on-canvas effect.
+        let effect_processor = EffectProcessor::new(device, wgpu::TextureFormat::Rgba16Float);
 
         // Create source texture
         let source_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -55,12 +93,12 @@ impl EffectThumbnailGenerator {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
-        // Upload source image data
+        // Upload source image data (Rgba16Float = 8 bytes/texel).
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &source_texture,
@@ -68,10 +106,10 @@ impl EffectThumbnailGenerator {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &source_rgba,
+            &source_f16,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(EFFECT_THUMBNAIL_SIZE * 4),
+                bytes_per_row: Some(EFFECT_THUMBNAIL_SIZE * 8),
                 rows_per_image: Some(EFFECT_THUMBNAIL_SIZE),
             },
             wgpu::Extent3d {
@@ -94,17 +132,15 @@ impl EffectThumbnailGenerator {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
 
         let dest_view = dest_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create readback buffer
-        let _buffer_size = (EFFECT_THUMBNAIL_SIZE * EFFECT_THUMBNAIL_SIZE * 4) as u64;
-        // Align to 256 bytes for wgpu requirements
-        let aligned_bytes_per_row = ((EFFECT_THUMBNAIL_SIZE * 4 + 255) / 256) * 256;
+        // Create readback buffer (Rgba16Float = 8 bytes/texel, rows 256-aligned).
+        let aligned_bytes_per_row = ((EFFECT_THUMBNAIL_SIZE * 8 + 255) / 256) * 256;
         let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("effect_thumbnail_readback"),
             size: (aligned_bytes_per_row * EFFECT_THUMBNAIL_SIZE) as u64,
@@ -248,8 +284,8 @@ impl EffectThumbnailGenerator {
             return None;
         }
 
-        // Copy result to readback buffer
-        let aligned_bytes_per_row = ((EFFECT_THUMBNAIL_SIZE * 4 + 255) / 256) * 256;
+        // Copy result to readback buffer (Rgba16Float = 8 bytes/texel).
+        let aligned_bytes_per_row = ((EFFECT_THUMBNAIL_SIZE * 8 + 255) / 256) * 256;
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.dest_texture,
@@ -291,20 +327,21 @@ impl EffectThumbnailGenerator {
             return None;
         }
 
-        // Copy data from mapped buffer (handling row alignment)
+        // De-stride the linear-f16 result (drop the 256-byte row padding).
         let data = buffer_slice.get_mapped_range();
-        let mut rgba = Vec::with_capacity((EFFECT_THUMBNAIL_SIZE * EFFECT_THUMBNAIL_SIZE * 4) as usize);
-
+        let row_tight = (EFFECT_THUMBNAIL_SIZE * 8) as usize;
+        let mut f16_rgba = Vec::with_capacity(row_tight * EFFECT_THUMBNAIL_SIZE as usize);
         for row in 0..EFFECT_THUMBNAIL_SIZE {
             let row_start = (row * aligned_bytes_per_row) as usize;
-            let row_end = row_start + (EFFECT_THUMBNAIL_SIZE * 4) as usize;
-            rgba.extend_from_slice(&data[row_start..row_end]);
+            f16_rgba.extend_from_slice(&data[row_start..row_start + row_tight]);
         }
 
         drop(data);
         self.readback_buffer.unmap();
 
-        Some(rgba)
+        // Result is linear f16 (the effect ran in linear light); re-encode to
+        // sRGB-u8 for display, mirroring the live pipeline's linear→sRGB output.
+        Some(linear_f16_to_srgb_image(&f16_rgba))
     }
 
     /// Get all effect IDs that have pending thumbnail requests
