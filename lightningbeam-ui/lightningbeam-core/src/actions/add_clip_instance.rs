@@ -316,8 +316,11 @@ mod tests {
         let layer_id = layer.layer.id;
         document.root_mut().add_child(AnyLayer::Vector(layer));
 
-        // Create a clip instance (using a fake clip_id since we're just testing the action)
+        // Register a vector clip so get_clip_duration succeeds
         let clip_id = Uuid::new_v4();
+        let clip = crate::clip::VectorClip::with_id(clip_id, "Test Clip", 100.0, 100.0, 5.0);
+        document.vector_clips.insert(clip_id, clip);
+
         let clip_instance = ClipInstance::new(clip_id);
         let instance_id = clip_instance.id;
 

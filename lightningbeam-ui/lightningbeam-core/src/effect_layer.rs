@@ -240,14 +240,18 @@ mod tests {
         let effect2 = def.create_instance(3.0, 7.0); // 3.0 + 7.0 = 10.0 end
         layer.add_clip_instance(effect2);
 
+        // At 60 BPM the tempo map is identity (1 beat == 1 second), so the
+        // query time in seconds equals the effect's beats-domain extents.
+        let tempo_map = crate::tempo_map::TempoMap::constant(60.0);
+
         // At time 2: only effect1 active
-        assert_eq!(layer.active_clip_instances_at(2.0, 60.0).len(), 1);
+        assert_eq!(layer.active_clip_instances_at(2.0, &tempo_map).len(), 1);
 
         // At time 4: both effects active
-        assert_eq!(layer.active_clip_instances_at(4.0, 60.0).len(), 2);
+        assert_eq!(layer.active_clip_instances_at(4.0, &tempo_map).len(), 2);
 
         // At time 7: only effect2 active
-        assert_eq!(layer.active_clip_instances_at(7.0, 60.0).len(), 1);
+        assert_eq!(layer.active_clip_instances_at(7.0, &tempo_map).len(), 1);
     }
 
     #[test]

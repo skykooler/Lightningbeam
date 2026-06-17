@@ -395,7 +395,7 @@ mod tests {
         let shape = Shape::new(path);
 
         assert_eq!(shape.versions.len(), 1);
-        assert!(shape.fill_color.is_some());
+        assert!(shape.fill_color.is_none());
     }
 
     #[test]

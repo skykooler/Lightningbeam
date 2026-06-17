@@ -547,6 +547,8 @@ mod tests {
 
         // Create a clip ID (ClipInstance references clip by ID)
         let clip_id = uuid::Uuid::new_v4();
+        let clip = crate::clip::VectorClip::with_id(clip_id, "Test Clip", 100.0, 100.0, 10.0);
+        document.vector_clips.insert(clip_id, clip);
 
         let mut vector_layer = VectorLayer::new("Layer 1");
 
@@ -607,6 +609,8 @@ mod tests {
 
         // Create a clip ID (ClipInstance references clip by ID)
         let clip_id = uuid::Uuid::new_v4();
+        let clip = crate::clip::VectorClip::with_id(clip_id, "Test Clip", 100.0, 100.0, 10.0);
+        document.vector_clips.insert(clip_id, clip);
 
         let mut vector_layer = VectorLayer::new("Layer 1");
 

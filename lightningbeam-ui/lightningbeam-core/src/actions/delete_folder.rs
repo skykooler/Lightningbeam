@@ -37,6 +37,9 @@ pub struct DeleteFolderAction {
 
     /// Asset IDs that were deleted (for DeleteRecursive strategy)
     deleted_asset_ids: Vec<Uuid>,
+
+    /// Subfolder IDs that were reparented to the deleted folder's parent (for MoveToParent strategy)
+    moved_subfolder_ids: Vec<Uuid>,
 }
 
 impl DeleteFolderAction {
@@ -55,6 +58,7 @@ impl DeleteFolderAction {
             removed_folders: Vec::new(),
             moved_asset_ids: Vec::new(),
             deleted_asset_ids: Vec::new(),
+            moved_subfolder_ids: Vec::new(),
         }
     }
 }
@@ -130,6 +134,7 @@ impl Action for DeleteFolderAction {
                 for subfolder_id in subfolder_ids {
                     if let Some(subfolder) = tree.folders.get_mut(&subfolder_id) {
                         subfolder.parent_id = parent_id;
+                        self.moved_subfolder_ids.push(subfolder_id);
                     }
                 }
             }
@@ -259,6 +264,13 @@ impl Action for DeleteFolderAction {
             tree.add_folder(folder.clone());
         }
 
+        // Restore reparented subfolders back under the deleted folder
+        for subfolder_id in &self.moved_subfolder_ids {
+            if let Some(subfolder) = tree.folders.get_mut(subfolder_id) {
+                subfolder.parent_id = Some(self.folder_id);
+            }
+        }
+
         match self.strategy {
             DeleteStrategy::MoveToParent => {
                 // Restore folder_id for moved assets
@@ -312,6 +324,7 @@ impl Action for DeleteFolderAction {
         self.removed_folders.clear();
         self.moved_asset_ids.clear();
         self.deleted_asset_ids.clear();
+        self.moved_subfolder_ids.clear();
 
         Ok(())
     }
