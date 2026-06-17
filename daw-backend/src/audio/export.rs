@@ -671,14 +671,39 @@ fn convert_chunk_to_planar_i16(interleaved: &[f32], channels: u32) -> Vec<Vec<i1
     planar
 }
 
-/// Convert a chunk of interleaved f32 samples to planar f32 format
+/// Convert a chunk of interleaved f32 samples to planar f32 format.
+///
+/// Non-finite samples (NaN/±Inf) are replaced with `0.0` and finite samples are
+/// clamped to `[-1.0, 1.0]`: the float encoders (e.g. AAC, which takes `fltp`)
+/// reject a frame outright on "(near) NaN/+-Inf", failing the whole export, so we
+/// sanitize here exactly as the integer paths already clamp.
 fn convert_chunk_to_planar_f32(interleaved: &[f32], channels: u32) -> Vec<Vec<f32>> {
     let num_frames = interleaved.len() / channels as usize;
     let mut planar = vec![vec![0.0f32; num_frames]; channels as usize];
 
+    let mut non_finite = 0u64;
     for (i, chunk) in interleaved.chunks(channels as usize).enumerate() {
         for (ch, &sample) in chunk.iter().enumerate() {
-            planar[ch][i] = sample;
+            planar[ch][i] = if sample.is_finite() {
+                sample.clamp(-1.0, 1.0)
+            } else {
+                non_finite += 1;
+                0.0
+            };
+        }
+    }
+    if non_finite > 0 {
+        // One-time warning: we sanitized rather than failed, but a non-finite
+        // sample reaching here means something upstream (an effect, automation,
+        // or a source decode) produced NaN/Inf — worth chasing if audio is wrong.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "⚠️ [EXPORT] sanitized {} non-finite (NaN/Inf) audio sample(s) in a chunk — \
+                 check effects/automation/source decode",
+                non_finite
+            );
         }
     }
 

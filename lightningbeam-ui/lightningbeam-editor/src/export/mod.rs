@@ -384,90 +384,90 @@ impl ExportOrchestrator {
         println!("🎵 [MUX] Audio stream - Input TB: {}/{}, Output TB: {}/{}",
                  audio_input_tb.0, audio_input_tb.1, audio_output_tb.0, audio_output_tb.1);
 
-        // Collect all packets with their stream info and timestamps
-        let mut video_packets = Vec::new();
-        for (stream, packet) in video_input.packets() {
-            if stream.index() == video_stream_index {
-                video_packets.push(packet);
+        // Stream-merge the two inputs by PTS, writing each packet as it's read —
+        // O(1) memory (one pending packet per stream) instead of collecting every
+        // packet first, so muxing a long export never grows unbounded.
+        let video_idx = video_stream_index;
+        let audio_idx = audio_stream_index;
+        let mut v_iter = video_input.packets();
+        let mut a_iter = audio_input.packets();
+
+        // Pull the next packet belonging to the desired stream from each input.
+        let mut next_video = move || -> Option<ffmpeg::Packet> {
+            loop {
+                match v_iter.next() {
+                    Some((stream, packet)) => {
+                        if stream.index() == video_idx {
+                            return Some(packet);
+                        }
+                    }
+                    None => return None,
+                }
             }
-        }
-
-        let mut audio_packets = Vec::new();
-        for (stream, packet) in audio_input.packets() {
-            if stream.index() == audio_stream_index {
-                audio_packets.push(packet);
+        };
+        let mut next_audio = move || -> Option<ffmpeg::Packet> {
+            loop {
+                match a_iter.next() {
+                    Some((stream, packet)) => {
+                        if stream.index() == audio_idx {
+                            return Some(packet);
+                        }
+                    }
+                    None => return None,
+                }
             }
-        }
+        };
 
-        println!("🎬 [MUX] Collected {} video packets, {} audio packets",
-                 video_packets.len(), audio_packets.len());
+        let mut pending_v = next_video();
+        let mut pending_a = next_audio();
+        let mut v_count = 0usize;
+        let mut a_count = 0usize;
+        let mut log_count = 0;
 
-        // Report first and last timestamps
-        if !video_packets.is_empty() {
-            println!("🎬 [MUX] Video PTS range: {} to {}",
-                     video_packets[0].pts().unwrap_or(0),
-                     video_packets[video_packets.len()-1].pts().unwrap_or(0));
-        }
-        if !audio_packets.is_empty() {
-            println!("🎵 [MUX] Audio PTS range: {} to {}",
-                     audio_packets[0].pts().unwrap_or(0),
-                     audio_packets[audio_packets.len()-1].pts().unwrap_or(0));
-        }
-
-        // Interleave packets by comparing timestamps in a common time base (use microseconds)
-        let mut v_idx = 0;
-        let mut a_idx = 0;
-        let mut interleave_log_count = 0;
-
-        while v_idx < video_packets.len() || a_idx < audio_packets.len() {
-            let write_video = if v_idx >= video_packets.len() {
-                false // No more video
-            } else if a_idx >= audio_packets.len() {
-                true // No more audio, write video
-            } else {
-                // Compare timestamps - convert both to microseconds
-                let v_pts = video_packets[v_idx].pts().unwrap_or(0);
-                let a_pts = audio_packets[a_idx].pts().unwrap_or(0);
-
-                // Convert to microseconds: pts * 1000000 * tb.num / tb.den
-                let v_us = v_pts * 1_000_000 * video_input_tb.0 as i64 / video_input_tb.1 as i64;
-                let a_us = a_pts * 1_000_000 * audio_input_tb.0 as i64 / audio_input_tb.1 as i64;
-
-                v_us <= a_us // Write video if it comes before or at same time as audio
+        loop {
+            // Write whichever pending packet has the earlier PTS (in a common
+            // microsecond base); when one stream is exhausted, drain the other.
+            let write_video = match (&pending_v, &pending_a) {
+                (None, None) => break,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some(v), Some(a)) => {
+                    let v_us = v.pts().unwrap_or(0) * 1_000_000 * video_input_tb.0 as i64
+                        / video_input_tb.1 as i64;
+                    let a_us = a.pts().unwrap_or(0) * 1_000_000 * audio_input_tb.0 as i64
+                        / audio_input_tb.1 as i64;
+                    v_us <= a_us
+                }
             };
 
             if write_video {
-                let mut packet = video_packets[v_idx].clone();
+                let mut packet = pending_v.take().unwrap();
                 packet.set_stream(0);
                 packet.rescale_ts(video_input_tb, video_output_tb);
-
-                if interleave_log_count < 10 {
-                    println!("🎬 [MUX] Writing V packet {} - PTS={:?}, DTS={:?}, Duration={:?}",
-                             v_idx, packet.pts(), packet.dts(), packet.duration());
-                    interleave_log_count += 1;
+                if log_count < 10 {
+                    println!("🎬 [MUX] Writing V packet - PTS={:?}, DTS={:?}", packet.pts(), packet.dts());
+                    log_count += 1;
                 }
-
                 packet.write_interleaved(&mut output)
                     .map_err(|e| format!("Failed to write video packet: {}", e))?;
-                v_idx += 1;
+                v_count += 1;
+                pending_v = next_video();
             } else {
-                let mut packet = audio_packets[a_idx].clone();
+                let mut packet = pending_a.take().unwrap();
                 packet.set_stream(1);
                 packet.rescale_ts(audio_input_tb, audio_output_tb);
-
-                if interleave_log_count < 10 {
-                    println!("🎵 [MUX] Writing A packet {} - PTS={:?}, DTS={:?}, Duration={:?}",
-                             a_idx, packet.pts(), packet.dts(), packet.duration());
-                    interleave_log_count += 1;
+                if log_count < 10 {
+                    println!("🎵 [MUX] Writing A packet - PTS={:?}, DTS={:?}", packet.pts(), packet.dts());
+                    log_count += 1;
                 }
-
                 packet.write_interleaved(&mut output)
                     .map_err(|e| format!("Failed to write audio packet: {}", e))?;
-                a_idx += 1;
+                a_count += 1;
+                pending_a = next_audio();
             }
         }
 
-        println!("🎬 [MUX] Wrote {} video packets, {} audio packets", v_idx, a_idx);
+        println!("🎬 [MUX] Wrote {} video packets, {} audio packets", v_count, a_count);
 
         // Write trailer
         output.write_trailer().map_err(|e| format!("Failed to write trailer: {}", e))?;

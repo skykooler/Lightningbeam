@@ -458,9 +458,14 @@ pub struct VideoManager {
     /// Pool of video decoders, one per clip
     decoders: HashMap<Uuid, Arc<Mutex<VideoDecoder>>>,
 
-    /// Frame cache: (clip_id, timestamp_ms) -> frame
-    /// Stores raw RGBA data for zero-copy rendering
-    frame_cache: HashMap<(Uuid, i64), Arc<VideoFrame>>,
+    /// Frame cache: (clip_id, timestamp_ms) -> frame. Stores decoded RGBA for
+    /// zero-copy rendering. Bounded by a **byte budget** (not a frame count, which
+    /// would be unsafe across resolutions — a 4K frame is ~33MB vs ~2MB at 800x600)
+    /// so playback of arbitrarily long video never grows unbounded.
+    frame_cache: LruCache<(Uuid, i64), Arc<VideoFrame>>,
+    /// Running total of bytes held in `frame_cache` (sum of each frame's RGBA len),
+    /// kept in sync on insert/evict/remove so eviction is O(1) per frame.
+    frame_cache_bytes: usize,
 
     /// Thumbnail cache: clip_id -> Vec of (timestamp, rgba_data)
     /// Low-resolution (64px width) thumbnails for scrubbing
@@ -469,6 +474,11 @@ pub struct VideoManager {
     /// Maximum number of frames to cache per decoder
     cache_size: usize,
 }
+
+/// Byte budget for [`VideoManager::frame_cache`] (decoded full-resolution frames).
+/// At ~2MB/frame (800x600) this holds ~128 frames; at ~33MB/frame (4K) ~8 — in
+/// both cases enough for the current frame plus a scrub window, while bounding RAM.
+const FRAME_CACHE_BYTE_BUDGET: usize = 256 * 1024 * 1024;
 
 impl VideoManager {
     /// Create a new video manager with default cache size
@@ -480,7 +490,8 @@ impl VideoManager {
     pub fn with_cache_size(cache_size: usize) -> Self {
         Self {
             decoders: HashMap::new(),
-            frame_cache: HashMap::new(),
+            frame_cache: LruCache::unbounded(),
+            frame_cache_bytes: 0,
             thumbnail_cache: HashMap::new(),
             cache_size,
         }
@@ -533,14 +544,16 @@ impl VideoManager {
             return Some(Arc::clone(cached_frame));
         }
 
-        // Get decoder for this clip
-        let decoder_arc = self.decoders.get(clip_id)?;
+        // Get decoder for this clip. Clone the Arc so we don't hold a borrow of
+        // `self.decoders` across the `&mut self` cache insert below.
+        let decoder_arc = Arc::clone(self.decoders.get(clip_id)?);
         let mut decoder = decoder_arc.lock().ok()?;
 
         // Decode the frame
         let rgba_data = decoder.get_frame(timestamp).ok()?;
         let width = decoder.output_width;
         let height = decoder.output_height;
+        drop(decoder); // release the lock before touching `self`
 
         // Create VideoFrame and cache it
         let frame = Arc::new(VideoFrame {
@@ -550,9 +563,27 @@ impl VideoManager {
             timestamp,
         });
 
-        self.frame_cache.insert(cache_key, Arc::clone(&frame));
+        self.cache_frame(cache_key, Arc::clone(&frame));
 
         Some(frame)
+    }
+
+    /// Insert a frame into the byte-budgeted cache, evicting least-recently-used
+    /// frames until the total is within [`FRAME_CACHE_BYTE_BUDGET`].
+    fn cache_frame(&mut self, key: (Uuid, i64), frame: Arc<VideoFrame>) {
+        let bytes = frame.rgba_data.len();
+        if let Some(old) = self.frame_cache.put(key, frame) {
+            self.frame_cache_bytes = self.frame_cache_bytes.saturating_sub(old.rgba_data.len());
+        }
+        self.frame_cache_bytes += bytes;
+        // Keep at least one frame resident even if it alone exceeds the budget.
+        while self.frame_cache_bytes > FRAME_CACHE_BYTE_BUDGET && self.frame_cache.len() > 1 {
+            if let Some((_, evicted)) = self.frame_cache.pop_lru() {
+                self.frame_cache_bytes = self.frame_cache_bytes.saturating_sub(evicted.rgba_data.len());
+            } else {
+                break;
+            }
+        }
     }
 
     /// Get the decoder Arc for a clip (for external thumbnail generation)
@@ -614,8 +645,19 @@ impl VideoManager {
     pub fn unload_video(&mut self, clip_id: &Uuid) {
         self.decoders.remove(clip_id);
 
-        // Remove all cached frames for this clip
-        self.frame_cache.retain(|(id, _), _| id != clip_id);
+        // Remove all cached frames for this clip (LruCache has no retain; collect
+        // matching keys, then pop each, keeping the byte total in sync).
+        let keys: Vec<(Uuid, i64)> = self
+            .frame_cache
+            .iter()
+            .filter(|((id, _), _)| id == clip_id)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in keys {
+            if let Some(frame) = self.frame_cache.pop(&key) {
+                self.frame_cache_bytes = self.frame_cache_bytes.saturating_sub(frame.rgba_data.len());
+            }
+        }
 
         // Remove thumbnails
         self.thumbnail_cache.remove(clip_id);
@@ -624,6 +666,7 @@ impl VideoManager {
     /// Clear all frame caches (useful for memory management)
     pub fn clear_frame_cache(&mut self) {
         self.frame_cache.clear();
+        self.frame_cache_bytes = 0;
     }
 }
 
