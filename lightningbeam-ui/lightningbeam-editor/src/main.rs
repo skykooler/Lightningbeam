@@ -492,6 +492,11 @@ enum FileCommand {
         path: std::path::PathBuf,
         document: lightningbeam_core::document::Document,
         layer_to_track_map: std::collections::HashMap<uuid::Uuid, u32>,
+        /// How to store large media on this save (from the user's preference).
+        large_media_mode: lightningbeam_core::file_io::LargeMediaMode,
+        /// Serialized waveform-pyramid blobs per audio pool index, persisted into
+        /// the container so a later load needn't re-decode the source media.
+        waveform_blobs: std::collections::HashMap<usize, Vec<u8>>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     },
     Load {
@@ -566,8 +571,8 @@ impl FileOperationsWorker {
     fn run(self) {
         while let Ok(command) = self.command_rx.recv() {
             match command {
-                FileCommand::Save { path, document, layer_to_track_map, progress_tx } => {
-                    self.handle_save(path, document, &layer_to_track_map, progress_tx);
+                FileCommand::Save { path, document, layer_to_track_map, large_media_mode, waveform_blobs, progress_tx } => {
+                    self.handle_save(path, document, &layer_to_track_map, large_media_mode, waveform_blobs, progress_tx);
                 }
                 FileCommand::Load { path, progress_tx } => {
                     self.handle_load(path, progress_tx);
@@ -582,6 +587,8 @@ impl FileOperationsWorker {
         path: std::path::PathBuf,
         document: lightningbeam_core::document::Document,
         layer_to_track_map: &std::collections::HashMap<uuid::Uuid, u32>,
+        large_media_mode: lightningbeam_core::file_io::LargeMediaMode,
+        waveform_blobs: std::collections::HashMap<usize, Vec<u8>>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     ) {
         use lightningbeam_core::file_io::{save_beam, SaveSettings};
@@ -593,7 +600,7 @@ impl FileOperationsWorker {
         let _ = progress_tx.send(FileProgress::SerializingAudioPool);
         let step1_start = std::time::Instant::now();
 
-        let audio_pool_entries = {
+        let mut audio_pool_entries = {
             let mut controller = self.audio_controller.lock().unwrap();
             match controller.serialize_audio_pool(&path) {
                 Ok(entries) => entries,
@@ -603,6 +610,13 @@ impl FileOperationsWorker {
                 }
             }
         };
+        // Attach precomputed waveform pyramids so save_beam can persist them
+        // (keyed by pool index inside the container).
+        for entry in &mut audio_pool_entries {
+            if let Some(blob) = waveform_blobs.get(&entry.pool_index) {
+                entry.waveform_blob = Some(blob.clone());
+            }
+        }
         eprintln!("📊 [SAVE] Step 1: Serialize audio pool took {:.2}ms", step1_start.elapsed().as_secs_f64() * 1000.0);
 
         // Step 2: Get project
@@ -623,7 +637,10 @@ impl FileOperationsWorker {
         let _ = progress_tx.send(FileProgress::WritingZip);
         let step3_start = std::time::Instant::now();
 
-        let settings = SaveSettings::default();
+        let settings = SaveSettings {
+            large_media_mode,
+            ..SaveSettings::default()
+        };
         match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, &settings) {
             Ok(()) => {
                 eprintln!("📊 [SAVE] Step 3: save_beam() took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
@@ -686,9 +703,6 @@ enum AudioExtractionResult {
         video_name: String,
         channels: u32,
         sample_rate: u32,
-    },
-    NoAudio {
-        video_clip_id: Uuid,
     },
     Error {
         video_clip_id: Uuid,
@@ -901,6 +915,21 @@ struct EditorApp {
     raw_audio_cache: HashMap<usize, (Arc<Vec<f32>>, u32, u32)>,
     /// Pool indices that need GPU texture upload (set when raw audio arrives, cleared after upload)
     waveform_gpu_dirty: HashSet<usize>,
+    /// Pool indices whose `raw_audio_cache` entry holds a packed min/max floor
+    /// (4 f32 per texel: Lmin,Lmax,Rmin,Rmax) rather than raw per-sample data.
+    /// Maps pool_index -> `B` (floor frames-per-texel), so the timeline render can
+    /// derive the floor's effective rate `sr/B` with full float precision. Populated
+    /// for streamed video-audio, which has no in-RAM samples to draw per-sample.
+    waveform_minmax_pools: HashMap<usize, u32>,
+    /// Serialized waveform-pyramid blobs (LBWF bytes) per pool, kept so a save can
+    /// persist them into the `.beam` container without re-decoding. Populated on
+    /// generation and on load. See `daw_backend::audio::waveform_pyramid::to_bytes`.
+    waveform_pyramid_blobs: HashMap<usize, Arc<Vec<u8>>>,
+    /// Receives generated waveforms from a background thread:
+    /// (pool_index, packed_floor_texels, source_sample_rate, channels, B, pyramid_blob).
+    waveform_result_rx: std::sync::mpsc::Receiver<(usize, Vec<f32>, u32, u32, u32, Vec<u8>)>,
+    /// Sender handed to background waveform-pyramid generation threads.
+    waveform_result_tx: std::sync::mpsc::Sender<(usize, Vec<f32>, u32, u32, u32, Vec<u8>)>,
     /// Consumer for recording audio mirror (streams recorded samples to UI for live waveform)
     recording_mirror_rx: Option<rtrb::Consumer<f32>>,
     /// Current file path (None if not yet saved)
@@ -923,6 +952,10 @@ struct EditorApp {
     export_dialog: export::dialog::ExportDialog,
     /// Export progress dialog
     export_progress_dialog: export::dialog::ExportProgressDialog,
+    /// When `Some(name)`, show the "large media: pack or reference?" prompt for the
+    /// named just-imported file. Set on the first large import while the
+    /// `large_media_default` preference is still `Ask`.
+    large_media_prompt: Option<String>,
     /// Preferences dialog
     preferences_dialog: preferences::dialog::PreferencesDialog,
     /// Export orchestrator for background exports
@@ -1069,6 +1102,8 @@ impl EditorApp {
             .map(|rs| rs.target_format)
             .unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
 
+        let (waveform_result_tx, waveform_result_rx) = std::sync::mpsc::channel();
+
         Self {
             layouts,
             current_layout_index: 0,
@@ -1156,6 +1191,10 @@ impl EditorApp {
             audio_pools_with_new_waveforms: HashSet::new(), // Track pool indices with new raw audio
             raw_audio_cache: HashMap::new(),
             waveform_gpu_dirty: HashSet::new(),
+            waveform_minmax_pools: HashMap::new(),
+            waveform_pyramid_blobs: HashMap::new(),
+            waveform_result_rx,
+            waveform_result_tx,
             recording_mirror_rx,
             current_file_path: None, // No file loaded initially
             keymap: KeymapManager::new(&config.keybindings),
@@ -1166,6 +1205,7 @@ impl EditorApp {
             audio_extraction_rx,
             export_dialog: export::dialog::ExportDialog::default(),
             export_progress_dialog: export::dialog::ExportProgressDialog::default(),
+            large_media_prompt: None,
             preferences_dialog: preferences::dialog::PreferencesDialog::default(),
             export_orchestrator: None,
             effect_thumbnail_generator: None, // Initialized when GPU available
@@ -2882,6 +2922,8 @@ impl EditorApp {
                 self.audio_duration_cache.clear();
                 self.raw_audio_cache.clear();
                 self.waveform_gpu_dirty.clear();
+                self.waveform_minmax_pools.clear();
+                self.waveform_pyramid_blobs.clear();
                 self.pane_instances.clear();
                 self.project_generation += 1;
                 self.app_mode = AppMode::StartScreen;
@@ -3666,11 +3708,21 @@ impl EditorApp {
         // Clone document for background thread
         let document = self.action_executor.document().clone();
 
+        // Snapshot the generated waveform pyramids (by pool index) so the worker
+        // can persist them into the container alongside the audio.
+        let waveform_blobs: std::collections::HashMap<usize, Vec<u8>> = self
+            .waveform_pyramid_blobs
+            .iter()
+            .map(|(&idx, blob)| (idx, blob.as_ref().clone()))
+            .collect();
+
         // Send save command to worker thread
         let command = FileCommand::Save {
             path: path.clone(),
             document,
             layer_to_track_map: self.layer_to_track_map.clone(),
+            large_media_mode: self.config.large_media_default,
+            waveform_blobs,
             progress_tx,
         };
 
@@ -3781,6 +3833,34 @@ impl EditorApp {
         self.restore_layout_from_document();
         eprintln!("📊 [APPLY] Step 2: Restore UI layout took {:.2}ms", step2_start.elapsed().as_secs_f64() * 1000.0);
 
+        // Snapshot persisted waveform pyramids (with each entry's source sample
+        // rate) before the backend consumes the entries below. Restored into the
+        // GPU caches after the controller borrow ends, so a load needn't re-decode.
+        let loaded_waveforms: Vec<(usize, u32, Vec<u8>)> = loaded_project
+            .audio_pool_entries
+            .iter()
+            .filter_map(|e| e.waveform_blob.as_ref().map(|b| (e.pool_index, e.sample_rate, b.clone())))
+            .collect();
+
+        // Streamed (packed) audio entries that have NO persisted pyramid yet
+        // (e.g. saved before waveform persistence): generate one in the background
+        // from the packed blob so the overview appears without a full decode.
+        // (pool_index, media_id, codec/ext, sample_rate)
+        let streamed_needing_waveform: Vec<(usize, String, Option<String>, u32)> = loaded_project
+            .audio_pool_entries
+            .iter()
+            .filter(|e| e.waveform_blob.is_none() && e.embedded_data.is_none())
+            .filter_map(|e| {
+                e.media_id.clone().map(|id| {
+                    let ext = std::path::Path::new(&e.name)
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|s| s.to_lowercase());
+                    (e.pool_index, id, ext, e.sample_rate)
+                })
+            })
+            .collect();
+
         // Load audio pool FIRST (before setting project, so clips can reference pool entries)
         let step3_start = std::time::Instant::now();
         if let Some(ref controller_arc) = self.audio_controller {
@@ -3793,6 +3873,15 @@ impl EditorApp {
                 return;
             }
             eprintln!("📊 [APPLY] Step 3: Load audio pool took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
+
+            // Install the packed-media byte-source factory for this container before
+            // SetProject, so bulk activation can stream container-packed audio.
+            if lightningbeam_core::beam_archive::BeamArchive::is_sqlite(&path) {
+                let factory = lightningbeam_core::file_io::blob_source_factory(&path);
+                if let Err(e) = controller.set_blob_source_factory(factory) {
+                    eprintln!("⚠️ [APPLY] Failed to install blob source factory: {}", e);
+                }
+            }
 
             // Now set project (clips can now reference the loaded pool entries)
             let step4_start = std::time::Instant::now();
@@ -3808,6 +3897,86 @@ impl EditorApp {
                 doc.bpm() as f32,
                 (doc.time_signature.numerator, doc.time_signature.denominator),
             );
+        }
+
+        // Restore waveform overviews from the persisted pyramids (no re-decode).
+        // Clear first so stale pools from the previous project don't linger;
+        // on-demand audio repopulates raw_audio_cache lazily at render time.
+        self.raw_audio_cache.clear();
+        self.waveform_gpu_dirty.clear();
+        self.waveform_minmax_pools.clear();
+        self.waveform_pyramid_blobs.clear();
+        for (pool_index, sample_rate, blob) in loaded_waveforms {
+            match daw_backend::audio::waveform_pyramid::WaveformPyramid::from_bytes(&blob) {
+                Ok(pyramid) => {
+                    let b = pyramid.floor_samples_per_texel.max(1);
+                    let channels = pyramid.channels;
+                    let floor = pyramid.floor();
+                    let mut packed = Vec::with_capacity(floor.len() * 4);
+                    for t in floor {
+                        packed.push(t.l_min);
+                        packed.push(t.l_max);
+                        packed.push(t.r_min);
+                        packed.push(t.r_max);
+                    }
+                    self.raw_audio_cache.insert(pool_index, (Arc::new(packed), sample_rate, channels));
+                    self.waveform_minmax_pools.insert(pool_index, b);
+                    self.waveform_pyramid_blobs.insert(pool_index, Arc::new(blob));
+                    self.waveform_gpu_dirty.insert(pool_index);
+                }
+                Err(e) => eprintln!(
+                    "⚠️ [APPLY] Failed to parse persisted waveform for pool {}: {}",
+                    pool_index, e
+                ),
+            }
+        }
+
+        // Background-generate overviews for streamed audio that has no persisted
+        // pyramid yet (older saves). Streams the packed blob via the factory and
+        // sends the floor through the same channel `update()` already drains; the
+        // next save then persists it.
+        if !streamed_needing_waveform.is_empty() {
+            let wf_tx = self.waveform_result_tx.clone();
+            let floor_b = self.config.waveform_floor_samples_per_texel.max(1);
+            let beam_path = path.clone();
+            std::thread::spawn(move || {
+                let factory = lightningbeam_core::file_io::blob_source_factory(&beam_path);
+                for (pool_index, media_id, ext, sample_rate) in streamed_needing_waveform {
+                    let src = match factory.open(&media_id) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("[APPLY] waveform gen: open packed {} failed: {}", media_id, e);
+                            continue;
+                        }
+                    };
+                    match daw_backend::audio::disk_reader::build_waveform_pyramid_from_source(
+                        src,
+                        ext.as_deref(),
+                        floor_b,
+                    ) {
+                        Ok(pyramid) => {
+                            let floor = pyramid.floor();
+                            let mut packed = Vec::with_capacity(floor.len() * 4);
+                            for t in floor {
+                                packed.push(t.l_min);
+                                packed.push(t.l_max);
+                                packed.push(t.r_min);
+                                packed.push(t.r_max);
+                            }
+                            let blob = pyramid.to_bytes();
+                            let _ = wf_tx.send((
+                                pool_index,
+                                packed,
+                                sample_rate,
+                                pyramid.channels,
+                                pyramid.floor_samples_per_texel,
+                                blob,
+                            ));
+                        }
+                        Err(e) => eprintln!("[APPLY] waveform gen failed for pool {}: {}", pool_index, e),
+                    }
+                }
+            });
         }
 
         // Reset state and restore track mappings
@@ -3890,6 +4059,13 @@ impl EditorApp {
         }
         eprintln!("📊 [APPLY] Step 8: Rebuilt MIDI event cache for {} clips in {:.2}ms", midi_fetched, step8_start.elapsed().as_secs_f64() * 1000.0);
 
+        // Re-register video clips with the VideoManager (decoder + keyframe index +
+        // thumbnails). Restored video_clips carry only metadata + file_path; without
+        // this they render black with no thumbnails.
+        let step9_start = std::time::Instant::now();
+        self.register_loaded_videos();
+        eprintln!("📊 [APPLY] Step 9: Registered loaded videos in {:.2}ms", step9_start.elapsed().as_secs_f64() * 1000.0);
+
         // Reset playback state
         self.playback_time = 0.0;
         self.is_playing = false;
@@ -3908,9 +4084,178 @@ impl EditorApp {
         println!("✅ Loaded from: {}", path.display());
     }
 
+    /// Register every video clip in the loaded document with the `VideoManager`
+    /// so it can decode and display. Mirrors the import path's setup (decoder +
+    /// background keyframe index + thumbnails) but does NOT re-extract audio —
+    /// the extracted audio is already restored via the audio pool.
+    fn register_loaded_videos(&mut self) {
+        let doc_width = self.action_executor.document().width as u32;
+        let doc_height = self.action_executor.document().height as u32;
+
+        // Snapshot (id, path) so we don't hold the document borrow while locking
+        // the VideoManager / spawning threads.
+        let videos: Vec<_> = self
+            .action_executor
+            .document()
+            .video_clips
+            .values()
+            .map(|c| (c.id, c.file_path.clone()))
+            .collect();
+
+        for (clip_id, file_path) in videos {
+            if !std::path::Path::new(&file_path).exists() {
+                eprintln!("⚠️ [APPLY] Video file not found, skipping: {}", file_path);
+                continue;
+            }
+
+            {
+                let mut video_mgr = self.video_manager.lock().unwrap();
+                if let Err(e) = video_mgr.load_video(clip_id, file_path.clone(), doc_width, doc_height) {
+                    eprintln!("⚠️ [APPLY] Failed to load video {}: {}", file_path, e);
+                    continue;
+                }
+            }
+
+            self.spawn_keyframe_index(clip_id);
+            self.spawn_thumbnail_generation(clip_id);
+        }
+    }
+
+    /// Spawn a background thread that builds the keyframe (seek) index for a
+    /// video clip. The clip must already be registered via `load_video`.
+    ///
+    /// The slow packet scan runs holding **no** lock — only brief locks bracket it
+    /// (to grab the decoder handle and to store the result) — so it never blocks
+    /// playback or the UI (which both need the VideoManager / decoder locks).
+    fn spawn_keyframe_index(&self, clip_id: uuid::Uuid) {
+        let video_manager = Arc::clone(&self.video_manager);
+        std::thread::spawn(move || {
+            let decoder_arc = {
+                let vm = video_manager.lock().unwrap();
+                vm.get_decoder(&clip_id)
+            };
+            let Some(decoder_arc) = decoder_arc else { return; };
+
+            let (path, stream_index) = {
+                let decoder = decoder_arc.lock().unwrap();
+                decoder.keyframe_scan_params()
+            };
+
+            // Slow scan, no locks held.
+            match lightningbeam_core::video::VideoDecoder::scan_keyframes(&path, stream_index) {
+                Ok(positions) => {
+                    let count = positions.len();
+                    decoder_arc.lock().unwrap().set_keyframe_index(positions);
+                    println!("  Built keyframe index ({} keyframes) for video clip {}", count, clip_id);
+                }
+                Err(e) => eprintln!("Failed to build keyframe index for {}: {}", clip_id, e),
+            }
+        });
+    }
+
+    /// Spawn a background thread that (re)generates timeline thumbnails for a
+    /// video clip. Uses a **dedicated** decoder (independent of the playback
+    /// decoder) and samples at keyframes, so it neither blocks playback nor pays
+    /// the cost of decoding whole GOPs. Safe to call on its own to refresh a
+    /// single clip's thumbnails.
+    fn spawn_thumbnail_generation(&self, clip_id: uuid::Uuid) {
+        let video_manager = Arc::clone(&self.video_manager);
+        std::thread::spawn(move || {
+            // Grab the source path from the playback decoder (brief lock), then do
+            // all decoding on an independent decoder.
+            let path = {
+                let decoder_arc = {
+                    let vm = video_manager.lock().unwrap();
+                    vm.get_decoder(&clip_id)
+                };
+                let Some(decoder_arc) = decoder_arc else { return; };
+                let decoder = decoder_arc.lock().unwrap();
+                decoder.path().to_string()
+            };
+
+            let vm_insert = Arc::clone(&video_manager);
+            let result = lightningbeam_core::video::generate_keyframe_thumbnails(
+                &path,
+                5.0,
+                128,
+                |ts, rgba| {
+                    let mut vm = vm_insert.lock().unwrap();
+                    vm.insert_thumbnail(&clip_id, ts, rgba);
+                },
+            );
+            if let Err(e) = result {
+                eprintln!("Thumbnail generation failed for {}: {}", clip_id, e);
+            }
+        });
+    }
+
+    /// If `path` is a large media file (≥ the large-media threshold) and the user
+    /// hasn't yet chosen a default pack-vs-reference policy, queue the one-time
+    /// prompt. The actual storage decision happens at save time from the chosen
+    /// preference; this only establishes that preference.
+    fn note_possible_large_media(&mut self, path: &std::path::Path) {
+        use lightningbeam_core::file_io::LargeMediaMode;
+        if self.config.large_media_default != LargeMediaMode::Ask || self.large_media_prompt.is_some() {
+            return;
+        }
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        if size >= lightningbeam_core::beam_archive::LARGE_MEDIA_THRESHOLD {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            self.large_media_prompt = Some(name);
+        }
+    }
+
+    /// Render the one-time "pack vs reference large media" prompt, if pending.
+    /// The choice is persisted to config as the future default.
+    fn render_large_media_prompt(&mut self, ctx: &egui::Context) {
+        use lightningbeam_core::file_io::LargeMediaMode;
+        let Some(name) = self.large_media_prompt.clone() else {
+            return;
+        };
+        let threshold_gb = lightningbeam_core::beam_archive::LARGE_MEDIA_THRESHOLD as f64
+            / (1024.0 * 1024.0 * 1024.0);
+        let mut choice: Option<LargeMediaMode> = None;
+        egui::Window::new("Large media file")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!("\"{}\" is larger than {:.0} GB.", name, threshold_gb));
+                ui.add_space(6.0);
+                ui.label("How should large media be stored in projects from now on?");
+                ui.add_space(6.0);
+                ui.label("• Pack — copy the bytes into the .beam file (self-contained, larger project).");
+                ui.label("• Reference — keep the file on disk and store only its path (smaller project; the file must stay put).");
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Pack into project").clicked() {
+                        choice = Some(LargeMediaMode::Pack);
+                    }
+                    if ui.button("Reference external file").clicked() {
+                        choice = Some(LargeMediaMode::Reference);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("You can change this later in Preferences.")
+                        .weak()
+                        .small(),
+                );
+            });
+        if let Some(mode) = choice {
+            self.config.large_media_default = mode;
+            self.config.save();
+            self.large_media_prompt = None;
+        }
+    }
+
     /// Import an image file as an ImageAsset
     fn import_image(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::ImageAsset;
+        self.note_possible_large_media(path);
 
         // Get filename for asset name
         let name = path.file_stem()
@@ -3963,6 +4308,7 @@ impl EditorApp {
     /// GPU waveform cache.
     fn import_audio(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::AudioClip;
+        self.note_possible_large_media(path);
 
         let name = path.file_stem()
             .and_then(|s| s.to_str())
@@ -4088,6 +4434,7 @@ impl EditorApp {
     fn import_video(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::VideoClip;
         use lightningbeam_core::video::probe_video;
+        self.note_possible_large_media(path);
 
         let name = path.file_stem()
             .and_then(|s| s.to_str())
@@ -4129,82 +4476,95 @@ impl EditorApp {
         drop(video_mgr);
 
         // Spawn background thread to build keyframe index asynchronously
-        let video_manager_clone = Arc::clone(&self.video_manager);
-        let keyframe_clip_id = clip_id;
-        std::thread::spawn(move || {
-            let video_mgr = video_manager_clone.lock().unwrap();
-            if let Err(e) = video_mgr.build_keyframe_index(&keyframe_clip_id) {
-                eprintln!("Failed to build keyframe index: {}", e);
-            } else {
-                println!("  Built keyframe index for video clip {}", keyframe_clip_id);
-            }
-        });
+        self.spawn_keyframe_index(clip_id);
 
-        // Spawn background thread for audio extraction if video has audio
+        // Register the video's audio track as a streaming pool entry if present.
         if metadata.has_audio {
             if let Some(ref audio_controller) = self.audio_controller {
                 let path_clone = path_str.clone();
                 let video_clip_id = clip_id;
                 let video_name = name.clone();
+                let video_duration = metadata.duration;
                 let audio_controller_clone = Arc::clone(audio_controller);
                 let tx = self.audio_extraction_tx.clone();
+                let wf_tx = self.waveform_result_tx.clone();
+                let floor_b = self.config.waveform_floor_samples_per_texel.max(1);
 
                 std::thread::spawn(move || {
-                    use lightningbeam_core::video::extract_audio_from_video;
                     use lightningbeam_core::clip::AudioClip;
 
-                    // Extract audio from video (slow FFmpeg operation)
-                    match extract_audio_from_video(&path_clone) {
-                        Ok(Some(extracted)) => {
-                            // Add audio to daw-backend pool synchronously to get pool index
-                            let pool_index = {
-                                let mut controller = audio_controller_clone.lock().unwrap();
-                                match controller.add_audio_file_sync(
-                                    path_clone.clone(),
-                                    extracted.samples,
-                                    extracted.channels,
-                                    extracted.sample_rate,
-                                ) {
-                                    Ok(index) => index,
-                                    Err(e) => {
-                                        eprintln!("Failed to add audio file to backend: {}", e);
-                                        let _ = tx.send(AudioExtractionResult::Error {
-                                            video_clip_id,
-                                            error: format!("Failed to add audio to backend: {}", e),
-                                        });
-                                        return;
-                                    }
-                                }
-                            };
+                    // Add the video's audio track as a streaming pool entry — it is
+                    // decoded on demand from the video file by the disk reader's
+                    // FFmpeg backend. No extraction to disk or RAM.
+                    let mut controller = audio_controller_clone.lock().unwrap();
+                    let pool_index =
+                        match controller.add_video_audio_sync(std::path::PathBuf::from(&path_clone)) {
+                            Ok(index) => index,
+                            Err(e) => {
+                                drop(controller);
+                                eprintln!("Failed to add video audio stream: {}", e);
+                                let _ = tx.send(AudioExtractionResult::Error {
+                                    video_clip_id,
+                                    error: format!("Failed to add video audio: {}", e),
+                                });
+                                return;
+                            }
+                        };
+                    // Pull the audio track's channels/sample_rate for reporting
+                    // (duration comes from the video itself, so the clip length
+                    // matches the video clip exactly).
+                    let (_dur, sample_rate, channels) = controller
+                        .get_pool_file_info(pool_index)
+                        .unwrap_or((video_duration, 0, 0));
+                    drop(controller);
 
-                            // Create AudioClip
-                            let audio_clip_name = format!("{} (Audio)", video_name);
-                            let audio_clip = AudioClip::new_sampled(
-                                &audio_clip_name,
-                                pool_index,
-                                extracted.duration,
-                            );
+                    let audio_clip_name = format!("{} (Audio)", video_name);
+                    let audio_clip =
+                        AudioClip::new_sampled(&audio_clip_name, pool_index, video_duration);
 
-                            // Send success result
-                            let _ = tx.send(AudioExtractionResult::Success {
-                                video_clip_id,
-                                audio_clip,
+                    let _ = tx.send(AudioExtractionResult::Success {
+                        video_clip_id,
+                        audio_clip,
+                        pool_index,
+                        video_name,
+                        channels,
+                        sample_rate,
+                    });
+
+                    // Build the min/max waveform overview pyramid by streaming the
+                    // video's audio through FFmpeg once. Video-audio has no in-RAM
+                    // samples, so without this the clip would draw no waveform.
+                    use daw_backend::audio::disk_reader::{build_waveform_pyramid, SourceKind};
+                    match build_waveform_pyramid(
+                        std::path::Path::new(&path_clone),
+                        SourceKind::VideoAudio,
+                        floor_b,
+                    ) {
+                        Ok(pyramid) => {
+                            // Pack the floor level interleaved as (Lmin,Lmax,Rmin,Rmax)
+                            // f32 per texel — the layout the GPU min/max upload expects.
+                            let floor = pyramid.floor();
+                            let mut packed = Vec::with_capacity(floor.len() * 4);
+                            for t in floor {
+                                packed.push(t.l_min);
+                                packed.push(t.l_max);
+                                packed.push(t.r_min);
+                                packed.push(t.r_max);
+                            }
+                            // Serialize the whole pyramid for persistence in the .beam
+                            // container (so a later load is a disk read, not a re-decode).
+                            let blob = pyramid.to_bytes();
+                            let _ = wf_tx.send((
                                 pool_index,
-                                video_name,
-                                channels: extracted.channels,
-                                sample_rate: extracted.sample_rate,
-                            });
-                        }
-                        Ok(None) => {
-                            // Video has no audio stream
-                            let _ = tx.send(AudioExtractionResult::NoAudio { video_clip_id });
+                                packed,
+                                sample_rate,
+                                channels,
+                                pyramid.floor_samples_per_texel,
+                                blob,
+                            ));
                         }
                         Err(e) => {
-                            // Audio extraction failed
-                            let _ = tx.send(AudioExtractionResult::Error {
-                                video_clip_id,
-                                error: e,
-                            });
+                            eprintln!("Failed to build waveform pyramid for video audio: {}", e);
                         }
                     }
                 });
@@ -4213,63 +4573,10 @@ impl EditorApp {
             }
         }
 
-        // Spawn background thread for thumbnail generation
-        // Get decoder once, then generate thumbnails without holding VideoManager lock
-        let video_manager_clone = Arc::clone(&self.video_manager);
-        let duration = metadata.duration;
-        let thumb_clip_id = clip_id;
-        std::thread::spawn(move || {
-            // Get decoder Arc with brief lock
-            let decoder_arc = {
-                let video_mgr = video_manager_clone.lock().unwrap();
-                match video_mgr.get_decoder(&thumb_clip_id) {
-                    Some(arc) => arc,
-                    None => {
-                        eprintln!("Failed to get decoder for thumbnail generation");
-                        return;
-                    }
-                }
-            };
-            // VideoManager lock released - video can now be displayed!
-
-            let interval = 5.0;
-            let mut t = 0.0;
-            let mut thumbnail_count = 0;
-
-            while t < duration {
-                // Decode frame WITHOUT holding VideoManager lock
-                let thumb_opt = {
-                    let mut decoder = decoder_arc.lock().unwrap();
-                    match decoder.decode_frame(t) {
-                        Ok(rgba_data) => {
-                            let w = decoder.get_output_width();
-                            let h = decoder.get_output_height();
-                            Some((rgba_data, w, h))
-                        }
-                        Err(_) => None,
-                    }
-                };
-
-                // Downsample without any locks
-                if let Some((rgba_data, w, h)) = thumb_opt {
-                    use lightningbeam_core::video::downsample_rgba_public;
-                    let thumb_w = 128u32;
-                    let thumb_h = (h as f32 / w as f32 * thumb_w as f32) as u32;
-                    let thumb_data = downsample_rgba_public(&rgba_data, w, h, thumb_w, thumb_h);
-
-                    // Brief lock just to insert
-                    {
-                        let mut video_mgr = video_manager_clone.lock().unwrap();
-                        video_mgr.insert_thumbnail(&thumb_clip_id, t, Arc::new(thumb_data));
-                    }
-                    thumbnail_count += 1;
-                }
-
-                t += interval;
-            }
-
-            println!("  Generated {} thumbnails for video clip {}", thumbnail_count, thumb_clip_id);
-        });
+        // Spawn background thread for thumbnail generation. The video becomes
+        // displayable as soon as the decoder is registered (above); thumbnails
+        // fill in without holding the VideoManager lock during decode.
+        self.spawn_thumbnail_generation(clip_id);
 
         // Add clip to document
         let clip_id = self.action_executor.document_mut().add_video_clip(clip);
@@ -4665,9 +4972,6 @@ impl EditorApp {
                     eprintln!("⚠️  Audio extracted but VideoClip {} not found (may have been deleted)", video_clip_id);
                 }
             }
-            AudioExtractionResult::NoAudio { video_clip_id } => {
-                println!("ℹ️  Video {} has no audio stream", video_clip_id);
-            }
             AudioExtractionResult::Error { video_clip_id, error } => {
                 eprintln!("❌ Failed to extract audio from video {}: {}", video_clip_id, error);
             }
@@ -4700,6 +5004,17 @@ impl eframe::App for EditorApp {
         // Poll audio extraction results from background threads
         while let Ok(result) = self.audio_extraction_rx.try_recv() {
             self.handle_audio_extraction_result(result);
+        }
+
+        // Poll completed waveform-overview pyramids (packed min/max floors).
+        // Stored in the same cache the GPU upload reads from, but flagged as
+        // min/max so the renderer uploads via the (Lmin,Lmax,Rmin,Rmax) path.
+        while let Ok((pool_index, packed, sample_rate, channels, b, blob)) = self.waveform_result_rx.try_recv() {
+            self.raw_audio_cache.insert(pool_index, (Arc::new(packed), sample_rate, channels));
+            self.waveform_minmax_pools.insert(pool_index, b.max(1));
+            self.waveform_pyramid_blobs.insert(pool_index, Arc::new(blob));
+            self.waveform_gpu_dirty.insert(pool_index);
+            self.audio_pools_with_new_waveforms.insert(pool_index);
         }
 
         // Webcam management: open/close based on camera_enabled layers, poll frames
@@ -5509,6 +5824,9 @@ impl eframe::App for EditorApp {
             }
         }
 
+        // One-time prompt: how to store large media (pack vs reference).
+        self.render_large_media_prompt(ctx);
+
         // Render video frames incrementally (if video export in progress)
         if let Some(orchestrator) = &mut self.export_orchestrator {
             if orchestrator.is_exporting() {
@@ -5825,6 +6143,7 @@ impl eframe::App for EditorApp {
                     audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
                     raw_audio_cache: &self.raw_audio_cache,
                     waveform_gpu_dirty: &mut self.waveform_gpu_dirty,
+                    waveform_minmax_pools: &self.waveform_minmax_pools,
                     effect_to_load: &mut self.effect_to_load,
                     effect_thumbnail_requests: &mut effect_thumbnail_requests,
                     effect_thumbnail_cache: self.effect_thumbnail_generator.as_ref()
@@ -6066,24 +6385,9 @@ impl eframe::App for EditorApp {
                                                     }
                                                 }
 
-                                                // Generate thumbnails in background
-                                                let vm_clone = Arc::clone(&self.video_manager);
-                                                std::thread::spawn(move || {
-                                                    // Build keyframe index first
-                                                    {
-                                                        let vm = vm_clone.lock().unwrap();
-                                                        if let Err(e) = vm.build_keyframe_index(&clip_id) {
-                                                            eprintln!("[WEBCAM] Failed to build keyframe index: {e}");
-                                                        }
-                                                    }
-                                                    // Generate thumbnails
-                                                    {
-                                                        let mut vm = vm_clone.lock().unwrap();
-                                                        if let Err(e) = vm.generate_thumbnails(&clip_id, duration) {
-                                                            eprintln!("[WEBCAM] Failed to generate thumbnails: {e}");
-                                                        }
-                                                    }
-                                                });
+                                                // Build keyframe index + thumbnails in background.
+                                                self.spawn_keyframe_index(clip_id);
+                                                self.spawn_thumbnail_generation(clip_id);
 
                                                 eprintln!(
                                                     "[WEBCAM] probe_video: duration={:.4}s, fps={:.1}, {}x{}. Using probe duration for clip.",

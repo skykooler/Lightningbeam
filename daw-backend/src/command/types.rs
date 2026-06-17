@@ -430,8 +430,6 @@ pub enum Query {
     /// Add a MIDI clip instance to a track synchronously (track_id, instance) - returns instance ID
     /// The clip must already exist in the MidiClipPool
     AddMidiClipInstanceSync(TrackId, crate::audio::midi::MidiClipInstance),
-    /// Add an audio file to the pool synchronously (path, data, channels, sample_rate) - returns pool index
-    AddAudioFileSync(String, Vec<f32>, u32, u32),
     /// Import an audio file synchronously (path) - returns pool index.
     /// Does the same work as Command::ImportAudio (mmap for PCM, streaming
     /// setup for compressed) but returns the real pool index in the response.
@@ -440,12 +438,20 @@ pub enum Query {
     /// problem for very large files, switch to async import with event-based
     /// pool index reconciliation.
     ImportAudioSync(std::path::PathBuf),
+    /// Add the audio track of a video file as a streaming pool entry (FFmpeg,
+    /// decoded on demand — no extraction). Probes the audio track and returns
+    /// the pool index. Response: `AudioImportedSync`.
+    AddVideoAudioSync(std::path::PathBuf),
     /// Get raw audio samples from pool (pool_index) - returns (samples, sample_rate, channels)
     GetPoolAudioSamples(usize),
     /// Get a clone of the current project for serialization
     GetProject,
     /// Set the project (replaces current project state)
     SetProject(Box<crate::audio::project::Project>),
+    /// Install the host's packed-media byte-source factory (for streaming
+    /// container-packed audio on load). Sent before `SetProject` so bulk
+    /// activation can open packed sources.
+    SetBlobSourceFactory(std::sync::Arc<dyn crate::audio::disk_reader::AudioBlobSourceFactory>),
     /// Duplicate a MIDI clip in the pool, returning the new clip's ID
     DuplicateMidiClipSync(MidiClipId),
     /// Get whether a track's graph is still the auto-generated default
@@ -516,10 +522,10 @@ pub enum QueryResponse {
     AudioExported(Result<(), String>),
     /// MIDI clip instance added (returns instance ID)
     MidiClipInstanceAdded(Result<MidiClipInstanceId, String>),
-    /// Audio file added to pool (returns pool index)
-    AudioFileAddedSync(Result<usize, String>),
     /// Audio file imported to pool (returns pool index)
     AudioImportedSync(Result<usize, String>),
+    /// Packed-media byte-source factory installed
+    BlobSourceFactorySet(Result<(), String>),
     /// Raw audio samples from pool (samples, sample_rate, channels)
     PoolAudioSamples(Result<(Vec<f32>, u32, u32), String>),
     /// Project retrieved

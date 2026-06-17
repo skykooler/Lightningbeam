@@ -2632,6 +2632,7 @@ impl TimelinePane {
         midi_event_cache: &std::collections::HashMap<u32, Vec<daw_backend::audio::midi::MidiEvent>>,
         raw_audio_cache: &std::collections::HashMap<usize, (std::sync::Arc<Vec<f32>>, u32, u32)>,
         waveform_gpu_dirty: &mut std::collections::HashSet<usize>,
+        waveform_minmax_pools: &std::collections::HashMap<usize, u32>,
         target_format: wgpu::TextureFormat,
         waveform_stereo: bool,
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
@@ -2899,8 +2900,9 @@ impl TimelinePane {
                     theme.text_color(&["#timeline", ".group-bar"], ui.ctx(), egui::Color32::from_rgb(100, 220, 220))
                 };
                 for (s, e) in &merged {
-                    let sx = self.time_to_x(*s);
-                    let ex = self.time_to_x(*e).max(sx + MIN_CLIP_WIDTH_PX);
+                    // `merged` ranges are in beats; convert to seconds for time_to_x.
+                    let sx = self.time_to_x(document.tempo_map().transform(*s));
+                    let ex = self.time_to_x(document.tempo_map().transform(*e)).max(sx + MIN_CLIP_WIDTH_PX);
                     if ex >= 0.0 && sx <= rect.width() {
                         let vsx = sx.max(0.0);
                         let vex = ex.min(rect.width());
@@ -2940,8 +2942,9 @@ impl TimelinePane {
                                 let ci_duration = ci.total_duration(clip_dur, document.tempo_map());
                                 let ci_end = ci_start + ci_duration;
 
-                                let sx = self.time_to_x(ci_start);
-                                let ex = self.time_to_x(ci_end);
+                                // ci_start/ci_end are in beats; convert to seconds for time_to_x.
+                                let sx = self.time_to_x(document.tempo_map().transform(ci_start));
+                                let ex = self.time_to_x(document.tempo_map().transform(ci_end));
                                 if ex < 0.0 || sx > rect.width() { continue; }
 
                                 let ci_rect = egui::Rect::from_min_max(
@@ -3048,8 +3051,17 @@ impl TimelinePane {
                                     None => continue,
                                 };
 
-                                let total_frames = samples.len() / (*ch).max(1) as usize;
-                                let audio_file_duration = total_frames as f64 / *sr as f64;
+                                // Min/max overview pools store 4 f32 per texel at the
+                                // floor rate sr/B; raw pools store interleaved samples.
+                                let minmax_b = waveform_minmax_pools.get(&audio_pool_index).copied();
+                                let is_minmax = minmax_b.is_some();
+                                let frame_stride = if is_minmax { 4 } else { (*ch).max(1) as usize };
+                                let total_frames = samples.len() / frame_stride;
+                                let eff_sr: f32 = match minmax_b {
+                                    Some(b) => *sr as f32 / b.max(1) as f32,
+                                    None => *sr as f32,
+                                };
+                                let audio_file_duration = total_frames as f64 / eff_sr as f64;
 
                                 let clip_dur = audio_clip.duration;
                                 let mut ci_start = ci.effective_start();
@@ -3058,8 +3070,9 @@ impl TimelinePane {
                                 }
                                 let ci_duration = ci.total_duration(clip_dur, document.tempo_map());
 
-                                let ci_screen_start = rect.min.x + self.time_to_x(ci_start);
-                                let ci_screen_end = ci_screen_start + (ci_duration * self.pixels_per_second as f64) as f32;
+                                // ci_start/ci_duration are in beats; convert to seconds for time_to_x.
+                                let ci_screen_start = rect.min.x + self.time_to_x(document.tempo_map().transform(ci_start));
+                                let ci_screen_end = rect.min.x + self.time_to_x(document.tempo_map().transform(ci_start + ci_duration));
 
                                 let waveform_rect = egui::Rect::from_min_max(
                                     egui::pos2(ci_screen_start.max(rect.min.x), wave_y_min),
@@ -3081,9 +3094,10 @@ impl TimelinePane {
                                         }
                                         Some(crate::waveform_gpu::PendingUpload {
                                             samples: samples.clone(),
-                                            sample_rate: *sr,
+                                            sample_rate: if is_minmax { eff_sr.round().max(1.0) as u32 } else { *sr },
                                             channels: *ch,
                                             frame_limit,
+                                            minmax: is_minmax,
                                         })
                                     } else {
                                         None
@@ -3098,7 +3112,7 @@ impl TimelinePane {
                                             viewport_start_time: self.viewport_start_time as f32,
                                             pixels_per_second: self.pixels_per_second as f32,
                                             audio_duration: audio_file_duration as f32,
-                                            sample_rate: *sr as f32,
+                                            sample_rate: eff_sr,
                                             clip_start_time: ci_screen_start,
                                             trim_start: ci.trim_start as f32,
                                             tex_width: crate::waveform_gpu::tex_width() as f32,
@@ -3597,8 +3611,16 @@ impl TimelinePane {
                                     // Sampled Audio: Draw waveform via GPU
                                     lightningbeam_core::clip::AudioClipType::Sampled { audio_pool_index } => {
                                         if let Some((samples, sr, ch)) = raw_audio_cache.get(audio_pool_index) {
-                                            let total_frames = samples.len() / (*ch).max(1) as usize;
-                                            let audio_file_duration = total_frames as f64 / *sr as f64;
+                                            // Min/max overview pools: 4 f32/texel at rate sr/B.
+                                            let minmax_b = waveform_minmax_pools.get(audio_pool_index).copied();
+                                            let is_minmax = minmax_b.is_some();
+                                            let frame_stride = if is_minmax { 4 } else { (*ch).max(1) as usize };
+                                            let total_frames = samples.len() / frame_stride;
+                                            let eff_sr: f32 = match minmax_b {
+                                                Some(b) => *sr as f32 / b.max(1) as f32,
+                                                None => *sr as f32,
+                                            };
+                                            let audio_file_duration = total_frames as f64 / eff_sr as f64;
                                             let screen_size = ui.ctx().content_rect().size();
 
                                             let pending_upload = if waveform_gpu_dirty.contains(audio_pool_index) {
@@ -3620,9 +3642,10 @@ impl TimelinePane {
 
                                                 Some(crate::waveform_gpu::PendingUpload {
                                                     samples: samples.clone(),
-                                                    sample_rate: *sr,
+                                                    sample_rate: if is_minmax { eff_sr.round().max(1.0) as u32 } else { *sr },
                                                     channels: *ch,
                                                     frame_limit,
+                                                    minmax: is_minmax,
                                                 })
                                             } else {
                                                 None
@@ -3684,7 +3707,7 @@ impl TimelinePane {
                                                             viewport_start_time: self.viewport_start_time as f32,
                                                             pixels_per_second: self.pixels_per_second as f32,
                                                             audio_duration: audio_file_duration as f32,
-                                                            sample_rate: *sr as f32,
+                                                            sample_rate: eff_sr,
                                                             clip_start_time: iter_screen_start,
                                                             trim_start: preview_trim_start as f32,
                                                             tex_width: crate::waveform_gpu::tex_width() as f32,
@@ -3730,6 +3753,7 @@ impl TimelinePane {
                                                         sample_rate: *sr,
                                                         channels: *ch,
                                                         frame_limit: None, // recording uses incremental path
+                                                        minmax: false,
                                                     })
                                                 } else {
                                                     None
@@ -5418,7 +5442,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        let (video_clip_hovers, pending_lane_renders) = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager, &audio_cache, *shared.playback_time);
+        let (video_clip_hovers, pending_lane_renders) = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.waveform_minmax_pools, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager, &audio_cache, *shared.playback_time);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));

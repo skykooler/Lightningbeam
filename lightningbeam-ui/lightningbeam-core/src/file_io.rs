@@ -1,20 +1,25 @@
 //! File I/O for .beam project files
 //!
-//! This module handles saving and loading Lightningbeam projects in the .beam format,
-//! which is a ZIP archive containing:
-//! - project.json (compressed) - Project metadata and structure
-//! - media/ directory (uncompressed) - Embedded media files (FLAC for audio)
+//! The `.beam` format is a single **SQLite database** (see [`crate::beam_archive`]):
+//! - `project_json` table — serialized project metadata and structure
+//! - `media` / `media_chunk` tables — audio and raster media (packed as chunked
+//!   blobs, or referenced by external path)
+//!
+//! Older `.beam` files are ZIP archives; [`load_beam`] detects and reads those
+//! too (via [`load_beam_zip_legacy`]). Saving always writes the SQLite form, so
+//! opening a legacy file and saving migrates it.
 
+use crate::beam_archive::{BeamArchive, MediaKind, MediaMeta, LARGE_MEDIA_THRESHOLD};
 use crate::document::Document;
 use daw_backend::audio::pool::AudioPoolEntry;
 use daw_backend::audio::project::Project as AudioProject;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use zip::write::FileOptions;
-use zip::{CompressionMethod, ZipArchive, ZipWriter};
-use flacenc::error::Verify;
+use uuid::Uuid;
+use zip::ZipArchive;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
 /// File format version
@@ -51,9 +56,7 @@ pub struct SerializedAudioBackend {
     /// Audio project (tracks, MIDI clips, etc.)
     pub project: AudioProject,
 
-    /// Audio pool entries (metadata and paths for audio files)
-    /// Note: embedded_data field from daw-backend is ignored; embedded files
-    /// are stored as FLAC in the ZIP's media/audio/ directory instead
+    /// Audio pool entries (metadata and media references for audio files)
     pub audio_pool_entries: Vec<AudioPoolEntry>,
 
     /// Mapping from UI layer UUIDs to backend TrackIds
@@ -61,6 +64,25 @@ pub struct SerializedAudioBackend {
     #[serde(default)]
     pub layer_to_track_map: std::collections::HashMap<uuid::Uuid, u32>,
 
+}
+
+/// How to store a media file at or above [`LARGE_MEDIA_THRESHOLD`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LargeMediaMode {
+    /// Not yet decided — prompt the user the first time a large file is imported.
+    /// Treated as [`LargeMediaMode::Reference`] at save time. Resetting the
+    /// preference to `Ask` re-triggers the prompt (useful for testing).
+    Ask,
+    /// Pack the bytes into the `.beam` container (chunked, streamed from disk).
+    Pack,
+    /// Keep the file external and store only a path reference.
+    Reference,
+}
+
+impl Default for LargeMediaMode {
+    fn default() -> Self {
+        LargeMediaMode::Ask
+    }
 }
 
 /// Settings for saving a project
@@ -74,6 +96,10 @@ pub struct SaveSettings {
 
     /// Force linking all media files (don't embed any)
     pub force_link_all: bool,
+
+    /// How to store files at/above [`LARGE_MEDIA_THRESHOLD`] (pack vs reference).
+    /// `Ask` behaves as `Reference` here (safe default: don't bloat the DB).
+    pub large_media_mode: LargeMediaMode,
 }
 
 impl Default for SaveSettings {
@@ -82,6 +108,7 @@ impl Default for SaveSettings {
             auto_embed_threshold_bytes: 10_000_000, // 10 MB
             force_embed_all: false,
             force_link_all: false,
+            large_media_mode: LargeMediaMode::Ask,
         }
     }
 }
@@ -125,23 +152,93 @@ pub enum MediaFileType {
     Image,
 }
 
-/// Save a project to a .beam file
+/// Save a project to a `.beam` file (SQLite container).
 ///
-/// This function:
-/// 1. Prepares audio project for save (saves AudioGraph presets)
-/// 2. Serializes project data to JSON
-/// 3. Creates ZIP archive with compressed project.json
-/// 4. Embeds media files as FLAC (for audio) in media/ directory
+/// Re-saving an existing SQLite `.beam` updates it **in place** inside a single
+/// transaction: unchanged (large) media is never rewritten, only changed rows
+/// are touched, and the commit is atomic/crash-safe. A brand-new file or a
+/// legacy-ZIP migration is written to a temp file and atomically renamed (there
+/// is no large existing container to copy in that case).
 ///
-/// # Arguments
-/// * `path` - Path to save the .beam file
-/// * `document` - UI document state
-/// * `audio_project` - Audio backend project
-/// * `audio_pool_entries` - Serialized audio pool entries
-/// * `settings` - Save settings (embedding preferences)
-///
-/// # Returns
-/// Ok(()) on success, or error message
+/// Audio and raster media become rows in the `media` table — packed as chunked
+/// blobs, or referenced by external path for files at/above
+/// [`LARGE_MEDIA_THRESHOLD`]. `project.json` goes in the `project_json` table.
+/// Whether a stored media codec is an audio format the disk reader (Symphonia)
+/// can stream directly from a packed blob. Video-container audio tracks and any
+/// unknown formats fall back to the legacy reconstitution-and-decode path.
+fn is_streamable_audio_codec(codec: &str) -> bool {
+    matches!(
+        codec.to_lowercase().as_str(),
+        "mp3" | "flac" | "ogg" | "oga" | "wav" | "wave" | "aiff" | "aif"
+            | "aac" | "m4a" | "opus" | "alac" | "caf"
+    )
+}
+
+/// A `Sync` wrapper over core's `BlobReader` so it satisfies Symphonia's
+/// `MediaSource: Send + Sync`. `BlobReader` holds a rusqlite `Connection`
+/// (`Send` but `!Sync`); the disk reader uses it single-threaded, so the
+/// hot Read/Seek path goes through `Mutex::get_mut` (no runtime locking).
+struct SyncBlobReader {
+    inner: std::sync::Mutex<crate::beam_archive::BlobReader>,
+    len: u64,
+}
+
+impl std::io::Read for SyncBlobReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.get_mut().unwrap().read(buf)
+    }
+}
+impl std::io::Seek for SyncBlobReader {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.inner.get_mut().unwrap().seek(pos)
+    }
+}
+impl daw_backend::audio::MediaByteSource for SyncBlobReader {
+    fn byte_len(&self) -> u64 {
+        self.len
+    }
+}
+
+/// The host's packed-media byte-source factory: opens an independent streaming
+/// reader over a `.beam` container's packed audio by media id. Installed into the
+/// engine on load so container-packed audio streams without a full decode.
+#[derive(Debug)]
+struct BeamBlobFactory {
+    db_path: PathBuf,
+}
+
+impl daw_backend::audio::AudioBlobSourceFactory for BeamBlobFactory {
+    fn open(
+        &self,
+        media_id: &str,
+    ) -> Result<Box<dyn daw_backend::audio::MediaByteSource>, String> {
+        let id = Uuid::parse_str(media_id).map_err(|e| format!("bad media id {}: {}", media_id, e))?;
+        let archive = BeamArchive::open(&self.db_path)?;
+        let reader = archive.open_blob_reader(&self.db_path, id)?;
+        let len = reader.len();
+        Ok(Box::new(SyncBlobReader { inner: std::sync::Mutex::new(reader), len }))
+    }
+}
+
+/// Build a packed-media byte-source factory for a `.beam` file, to install into
+/// the engine (`EngineController::set_blob_source_factory`) before loading so its
+/// packed audio can be streamed.
+pub fn blob_source_factory(
+    beam_path: &Path,
+) -> std::sync::Arc<dyn daw_backend::audio::AudioBlobSourceFactory> {
+    std::sync::Arc::new(BeamBlobFactory { db_path: beam_path.to_path_buf() })
+}
+
+/// Deterministic id for the waveform-pyramid media row of audio pool entry
+/// `pool_index`, within a single project container. Stable across saves (so an
+/// in-place re-save reuses the row instead of orphaning/rewriting it) and
+/// independent of how the audio bytes are stored. The top 32 bits are a fixed
+/// "LBWF" sentinel so it can't collide with the random v4 ids used elsewhere.
+fn waveform_media_id(pool_index: usize) -> Uuid {
+    const SENTINEL: u128 = 0x4C42_5746u128 << 96; // "LBWF" in the high 32 bits
+    Uuid::from_u128(SENTINEL | (pool_index as u128))
+}
+
 pub fn save_beam(
     path: &Path,
     document: &Document,
@@ -151,256 +248,166 @@ pub fn save_beam(
     _settings: &SaveSettings,
 ) -> Result<(), String> {
     let fn_start = std::time::Instant::now();
-    eprintln!("📊 [SAVE_BEAM] Starting save_beam()...");
+    eprintln!("📊 [SAVE_BEAM] Starting save_beam() (SQLite container)...");
 
-    // 1. Create backup if file exists and open it for reading old audio files
-    let step1_start = std::time::Instant::now();
-    let mut old_zip = if path.exists() {
-        let backup_path = path.with_extension("beam.backup");
-        std::fs::copy(path, &backup_path)
-            .map_err(|e| format!("Failed to create backup: {}", e))?;
+    let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let in_place = path.exists() && BeamArchive::is_sqlite(path);
 
-        // Open the backup as a ZIP archive for reading
-        match File::open(&backup_path) {
-            Ok(file) => match ZipArchive::new(file) {
-                Ok(archive) => {
-                    eprintln!("📊 [SAVE_BEAM] Step 1: Create backup and open for reading took {:.2}ms", step1_start.elapsed().as_secs_f64() * 1000.0);
-                    Some(archive)
-                }
-                Err(e) => {
-                    eprintln!("⚠️ [SAVE_BEAM] Failed to open backup as ZIP: {}, will not copy old audio files", e);
-                    eprintln!("📊 [SAVE_BEAM] Step 1: Create backup took {:.2}ms", step1_start.elapsed().as_secs_f64() * 1000.0);
-                    None
-                }
-            },
-            Err(e) => {
-                eprintln!("⚠️ [SAVE_BEAM] Failed to open backup: {}, will not copy old audio files", e);
-                eprintln!("📊 [SAVE_BEAM] Step 1: Create backup took {:.2}ms", step1_start.elapsed().as_secs_f64() * 1000.0);
-                None
-            }
-        }
+    // In-place for an existing SQLite container (don't rewrite unchanged media);
+    // temp + atomic rename for new files / legacy-ZIP migration.
+    let tmp_path = path.with_extension("beam.tmp");
+    let mut archive = if in_place {
+        BeamArchive::open(path)?
     } else {
-        eprintln!("📊 [SAVE_BEAM] Step 1: No backup needed (new file)");
-        None
+        BeamArchive::create(&tmp_path)?
     };
 
-    // 2. Graph presets are already populated by the engine thread (in GetProject handler)
-    // before cloning. Do NOT call prepare_for_save() here — the cloned project has
-    // default empty graphs (AudioTrack::clone() doesn't copy the graph), so calling
-    // prepare_for_save() would overwrite the good presets with empty ones.
-    let step2_start = std::time::Instant::now();
-    eprintln!("📊 [SAVE_BEAM] Step 2: (graph presets already prepared) took {:.2}ms", step2_start.elapsed().as_secs_f64() * 1000.0);
+    let now = chrono::Utc::now().to_rfc3339();
+    let created = if in_place {
+        archive.get_meta("created").ok().flatten().unwrap_or_else(|| now.clone())
+    } else {
+        now.clone()
+    };
 
-    // 3. Create ZIP writer
-    let step3_start = std::time::Instant::now();
-    let file = File::create(path)
-        .map_err(|e| format!("Failed to create file: {}", e))?;
-    let mut zip = ZipWriter::new(file);
-    eprintln!("📊 [SAVE_BEAM] Step 3: Create ZIP writer took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
+    let txn = archive.transaction()?;
 
-    // 4. Process audio pool entries and write embedded audio files to ZIP
-    // Priority: old ZIP file > external file > encode PCM as FLAC
-    let step4_start = std::time::Instant::now();
-    let mut modified_entries = Vec::new();
-    let mut flac_encode_time = 0.0;
-    let mut zip_write_time = 0.0;
-    let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    // --- audio pool entries -> media rows (packed) or external references ---
+    let mut modified_entries = Vec::with_capacity(audio_pool_entries.len());
+    let mut live_media: HashSet<Uuid> = HashSet::new();
 
     for entry in &audio_pool_entries {
-        let mut modified_entry = entry.clone();
+        let mut e = entry.clone();
+        let existing_id = entry.media_id.as_ref().and_then(|s| Uuid::parse_str(s).ok());
 
-        // Try to get audio data from various sources (in priority order)
-        let audio_source: Option<(Vec<u8>, String)> = if let Some(ref rel_path) = entry.relative_path {
-            // Priority 1: Check if file is in the old ZIP
-            if rel_path.starts_with("media/audio/") {
-                if let Some(ref mut old_zip_archive) = old_zip {
-                    match old_zip_archive.by_name(rel_path) {
-                        Ok(mut file) => {
-                            let mut bytes = Vec::new();
-                            if file.read_to_end(&mut bytes).is_ok() {
-                                let extension = rel_path.split('.').last().unwrap_or("bin").to_string();
-                                eprintln!("📊 [SAVE_BEAM] Copying from old ZIP: {}", rel_path);
-                                Some((bytes, extension))
-                            } else {
-                                eprintln!("⚠️ [SAVE_BEAM] Failed to read {} from old ZIP", rel_path);
-                                None
-                            }
-                        }
-                        Err(_) => {
-                            eprintln!("⚠️ [SAVE_BEAM] File {} not found in old ZIP", rel_path);
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
+        // Already packed in this archive (in-place re-save): leave the bytes
+        // untouched, just keep the reference.
+        if let Some(id) = existing_id {
+            if txn.media_exists(id)? {
+                live_media.insert(id);
+                e.media_id = Some(id.to_string());
+                e.relative_path = None;
+                e.embedded_data = None;
+                modified_entries.push(e);
+                continue;
             }
-            // Priority 2: Check external filesystem
-            else {
-                let full_path = project_dir.join(rel_path);
-                if full_path.exists() {
-                    match std::fs::read(&full_path) {
-                        Ok(bytes) => {
-                            let extension = full_path.extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or("bin")
-                                .to_string();
-                            eprintln!("📊 [SAVE_BEAM] Using external file: {:?}", full_path);
-                            Some((bytes, extension))
-                        }
-                        Err(e) => {
-                            eprintln!("⚠️ [SAVE_BEAM] Failed to read {:?}: {}", full_path, e);
-                            None
-                        }
-                    }
-                } else {
-                    eprintln!("⚠️ [SAVE_BEAM] External file not found: {:?}", full_path);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        if let Some((audio_bytes, extension)) = audio_source {
-            // We have the original file - copy it directly
-            let zip_filename = format!("media/audio/{}.{}", entry.pool_index, extension);
-
-            let file_options = FileOptions::default()
-                .compression_method(CompressionMethod::Stored);
-
-            zip.start_file(&zip_filename, file_options)
-                .map_err(|e| format!("Failed to create {} in ZIP: {}", zip_filename, e))?;
-
-            let write_start = std::time::Instant::now();
-            zip.write_all(&audio_bytes)
-                .map_err(|e| format!("Failed to write {}: {}", zip_filename, e))?;
-            zip_write_time += write_start.elapsed().as_secs_f64() * 1000.0;
-
-            // Update entry to point to ZIP file
-            modified_entry.embedded_data = None;
-            modified_entry.relative_path = Some(zip_filename);
-
-        } else if let Some(ref embedded_data) = entry.embedded_data {
-            // Priority 3: No original file - encode PCM as FLAC
-            eprintln!("📊 [SAVE_BEAM] Encoding PCM to FLAC for pool {} (no original file)", entry.pool_index);
-            // Embedded data is always PCM - encode as FLAC
-            let audio_bytes = BASE64_STANDARD.decode(&embedded_data.data_base64)
-                .map_err(|e| format!("Failed to decode base64 audio data for pool index {}: {}", entry.pool_index, e))?;
-
-            let zip_filename = format!("media/audio/{}.flac", entry.pool_index);
-
-            let file_options = FileOptions::default()
-                .compression_method(CompressionMethod::Stored);
-
-            zip.start_file(&zip_filename, file_options)
-                .map_err(|e| format!("Failed to create {} in ZIP: {}", zip_filename, e))?;
-
-            // Encode PCM samples to FLAC
-            let flac_start = std::time::Instant::now();
-
-            // The audio_bytes are raw PCM samples (interleaved f32 little-endian)
-            let samples: Vec<f32> = audio_bytes
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect();
-
-            // Convert f32 samples to i32 for FLAC encoding
-            let samples_i32: Vec<i32> = samples
-                .iter()
-                .map(|&s| {
-                    let clamped = s.clamp(-1.0, 1.0);
-                    (clamped * 8388607.0) as i32
-                })
-                .collect();
-
-            // Configure FLAC encoder
-            let config = flacenc::config::Encoder::default()
-                .into_verified()
-                .map_err(|(_, e)| format!("FLAC encoder config error: {:?}", e))?;
-
-            let source = flacenc::source::MemSource::from_samples(
-                &samples_i32,
-                entry.channels as usize,
-                24,
-                entry.sample_rate as usize,
-            );
-
-            // Encode to FLAC
-            let flac_stream = flacenc::encode_with_fixed_block_size(
-                &config,
-                source,
-                config.block_size,
-            ).map_err(|e| format!("FLAC encoding failed: {:?}", e))?;
-
-            // Convert stream to bytes
-            use flacenc::component::BitRepr;
-            let mut sink = flacenc::bitsink::ByteSink::new();
-            flac_stream.write(&mut sink)
-                .map_err(|e| format!("Failed to write FLAC stream: {:?}", e))?;
-            let flac_bytes = sink.as_slice();
-
-            flac_encode_time += flac_start.elapsed().as_secs_f64() * 1000.0;
-
-            let write_start = std::time::Instant::now();
-            zip.write_all(flac_bytes)
-                .map_err(|e| format!("Failed to write {}: {}", zip_filename, e))?;
-            zip_write_time += write_start.elapsed().as_secs_f64() * 1000.0;
-
-            // Update entry to point to ZIP file instead of embedding data
-            modified_entry.embedded_data = None;
-            modified_entry.relative_path = Some(zip_filename);
         }
 
-        modified_entries.push(modified_entry);
-    }
-    eprintln!("📊 [SAVE_BEAM] Step 4: Process audio pool ({} entries) took {:.2}ms",
-              audio_pool_entries.len(), step4_start.elapsed().as_secs_f64() * 1000.0);
-    if flac_encode_time > 0.0 {
-        eprintln!("📊 [SAVE_BEAM]   - FLAC encoding: {:.2}ms", flac_encode_time);
-    }
-    if zip_write_time > 0.0 {
-        eprintln!("📊 [SAVE_BEAM]   - ZIP writing: {:.2}ms", zip_write_time);
+        // Otherwise resolve the source: external file (Priority 2, streamed from
+        // disk so a huge file is never fully loaded), or embedded data (Priority 3).
+        let meta = MediaMeta {
+            channels: Some(entry.channels),
+            sample_rate: Some(entry.sample_rate),
+            ..Default::default()
+        };
+        let mut wrote_packed: Option<Uuid> = None;
+        let mut referenced: Option<String> = None;
+
+        if let Some(rel) = entry.relative_path.as_ref() {
+            let full = if Path::new(rel).is_absolute() {
+                PathBuf::from(rel)
+            } else {
+                project_dir.join(rel)
+            };
+            if full.exists() {
+                let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+                let codec = full
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .unwrap_or("bin")
+                    .to_lowercase();
+                // Large files honor the user's pack-vs-reference choice (`Ask` ==
+                // reference); smaller files are always packed.
+                let reference_it = size >= LARGE_MEDIA_THRESHOLD
+                    && _settings.large_media_mode != LargeMediaMode::Pack;
+                if reference_it {
+                    referenced = Some(rel.clone());
+                } else {
+                    let id = existing_id.unwrap_or_else(Uuid::new_v4);
+                    txn.put_media_packed_from_path(id, MediaKind::Audio, &codec, &full, meta)?;
+                    wrote_packed = Some(id);
+                }
+            }
+        }
+
+        if wrote_packed.is_none() && referenced.is_none() {
+            if let Some(ed) = entry.embedded_data.as_ref() {
+                if let Ok(bytes) = BASE64_STANDARD.decode(&ed.data_base64) {
+                    let id = existing_id.unwrap_or_else(Uuid::new_v4);
+                    txn.put_media_packed(id, MediaKind::Audio, &ed.format.to_lowercase(), &bytes, meta)?;
+                    wrote_packed = Some(id);
+                }
+            }
+        }
+
+        if let Some(id) = wrote_packed {
+            live_media.insert(id);
+            e.media_id = Some(id.to_string());
+            e.relative_path = None;
+            e.embedded_data = None;
+        } else if let Some(rel) = referenced {
+            e.media_id = None;
+            e.relative_path = Some(rel);
+            e.embedded_data = None;
+        } // else: nothing available — keep original references (reported missing on load)
+
+        // Persist this entry's waveform pyramid (keyed by pool index, independent
+        // of the audio storage above). Reuse the row in place on re-save.
+        let wf_id = waveform_media_id(entry.pool_index);
+        if let Some(blob) = entry.waveform_blob.as_ref() {
+            txn.put_media_packed(wf_id, MediaKind::Waveform, "lbwf", blob, MediaMeta::default())?;
+            live_media.insert(wf_id);
+        } else if txn.media_exists(wf_id)? {
+            // Unchanged this save — keep the stored waveform row.
+            live_media.insert(wf_id);
+        }
+
+        modified_entries.push(e);
     }
 
-    // 4b. Write raster layer PNG buffers to ZIP (media/raster/<keyframe-uuid>.png)
-    let step4b_start = std::time::Instant::now();
-    let raster_file_options = FileOptions::default()
-        .compression_method(CompressionMethod::Stored); // PNG is already compressed
+    // --- raster keyframes -> media rows (PNG), keyed by keyframe id ---
+    // (Phase 0 writes all resident frames each save; a disk-dirty flag to skip
+    // unchanged frames in place is deferred to Phase 3.)
     let mut raster_count = 0usize;
     for layer in &document.root.children {
         if let crate::layer::AnyLayer::Raster(rl) = layer {
             for kf in &rl.keyframes {
                 if !kf.raw_pixels.is_empty() {
-                    // Encode raw RGBA to PNG for storage
-                    let img = crate::brush_engine::image_from_raw(
-                        kf.raw_pixels.clone(), kf.width, kf.height,
-                    );
+                    let img =
+                        crate::brush_engine::image_from_raw(kf.raw_pixels.clone(), kf.width, kf.height);
                     match crate::brush_engine::encode_png(&img) {
                         Ok(png_bytes) => {
-                            let zip_path = kf.media_path.clone();
-                            zip.start_file(&zip_path, raster_file_options)
-                                .map_err(|e| format!("Failed to create {} in ZIP: {}", zip_path, e))?;
-                            zip.write_all(&png_bytes)
-                                .map_err(|e| format!("Failed to write {}: {}", zip_path, e))?;
+                            txn.put_media_packed(
+                                kf.id,
+                                MediaKind::Raster,
+                                "png",
+                                &png_bytes,
+                                MediaMeta {
+                                    width: Some(kf.width),
+                                    height: Some(kf.height),
+                                    ..Default::default()
+                                },
+                            )?;
+                            live_media.insert(kf.id);
                             raster_count += 1;
                         }
-                        Err(e) => eprintln!("⚠️ [SAVE_BEAM] Failed to encode raster PNG {}: {}", kf.media_path, e),
+                        Err(e) => eprintln!("⚠️ [SAVE_BEAM] Failed to encode raster {}: {}", kf.id, e),
                     }
+                } else if txn.media_exists(kf.id)? {
+                    // Pixels not resident but already stored — keep the row.
+                    live_media.insert(kf.id);
                 }
             }
         }
     }
-    eprintln!("📊 [SAVE_BEAM] Step 4b: Write {} raster PNG buffers took {:.2}ms",
-              raster_count, step4b_start.elapsed().as_secs_f64() * 1000.0);
 
-    // 5. Build BeamProject structure with modified entries
-    let step5_start = std::time::Instant::now();
-    let now = chrono::Utc::now().to_rfc3339();
+    // --- orphan cleanup: drop media for removed clips/keyframes ---
+    let removed = txn.retain_media(&live_media)?;
+
+    // --- project.json + meta ---
     let beam_project = BeamProject {
         version: BEAM_VERSION.to_string(),
-        created: now.clone(),
-        modified: now,
+        created: created.clone(),
+        modified: now.clone(),
         ui_state: document.clone(),
         audio_backend: SerializedAudioBackend {
             sample_rate: 48000, // TODO: Get from audio engine
@@ -409,52 +416,187 @@ pub fn save_beam(
             layer_to_track_map: layer_to_track_map.clone(),
         },
     };
-    eprintln!("📊 [SAVE_BEAM] Step 5: Build BeamProject structure took {:.2}ms", step5_start.elapsed().as_secs_f64() * 1000.0);
-
-    // 6. Write project.json (compressed with DEFLATE)
-    let step6_start = std::time::Instant::now();
-    let json_options = FileOptions::default()
-        .compression_method(CompressionMethod::Deflated)
-        .compression_level(Some(6));
-
-    zip.start_file("project.json", json_options)
-        .map_err(|e| format!("Failed to create project.json in ZIP: {}", e))?;
-
-    let json = serde_json::to_string_pretty(&beam_project)
+    let json = serde_json::to_string(&beam_project)
         .map_err(|e| format!("JSON serialization failed: {}", e))?;
+    txn.set_project_json(&json)?;
+    txn.set_meta("version", BEAM_VERSION)?;
+    txn.set_meta("created", &created)?;
+    txn.set_meta("modified", &now)?;
+    txn.commit()?;
 
-    zip.write_all(json.as_bytes())
-        .map_err(|e| format!("Failed to write project.json: {}", e))?;
-    eprintln!("📊 [SAVE_BEAM] Step 6: Write project.json ({} bytes) took {:.2}ms", json.len(), step6_start.elapsed().as_secs_f64() * 1000.0);
+    // Close the connection before renaming (required on Windows; harmless elsewhere).
+    drop(archive);
+    if !in_place {
+        std::fs::rename(&tmp_path, path)
+            .map_err(|e| format!("Failed to finalize {:?}: {}", path, e))?;
+    }
 
-    // 7. Finalize ZIP
-    let step7_start = std::time::Instant::now();
-    zip.finish()
-        .map_err(|e| format!("Failed to finalize ZIP: {}", e))?;
-    eprintln!("📊 [SAVE_BEAM] Step 7: Finalize ZIP took {:.2}ms", step7_start.elapsed().as_secs_f64() * 1000.0);
-
-    eprintln!("📊 [SAVE_BEAM] ✅ Total save_beam() time: {:.2}ms", fn_start.elapsed().as_secs_f64() * 1000.0);
-
+    eprintln!(
+        "📊 [SAVE_BEAM] ✅ Saved {} audio + {} raster media, {} orphans removed, in {:.2}ms",
+        audio_pool_entries.len(),
+        raster_count,
+        removed,
+        fn_start.elapsed().as_secs_f64() * 1000.0
+    );
     Ok(())
 }
 
-/// Load a project from a .beam file
+/// Load a project from a `.beam` file.
 ///
-/// This function:
-/// 1. Opens ZIP archive and reads project.json
-/// 2. Deserializes project data
-/// 3. Loads embedded media files from archive
-/// 4. Attempts to load external media files
-/// 5. Rebuilds AudioGraphs from presets with correct sample_rate
-///
-/// # Arguments
-/// * `path` - Path to the .beam file
-///
-/// # Returns
-/// LoadedProject on success (with missing_files list), or error message
+/// Detects the container format: SQLite (current) or legacy ZIP, and dispatches
+/// accordingly. Both produce an identical [`LoadedProject`].
 pub fn load_beam(path: &Path) -> Result<LoadedProject, String> {
+    if BeamArchive::is_sqlite(path) {
+        load_beam_sqlite(path)
+    } else {
+        load_beam_zip_legacy(path)
+    }
+}
+
+/// Load a project from a SQLite `.beam` container.
+///
+/// Phase 0 reconstitutes packed audio into each entry's `embedded_data` so the
+/// existing (full-decode) audio pool loader keeps working unchanged; Phase 1b
+/// replaces this with streaming reads via `BlobReader`.
+fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
     let fn_start = std::time::Instant::now();
-    eprintln!("📊 [LOAD_BEAM] Starting load_beam()...");
+    eprintln!("📊 [LOAD_BEAM] Starting load_beam() (SQLite container)...");
+
+    let archive = BeamArchive::open(path)?;
+    let json = archive.get_project_json()?;
+    let beam_project: BeamProject = serde_json::from_str(&json)
+        .map_err(|e| format!("Failed to deserialize project.json: {}", e))?;
+
+    if beam_project.version != BEAM_VERSION {
+        return Err(format!(
+            "Unsupported file version: {} (expected {})",
+            beam_project.version, BEAM_VERSION
+        ));
+    }
+
+    let mut document = beam_project.ui_state;
+    document.tempo_map_mut().rebuild_seconds();
+    let mut audio_project = beam_project.audio_backend.project;
+    audio_project
+        .rebuild_audio_graphs(DEFAULT_BUFFER_SIZE)
+        .map_err(|e| format!("Failed to rebuild audio graphs: {}", e))?;
+    let layer_to_track_map = beam_project.audio_backend.layer_to_track_map;
+
+    // For each packed audio item: stream it (leave `embedded_data` empty so the
+    // pool builds a Compressed placeholder backed by the blob factory) when it's a
+    // recognized audio codec; otherwise fall back to the legacy reconstitution
+    // (whole bytes → base64 → decode), which still covers video-container audio
+    // tracks symphonia can't stream and any unknown formats.
+    let mut restored_entries = Vec::with_capacity(beam_project.audio_backend.audio_pool_entries.len());
+    for entry in &beam_project.audio_backend.audio_pool_entries {
+        let mut e = entry.clone();
+        if let Some(id) = entry.media_id.as_ref().and_then(|s| Uuid::parse_str(s).ok()) {
+            match archive.media_info(id) {
+                Ok(Some(info)) => {
+                    if is_streamable_audio_codec(&info.codec) {
+                        // Stream: keep media_id, no embedded bytes. The engine opens
+                        // the packed blob via the factory at activation time.
+                        e.embedded_data = None;
+                        e.relative_path = None;
+                    } else {
+                        match archive.read_media_full(id) {
+                            Ok(bytes) => {
+                                e.embedded_data = Some(daw_backend::audio::pool::EmbeddedAudioData {
+                                    data_base64: BASE64_STANDARD.encode(&bytes),
+                                    format: info.codec,
+                                });
+                                e.relative_path = None;
+                            }
+                            Err(err) => eprintln!("⚠️ [LOAD_BEAM] Failed to read audio media {}: {}", id, err),
+                        }
+                    }
+                }
+                Ok(None) => eprintln!("⚠️ [LOAD_BEAM] Audio media {} missing from archive", id),
+                Err(err) => eprintln!("⚠️ [LOAD_BEAM] media_info({}) failed: {}", id, err),
+            }
+        }
+
+        // Restore this entry's persisted waveform pyramid, if present — avoids
+        // re-decoding the source media just to redraw the overview.
+        let wf_id = waveform_media_id(entry.pool_index);
+        if let Ok(Some(_)) = archive.media_info(wf_id) {
+            match archive.read_media_full(wf_id) {
+                Ok(bytes) => e.waveform_blob = Some(bytes),
+                Err(err) => eprintln!("⚠️ [LOAD_BEAM] Failed to read waveform {}: {}", wf_id, err),
+            }
+        }
+
+        restored_entries.push(e);
+    }
+
+    // Raster keyframes: load PNG bytes from media rows into raw_pixels.
+    let mut raster_load_count = 0usize;
+    for layer in document.root.children.iter_mut() {
+        if let crate::layer::AnyLayer::Raster(rl) = layer {
+            for kf in &mut rl.keyframes {
+                if let Ok(Some(_)) = archive.media_info(kf.id) {
+                    match archive.read_media_full(kf.id) {
+                        Ok(png_bytes) => match crate::brush_engine::decode_png(&png_bytes) {
+                            Ok(rgba) => {
+                                kf.raw_pixels = rgba.into_raw();
+                                raster_load_count += 1;
+                            }
+                            Err(e) => eprintln!("⚠️ [LOAD_BEAM] Failed to decode raster {}: {}", kf.id, e),
+                        },
+                        Err(e) => eprintln!("⚠️ [LOAD_BEAM] Failed to read raster {}: {}", kf.id, e),
+                    }
+                }
+            }
+        }
+    }
+
+    // Missing external files (referenced entries whose file no longer exists).
+    let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let missing_files: Vec<MissingFileInfo> = restored_entries
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, entry)| {
+            if entry.embedded_data.is_none() && entry.media_id.is_none() {
+                if let Some(rel) = entry.relative_path.as_ref() {
+                    let full = if Path::new(rel).is_absolute() {
+                        PathBuf::from(rel)
+                    } else {
+                        project_dir.join(rel)
+                    };
+                    if !full.exists() {
+                        return Some(MissingFileInfo {
+                            pool_index: idx,
+                            original_path: full,
+                            file_type: MediaFileType::Audio,
+                        });
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+
+    eprintln!(
+        "📊 [LOAD_BEAM] ✅ Loaded {} audio entries, {} raster frames in {:.2}ms",
+        restored_entries.len(),
+        raster_load_count,
+        fn_start.elapsed().as_secs_f64() * 1000.0
+    );
+
+    Ok(LoadedProject {
+        document,
+        audio_project,
+        layer_to_track_map,
+        audio_pool_entries: restored_entries,
+        missing_files,
+    })
+}
+
+/// Load a project from a legacy ZIP `.beam` archive (pre-SQLite format).
+/// Retained for backward compatibility; saving converts to SQLite.
+fn load_beam_zip_legacy(path: &Path) -> Result<LoadedProject, String> {
+    let fn_start = std::time::Instant::now();
+    eprintln!("📊 [LOAD_BEAM] Starting load_beam() (legacy ZIP)...");
 
     // 1. Open ZIP archive
     let step1_start = std::time::Instant::now();

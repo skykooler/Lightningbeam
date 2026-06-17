@@ -77,27 +77,29 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let frames_per_pixel = params.sample_rate / params.pixels_per_second;
     // Each mip level reduces by 4x in sample count (2x in each texture dimension)
     let mip_f = max(0.0, log2(frames_per_pixel) / 2.0);
-    let max_mip = f32(textureNumLevels(peak_tex) - 1u);
-    let mip = min(mip_f, max_mip);
 
-    // Frame index at the chosen mip level
-    let mip_floor = u32(mip);
-    let reduction = pow(4.0, f32(mip_floor));
+    // Pick the NEAREST INTEGER LOD and read its exact texel. Sampling at a
+    // fractional mip (trilinear) blends level N and N+1, but each level has its
+    // own 1D→2D row-major linearization (width halves per level), so the two
+    // levels disagree on which audio frame a given screen column maps to. The
+    // blend then reads horizontally-offset neighbours, and because a 2x zoom step
+    // shifts mip_f by exactly 0.5, alternate zoom levels land on a clean integer
+    // (correct) vs a 50/50 blend (offset) — the "every other zoom level" artifact.
+    // textureLoad at one integer level keeps the frame→texel mapping exact.
+    let max_mip = i32(textureNumLevels(peak_tex)) - 1;
+    let mip_i = clamp(i32(mip_f + 0.5), 0, max_mip);
+    let reduction = pow(4.0, f32(mip_i));
     let mip_frame = frame_f / reduction;
 
-    // Convert 1D mip-space index to 2D UV coordinates
-    // Use actual texture dimensions (not computed from total_frames) because the
-    // texture may be pre-allocated larger for live recording.
-    let mip_dims = textureDimensions(peak_tex, mip_floor);
+    // Convert 1D mip-space index to 2D texel coords using this level's actual
+    // dimensions (texture may be pre-allocated larger, e.g. for live recording).
+    let mip_dims = textureDimensions(peak_tex, mip_i);
     let mip_tex_width = f32(mip_dims.x);
-    let mip_tex_height = f32(mip_dims.y);
-    let texel_x = mip_frame % mip_tex_width;
-    let texel_y = floor(mip_frame / mip_tex_width);
-    let uv = vec2((texel_x + 0.5) / mip_tex_width, (texel_y + 0.5) / mip_tex_height);
+    let texel_x = i32(mip_frame % mip_tex_width);
+    let texel_y = i32(floor(mip_frame / mip_tex_width));
 
-    // Sample the peak texture at computed mip level
     // R = left_min, G = left_max, B = right_min, A = right_max
-    let peak = textureSampleLevel(peak_tex, peak_sampler, uv, mip);
+    let peak = textureLoad(peak_tex, vec2<i32>(texel_x, texel_y), mip_i);
 
     let clip_height = params.clip_rect.w - params.clip_rect.y;
     let clip_top = params.clip_rect.y;

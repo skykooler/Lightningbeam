@@ -83,6 +83,16 @@ pub enum AudioStorage {
         decoded_frames: u64,
         total_frames: u64,
     },
+
+    /// Audio track of a video container, decoded on demand via FFmpeg
+    /// (`VideoAudioReader`). The source video file is `AudioFile::path`. Like
+    /// `Compressed`, playback is streamed through the disk reader and
+    /// `decoded_for_waveform` is filled progressively for the overview.
+    VideoAudio {
+        decoded_for_waveform: Vec<f32>,
+        decoded_frames: u64,
+        total_frames: u64,
+    },
 }
 
 /// Audio file stored in the pool
@@ -98,6 +108,10 @@ pub struct AudioFile {
     pub original_format: Option<String>,
     /// Original compressed file bytes (preserved across save/load to avoid re-encoding)
     pub original_bytes: Option<Vec<u8>>,
+    /// When `Some`, this entry's bytes are packed in the project container (not on
+    /// disk at `path`); the disk reader opens them via the host's
+    /// `AudioBlobSourceFactory` using this media id. `None` ⇒ stream from `path`.
+    pub packed_media_id: Option<String>,
 }
 
 impl AudioFile {
@@ -112,6 +126,7 @@ impl AudioFile {
             frames,
             original_format: None,
             original_bytes: None,
+            packed_media_id: None,
         }
     }
 
@@ -126,6 +141,7 @@ impl AudioFile {
             frames,
             original_format,
             original_bytes: None,
+            packed_media_id: None,
         }
     }
 
@@ -158,6 +174,7 @@ impl AudioFile {
             frames: total_frames,
             original_format: Some("wav".to_string()),
             original_bytes: None,
+            packed_media_id: None,
         }
     }
 
@@ -181,6 +198,32 @@ impl AudioFile {
             frames: total_frames,
             original_format,
             original_bytes: None,
+            packed_media_id: None,
+        }
+    }
+
+    /// Create a placeholder AudioFile for a video's audio track. `path` is the
+    /// source video file; the audio is streamed on demand by the disk reader's
+    /// FFmpeg-backed `VideoAudioReader`.
+    pub fn from_video_audio(
+        path: PathBuf,
+        channels: u32,
+        sample_rate: u32,
+        total_frames: u64,
+    ) -> Self {
+        Self {
+            path,
+            storage: AudioStorage::VideoAudio {
+                decoded_for_waveform: Vec::new(),
+                decoded_frames: 0,
+                total_frames,
+            },
+            channels,
+            sample_rate,
+            frames: total_frames,
+            original_format: None,
+            original_bytes: None,
+            packed_media_id: None,
         }
     }
 
@@ -274,8 +317,8 @@ impl AudioFile {
                 }
                 written
             }
-            AudioStorage::Compressed { .. } => {
-                // Compressed files are read through the disk reader
+            AudioStorage::Compressed { .. } | AudioStorage::VideoAudio { .. } => {
+                // Streamed through the disk reader, not via read_samples().
                 0
             }
         }
@@ -786,6 +829,18 @@ pub struct AudioPoolEntry {
     pub channels: u32,
     /// Embedded audio data (for files < 10MB)
     pub embedded_data: Option<EmbeddedAudioData>,
+    /// Stable media id (UUID string) for the SQLite `.beam` container. When set,
+    /// the audio bytes live in the container's `media` table keyed by this id
+    /// (packed storage). `None` for referenced entries (use `relative_path`) or
+    /// legacy ZIP-loaded entries. Populated by the file_io save/load layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_id: Option<String>,
+    /// Transient carrier for this entry's serialized waveform-pyramid blob (LBWF
+    /// bytes). Never serialized into project.json — the bytes live in the
+    /// container's `media` table (kind `Waveform`). Set by the file_io save layer
+    /// (in) and load layer (out); `None` everywhere else.
+    #[serde(skip)]
+    pub waveform_blob: Option<Vec<u8>>,
 }
 
 impl AudioClipPool {
@@ -800,6 +855,28 @@ impl AudioClipPool {
         let mut entries = Vec::new();
 
         for (index, file) in self.files.iter().enumerate() {
+            // Packed-in-container streaming entry: its bytes already live in the
+            // `.beam` media table (kept in place across re-saves). Emit just the
+            // media id — no path, no embedded bytes, nothing to decode.
+            if let Some(media_id) = &file.packed_media_id {
+                entries.push(AudioPoolEntry {
+                    pool_index: index,
+                    waveform_blob: None,
+                    name: file
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| format!("file_{}", index)),
+                    relative_path: None,
+                    duration: file.duration_seconds(),
+                    sample_rate: file.sample_rate,
+                    channels: file.channels,
+                    embedded_data: None,
+                    media_id: Some(media_id.clone()),
+                });
+                continue;
+            }
+
             let file_path = &file.path;
             let file_path_str = file_path.to_string_lossy();
 
@@ -830,6 +907,7 @@ impl AudioClipPool {
 
             let entry = AudioPoolEntry {
                 pool_index: index,
+                waveform_blob: None,
                 name: file_path
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
@@ -839,6 +917,7 @@ impl AudioClipPool {
                 sample_rate: file.sample_rate,
                 channels: file.channels,
                 embedded_data,
+                media_id: None,
             };
 
             entries.push(entry);
@@ -977,7 +1056,31 @@ impl AudioClipPool {
             let entry_start = std::time::Instant::now();
             eprintln!("📊 [LOAD_SERIALIZED] Processing entry {}/{}: '{}'", i + 1, entries.len(), entry.name);
 
-            let success = if let Some(ref embedded) = entry.embedded_data {
+            let success = if entry.media_id.is_some() && entry.embedded_data.is_none() {
+                // Packed-in-container streaming entry: build a Compressed placeholder
+                // backed by the host blob factory (opened at clip-activation time).
+                // No decode here — playback streams through the disk reader.
+                let media_id = entry.media_id.clone().unwrap();
+                let ext = std::path::Path::new(&entry.name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_lowercase());
+                let total_frames = (entry.duration * entry.sample_rate as f64).ceil() as u64;
+                let mut file = AudioFile::from_compressed(
+                    PathBuf::from(&entry.name),
+                    entry.channels,
+                    entry.sample_rate,
+                    total_frames,
+                    ext,
+                );
+                file.packed_media_id = Some(media_id);
+                if entry.pool_index < self.files.len() {
+                    self.files[entry.pool_index] = file;
+                    true
+                } else {
+                    false
+                }
+            } else if let Some(ref embedded) = entry.embedded_data {
                 // Load from embedded data
                 eprintln!("📊 [LOAD_SERIALIZED]   Entry has embedded data (format: {})", embedded.format);
                 match Self::load_from_embedded_into_pool(self, entry.pool_index, embedded.clone(), &entry.name) {

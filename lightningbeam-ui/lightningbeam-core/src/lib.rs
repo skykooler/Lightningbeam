@@ -42,6 +42,7 @@ pub mod segment_builder;
 pub mod planar_graph;
 pub mod file_types;
 pub mod file_io;
+pub mod beam_archive;
 pub mod export;
 pub mod clipboard;
 pub(crate) mod clipboard_platform;

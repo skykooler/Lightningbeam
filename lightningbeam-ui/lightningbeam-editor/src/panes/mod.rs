@@ -242,6 +242,10 @@ pub struct SharedPaneState<'a> {
     pub raw_audio_cache: &'a std::collections::HashMap<usize, (std::sync::Arc<Vec<f32>>, u32, u32)>,
     /// Pool indices needing GPU waveform texture upload
     pub waveform_gpu_dirty: &'a mut std::collections::HashSet<usize>,
+    /// Pools whose `raw_audio_cache` entry is a packed min/max floor rather than
+    /// raw samples (pool_index -> `B`, floor frames-per-texel). Drives the GPU
+    /// min/max upload path and the floor's effective rate `sr/B` in the renderer.
+    pub waveform_minmax_pools: &'a std::collections::HashMap<usize, u32>,
     /// Effect ID to load into shader editor (set by asset library, consumed by shader editor)
     pub effect_to_load: &'a mut Option<Uuid>,
     /// Queue for effect thumbnail requests (effect IDs to generate thumbnails for)

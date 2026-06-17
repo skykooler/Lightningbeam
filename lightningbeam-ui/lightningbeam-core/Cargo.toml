@@ -36,6 +36,9 @@ zip = "0.6"
 chrono = "0.4"
 base64 = "0.21"
 pathdiff = "0.2"
+# .beam container: SQLite database file. `bundled` compiles SQLite from source
+# (no system dependency); `blob` enables incremental blob I/O for streaming.
+rusqlite = { version = "0.31", features = ["bundled", "blob"] }
 
 # Audio encoding for embedded files
 flacenc = "0.4" # For FLAC encoding (lossless)

@@ -97,7 +97,7 @@ impl VideoDecoder {
         // Optionally build keyframe index for fast seeking
         let keyframe_positions = if build_keyframes {
             eprintln!("[Video Decoder] Building keyframe index for {}", path);
-            let positions = Self::build_keyframe_index(&path, stream_index)?;
+            let positions = Self::scan_keyframes(&path, stream_index)?;
             eprintln!("[Video Decoder] Found {} keyframes", positions.len());
             positions
         } else {
@@ -125,14 +125,19 @@ impl VideoDecoder {
         })
     }
 
-    /// Build keyframe index for this decoder
-    /// This can be called asynchronously after decoder creation
-    fn build_and_set_keyframe_index(&mut self) -> Result<(), String> {
-        eprintln!("[Video Decoder] Building keyframe index for {}", self.path);
-        let positions = Self::build_keyframe_index(&self.path, self.stream_index)?;
-        eprintln!("[Video Decoder] Found {} keyframes", positions.len());
+    /// Source file path this decoder reads from.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Parameters needed to scan keyframes off-thread (path + video stream index).
+    pub fn keyframe_scan_params(&self) -> (String, usize) {
+        (self.path.clone(), self.stream_index)
+    }
+
+    /// Replace the keyframe index (built off-thread via [`VideoDecoder::scan_keyframes`]).
+    pub fn set_keyframe_index(&mut self, positions: Vec<i64>) {
         self.keyframe_positions = positions;
-        Ok(())
     }
 
     /// Get the output width (scaled dimensions)
@@ -150,9 +155,10 @@ impl VideoDecoder {
         self.get_frame(timestamp)
     }
 
-    /// Build an index of all keyframe positions in the video
-    /// This enables fast seeking by knowing exactly where keyframes are
-    fn build_keyframe_index(path: &str, stream_index: usize) -> Result<Vec<i64>, String> {
+    /// Build an index of all keyframe positions in the video by scanning packets
+    /// from a fresh input. Does not touch `self` — call it off-thread (it is slow
+    /// on long videos) and hand the result to [`VideoDecoder::set_keyframe_index`].
+    pub fn scan_keyframes(path: &str, stream_index: usize) -> Result<Vec<i64>, String> {
         let mut input = ffmpeg::format::input(path)
             .map_err(|e| format!("Failed to open video for indexing: {}", e))?;
 
@@ -340,6 +346,51 @@ impl VideoDecoder {
     }
 }
 
+/// Generate timeline thumbnails for a video using a **dedicated** decoder that
+/// is independent of any shared playback decoder — so thumbnail work never holds
+/// a lock the UI/playback needs.
+///
+/// Thumbnails are sampled at keyframes ~`interval_secs` apart. Decoding at a
+/// keyframe is cheap (≈one frame) versus decoding forward to an arbitrary
+/// timestamp (the whole GOP). Frames are decoded directly at `thumb_width` (so
+/// `get_thumbnail_at`'s 128-wide assumption holds) and tightly packed RGBA is
+/// handed to `on_thumb` as `(timestamp_secs, data)`.
+pub fn generate_keyframe_thumbnails(
+    path: &str,
+    interval_secs: f64,
+    thumb_width: u32,
+    mut on_thumb: impl FnMut(f64, Arc<Vec<u8>>),
+) -> Result<(), String> {
+    // Own decoder at thumbnail resolution; builds its own keyframe index. The
+    // large max-height lets width be the constraining dimension, so output width
+    // is exactly `thumb_width`.
+    let mut decoder = VideoDecoder::new(
+        path.to_string(),
+        4,
+        Some(thumb_width),
+        Some(100_000),
+        true, // build keyframe index (needed to sample at keyframes)
+    )?;
+
+    let keyframe_secs: Vec<f64> = decoder
+        .keyframe_positions
+        .iter()
+        .map(|&ts| ts as f64 * decoder.time_base)
+        .collect();
+
+    let mut last_emitted = f64::NEG_INFINITY;
+    for ks in keyframe_secs {
+        if ks - last_emitted < interval_secs {
+            continue;
+        }
+        if let Ok(rgba) = decoder.get_frame(ks) {
+            last_emitted = ks;
+            on_thumb(ks, Arc::new(rgba));
+        }
+    }
+    Ok(())
+}
+
 /// Probe video file for metadata without creating a full decoder
 pub fn probe_video(path: &str) -> Result<VideoMetadata, String> {
     ffmpeg::init().map_err(|e| e.to_string())?;
@@ -440,8 +491,9 @@ impl VideoManager {
     /// `target_width` and `target_height` specify the maximum dimensions
     /// for decoded frames. Video will be scaled down if larger.
     ///
-    /// The keyframe index is NOT built during this call - use `build_keyframe_index_async`
-    /// in a background thread to build it asynchronously.
+    /// The keyframe index is NOT built during this call — scan it off-thread via
+    /// [`VideoDecoder::scan_keyframes`] and store it with
+    /// [`VideoDecoder::set_keyframe_index`] so the slow scan never blocks playback.
     pub fn load_video(
         &mut self,
         clip_id: Uuid,
@@ -465,20 +517,6 @@ impl VideoManager {
         self.decoders.insert(clip_id, Arc::new(Mutex::new(decoder)));
 
         Ok(metadata)
-    }
-
-    /// Build keyframe index for a loaded video asynchronously
-    ///
-    /// This should be called from a background thread after load_video()
-    /// to avoid blocking the UI during import.
-    pub fn build_keyframe_index(&self, clip_id: &Uuid) -> Result<(), String> {
-        let decoder_arc = self.decoders.get(clip_id)
-            .ok_or_else(|| format!("Video clip {} not found", clip_id))?;
-
-        let mut decoder = decoder_arc.lock()
-            .map_err(|e| format!("Failed to lock decoder: {}", e))?;
-
-        decoder.build_and_set_keyframe_index()
     }
 
     /// Get a decoded frame for a specific clip at a specific timestamp
@@ -515,62 +553,6 @@ impl VideoManager {
         self.frame_cache.insert(cache_key, Arc::clone(&frame));
 
         Some(frame)
-    }
-
-    /// Generate thumbnails for a video clip (single batch version - use generate_thumbnails_progressive instead)
-    ///
-    /// Thumbnails are generated every 5 seconds at 128px width.
-    /// This should be called in a background thread to avoid blocking.
-    /// Thumbnails are inserted into the cache progressively as they're generated,
-    /// allowing the UI to display them immediately.
-    ///
-    /// DEPRECATED: Use generate_thumbnails_progressive which releases the lock between thumbnails.
-    pub fn generate_thumbnails(&mut self, clip_id: &Uuid, duration: f64) -> Result<(), String> {
-        let decoder_arc = self.decoders.get(clip_id)
-            .ok_or("Clip not loaded")?
-            .clone();
-
-        let mut decoder = decoder_arc.lock()
-            .map_err(|e| format!("Failed to lock decoder: {}", e))?;
-
-        // Initialize thumbnail cache entry with empty vec
-        self.thumbnail_cache.insert(*clip_id, Vec::new());
-
-        let interval = 5.0; // Generate thumbnail every 5 seconds
-        let mut t = 0.0;
-
-        while t < duration {
-            // Decode frame at this timestamp
-            if let Ok(rgba_data) = decoder.get_frame(t) {
-                // Decode already scaled to output dimensions, but we want 128px width for thumbnails
-                // We need to scale down further
-                let current_width = decoder.output_width;
-                let current_height = decoder.output_height;
-
-                // Calculate thumbnail dimensions (128px width, maintain aspect ratio)
-                let thumb_width = 128u32;
-                let aspect_ratio = current_height as f32 / current_width as f32;
-                let thumb_height = (thumb_width as f32 * aspect_ratio) as u32;
-
-                // Simple nearest-neighbor downsampling for thumbnails
-                let thumb_data = downsample_rgba(
-                    &rgba_data,
-                    current_width,
-                    current_height,
-                    thumb_width,
-                    thumb_height,
-                );
-
-                // Insert thumbnail into cache immediately so UI can display it
-                if let Some(thumbnails) = self.thumbnail_cache.get_mut(clip_id) {
-                    thumbnails.push((t, Arc::new(thumb_data)));
-                }
-            }
-
-            t += interval;
-        }
-
-        Ok(())
     }
 
     /// Get the decoder Arc for a clip (for external thumbnail generation)
@@ -649,212 +631,4 @@ impl Default for VideoManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Simple nearest-neighbor downsampling for RGBA images
-pub fn downsample_rgba_public(
-    src: &[u8],
-    src_width: u32,
-    src_height: u32,
-    dst_width: u32,
-    dst_height: u32,
-) -> Vec<u8> {
-    downsample_rgba(src, src_width, src_height, dst_width, dst_height)
-}
-
-/// Simple nearest-neighbor downsampling for RGBA images (internal)
-fn downsample_rgba(
-    src: &[u8],
-    src_width: u32,
-    src_height: u32,
-    dst_width: u32,
-    dst_height: u32,
-) -> Vec<u8> {
-    let mut dst = Vec::with_capacity((dst_width * dst_height * 4) as usize);
-
-    let x_ratio = src_width as f32 / dst_width as f32;
-    let y_ratio = src_height as f32 / dst_height as f32;
-
-    for y in 0..dst_height {
-        for x in 0..dst_width {
-            let src_x = (x as f32 * x_ratio) as u32;
-            let src_y = (y as f32 * y_ratio) as u32;
-
-            let src_idx = ((src_y * src_width + src_x) * 4) as usize;
-
-            // Copy RGBA bytes
-            dst.push(src[src_idx]);     // R
-            dst.push(src[src_idx + 1]); // G
-            dst.push(src[src_idx + 2]); // B
-            dst.push(src[src_idx + 3]); // A
-        }
-    }
-
-    dst
-}
-
-/// Extracted audio data from a video file
-#[derive(Debug, Clone)]
-pub struct ExtractedAudio {
-    pub samples: Vec<f32>,
-    pub channels: u32,
-    pub sample_rate: u32,
-    pub duration: f64,
-}
-
-/// Extract audio from a video file
-///
-/// This function performs the slow FFmpeg decoding without holding any locks.
-/// The caller can then quickly add the audio to the DAW backend in a background thread.
-///
-/// Returns None if the video has no audio stream.
-pub fn extract_audio_from_video(path: &str) -> Result<Option<ExtractedAudio>, String> {
-    ffmpeg::init().map_err(|e| e.to_string())?;
-
-    // Open video file
-    let mut input = ffmpeg::format::input(path)
-        .map_err(|e| format!("Failed to open video: {}", e))?;
-
-    // Find audio stream
-    let audio_stream_opt = input.streams()
-        .best(ffmpeg::media::Type::Audio);
-
-    // Return None if no audio stream
-    if audio_stream_opt.is_none() {
-        return Ok(None);
-    }
-
-    let audio_stream = audio_stream_opt.unwrap();
-    let audio_index = audio_stream.index();
-
-    // Get audio properties
-    let context_decoder = ffmpeg::codec::context::Context::from_parameters(
-        audio_stream.parameters()
-    ).map_err(|e| e.to_string())?;
-
-    let mut audio_decoder = context_decoder.decoder().audio()
-        .map_err(|e| e.to_string())?;
-
-    let sample_rate = audio_decoder.rate();
-    let channels = audio_decoder.channels() as u32;
-
-    // Decode all audio frames
-    let mut audio_samples: Vec<f32> = Vec::new();
-
-    for (stream, packet) in input.packets() {
-        if stream.index() == audio_index {
-            audio_decoder.send_packet(&packet)
-                .map_err(|e| e.to_string())?;
-
-            let mut audio_frame = ffmpeg::util::frame::Audio::empty();
-            while audio_decoder.receive_frame(&mut audio_frame).is_ok() {
-                // Convert audio to f32 packed format
-                let format = audio_frame.format();
-                let frame_channels = audio_frame.channels() as usize;
-
-                // Create resampler to convert to f32 packed
-                let mut resampler = ffmpeg::software::resampling::context::Context::get(
-                    format,
-                    audio_frame.channel_layout(),
-                    sample_rate,
-                    ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
-                    audio_frame.channel_layout(),
-                    sample_rate,
-                ).map_err(|e| e.to_string())?;
-
-                let mut resampled_frame = ffmpeg::util::frame::Audio::empty();
-                resampler.run(&audio_frame, &mut resampled_frame)
-                    .map_err(|e| e.to_string())?;
-
-                // Extract f32 samples (interleaved format)
-                let data_ptr = resampled_frame.data(0).as_ptr() as *const f32;
-                let total_samples = resampled_frame.samples() * frame_channels;
-
-                // Safety checks before creating slice from FFmpeg data
-                // 1. Verify f32 alignment (required: 4 bytes)
-                if data_ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
-                    return Err("FFmpeg audio data is not properly aligned for f32".to_string());
-                }
-
-                // 2. Verify the frame actually has enough data
-                let byte_size = resampled_frame.data(0).len();
-                let expected_bytes = total_samples * std::mem::size_of::<f32>();
-                if byte_size < expected_bytes {
-                    return Err(format!(
-                        "FFmpeg frame buffer too small: {} bytes, need {} bytes",
-                        byte_size, expected_bytes
-                    ));
-                }
-
-                // SAFETY: We verified alignment and bounds above.
-                // The slice lifetime is tied to resampled_frame which lives until
-                // after extend_from_slice completes.
-                let samples_slice = unsafe {
-                    std::slice::from_raw_parts(data_ptr, total_samples)
-                };
-
-                audio_samples.extend_from_slice(samples_slice);
-            }
-        }
-    }
-
-    // Flush audio decoder
-    audio_decoder.send_eof().map_err(|e| e.to_string())?;
-    let mut audio_frame = ffmpeg::util::frame::Audio::empty();
-    while audio_decoder.receive_frame(&mut audio_frame).is_ok() {
-        let format = audio_frame.format();
-        let frame_channels = audio_frame.channels() as usize;
-
-        let mut resampler = ffmpeg::software::resampling::context::Context::get(
-            format,
-            audio_frame.channel_layout(),
-            sample_rate,
-            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
-            audio_frame.channel_layout(),
-            sample_rate,
-        ).map_err(|e| e.to_string())?;
-
-        let mut resampled_frame = ffmpeg::util::frame::Audio::empty();
-        resampler.run(&audio_frame, &mut resampled_frame)
-            .map_err(|e| e.to_string())?;
-
-        let data_ptr = resampled_frame.data(0).as_ptr() as *const f32;
-        let total_samples = resampled_frame.samples() * frame_channels;
-
-        // Safety checks before creating slice from FFmpeg data
-        // 1. Verify f32 alignment (required: 4 bytes)
-        if data_ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
-            return Err("FFmpeg audio data is not properly aligned for f32".to_string());
-        }
-
-        // 2. Verify the frame actually has enough data
-        let byte_size = resampled_frame.data(0).len();
-        let expected_bytes = total_samples * std::mem::size_of::<f32>();
-        if byte_size < expected_bytes {
-            return Err(format!(
-                "FFmpeg frame buffer too small: {} bytes, need {} bytes",
-                byte_size, expected_bytes
-            ));
-        }
-
-        // SAFETY: We verified alignment and bounds above.
-        // The slice lifetime is tied to resampled_frame which lives until
-        // after extend_from_slice completes.
-        let samples_slice = unsafe {
-            std::slice::from_raw_parts(data_ptr, total_samples)
-        };
-
-        audio_samples.extend_from_slice(samples_slice);
-    }
-
-    // Calculate duration
-    let total_samples_per_channel = audio_samples.len() / channels as usize;
-    let duration = total_samples_per_channel as f64 / sample_rate as f64;
-
-    Ok(Some(ExtractedAudio {
-        samples: audio_samples,
-        channels,
-        sample_rate,
-        duration,
-    }))
 }
