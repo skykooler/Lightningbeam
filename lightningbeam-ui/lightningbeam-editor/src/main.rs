@@ -486,6 +486,79 @@ impl FocusIconCache {
     }
 }
 
+/// Serialize a clip's thumbnails to an `LBTN` blob (version 2): a `complete` flag
+/// then each frame PNG-encoded and packed with its timestamp. Thumbnails are 128px
+/// wide; height is implied by the PNG. `complete` records whether the generating
+/// pass finished — a partial pack is persisted and resumed on load. Frames that
+/// fail to encode are skipped (the count reflects what's written).
+fn encode_thumbnail_blob(thumbs: &[(f64, std::sync::Arc<Vec<u8>>)], complete: bool) -> Vec<u8> {
+    let mut entries: Vec<(f64, Vec<u8>)> = Vec::with_capacity(thumbs.len());
+    for (ts, rgba) in thumbs {
+        let width = 128u32;
+        let height = (rgba.len() / (width as usize * 4)) as u32;
+        if height == 0 {
+            continue;
+        }
+        let img = lightningbeam_core::brush_engine::image_from_raw((**rgba).clone(), width, height);
+        if let Ok(png) = lightningbeam_core::brush_engine::encode_png(&img) {
+            entries.push((*ts, png));
+        }
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"LBTN");
+    out.extend_from_slice(&2u32.to_le_bytes()); // version
+    out.push(if complete { 1 } else { 0 });
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for (ts, png) in &entries {
+        out.extend_from_slice(&ts.to_le_bytes());
+        out.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        out.extend_from_slice(png);
+    }
+    out
+}
+
+/// Read just the `complete` flag from an `LBTN` blob (cheap header read, no PNG
+/// decode). Unknown/old versions are treated as incomplete (→ regenerate).
+fn thumbnail_blob_is_complete(blob: &[u8]) -> bool {
+    blob.len() >= 9
+        && &blob[0..4] == b"LBTN"
+        && u32::from_le_bytes(blob[4..8].try_into().unwrap()) == 2
+        && blob[8] == 1
+}
+
+/// Decode an `LBTN` blob into `(timestamp, rgba)` thumbnails (128px wide). Returns
+/// empty for unknown/old versions.
+fn decode_thumbnail_blob(blob: &[u8]) -> Vec<(f64, std::sync::Arc<Vec<u8>>)> {
+    let mut out = Vec::new();
+    if blob.len() < 13 || &blob[0..4] != b"LBTN" {
+        return out;
+    }
+    if u32::from_le_bytes(blob[4..8].try_into().unwrap()) != 2 {
+        return out;
+    }
+    // blob[8] = complete flag (read separately via thumbnail_blob_is_complete)
+    let count = u32::from_le_bytes(blob[9..13].try_into().unwrap()) as usize;
+    let mut pos = 13;
+    for _ in 0..count {
+        if pos + 12 > blob.len() {
+            break;
+        }
+        let ts = f64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        let png_len = u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + png_len > blob.len() {
+            break;
+        }
+        if let Ok(img) = lightningbeam_core::brush_engine::decode_png(&blob[pos..pos + png_len]) {
+            out.push((ts, std::sync::Arc::new(img.into_raw())));
+        }
+        pos += png_len;
+    }
+    out
+}
+
 /// Command sent to file operations worker thread
 enum FileCommand {
     Save {
@@ -497,6 +570,12 @@ enum FileCommand {
         /// Serialized waveform-pyramid blobs per audio pool index, persisted into
         /// the container so a later load needn't re-decode the source media.
         waveform_blobs: std::collections::HashMap<usize, Vec<u8>>,
+        /// Raw video thumbnails by clip id (cheap Arc-clone snapshot). The worker
+        /// PNG-encodes them off the UI thread, then persists them in the container.
+        thumbnail_snapshot: std::collections::HashMap<uuid::Uuid, Vec<(f64, std::sync::Arc<Vec<u8>>)>>,
+        /// Clips whose thumbnail generation has finished — partial sets are still
+        /// persisted (and resumed on load), but flagged incomplete.
+        complete_thumbnail_clips: std::collections::HashSet<uuid::Uuid>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     },
     Load {
@@ -571,8 +650,8 @@ impl FileOperationsWorker {
     fn run(self) {
         while let Ok(command) = self.command_rx.recv() {
             match command {
-                FileCommand::Save { path, document, layer_to_track_map, large_media_mode, waveform_blobs, progress_tx } => {
-                    self.handle_save(path, document, &layer_to_track_map, large_media_mode, waveform_blobs, progress_tx);
+                FileCommand::Save { path, document, layer_to_track_map, large_media_mode, waveform_blobs, thumbnail_snapshot, complete_thumbnail_clips, progress_tx } => {
+                    self.handle_save(path, document, &layer_to_track_map, large_media_mode, waveform_blobs, thumbnail_snapshot, complete_thumbnail_clips, progress_tx);
                 }
                 FileCommand::Load { path, progress_tx } => {
                     self.handle_load(path, progress_tx);
@@ -589,9 +668,22 @@ impl FileOperationsWorker {
         layer_to_track_map: &std::collections::HashMap<uuid::Uuid, u32>,
         large_media_mode: lightningbeam_core::file_io::LargeMediaMode,
         waveform_blobs: std::collections::HashMap<usize, Vec<u8>>,
+        thumbnail_snapshot: std::collections::HashMap<uuid::Uuid, Vec<(f64, std::sync::Arc<Vec<u8>>)>>,
+        complete_thumbnail_clips: std::collections::HashSet<uuid::Uuid>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     ) {
         use lightningbeam_core::file_io::{save_beam, SaveSettings};
+
+        // PNG-encode the thumbnail snapshot into per-clip LBTN blobs (off the UI
+        // thread), flagging each pack complete-or-partial so the load can resume.
+        let thumbnail_blobs: std::collections::HashMap<uuid::Uuid, Vec<u8>> = thumbnail_snapshot
+            .iter()
+            .filter(|(_, thumbs)| !thumbs.is_empty())
+            .map(|(clip_id, thumbs)| {
+                let complete = complete_thumbnail_clips.contains(clip_id);
+                (*clip_id, encode_thumbnail_blob(thumbs, complete))
+            })
+            .collect();
 
         let save_start = std::time::Instant::now();
         eprintln!("📊 [SAVE] Starting save operation...");
@@ -641,7 +733,7 @@ impl FileOperationsWorker {
             large_media_mode,
             ..SaveSettings::default()
         };
-        match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, &settings) {
+        match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, &thumbnail_blobs, &settings) {
             Ok(()) => {
                 eprintln!("📊 [SAVE] Step 3: save_beam() took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
                 eprintln!("📊 [SAVE] ✅ Total save time: {:.2}ms", save_start.elapsed().as_secs_f64() * 1000.0);
@@ -3716,6 +3808,14 @@ impl EditorApp {
             .map(|(&idx, blob)| (idx, blob.as_ref().clone()))
             .collect();
 
+        // Snapshot all video thumbnails (cheap Arc-clone) + which clips finished
+        // generating; the worker PNG-encodes them with a complete/partial flag so a
+        // save mid-generation persists progress and resumes on load.
+        let (thumbnail_snapshot, complete_thumbnail_clips) = {
+            let vm = self.video_manager.lock().unwrap();
+            (vm.snapshot_all_thumbnails(), vm.complete_thumbnail_clips())
+        };
+
         // Send save command to worker thread
         let command = FileCommand::Save {
             path: path.clone(),
@@ -3723,6 +3823,8 @@ impl EditorApp {
             layer_to_track_map: self.layer_to_track_map.clone(),
             large_media_mode: self.config.large_media_default,
             waveform_blobs,
+            thumbnail_snapshot,
+            complete_thumbnail_clips,
             progress_tx,
         };
 
@@ -3808,7 +3910,7 @@ impl EditorApp {
     }
 
     /// Apply loaded project data (called after successful load in background)
-    fn apply_loaded_project(&mut self, loaded_project: lightningbeam_core::file_io::LoadedProject, path: std::path::PathBuf) {
+    fn apply_loaded_project(&mut self, mut loaded_project: lightningbeam_core::file_io::LoadedProject, path: std::path::PathBuf) {
         use lightningbeam_core::action::ActionExecutor;
 
         let apply_start = std::time::Instant::now();
@@ -4059,11 +4161,39 @@ impl EditorApp {
         }
         eprintln!("📊 [APPLY] Step 8: Rebuilt MIDI event cache for {} clips in {:.2}ms", midi_fetched, step8_start.elapsed().as_secs_f64() * 1000.0);
 
+        // Restore persisted video thumbnails (decode + insert off-thread). Only
+        // *complete* packs are skipped from regeneration; *partial* packs are
+        // restored AND have generation resumed below (it skips the keyframes already
+        // restored), so a save mid-generation continues from where it left off.
+        let skip_thumbnail_clips: std::collections::HashSet<uuid::Uuid> = loaded_project
+            .thumbnail_blobs
+            .iter()
+            .filter(|(_, blob)| thumbnail_blob_is_complete(blob))
+            .map(|(id, _)| *id)
+            .collect();
+        if !loaded_project.thumbnail_blobs.is_empty() {
+            let blobs = std::mem::take(&mut loaded_project.thumbnail_blobs);
+            let video_manager = Arc::clone(&self.video_manager);
+            std::thread::spawn(move || {
+                for (clip_id, blob) in blobs {
+                    let complete = thumbnail_blob_is_complete(&blob);
+                    let thumbs = decode_thumbnail_blob(&blob);
+                    let mut vm = video_manager.lock().unwrap();
+                    for (ts, rgba) in thumbs {
+                        vm.insert_thumbnail(&clip_id, ts, rgba);
+                    }
+                    if complete {
+                        vm.mark_thumbnails_complete(&clip_id);
+                    }
+                }
+            });
+        }
+
         // Re-register video clips with the VideoManager (decoder + keyframe index +
         // thumbnails). Restored video_clips carry only metadata + file_path; without
         // this they render black with no thumbnails.
         let step9_start = std::time::Instant::now();
-        self.register_loaded_videos();
+        self.register_loaded_videos(&skip_thumbnail_clips);
         eprintln!("📊 [APPLY] Step 9: Registered loaded videos in {:.2}ms", step9_start.elapsed().as_secs_f64() * 1000.0);
 
         // Reset playback state
@@ -4088,7 +4218,7 @@ impl EditorApp {
     /// so it can decode and display. Mirrors the import path's setup (decoder +
     /// background keyframe index + thumbnails) but does NOT re-extract audio —
     /// the extracted audio is already restored via the audio pool.
-    fn register_loaded_videos(&mut self) {
+    fn register_loaded_videos(&mut self, skip_thumbnail_clips: &std::collections::HashSet<uuid::Uuid>) {
         let doc_width = self.action_executor.document().width as u32;
         let doc_height = self.action_executor.document().height as u32;
 
@@ -4117,7 +4247,11 @@ impl EditorApp {
             }
 
             self.spawn_keyframe_index(clip_id);
-            self.spawn_thumbnail_generation(clip_id);
+            // Skip regeneration for clips whose thumbnails were restored from the
+            // container — they're being decoded + inserted in the background.
+            if !skip_thumbnail_clips.contains(&clip_id) {
+                self.spawn_thumbnail_generation(clip_id);
+            }
         }
     }
 
@@ -4174,17 +4308,26 @@ impl EditorApp {
             };
 
             let vm_insert = Arc::clone(&video_manager);
+            let vm_skip = Arc::clone(&video_manager);
             let result = lightningbeam_core::video::generate_keyframe_thumbnails(
                 &path,
                 5.0,
                 128,
+                // Resume: skip keyframes already covered (e.g. restored from a
+                // partial persisted pack), so generation only fills the gaps.
+                |ts| vm_skip.lock().unwrap().has_thumbnail_near(&clip_id, ts, 2.5),
                 |ts, rgba| {
                     let mut vm = vm_insert.lock().unwrap();
                     vm.insert_thumbnail(&clip_id, ts, rgba);
                 },
             );
-            if let Err(e) = result {
-                eprintln!("Thumbnail generation failed for {}: {}", clip_id, e);
+            match result {
+                Ok(()) => {
+                    // Full keyframe pass finished — mark complete so this set is
+                    // worth persisting (a partial set is left unmarked → not saved).
+                    vm_insert.lock().unwrap().mark_thumbnails_complete(&clip_id);
+                }
+                Err(e) => eprintln!("Thumbnail generation failed for {}: {}", clip_id, e),
             }
         });
     }

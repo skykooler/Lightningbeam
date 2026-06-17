@@ -127,6 +127,11 @@ pub struct LoadedProject {
     /// Loaded audio pool entries
     pub audio_pool_entries: Vec<AudioPoolEntry>,
 
+    /// Persisted video-thumbnail packs by clip id (opaque LBTN blobs; decoded and
+    /// inserted into the VideoManager by the editor). Clips present here don't need
+    /// their thumbnails regenerated on load.
+    pub thumbnail_blobs: std::collections::HashMap<uuid::Uuid, Vec<u8>>,
+
     /// List of files that couldn't be found
     pub missing_files: Vec<MissingFileInfo>,
 }
@@ -239,12 +244,23 @@ fn waveform_media_id(pool_index: usize) -> Uuid {
     Uuid::from_u128(SENTINEL | (pool_index as u128))
 }
 
+/// Deterministic id for the thumbnail-pack media row of a video clip. Derived from
+/// the clip id by XOR with a fixed constant — bijective and stable across saves, so
+/// it reuses the row in place, and it can't (in practice) collide with the random
+/// v4 ids used for other media of a different kind.
+fn thumbnail_media_id(clip_id: Uuid) -> Uuid {
+    // "LBTN" repeated — moves clip ids into a distinct region of the id space.
+    const SENTINEL: u128 = 0x4C42_544E_4C42_544E_4C42_544E_4C42_544E;
+    Uuid::from_u128(clip_id.as_u128() ^ SENTINEL)
+}
+
 pub fn save_beam(
     path: &Path,
     document: &Document,
     audio_project: &mut AudioProject,
     audio_pool_entries: Vec<AudioPoolEntry>,
     layer_to_track_map: &std::collections::HashMap<uuid::Uuid, u32>,
+    thumbnail_blobs: &std::collections::HashMap<uuid::Uuid, Vec<u8>>,
     _settings: &SaveSettings,
 ) -> Result<(), String> {
     let fn_start = std::time::Instant::now();
@@ -397,6 +413,19 @@ pub fn save_beam(
                     live_media.insert(kf.id);
                 }
             }
+        }
+    }
+
+    // --- video thumbnail packs -> media rows (opaque LBTN blob), keyed by a
+    //     sentinel-derived id from the video clip id ---
+    for clip_id in document.video_clips.keys() {
+        let tn_id = thumbnail_media_id(*clip_id);
+        if let Some(blob) = thumbnail_blobs.get(clip_id) {
+            txn.put_media_packed(tn_id, MediaKind::Thumbnail, "lbtn", blob, MediaMeta::default())?;
+            live_media.insert(tn_id);
+        } else if txn.media_exists(tn_id)? {
+            // Not regenerated this session — keep the stored pack.
+            live_media.insert(tn_id);
         }
     }
 
@@ -576,10 +605,26 @@ fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
         })
         .collect();
 
+    // Persisted video thumbnail packs (opaque LBTN blobs), keyed by clip id. The
+    // editor decodes + inserts them and skips regeneration for these clips.
+    let mut thumbnail_blobs = std::collections::HashMap::new();
+    for clip_id in document.video_clips.keys() {
+        let tn_id = thumbnail_media_id(*clip_id);
+        if let Ok(Some(info)) = archive.media_info(tn_id) {
+            if info.kind == MediaKind::Thumbnail {
+                match archive.read_media_full(tn_id) {
+                    Ok(bytes) => { thumbnail_blobs.insert(*clip_id, bytes); }
+                    Err(e) => eprintln!("⚠️ [LOAD_BEAM] Failed to read thumbnails for {}: {}", clip_id, e),
+                }
+            }
+        }
+    }
+
     eprintln!(
-        "📊 [LOAD_BEAM] ✅ Loaded {} audio entries, {} raster frames in {:.2}ms",
+        "📊 [LOAD_BEAM] ✅ Loaded {} audio entries, {} raster frames, {} thumbnail packs in {:.2}ms",
         restored_entries.len(),
         raster_load_count,
+        thumbnail_blobs.len(),
         fn_start.elapsed().as_secs_f64() * 1000.0
     );
 
@@ -588,6 +633,7 @@ fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
         audio_project,
         layer_to_track_map,
         audio_pool_entries: restored_entries,
+        thumbnail_blobs,
         missing_files,
     })
 }
@@ -815,6 +861,7 @@ fn load_beam_zip_legacy(path: &Path) -> Result<LoadedProject, String> {
         audio_project,
         layer_to_track_map,
         audio_pool_entries: restored_entries,
+        thumbnail_blobs: std::collections::HashMap::new(), // legacy ZIP has no thumbnail packs
         missing_files,
     })
 }

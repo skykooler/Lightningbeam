@@ -55,6 +55,9 @@ pub enum MediaKind {
     /// A precomputed waveform LOD pyramid blob for an audio item (keyed by the
     /// same id as the audio it describes). See `daw_backend::audio::waveform_pyramid`.
     Waveform = 4,
+    /// A pack of precomputed video thumbnails for a video clip (keyed by a
+    /// sentinel-derived id from the clip id). Opaque blob; format owned by the editor.
+    Thumbnail = 5,
 }
 
 impl MediaKind {
@@ -65,6 +68,7 @@ impl MediaKind {
             2 => Some(Self::Raster),
             3 => Some(Self::ImageAsset),
             4 => Some(Self::Waveform),
+            5 => Some(Self::Thumbnail),
             _ => None,
         }
     }

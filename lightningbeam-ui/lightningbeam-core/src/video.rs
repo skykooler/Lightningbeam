@@ -359,6 +359,7 @@ pub fn generate_keyframe_thumbnails(
     path: &str,
     interval_secs: f64,
     thumb_width: u32,
+    mut should_skip: impl FnMut(f64) -> bool,
     mut on_thumb: impl FnMut(f64, Arc<Vec<u8>>),
 ) -> Result<(), String> {
     // Own decoder at thumbnail resolution; builds its own keyframe index. The
@@ -383,8 +384,14 @@ pub fn generate_keyframe_thumbnails(
         if ks - last_emitted < interval_secs {
             continue;
         }
+        // This keyframe is a target slot; advance regardless of skip so the chosen
+        // slots are deterministic (lets a resumed pass target the same timestamps).
+        last_emitted = ks;
+        // Skip slots already covered (resume after a partial save / dedup).
+        if should_skip(ks) {
+            continue;
+        }
         if let Ok(rgba) = decoder.get_frame(ks) {
-            last_emitted = ks;
             on_thumb(ks, Arc::new(rgba));
         }
     }
@@ -471,6 +478,11 @@ pub struct VideoManager {
     /// Low-resolution (64px width) thumbnails for scrubbing
     thumbnail_cache: HashMap<Uuid, Vec<(f64, Arc<Vec<u8>>)>>,
 
+    /// Clips whose thumbnail generation finished. Only complete sets are worth
+    /// persisting — a partial set (saved mid-generation) is dropped so the load
+    /// regenerates it fully rather than leaving it permanently incomplete.
+    thumbnails_complete: std::collections::HashSet<Uuid>,
+
     /// Maximum number of frames to cache per decoder
     cache_size: usize,
 }
@@ -493,6 +505,7 @@ impl VideoManager {
             frame_cache: LruCache::unbounded(),
             frame_cache_bytes: 0,
             thumbnail_cache: HashMap::new(),
+            thumbnails_complete: std::collections::HashSet::new(),
             cache_size,
         }
     }
@@ -592,18 +605,57 @@ impl VideoManager {
         self.decoders.get(clip_id).cloned()
     }
 
-    /// Insert a thumbnail into the cache (for external thumbnail generation)
-    pub fn insert_thumbnail(&mut self, clip_id: &Uuid, timestamp: f64, data: Arc<Vec<u8>>) {
-        self.thumbnail_cache
-            .entry(*clip_id)
-            .or_insert_with(Vec::new)
-            .push((timestamp, data));
+    /// Snapshot all cached thumbnails for persistence (clip id -> sorted
+    /// (timestamp, rgba) pairs). Cheap: clones the `Arc`s, not the pixel data.
+    /// Partial sets are persisted too — pair with [`complete_thumbnail_clips`] so
+    /// the load knows which clips still need generation resumed.
+    pub fn snapshot_all_thumbnails(&self) -> HashMap<Uuid, Vec<(f64, Arc<Vec<u8>>)>> {
+        self.thumbnail_cache.clone()
     }
 
-    /// Get the thumbnail closest to the specified timestamp
+    /// The set of clips whose thumbnail generation has finished (a full keyframe
+    /// pass). A persisted set flagged incomplete is resumed on load.
+    pub fn complete_thumbnail_clips(&self) -> std::collections::HashSet<Uuid> {
+        self.thumbnails_complete.clone()
+    }
+
+    /// Mark a clip's thumbnail generation as complete (called when the background
+    /// generator finishes the full keyframe pass).
+    pub fn mark_thumbnails_complete(&mut self, clip_id: &Uuid) {
+        self.thumbnails_complete.insert(*clip_id);
+    }
+
+    /// Whether the clip already has a thumbnail within `tol` seconds of `ts`.
+    /// Lets the generator skip keyframes already covered (resume / dedup).
+    pub fn has_thumbnail_near(&self, clip_id: &Uuid, ts: f64, tol: f64) -> bool {
+        self.thumbnail_cache
+            .get(clip_id)
+            .map_or(false, |v| v.iter().any(|(t, _)| (t - ts).abs() < tol))
+    }
+
+    /// Insert a thumbnail into the cache, keeping it **sorted by timestamp** and
+    /// **deduped** (an existing entry at the same timestamp is replaced). Sorted
+    /// order is required by `get_thumbnail_at`'s binary search, and dedup makes
+    /// concurrent restore + resumed generation idempotent (no double inserts).
+    pub fn insert_thumbnail(&mut self, clip_id: &Uuid, timestamp: f64, data: Arc<Vec<u8>>) {
+        let vec = self.thumbnail_cache.entry(*clip_id).or_default();
+        match vec.binary_search_by(|(t, _)| {
+            t.partial_cmp(&timestamp).unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            Ok(i) => vec[i] = (timestamp, data),
+            Err(i) => vec.insert(i, (timestamp, data)),
+        }
+    }
+
+    /// Get the thumbnail closest to the specified timestamp.
     ///
+    /// Returns `(actual_timestamp, width, height, data)` — `actual_timestamp` is
+    /// the time of the thumbnail actually chosen (which may differ from the
+    /// requested `timestamp`, and changes as closer thumbnails finish generating).
+    /// Callers key their GPU texture cache on it so the on-clip strip refreshes as
+    /// better thumbnails load instead of freezing on the first one.
     /// Returns None if no thumbnails have been generated for this clip.
-    pub fn get_thumbnail_at(&self, clip_id: &Uuid, timestamp: f64) -> Option<(u32, u32, Arc<Vec<u8>>)> {
+    pub fn get_thumbnail_at(&self, clip_id: &Uuid, timestamp: f64) -> Option<(f64, u32, u32, Arc<Vec<u8>>)> {
         let thumbnails = self.thumbnail_cache.get(clip_id)?;
 
         if thumbnails.is_empty() {
@@ -631,14 +683,14 @@ impl VideoManager {
             }
         });
 
-        let (_, rgba_data) = &thumbnails[idx];
+        let (actual_ts, rgba_data) = &thumbnails[idx];
 
-        // Return (width, height, data)
+        // Return (actual_timestamp, width, height, data)
         // Thumbnails are always 128px width
         let thumb_width = 128;
         let thumb_height = (rgba_data.len() / (thumb_width * 4)) as u32;
 
-        Some((thumb_width as u32, thumb_height, Arc::clone(rgba_data)))
+        Some((*actual_ts, thumb_width as u32, thumb_height, Arc::clone(rgba_data)))
     }
 
     /// Remove a video clip and its cached data
@@ -661,6 +713,7 @@ impl VideoManager {
 
         // Remove thumbnails
         self.thumbnail_cache.remove(clip_id);
+        self.thumbnails_complete.remove(clip_id);
     }
 
     /// Clear all frame caches (useful for memory management)
