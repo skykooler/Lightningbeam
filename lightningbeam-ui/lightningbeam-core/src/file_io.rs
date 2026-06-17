@@ -331,10 +331,13 @@ pub fn save_beam(
                     .and_then(|x| x.to_str())
                     .unwrap_or("bin")
                     .to_lowercase();
-                // Large files honor the user's pack-vs-reference choice (`Ask` ==
-                // reference); smaller files are always packed.
-                let reference_it = size >= LARGE_MEDIA_THRESHOLD
-                    && _settings.large_media_mode != LargeMediaMode::Pack;
+                // Video-audio entries are always referenced (the video is already
+                // referenced by its VideoClip; reloaded by re-probing via FFmpeg).
+                // Otherwise large files honor the user's pack-vs-reference choice
+                // (`Ask` == reference); smaller files are always packed.
+                let reference_it = entry.is_video_audio
+                    || (size >= LARGE_MEDIA_THRESHOLD
+                        && _settings.large_media_mode != LargeMediaMode::Pack);
                 if reference_it {
                     referenced = Some(rel.clone());
                 } else {

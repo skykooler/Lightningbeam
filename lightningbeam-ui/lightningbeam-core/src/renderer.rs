@@ -423,11 +423,25 @@ pub fn render_layer_isolated(
                     * Affine::scale_non_uniform(scale_x, scale_y)
                     * skew_transform;
 
+                // The decoded frame is scaled down to fit the document (decoder caps
+                // at the canvas size), so its pixel size is smaller than the clip's
+                // native dimensions. The instance is blitted treating the texture as
+                // `frame.width × frame.height`, while `clip_transform` is expressed in
+                // the clip's native space — so scale frame-px → clip-native-px first,
+                // else the frame renders small in a corner with its edges streaked.
+                let frame_to_clip = if frame.width > 0 && frame.height > 0 {
+                    Affine::scale_non_uniform(
+                        video_clip.width / frame.width as f64,
+                        video_clip.height / frame.height as f64,
+                    )
+                } else {
+                    Affine::IDENTITY
+                };
                 instances.push(VideoRenderInstance {
                     rgba_data: frame.rgba_data.clone(),
                     width: frame.width,
                     height: frame.height,
-                    transform: base_transform * clip_transform,
+                    transform: base_transform * clip_transform * frame_to_clip,
                     opacity: (layer_opacity * inst_opacity) as f32,
                 });
             }
@@ -1028,12 +1042,26 @@ fn render_video_layer(
         // Create rectangle path for the video frame
         let video_rect = Rect::new(0.0, 0.0, video_clip.width, video_clip.height);
 
+        // The decoded frame is scaled down to fit the document (the decoder caps at
+        // the canvas size to bound memory), so its pixel dimensions are smaller than
+        // the clip's native display size. Scale the image brush from frame-pixel
+        // space to the clip rect; without this the image is drawn 1:1 in a corner
+        // and its edge pixels pad the rest (small frame with "stretched corners").
+        let brush_transform = if frame.width > 0 && frame.height > 0 {
+            Affine::scale_non_uniform(
+                video_clip.width / frame.width as f64,
+                video_clip.height / frame.height as f64,
+            )
+        } else {
+            Affine::IDENTITY
+        };
+
         // Render video frame as image fill
         scene.fill(
             Fill::NonZero,
             instance_transform,
             &image_with_alpha,
-            None,
+            Some(brush_transform),
             &video_rect,
         );
         clip_rendered = true;
