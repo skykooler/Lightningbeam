@@ -1179,6 +1179,39 @@ pub fn render_frame_to_rgba_hdr(
 ///
 /// # Returns
 /// Command encoder ready for submission (caller submits via ReadbackPipeline)
+/// Fault in raster keyframe pixels needed to composite the document at its current
+/// time, decoding them from the project `.beam` container via `raster_store`.
+///
+/// Mutates the document in place: for every raster layer's active keyframe whose
+/// `raw_pixels` are empty, loads + sets them (and marks `texture_dirty`). A no-op
+/// when `raster_store` is `None`/unsaved or everything is already resident.
+fn fault_in_raster_for_frame(
+    document: &mut Document,
+    raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
+) {
+    let store = match raster_store {
+        Some(s) if s.has_path() => s,
+        _ => return,
+    };
+    let now = document.current_time;
+    for layer in document.all_layers_mut() {
+        if let lightningbeam_core::layer::AnyLayer::Raster(rl) = layer {
+            // Resolve the active keyframe id at the current time, then fault it in.
+            let kf_id = match rl.keyframe_at(now) {
+                Some(kf) if kf.raw_pixels.is_empty() && kf.needs_fault_in => kf.id,
+                _ => continue,
+            };
+            if let Some(kf) = rl.keyframes.iter_mut().find(|kf| kf.id == kf_id) {
+                if let Some(pixels) = store.load_pixels(kf_id) {
+                    kf.raw_pixels = pixels;
+                    kf.texture_dirty = true;
+                }
+                kf.needs_fault_in = false;
+            }
+        }
+    }
+}
+
 pub fn render_frame_to_gpu_rgba(
     document: &mut Document,
     timestamp: f64,
@@ -1193,11 +1226,18 @@ pub fn render_frame_to_gpu_rgba(
     rgba_texture_view: &wgpu::TextureView,
     floating_selection: Option<&lightningbeam_core::selection::RasterFloatingSelection>,
     allow_transparency: bool,
+    raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
 ) -> Result<wgpu::CommandEncoder, String> {
     use vello::kurbo::Affine;
 
     // Set document time to the frame timestamp
     document.current_time = timestamp;
+
+    // Fault in raster keyframe pixels for this frame (Phase 3 paging). Offline
+    // export renders synchronously with no "next frame", so unlike the live canvas
+    // we must page the pixels in here, before compositing. Cheap no-op when every
+    // keyframe is already resident or when the document is unsaved (no store path).
+    fault_in_raster_for_frame(document, raster_store);
 
     // Scale the document to the export resolution. The core renderer bakes this
     // base transform into every layer (vector scenes, raster and video layer

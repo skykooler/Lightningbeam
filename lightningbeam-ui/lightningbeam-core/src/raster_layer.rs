@@ -117,6 +117,12 @@ pub struct RasterKeyframe {
     /// Always `true` after load; cleared by the renderer after uploading.
     #[serde(skip, default = "default_true")]
     pub texture_dirty: bool,
+    /// Phase 3 paging: the keyframe's pixels live in the container and must be
+    /// faulted in (`raw_pixels` empty *and* this true ⇒ page in from the store).
+    /// A *new* keyframe is `false` (intentionally blank/resident, nothing to load);
+    /// set true on load and again when evicted. Never serialized.
+    #[serde(skip)]
+    pub needs_fault_in: bool,
 }
 
 fn default_true() -> bool { true }
@@ -140,6 +146,7 @@ impl RasterKeyframe {
             tween_after: TweenType::Hold,
             raw_pixels: Vec::new(),
             texture_dirty: true,
+            needs_fault_in: false,
         }
     }
 }

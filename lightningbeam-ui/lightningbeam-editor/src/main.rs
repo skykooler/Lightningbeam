@@ -1026,6 +1026,12 @@ struct EditorApp {
     recording_mirror_rx: Option<rtrb::Consumer<f32>>,
     /// Current file path (None if not yet saved)
     current_file_path: Option<std::path::PathBuf>,
+    /// On-demand loader for raster keyframe pixels from the project `.beam` container.
+    raster_store: lightningbeam_core::raster_store::RasterStore,
+    /// Miss-sink: raster keyframe ids the canvas wanted but whose pixels weren't
+    /// resident. Drained and faulted in at the top of the next `update()`.
+    raster_fault_requests:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>>,
     /// Application configuration (recent files, etc.)
     config: AppConfig,
     /// Remappable keyboard shortcut manager
@@ -1289,6 +1295,8 @@ impl EditorApp {
             waveform_result_tx,
             recording_mirror_rx,
             current_file_path: None, // No file loaded initially
+            raster_store: lightningbeam_core::raster_store::RasterStore::new(None),
+            raster_fault_requests: Default::default(),
             keymap: KeymapManager::new(&config.keybindings),
             config,
             file_command_tx,
@@ -4200,6 +4208,8 @@ impl EditorApp {
         self.playback_time = 0.0;
         self.is_playing = false;
         self.current_file_path = Some(path.clone());
+        // Point the raster paging store at the loaded container so faulting works.
+        self.raster_store.set_path(self.current_file_path.clone());
 
         // Add to recent files
         self.config.add_recent_file(path.clone());
@@ -5133,6 +5143,46 @@ impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _frame_start = std::time::Instant::now();
 
+        // === Raster fault-in (Phase 3 paging) ===
+        // The canvas records raster keyframe ids whose `raw_pixels` weren't resident
+        // (it can't mutate the document while rendering). Drain that sink here, BEFORE
+        // any rendering, and fault the pixels in from the project container. A drain of
+        // an empty set is ~free, so this is cheap when everything is already resident.
+        {
+            let wanted: Vec<uuid::Uuid> = {
+                let mut s = self.raster_fault_requests.lock().unwrap();
+                s.drain().collect()
+            };
+            if !wanted.is_empty() && self.raster_store.has_path() {
+                let mut any_loaded = false;
+                let doc = self.action_executor.document_mut();
+                for kf_id in wanted {
+                    // Find the keyframe by id across every raster layer in the document.
+                    let kf = doc.all_layers_mut().into_iter().find_map(|l| match l {
+                        lightningbeam_core::layer::AnyLayer::Raster(rl) => {
+                            rl.keyframes.iter_mut().find(|kf| kf.id == kf_id)
+                        }
+                        _ => None,
+                    });
+                    if let Some(kf) = kf {
+                        if kf.raw_pixels.is_empty() && kf.needs_fault_in {
+                            if let Some(pixels) = self.raster_store.load_pixels(kf_id) {
+                                kf.raw_pixels = pixels;
+                                kf.texture_dirty = true;
+                                any_loaded = true;
+                            }
+                            // Resolved (loaded, or genuinely absent/blank) — clear the
+                            // flag so we don't re-request a page-in every frame.
+                            kf.needs_fault_in = false;
+                        }
+                    }
+                }
+                if any_loaded {
+                    ctx.request_repaint();
+                }
+            }
+        }
+
         // Consume any pending tool switch from the tablet (eraser in/out).
         if let Some(tool) = self.tablet.pending_tool_switch.take() {
             self.selected_tool = tool;
@@ -5274,6 +5324,9 @@ impl eframe::App for EditorApp {
                             FileProgress::Done => {
                                 println!("✅ Save complete!");
                                 self.current_file_path = Some(path.clone());
+                                // Container path may be new (Save As); update the
+                                // raster paging store so future faults read the right file.
+                                self.raster_store.set_path(self.current_file_path.clone());
 
                                 // Add to recent files
                                 self.config.add_recent_file(path.clone());
@@ -6002,6 +6055,7 @@ impl eframe::App for EditorApp {
                             renderer,
                             &mut temp_image_cache,
                             &self.video_manager,
+                            Some(&self.raster_store),
                         ) {
                             if has_more {
                                 ctx.request_repaint();
@@ -6017,6 +6071,7 @@ impl eframe::App for EditorApp {
                             &mut temp_image_cache,
                             &self.video_manager,
                             self.selection.raster_floating.as_ref(),
+                            Some(&self.raster_store),
                         ) {
                             Ok(false) => { ctx.request_repaint(); } // readback pending
                             Ok(true)  => {}                          // done or cancelled
@@ -6287,6 +6342,7 @@ impl eframe::App for EditorApp {
                     raw_audio_cache: &self.raw_audio_cache,
                     waveform_gpu_dirty: &mut self.waveform_gpu_dirty,
                     waveform_minmax_pools: &self.waveform_minmax_pools,
+                    raster_fault_requests: &self.raster_fault_requests,
                     effect_to_load: &mut self.effect_to_load,
                     effect_thumbnail_requests: &mut effect_thumbnail_requests,
                     effect_thumbnail_cache: self.effect_thumbnail_generator.as_ref()

@@ -766,6 +766,32 @@ fn set_meta_conn(conn: &Connection, key: &str, value: &str) -> Result<(), String
     Ok(())
 }
 
+/// Read a packed media item's full bytes via a fresh **read-only** connection,
+/// without an open [`BeamArchive`] handle. Returns `Ok(None)` if the item has no
+/// chunk rows. Used for on-demand raster fault-in: a read-only connection can't
+/// conflict with an in-place save and needs no long-lived handle.
+pub fn read_packed_media_readonly(db_path: &Path, id: Uuid) -> Result<Option<Vec<u8>>, String> {
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(map_sql)?;
+    let id_bytes = id.as_bytes().to_vec();
+    let mut stmt = conn
+        .prepare("SELECT bytes FROM media_chunk WHERE media_id = ?1 ORDER BY chunk_index")
+        .map_err(map_sql)?;
+    let rows = stmt
+        .query_map([&id_bytes], |r| r.get::<_, Vec<u8>>(0))
+        .map_err(map_sql)?;
+    let mut out = Vec::new();
+    let mut any = false;
+    for row in rows {
+        out.extend_from_slice(&row.map_err(map_sql)?);
+        any = true;
+    }
+    Ok(if any { Some(out) } else { None })
+}
+
 fn map_sql(e: rusqlite::Error) -> String {
     format!("SQLite error: {}", e)
 }

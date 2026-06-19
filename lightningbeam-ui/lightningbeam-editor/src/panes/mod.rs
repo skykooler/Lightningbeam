@@ -246,6 +246,12 @@ pub struct SharedPaneState<'a> {
     /// raw samples (pool_index -> `B`, floor frames-per-texel). Drives the GPU
     /// min/max upload path and the floor's effective rate `sr/B` in the renderer.
     pub waveform_minmax_pools: &'a std::collections::HashMap<usize, u32>,
+    /// Miss-sink for on-demand raster keyframe pixel faulting (Phase 3 paging).
+    /// The canvas inserts the id of any raster keyframe it wants to upload whose
+    /// `raw_pixels` aren't resident; the App drains this at the top of the next
+    /// `update()` and faults the pixels in from the project container.
+    pub raster_fault_requests:
+        &'a std::sync::Arc<std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>>,
     /// Effect ID to load into shader editor (set by asset library, consumed by shader editor)
     pub effect_to_load: &'a mut Option<Uuid>,
     /// Queue for effect thumbnail requests (effect IDs to generate thumbnails for)

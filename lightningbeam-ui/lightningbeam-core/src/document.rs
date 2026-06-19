@@ -650,6 +650,29 @@ impl Document {
         layers
     }
 
+    /// Get mutable references to all layers across the entire document
+    /// (root + nested groups + inside all vector clips). Mirrors [`all_layers`].
+    pub fn all_layers_mut(&mut self) -> Vec<&mut AnyLayer> {
+        let mut layers: Vec<&mut AnyLayer> = Vec::new();
+        // Iterative walk with an explicit stack of child slices. Group layers are
+        // descended into but not themselves collected (they hold no keyframes).
+        let mut stack: Vec<&mut [AnyLayer]> = vec![&mut self.root.children];
+        while let Some(list) = stack.pop() {
+            for layer in list {
+                match layer {
+                    AnyLayer::Group(g) => {
+                        stack.push(&mut g.children);
+                    }
+                    other => layers.push(other),
+                }
+            }
+        }
+        for clip in self.vector_clips.values_mut() {
+            layers.extend(clip.layers.root_data_mut());
+        }
+        layers
+    }
+
     // === CLIP LIBRARY METHODS ===
 
     /// Add a vector clip to the library

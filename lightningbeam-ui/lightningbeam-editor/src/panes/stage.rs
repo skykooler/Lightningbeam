@@ -523,6 +523,12 @@ struct VelloRenderContext {
     /// When `Some`, readback this B-canvas into `RASTER_READBACK_RESULTS` after
     /// dispatching GPU tool work.  Set on mouseup by the unified raster tool commit path.
     pending_tool_readback_b: Option<uuid::Uuid>,
+    /// Miss-sink for on-demand raster keyframe pixel faulting (Phase 3 paging).
+    /// When the compositor wants to upload an idle raster keyframe whose `raw_pixels`
+    /// aren't resident, it inserts the keyframe id here; the App drains this at the
+    /// top of the next `update()` and faults the pixels in from the project container.
+    raster_fault_requests:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>>,
 }
 
 /// Callback for Vello rendering within egui
@@ -1206,6 +1212,15 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     );
                                     Some(kf_id)
                                 } else {
+                                    // Empty pixels: if the frame is paged out (lives in the
+                                    // container), record a fault-in request so the App pages it
+                                    // in at the top of the next frame. A new blank keyframe
+                                    // (needs_fault_in == false) has nothing to load — skip it.
+                                    if kf.needs_fault_in {
+                                        if let Ok(mut reqs) = self.ctx.raster_fault_requests.lock() {
+                                            reqs.insert(kf_id);
+                                        }
+                                    }
                                     None
                                 }
                             } else {
@@ -11902,6 +11917,7 @@ impl PaneRenderer for StagePane {
                 .and_then(|(tool, _)| tool.take_pending_gpu_work()),
             pending_layer_cache_removals: std::mem::take(&mut self.pending_layer_cache_removals),
             pending_tool_readback_b: self.pending_tool_readback_b.take(),
+            raster_fault_requests: std::sync::Arc::clone(shared.raster_fault_requests),
         }};
 
         let cb = egui_wgpu::Callback::new_paint_callback(

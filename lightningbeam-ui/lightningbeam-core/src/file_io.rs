@@ -561,23 +561,18 @@ fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
         restored_entries.push(e);
     }
 
-    // Raster keyframes: load PNG bytes from media rows into raw_pixels.
+    // Raster keyframes are NOT eagerly decoded (Phase 3 paging): `raw_pixels` stays
+    // empty and is faulted in on demand from the container's `Raster` rows via the
+    // editor's `RasterStore` (keyed by `kf.id`). Loading a big paint project is now
+    // instant and only the resident window lives in RAM. Mark every keyframe
+    // `needs_fault_in` (recursively, incl. nested layers) so the renderer requests a
+    // page-in; a freshly-created keyframe stays `false` (blank-resident, nothing to load).
     let mut raster_load_count = 0usize;
-    for layer in document.root.children.iter_mut() {
+    for layer in document.all_layers_mut() {
         if let crate::layer::AnyLayer::Raster(rl) = layer {
             for kf in &mut rl.keyframes {
-                if let Ok(Some(_)) = archive.media_info(kf.id) {
-                    match archive.read_media_full(kf.id) {
-                        Ok(png_bytes) => match crate::brush_engine::decode_png(&png_bytes) {
-                            Ok(rgba) => {
-                                kf.raw_pixels = rgba.into_raw();
-                                raster_load_count += 1;
-                            }
-                            Err(e) => eprintln!("⚠️ [LOAD_BEAM] Failed to decode raster {}: {}", kf.id, e),
-                        },
-                        Err(e) => eprintln!("⚠️ [LOAD_BEAM] Failed to read raster {}: {}", kf.id, e),
-                    }
-                }
+                kf.needs_fault_in = true;
+                raster_load_count += 1;
             }
         }
     }
