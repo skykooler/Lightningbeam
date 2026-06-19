@@ -50,6 +50,7 @@ impl Action for RasterStrokeAction {
         let kf = get_keyframe_mut(document, &self.layer_id, self.time, self.width, self.height)?;
         kf.raw_pixels = self.buffer_after.clone();
         kf.texture_dirty = true;
+        kf.dirty = true;
         Ok(())
     }
 
@@ -57,6 +58,7 @@ impl Action for RasterStrokeAction {
         let kf = get_keyframe_mut(document, &self.layer_id, self.time, self.width, self.height)?;
         kf.raw_pixels = self.buffer_before.clone();
         kf.texture_dirty = true;
+        kf.dirty = true;
         Ok(())
     }
 

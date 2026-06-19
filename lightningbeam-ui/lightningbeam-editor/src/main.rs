@@ -1039,6 +1039,11 @@ struct EditorApp {
     /// Keyframe ids whose page-in is currently running on a background thread
     /// (prevents duplicate loads while the canvas keeps re-requesting them).
     raster_loads_inflight: std::collections::HashSet<uuid::Uuid>,
+    /// Fault-in-recency LRU of resident raster keyframe ids. Most-recently
+    /// paged-in is at the back; eviction pops the front when over budget
+    /// (`RASTER_RESIDENT_MAX`). The currently-shown frame is always the most
+    /// recent fault-in, so it's never evicted.
+    raster_resident_lru: std::collections::VecDeque<uuid::Uuid>,
     /// Application configuration (recent files, etc.)
     config: AppConfig,
     /// Remappable keyboard shortcut manager
@@ -1100,6 +1105,11 @@ enum ImportFilter {
 }
 
 impl EditorApp {
+    /// Maximum number of raster keyframes whose `raw_pixels` stay resident in
+    /// RAM. Older clean keyframes beyond this are evicted (re-page on revisit);
+    /// the most-recently-shown frame is always protected.
+    const RASTER_RESIDENT_MAX: usize = 12;
+
     fn new(
         cc: &eframe::CreationContext,
         layouts: Vec<LayoutDefinition>,
@@ -1308,6 +1318,7 @@ impl EditorApp {
             raster_load_result_tx,
             raster_load_result_rx,
             raster_loads_inflight: Default::default(),
+            raster_resident_lru: Default::default(),
             keymap: KeymapManager::new(&config.keybindings),
             config,
             file_command_tx,
@@ -2323,6 +2334,11 @@ impl EditorApp {
         let Some(AnyLayer::Raster(rl)) = document.get_layer_mut(&float.layer_id) else { return };
         let Some(kf) = rl.keyframe_at_mut(float.time) else { return };
         kf.raw_pixels = std::sync::Arc::try_unwrap(float.canvas_before).unwrap_or_else(|a| (*a).clone());
+        // Restoring the pre-lift snapshot rewrites raw_pixels in memory; that
+        // snapshot may itself contain un-persisted edits, and the lift had marked
+        // the kf dirty. Keep it pinned (dirty) so eviction can't lose it.
+        kf.dirty = true;
+        kf.texture_dirty = true;
     }
 
     /// Drop (discard) the floating selection keeping the hole punched in the
@@ -5178,6 +5194,11 @@ impl eframe::App for EditorApp {
                             kf.raw_pixels = pixels;
                             kf.texture_dirty = true;
                             any_applied = true;
+                            // Record fault-in recency: most-recently paged-in is
+                            // moved to the back so it's evicted last. The shown
+                            // frame is always the most recent, so it's protected.
+                            self.raster_resident_lru.retain(|id| *id != kf_id);
+                            self.raster_resident_lru.push_back(kf_id);
                         }
                         // Resolved (loaded, or genuinely absent/blank).
                         kf.needs_fault_in = false;
@@ -5186,6 +5207,29 @@ impl eframe::App for EditorApp {
             }
             if any_applied {
                 ctx.request_repaint();
+            }
+
+            // 1b) Evict over-budget resident keyframes (fault-in-recency LRU).
+            // Drop the pixels of the oldest *clean* keyframes and re-arm their
+            // fault-in so they re-page on revisit. DIRTY keyframes are never
+            // evicted (their pixels aren't in the container yet — evicting would
+            // silently lose the unsaved edit), so we just unpin them from the LRU.
+            while self.raster_resident_lru.len() > Self::RASTER_RESIDENT_MAX {
+                let old = self.raster_resident_lru.pop_front().unwrap();
+                let doc = self.action_executor.document_mut();
+                let kf = doc.all_layers_mut().into_iter().find_map(|l| match l {
+                    lightningbeam_core::layer::AnyLayer::Raster(rl) => {
+                        rl.keyframes.iter_mut().find(|kf| kf.id == old)
+                    }
+                    _ => None,
+                });
+                if let Some(kf) = kf {
+                    if !kf.dirty && !kf.raw_pixels.is_empty() {
+                        kf.raw_pixels = Vec::new();
+                        kf.needs_fault_in = true;
+                        kf.texture_dirty = true;
+                    }
+                }
             }
 
             // 2) Dispatch background page-ins for newly-requested keyframes.
@@ -5359,6 +5403,33 @@ impl eframe::App for EditorApp {
                                 // Container path may be new (Save As); update the
                                 // raster paging store so future faults read the right file.
                                 self.raster_store.set_path(self.current_file_path.clone());
+
+                                // All raster keyframes are now persisted in the
+                                // container, so none are dirty — clearing the flag
+                                // lets eviction reclaim their pixels again.
+                                {
+                                    use lightningbeam_core::layer::AnyLayer;
+                                    let mut resident_ids = Vec::new();
+                                    let doc = self.action_executor.document_mut();
+                                    for layer in doc.all_layers_mut() {
+                                        if let AnyLayer::Raster(rl) = layer {
+                                            for kf in rl.keyframes.iter_mut() {
+                                                kf.dirty = false;
+                                                if !kf.raw_pixels.is_empty() {
+                                                    resident_ids.push(kf.id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Frames edited this session were unpinned from the
+                                    // eviction LRU while dirty; now that they're clean and
+                                    // persisted, re-track them so the resident bound applies
+                                    // (the next fault-in trims the oldest, not the shown one).
+                                    for id in resident_ids {
+                                        self.raster_resident_lru.retain(|x| *x != id);
+                                        self.raster_resident_lru.push_back(id);
+                                    }
+                                }
 
                                 // Add to recent files
                                 self.config.add_recent_file(path.clone());

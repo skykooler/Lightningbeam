@@ -5821,6 +5821,9 @@ impl StagePane {
                     kf.raw_pixels[si..si + 4].fill(0);
                 }
             }
+            // Punching the hole edits raw_pixels but is NOT committed through an
+            // action yet — mark dirty so eviction can't drop the un-persisted hole.
+            kf.dirty = true;
         }
 
         // Re-set selection (commit_raster_floating_now cleared it) and create float.

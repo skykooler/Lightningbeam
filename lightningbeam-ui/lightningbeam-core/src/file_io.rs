@@ -386,8 +386,11 @@ pub fn save_beam(
     // --- raster keyframes -> media rows (PNG), keyed by keyframe id ---
     // (Phase 0 writes all resident frames each save; a disk-dirty flag to skip
     // unchanged frames in place is deferred to Phase 3.)
+    // Walk ALL layers (incl. nested in groups/clips) so nested raster keyframes
+    // are persisted too, and so `live_media` covers them — matching the load path,
+    // which arms `needs_fault_in` recursively. Top-level-only projects are unaffected.
     let mut raster_count = 0usize;
-    for layer in &document.root.children {
+    for layer in document.all_layers() {
         if let crate::layer::AnyLayer::Raster(rl) = layer {
             for kf in &rl.keyframes {
                 if !kf.raw_pixels.is_empty() {

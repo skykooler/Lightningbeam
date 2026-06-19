@@ -123,6 +123,13 @@ pub struct RasterKeyframe {
     /// set true on load and again when evicted. Never serialized.
     #[serde(skip)]
     pub needs_fault_in: bool,
+    /// Phase 3a eviction: set `true` whenever user editing mutates `raw_pixels`
+    /// (brush, fill, paint-bucket, floating-selection commit/lift, undo/redo of
+    /// those). A dirty keyframe's current pixels are NOT yet persisted in the
+    /// container, so it must NEVER be evicted (doing so would silently lose the
+    /// unsaved edit). Cleared on a successful save. Never serialized.
+    #[serde(skip)]
+    pub dirty: bool,
 }
 
 fn default_true() -> bool { true }
@@ -147,6 +154,7 @@ impl RasterKeyframe {
             raw_pixels: Vec::new(),
             texture_dirty: true,
             needs_fault_in: false,
+            dirty: false,
         }
     }
 }
