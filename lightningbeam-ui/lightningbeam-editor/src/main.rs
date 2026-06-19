@@ -1032,6 +1032,13 @@ struct EditorApp {
     /// resident. Drained and faulted in at the top of the next `update()`.
     raster_fault_requests:
         std::sync::Arc<std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>>,
+    /// Async raster page-in: background decode results `(kf_id, pixels-or-None)`.
+    /// `None` = the keyframe genuinely isn't in the container (blank).
+    raster_load_result_tx: std::sync::mpsc::Sender<(uuid::Uuid, Option<Vec<u8>>)>,
+    raster_load_result_rx: std::sync::mpsc::Receiver<(uuid::Uuid, Option<Vec<u8>>)>,
+    /// Keyframe ids whose page-in is currently running on a background thread
+    /// (prevents duplicate loads while the canvas keeps re-requesting them).
+    raster_loads_inflight: std::collections::HashSet<uuid::Uuid>,
     /// Application configuration (recent files, etc.)
     config: AppConfig,
     /// Remappable keyboard shortcut manager
@@ -1201,6 +1208,7 @@ impl EditorApp {
             .unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
 
         let (waveform_result_tx, waveform_result_rx) = std::sync::mpsc::channel();
+        let (raster_load_result_tx, raster_load_result_rx) = std::sync::mpsc::channel();
 
         Self {
             layouts,
@@ -1297,6 +1305,9 @@ impl EditorApp {
             current_file_path: None, // No file loaded initially
             raster_store: lightningbeam_core::raster_store::RasterStore::new(None),
             raster_fault_requests: Default::default(),
+            raster_load_result_tx,
+            raster_load_result_rx,
+            raster_loads_inflight: Default::default(),
             keymap: KeymapManager::new(&config.keybindings),
             config,
             file_command_tx,
@@ -5149,37 +5160,58 @@ impl eframe::App for EditorApp {
         // any rendering, and fault the pixels in from the project container. A drain of
         // an empty set is ~free, so this is cheap when everything is already resident.
         {
+            // 1) Apply completed background page-ins.
+            let mut any_applied = false;
+            while let Ok((kf_id, result)) = self.raster_load_result_rx.try_recv() {
+                self.raster_loads_inflight.remove(&kf_id);
+                let doc = self.action_executor.document_mut();
+                let kf = doc.all_layers_mut().into_iter().find_map(|l| match l {
+                    lightningbeam_core::layer::AnyLayer::Raster(rl) => {
+                        rl.keyframes.iter_mut().find(|kf| kf.id == kf_id)
+                    }
+                    _ => None,
+                });
+                if let Some(kf) = kf {
+                    // Don't clobber pixels edited while the load was in flight.
+                    if kf.needs_fault_in && kf.raw_pixels.is_empty() {
+                        if let Some(pixels) = result {
+                            kf.raw_pixels = pixels;
+                            kf.texture_dirty = true;
+                            any_applied = true;
+                        }
+                        // Resolved (loaded, or genuinely absent/blank).
+                        kf.needs_fault_in = false;
+                    }
+                }
+            }
+            if any_applied {
+                ctx.request_repaint();
+            }
+
+            // 2) Dispatch background page-ins for newly-requested keyframes.
             let wanted: Vec<uuid::Uuid> = {
                 let mut s = self.raster_fault_requests.lock().unwrap();
                 s.drain().collect()
             };
-            if !wanted.is_empty() && self.raster_store.has_path() {
-                let mut any_loaded = false;
-                let doc = self.action_executor.document_mut();
+            if self.raster_store.has_path() {
                 for kf_id in wanted {
-                    // Find the keyframe by id across every raster layer in the document.
-                    let kf = doc.all_layers_mut().into_iter().find_map(|l| match l {
-                        lightningbeam_core::layer::AnyLayer::Raster(rl) => {
-                            rl.keyframes.iter_mut().find(|kf| kf.id == kf_id)
-                        }
-                        _ => None,
-                    });
-                    if let Some(kf) = kf {
-                        if kf.raw_pixels.is_empty() && kf.needs_fault_in {
-                            if let Some(pixels) = self.raster_store.load_pixels(kf_id) {
-                                kf.raw_pixels = pixels;
-                                kf.texture_dirty = true;
-                                any_loaded = true;
-                            }
-                            // Resolved (loaded, or genuinely absent/blank) — clear the
-                            // flag so we don't re-request a page-in every frame.
-                            kf.needs_fault_in = false;
-                        }
+                    if self.raster_loads_inflight.contains(&kf_id) {
+                        continue;
                     }
+                    self.raster_loads_inflight.insert(kf_id);
+                    let store = self.raster_store.clone();
+                    let tx = self.raster_load_result_tx.clone();
+                    std::thread::spawn(move || {
+                        let pixels = store.load_pixels(kf_id);
+                        let _ = tx.send((kf_id, pixels));
+                    });
                 }
-                if any_loaded {
-                    ctx.request_repaint();
-                }
+            }
+
+            // Keep ticking while page-ins are running so their results get applied
+            // promptly (a background thread can't wake egui on its own).
+            if !self.raster_loads_inflight.is_empty() {
+                ctx.request_repaint();
             }
         }
 
