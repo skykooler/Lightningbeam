@@ -324,7 +324,11 @@ pub fn save_beam(
             } else {
                 project_dir.join(rel)
             };
-            if full.exists() {
+            // Require an actual file: an empty/blank `relative_path` resolves to the
+            // project directory itself (`join("")` == dir), which `exists()` accepts
+            // but can't be read as media. `is_file()` skips dirs + missing paths, so
+            // such an entry correctly falls through to embedded data below.
+            if full.is_file() {
                 let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
                 let codec = full
                     .extension()

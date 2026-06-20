@@ -926,6 +926,16 @@ impl AudioClipPool {
         let mut entries = Vec::new();
 
         for (index, file) in self.files.iter().enumerate() {
+            // Skip placeholder pool slots: `load_from_serialized` resizes the pool to
+            // `max_index + 1` filled with empty `AudioFile::new(PathBuf::new(), …)` to
+            // cover index gaps (and creates one even when there are no entries at all).
+            // Such a slot has an empty path and no packed media — there's nothing to
+            // persist, and emitting it yields an entry whose empty `relative_path`
+            // resolves to the project directory itself (unreadable on the next save).
+            if file.path.as_os_str().is_empty() && file.packed_media_id.is_none() {
+                continue;
+            }
+
             // Video's audio track: reference the video file (it's also referenced
             // by the VideoClip) and re-probe it via FFmpeg on load. Never pack or
             // embed it as audio media — that both wastes space and loses the 5.1+
@@ -1141,16 +1151,18 @@ impl AudioClipPool {
         self.files.clear();
         eprintln!("📊 [LOAD_SERIALIZED] Clear pool took {:.2}ms", clear_start.elapsed().as_secs_f64() * 1000.0);
 
-        // Find the maximum pool index to determine required size
-        let max_index = entries.iter()
-            .map(|e| e.pool_index)
+        // Size the pool to hold the highest pool_index (slots are addressed by index,
+        // so gaps are filled with placeholders). No entries → length 0, NOT 1: the old
+        // `max().unwrap_or(0) + 1` produced a spurious placeholder for an empty pool.
+        let pool_size = entries.iter()
+            .map(|e| e.pool_index + 1)
             .max()
             .unwrap_or(0);
 
         // Ensure we have space for all entries
         let resize_start = std::time::Instant::now();
-        self.files.resize(max_index + 1, AudioFile::new(PathBuf::new(), Vec::new(), 2, 44100));
-        eprintln!("📊 [LOAD_SERIALIZED] Resize pool to {} took {:.2}ms", max_index + 1, resize_start.elapsed().as_secs_f64() * 1000.0);
+        self.files.resize(pool_size, AudioFile::new(PathBuf::new(), Vec::new(), 2, 44100));
+        eprintln!("📊 [LOAD_SERIALIZED] Resize pool to {} took {:.2}ms", pool_size, resize_start.elapsed().as_secs_f64() * 1000.0);
 
         for (i, entry) in entries.iter().enumerate() {
             let entry_start = std::time::Instant::now();
