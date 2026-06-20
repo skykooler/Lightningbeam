@@ -348,11 +348,13 @@ clone). Not worth 64 edits. Start at 3a.
   rows via `media_exists` (no data loss) and walks all layers to match load.
   *(Refinement deferred: count budget → byte budget for 4K resolution-robustness.)*
 
-### 3c. Bound the GPU cache
-`raster_layer_cache` (`gpu_brush.rs:1051`, `HashMap<Uuid,CanvasPair>`, Rgba16Float ping-pong
-≈ `w·h·16`/entry, **unbounded**) → evict textures for keyframes outside every layer's window
-(drive from the same pass) / LRU byte budget. Export `raster_cache` (`video_exporter.rs:85`) lives
-one export — bound trivially. (Vello `ImageCache` is image *assets* → Phase 4.)
+### 3c. Bound the GPU cache  **[DONE for raster_layer_cache]**
+`raster_layer_cache` (`gpu_brush.rs`, `HashMap<Uuid,CanvasPair>`, Rgba16Float ping-pong
+≈ `w·h·16`/entry, was **unbounded**) → recency LRU (`RASTER_LAYER_CACHE_MAX = 12`) in
+`ensure_layer_texture`: bump-to-most-recent + evict oldest; shown frames protected. F3 overlay
+now shows tracked VRAM (raster cache MB + count). *(Refinements: count→byte budget; raise/headroom
+if >12 raster layers are visible at once. Export `raster_cache` lives one export — fine. Vello
+`ImageCache` is image *assets* → Phase 4.)*
 
 ### 3d. Undo memory
 `RasterStrokeAction`/`RasterFillAction` hold `buffer_before`+`buffer_after` full frames
