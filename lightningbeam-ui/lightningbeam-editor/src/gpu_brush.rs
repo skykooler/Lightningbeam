@@ -1049,6 +1049,11 @@ pub struct GpuBrushEngine {
     /// once when `RasterKeyframe::texture_dirty` is set, then reused every frame.
     /// Separate from `canvases` so tool teardown never accidentally removes them.
     pub raster_layer_cache: HashMap<Uuid, CanvasPair>,
+    /// Recency order for `raster_layer_cache` (least-recent first), bumped on every
+    /// `ensure_layer_texture` so the visible frames stay at the back. Scrubbing a long
+    /// timeline would otherwise grow this map without bound (~w·h·16 bytes of VRAM per
+    /// entry); we evict the oldest once it exceeds `RASTER_LAYER_CACHE_MAX`.
+    raster_layer_lru: Vec<Uuid>,
 }
 
 /// CPU-side parameters uniform for the compute shader.
@@ -1066,6 +1071,12 @@ struct DabParams {
 }
 
 impl GpuBrushEngine {
+    /// Max number of idle raster-layer textures kept resident in VRAM. Scrubbing a
+    /// long timeline would otherwise cache one ~`w·h·16`-byte pair per visited frame
+    /// without bound; the least-recently-used are evicted past this (re-uploaded on
+    /// revisit from the faulted-in pixels).
+    const RASTER_LAYER_CACHE_MAX: usize = 12;
+
     /// Create the pipeline.  Returns `Err` if the device lacks the required
     /// storage-texture capability for `Rgba16Float`.
     pub fn new(device: &wgpu::Device) -> Self {
@@ -1160,6 +1171,7 @@ impl GpuBrushEngine {
             canvases:           HashMap::new(),
             displacement_bufs:  HashMap::new(),
             raster_layer_cache: HashMap::new(),
+            raster_layer_lru:   Vec::new(),
         }
     }
 
@@ -1533,6 +1545,31 @@ impl GpuBrushEngine {
             }
             self.raster_layer_cache.insert(kf_id, canvas);
         }
+        // Bump recency (the frame was used this render) and evict the least-recently
+        // used textures over budget. The current frame is pushed to the back, so it
+        // (and every other frame rendered this pass) is never the eviction victim.
+        if let Some(pos) = self.raster_layer_lru.iter().position(|id| *id == kf_id) {
+            self.raster_layer_lru.remove(pos);
+        }
+        self.raster_layer_lru.push(kf_id);
+        let mut evicted = false;
+        while self.raster_layer_lru.len() > Self::RASTER_LAYER_CACHE_MAX {
+            let old = self.raster_layer_lru.remove(0);
+            self.raster_layer_cache.remove(&old);
+            evicted = true;
+        }
+        if needs_new || evicted {
+            self.report_raster_cache_vram();
+        }
+    }
+
+    /// Estimated VRAM footprint of `raster_layer_cache` (two `Rgba16Float` textures =
+    /// `w·h·16` bytes per entry), published to the F3 debug overlay.
+    fn report_raster_cache_vram(&self) {
+        let bytes: usize = self.raster_layer_cache.values()
+            .map(|c| (c.width as usize) * (c.height as usize) * 16)
+            .sum();
+        crate::debug_overlay::update_gpu_memory(self.raster_layer_cache.len(), bytes);
     }
 
     /// Get the cached display texture for a raster layer keyframe.
@@ -1542,7 +1579,12 @@ impl GpuBrushEngine {
 
     /// Remove the cached texture for a raster layer keyframe (e.g. when deleted).
     pub fn remove_layer_texture(&mut self, kf_id: &Uuid) {
-        self.raster_layer_cache.remove(kf_id);
+        if self.raster_layer_cache.remove(kf_id).is_some() {
+            if let Some(pos) = self.raster_layer_lru.iter().position(|id| id == kf_id) {
+                self.raster_layer_lru.remove(pos);
+            }
+            self.report_raster_cache_vram();
+        }
     }
 
     /// Composite the accumulated-dab scratch buffer C over the source A, writing the

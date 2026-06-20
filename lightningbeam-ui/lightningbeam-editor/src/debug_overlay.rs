@@ -39,6 +39,33 @@ pub fn update_prepare_timing(
         t.composite_ms     = composite_ms;
     }
 }
+/// GPU memory the editor tracks itself (wgpu has no allocator query). Currently the
+/// raster-layer texture cache — the only unbounded-by-default VRAM consumer.
+#[derive(Debug, Clone, Default)]
+pub struct GpuMemoryStats {
+    pub raster_cache_entries: usize,
+    pub raster_cache_bytes: usize,
+}
+
+static GPU_MEMORY: OnceLock<Mutex<GpuMemoryStats>> = OnceLock::new();
+
+/// Called by the GPU brush whenever the raster-layer cache changes.
+pub fn update_gpu_memory(raster_cache_entries: usize, raster_cache_bytes: usize) {
+    let cell = GPU_MEMORY.get_or_init(|| Mutex::new(GpuMemoryStats::default()));
+    if let Ok(mut s) = cell.lock() {
+        s.raster_cache_entries = raster_cache_entries;
+        s.raster_cache_bytes = raster_cache_bytes;
+    }
+}
+
+fn get_gpu_memory() -> GpuMemoryStats {
+    GPU_MEMORY
+        .get_or_init(|| Mutex::new(GpuMemoryStats::default()))
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default()
+}
+
 const DEVICE_REFRESH_INTERVAL: Duration = Duration::from_secs(2); // Refresh devices every 2 seconds
 const MEMORY_REFRESH_INTERVAL: Duration = Duration::from_millis(500); // Refresh memory every 500ms
 
@@ -52,6 +79,7 @@ pub struct DebugStats {
     pub frame_time_ms: f32,    // Current frame time in milliseconds
     pub memory_physical_mb: usize,
     pub memory_virtual_mb: usize,
+    pub gpu_memory: GpuMemoryStats,
     pub gpu_name: String,
     pub gpu_backend: String,
     pub gpu_driver: String,
@@ -218,6 +246,7 @@ impl DebugStatsCollector {
             frame_time_ms,
             memory_physical_mb,
             memory_virtual_mb,
+            gpu_memory: get_gpu_memory(),
             gpu_name,
             gpu_backend,
             gpu_driver,
@@ -286,6 +315,11 @@ pub fn render_debug_overlay(ctx: &egui::Context, stats: &DebugStats) {
                     ui.colored_label(egui::Color32::YELLOW, format!("Memory: ({}µs)", stats.timing_memory_us));
                     ui.label(format!("Physical: {} MB", stats.memory_physical_mb));
                     ui.label(format!("Virtual: {} MB", stats.memory_virtual_mb));
+                    ui.label(format!(
+                        "VRAM (raster cache): {:.1} MB ({} frames)",
+                        stats.gpu_memory.raster_cache_bytes as f64 / (1024.0 * 1024.0),
+                        stats.gpu_memory.raster_cache_entries,
+                    ));
 
                     ui.add_space(8.0);
 
