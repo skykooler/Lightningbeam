@@ -439,6 +439,8 @@ struct VelloRenderContext {
     onion: crate::panes::OnionSkinSettings,
     /// `.beam` container path for lazily paging image-asset bytes in the ImageCache.
     container_path: Option<std::path::PathBuf>,
+    /// Whether playback is active (gates image prefetch).
+    is_playing: bool,
     /// Active layer for tool operations
     active_layer_id: Option<uuid::Uuid>,
     /// Delta for drag preview (world space)
@@ -1043,6 +1045,22 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 }
                             }
                         }
+                    }
+                }
+            }
+
+            // Prefetch: during playback, decode images the upcoming frames will need
+            // (a short lookahead) into the bounded cache, so a keyframe that swaps image
+            // fills doesn't hitch when the playhead reaches it.
+            if self.ctx.is_playing {
+                const PREFETCH_LOOKAHEAD: f64 = 0.5;
+                let ahead = lightningbeam_core::renderer::assets_needed_at(
+                    &self.ctx.document,
+                    self.ctx.playback_time + PREFETCH_LOOKAHEAD,
+                );
+                for id in ahead {
+                    if let Some(asset) = self.ctx.document.get_image_asset(&id) {
+                        let _ = image_cache.get_or_decode(asset);
                     }
                 }
             }
@@ -12078,6 +12096,7 @@ impl PaneRenderer for StagePane {
             tool_state: shared.tool_state.clone(),
             onion: shared.onion,
             container_path: shared.container_path.clone(),
+            is_playing: *shared.is_playing,
             active_layer_id: *shared.active_layer_id,
             drag_delta,
             selection: shared.selection.clone(),

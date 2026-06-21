@@ -158,6 +158,28 @@ impl Default for ImageCache {
     }
 }
 
+/// Image asset ids referenced by the visible vector layers' active keyframes at `time`
+/// (top-level + group children). Used to prefetch/decode images ahead during playback.
+/// (Recursing into nested clip instances is a refinement.)
+pub fn assets_needed_at(document: &Document, time: f64) -> Vec<Uuid> {
+    let mut ids = Vec::new();
+    for layer in document.all_layers() {
+        if let crate::layer::AnyLayer::Vector(vl) = layer {
+            if !vl.layer.visible {
+                continue;
+            }
+            if let Some(kf) = vl.keyframe_at(time) {
+                for fill in &kf.graph.fills {
+                    if let Some(id) = fill.image_fill {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+    }
+    ids
+}
+
 /// Decode image bytes to a premultiplied tiny-skia Pixmap (CPU render path).
 fn decode_image_to_pixmap(data: &[u8]) -> Option<tiny_skia::Pixmap> {
     let img = image::load_from_memory(data).ok()?;
