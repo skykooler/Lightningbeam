@@ -34,6 +34,7 @@ pub mod convert_to_movie_clip;
 pub mod region_split;
 pub mod toggle_group_expansion;
 pub mod group_layers;
+pub mod raster_diff;
 pub mod raster_stroke;
 pub mod raster_fill;
 pub mod move_layer;

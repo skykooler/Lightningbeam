@@ -2324,6 +2324,39 @@ impl EditorApp {
 
     /// Cancel a floating raster selection: restore the canvas from the
     /// pre-cut/paste snapshot.  No undo entry is created.
+    /// Fault in the raster keyframe that a pending undo/redo needs resident, so its
+    /// dirty-rect diff applies onto the correct full base. A clean evicted frame's
+    /// container bytes equal its current logical state, so this restores the right
+    /// base. Synchronous — undo/redo is a discrete user action, not a hot path.
+    fn ensure_raster_resident_for_undo(&mut self, hint: Option<(uuid::Uuid, f64)>) {
+        use lightningbeam_core::layer::AnyLayer;
+        let Some((layer_id, time)) = hint else { return };
+        if !self.raster_store.has_path() { return; }
+        // Identify the (paged-out) keyframe the action will touch.
+        let target = {
+            let doc = self.action_executor.document();
+            match doc.get_layer(&layer_id) {
+                Some(AnyLayer::Raster(rl)) => rl
+                    .keyframe_at(time)
+                    .filter(|kf| kf.raw_pixels.is_empty() && kf.needs_fault_in)
+                    .map(|kf| kf.id),
+                _ => None,
+            }
+        };
+        if let Some(kf_id) = target {
+            if let Some(pixels) = self.raster_store.load_pixels(kf_id) {
+                let doc = self.action_executor.document_mut();
+                if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                    if let Some(kf) = rl.keyframes.iter_mut().find(|k| k.id == kf_id) {
+                        kf.raw_pixels = pixels;
+                        kf.texture_dirty = true;
+                        kf.needs_fault_in = false;
+                    }
+                }
+            }
+        }
+    }
+
     fn cancel_raster_floating(&mut self) {
         use lightningbeam_core::layer::AnyLayer;
 
@@ -3282,6 +3315,10 @@ impl EditorApp {
                     self.cancel_raster_floating();
                     return;
                 }
+                // Page in the target raster frame first so its dirty-rect diff has a
+                // resident base to apply onto.
+                let hint = self.action_executor.peek_undo_raster_hint();
+                self.ensure_raster_resident_for_undo(hint);
                 let undo_succeeded = if let Some(ref controller_arc) = self.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
                     let mut backend_context = lightningbeam_core::action::BackendContext {
@@ -3331,6 +3368,8 @@ impl EditorApp {
                 }
             }
             MenuAction::Redo => {
+                let hint = self.action_executor.peek_redo_raster_hint();
+                self.ensure_raster_resident_for_undo(hint);
                 let redo_succeeded = if let Some(ref controller_arc) = self.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
                     let mut backend_context = lightningbeam_core::action::BackendContext {
