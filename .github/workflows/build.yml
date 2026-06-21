@@ -90,6 +90,15 @@ jobs:
         shell: pwsh
         run: choco install cmake llvm --installargs 'ADD_CMAKE_TO_PATH=System' -y
 
+      # Activate the MSVC developer environment (runs vcvars) so the cmake crate
+      # building nam-ffi/NeuralAudio can determine the Visual Studio generator.
+      # Without this, cmake-rs panics with "couldn't determine visual studio generator".
+      - name: Set up MSVC developer environment (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       # ── Common build steps ──
       - name: Extract version
         id: version
