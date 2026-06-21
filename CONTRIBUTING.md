@@ -130,17 +130,16 @@ lightningbeam-2/
 
 ### Branching Strategy
 
-- `main` - Stable branch
-- `rust-ui` - Active development branch for Rust UI rewrite
-- Feature branches - Create from `rust-ui` for new features
+- `master` - Main development branch
+- Feature branches - Create from `master` for new features
 
 ### Before You Start
 
 1. Check existing issues or create a new one to discuss your change
-2. Make sure you're on the latest `rust-ui` branch:
+2. Make sure you're on the latest `master` branch:
    ```bash
-   git checkout rust-ui
-   git pull origin rust-ui
+   git checkout master
+   git pull origin master
    ```
 3. Create a feature branch:
    ```bash
@@ -241,7 +240,7 @@ this solution.
 ### Pull Request Process
 
 1. Push your branch to GitHub or Gitea
-2. Open a pull request against `rust-ui` branch
+2. Open a pull request against `master` branch
    - GitHub: https://github.com/skykooler/lightningbeam
    - Gitea: https://git.skyler.io/skyler/lightningbeam
 3. Provide a clear description of:
