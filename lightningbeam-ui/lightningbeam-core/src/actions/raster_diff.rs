@@ -31,6 +31,11 @@ pub struct RasterDiff {
     before_region: Vec<u8>,
     /// bbox-sized RGBA (`w*h*4`) of the region after the edit.
     after_region: Vec<u8>,
+    /// The pre-edit buffer was blank (empty/unallocated) — i.e. this was the first
+    /// edit on a fresh keyframe. Lets `apply_after` build from a transparent base
+    /// (the commit/redo path often starts with empty `raw_pixels`) and `apply_before`
+    /// restore to blank, instead of requiring a resident base.
+    before_blank: bool,
 }
 
 impl RasterDiff {
@@ -39,6 +44,7 @@ impl RasterDiff {
     /// keyframe's first stroke), treated as fully transparent.
     pub fn compute(before: &[u8], after: &[u8], width: u32, height: u32) -> Self {
         let n = width as usize * height as usize * 4;
+        let before_blank = before.len() != n;
         // Normalize both sides to full length; empty/short ⇒ transparent.
         let before_full = normalize(before, n);
         let after_full = normalize(after, n);
@@ -63,7 +69,7 @@ impl RasterDiff {
 
         if !any {
             return Self { full_width: width, full_height: height, bbox: None,
-                          before_region: Vec::new(), after_region: Vec::new() };
+                          before_region: Vec::new(), after_region: Vec::new(), before_blank };
         }
 
         let bw = max_x - min_x + 1;
@@ -83,6 +89,7 @@ impl RasterDiff {
             bbox: Some((min_x as u32, min_y as u32, bw as u32, bh as u32)),
             before_region: crop(&before_full),
             after_region: crop(&after_full),
+            before_blank,
         }
     }
 
@@ -91,25 +98,45 @@ impl RasterDiff {
         self.before_region.len() + self.after_region.len()
     }
 
-    /// Restore the pre-edit pixels into `raw` (undo).
+    /// Restore the pre-edit pixels into `raw` (undo / first-execute rollback).
     pub fn apply_before(&self, raw: &mut Vec<u8>) {
-        self.apply(&self.before_region, raw);
+        if self.bbox.is_none() {
+            return; // no change
+        }
+        if self.before_blank {
+            // The frame was blank before this edit (it was the first stroke); undoing
+            // it returns to blank regardless of the current buffer.
+            raw.clear();
+            return;
+        }
+        self.stamp_resident(&self.before_region, raw);
     }
 
-    /// Re-apply the post-edit pixels into `raw` (redo).
+    /// Apply the post-edit pixels into `raw` (commit / redo).
     pub fn apply_after(&self, raw: &mut Vec<u8>) {
-        self.apply(&self.after_region, raw);
+        if self.bbox.is_none() {
+            return; // no change
+        }
+        if self.before_blank {
+            // Base was blank: build a full transparent buffer then stamp the bbox. The
+            // commit/redo path frequently starts from empty `raw_pixels` here.
+            let n = self.full_width as usize * self.full_height as usize * 4;
+            raw.clear();
+            raw.resize(n, 0);
+        }
+        self.stamp_resident(&self.after_region, raw);
     }
 
-    fn apply(&self, region: &[u8], raw: &mut Vec<u8>) {
+    /// Stamp a bbox-sized region into `raw`, which must already be full-size. If it
+    /// isn't (a non-blank base that the editor failed to fault in), skip rather than
+    /// resize-and-corrupt — the frame will re-page to its container state.
+    fn stamp_resident(&self, region: &[u8], raw: &mut [u8]) {
         let n = self.full_width as usize * self.full_height as usize * 4;
         let (x, y, bw, bh) = match self.bbox {
             Some(b) => b,
-            None => return, // no change
+            None => return,
         };
         if raw.len() != n {
-            // Base not resident: the editor should have faulted it in. Skip rather
-            // than resize-and-corrupt — the frame will re-page to its container state.
             eprintln!(
                 "⚠️ [RASTER_DIFF] base not resident ({} != {}); skipping undo/redo apply",
                 raw.len(), n
@@ -157,17 +184,27 @@ mod tests {
     #[test]
     fn blank_before_first_stroke() {
         let (w, h) = (4, 4);
+        let n = (w * h * 4) as usize;
         let before: Vec<u8> = Vec::new(); // blank keyframe
-        let mut after = vec![0u8; (w * h * 4) as usize];
+        let mut after = vec![0u8; n];
         let i = ((1 * w + 1) * 4) as usize;
         after[i..i + 4].copy_from_slice(&[255, 0, 0, 255]);
         let diff = RasterDiff::compute(&before, &after, w, h);
         assert_eq!(diff.bbox, Some((1, 1, 1, 1)));
 
-        // Undo onto the resident post-stroke buffer → fully transparent (blank-equiv).
-        let mut buf = after.clone();
+        // First execute / redo from EMPTY raw_pixels (the real commit path): builds
+        // the full buffer from transparent + the stroke.
+        let mut buf: Vec<u8> = Vec::new();
+        diff.apply_after(&mut buf);
+        assert_eq!(buf, after, "commit/redo must build the frame from a blank base");
+
+        // Undo the first stroke → back to blank (empty).
         diff.apply_before(&mut buf);
-        assert_eq!(buf, vec![0u8; (w * h * 4) as usize]);
+        assert!(buf.is_empty(), "undoing the first stroke restores the blank keyframe");
+
+        // Redo again from the now-empty buffer.
+        diff.apply_after(&mut buf);
+        assert_eq!(buf, after);
     }
 
     #[test]

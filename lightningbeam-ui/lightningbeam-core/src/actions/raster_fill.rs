@@ -13,6 +13,9 @@ pub struct RasterFillAction {
     height: u32,
     name: String,
     diff: RasterDiff,
+    /// Full post-fill buffer, kept only for the first `execute` (commit); see
+    /// `RasterStrokeAction::full_after`.
+    full_after: Option<Vec<u8>>,
 }
 
 impl RasterFillAction {
@@ -25,7 +28,8 @@ impl RasterFillAction {
         height: u32,
     ) -> Self {
         let diff = RasterDiff::compute(&buffer_before, &buffer_after, width, height);
-        Self { layer_id, time, width, height, name: "Flood fill".to_string(), diff }
+        Self { layer_id, time, width, height, name: "Flood fill".to_string(),
+               diff, full_after: Some(buffer_after) }
     }
 
     pub fn with_description(mut self, name: &str) -> Self {
@@ -43,7 +47,11 @@ impl Action for RasterFillAction {
             _ => return Err("Not a raster layer".to_string()),
         };
         let kf = raster.ensure_keyframe_at(self.time, self.width, self.height);
-        self.diff.apply_after(&mut kf.raw_pixels);
+        if let Some(full) = self.full_after.take() {
+            kf.raw_pixels = full;
+        } else {
+            self.diff.apply_after(&mut kf.raw_pixels);
+        }
         kf.texture_dirty = true;
         kf.dirty = true;
         Ok(())
