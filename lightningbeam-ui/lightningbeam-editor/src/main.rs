@@ -7032,6 +7032,26 @@ impl eframe::App for EditorApp {
 
         }
 
+        // Onion skin settings window (shown only when onion skinning is enabled)
+        if self.onion_skin.enabled {
+            egui::Window::new("Onion Skin")
+                .resizable(false)
+                .collapsible(true)
+                .anchor(egui::Align2::RIGHT_TOP, [-10.0, 40.0])
+                .show(ctx, |ui| {
+                    ui.label("Onion skin settings");
+                    ui.horizontal(|ui| {
+                        ui.label("Frames before:");
+                        ui.add(egui::DragValue::new(&mut self.onion_skin.frames_before).range(0..=5));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Frames after:");
+                        ui.add(egui::DragValue::new(&mut self.onion_skin.frames_after).range(0..=5));
+                    });
+                    ui.add(egui::Slider::new(&mut self.onion_skin.opacity, 0.0..=1.0).text("Opacity"));
+                });
+        }
+
         // Render custom cursor overlay (on top of everything including debug overlay)
         custom_cursor::render_overlay(ctx, &mut self.cursor_cache);
 
