@@ -251,6 +251,11 @@ pub struct TimelinePane {
     /// Vertical scroll offset (in pixels)
     viewport_scroll_y: f32,
 
+    /// Clickable keyframe-diamond hit targets `(screen_rect, keyframe_time)` collected
+    /// during the last `render_layers`. Used by `handle_input` (next frame) to snap the
+    /// playhead exactly to a keyframe when its diamond is clicked.
+    keyframe_diamond_hits: Vec<(egui::Rect, f64)>,
+
     /// Total duration of the animation
     duration: f64,
 
@@ -773,6 +778,7 @@ impl TimelinePane {
             pixels_per_second: 100.0,
             viewport_start_time: 0.0,
             viewport_scroll_y: 0.0,
+            keyframe_diamond_hits: Vec::new(),
             duration: 10.0,  // Default 10 seconds
             is_scrubbing: false,
             is_panning: false,
@@ -2730,6 +2736,8 @@ impl TimelinePane {
     ) -> (Vec<(egui::Rect, uuid::Uuid, f64, f32)>, Vec<AutomationLaneRender>) {
         let painter = ui.painter().clone();
         let mut pending_lane_renders: Vec<AutomationLaneRender> = Vec::new();
+        // Rebuilt each frame; consumed by handle_input (next frame) for click-to-seek.
+        self.keyframe_diamond_hits.clear();
 
         // Collect video clip rects for hover detection (to avoid borrow conflicts)
         let mut video_clip_hovers: Vec<(egui::Rect, uuid::Uuid, f64, f32)> = Vec::new();
@@ -3972,6 +3980,11 @@ impl TimelinePane {
                             color,
                             egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".keyframe-diamond"], ui.ctx(), egui::Color32::from_rgb(180, 150, 50))),
                         ));
+                        // Record a (slightly enlarged) clickable area for click-to-seek.
+                        self.keyframe_diamond_hits.push((
+                            egui::Rect::from_center_size(egui::pos2(cx, cy), egui::vec2(13.0, 13.0)),
+                            kf.time,
+                        ));
                     }
                 }
             }
@@ -3995,6 +4008,11 @@ impl TimelinePane {
                             diamond.to_vec(),
                             color,
                             egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".keyframe-diamond"], ui.ctx(), egui::Color32::from_rgb(180, 150, 50))),
+                        ));
+                        // Record a (slightly enlarged) clickable area for click-to-seek.
+                        self.keyframe_diamond_hits.push((
+                            egui::Rect::from_center_size(egui::pos2(cx, cy), egui::vec2(13.0, 13.0)),
+                            kf.time,
                         ));
                     }
                 }
@@ -4844,6 +4862,23 @@ impl TimelinePane {
                             selection.clear_clip_instances();
                             *focus = lightningbeam_core::selection::FocusSelection::Layers(vec![layer_id]);
                         }
+                    }
+                }
+            }
+        }
+
+        // Click a keyframe diamond → snap the playhead exactly to that keyframe.
+        // (Hit targets come from the previous frame's render_layers; diamonds don't
+        // move between frames, so a click lands on the right one.)
+        if response.clicked() && !alt_held {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if let Some(&(_, kf_time)) =
+                    self.keyframe_diamond_hits.iter().find(|(r, _)| r.contains(pos))
+                {
+                    *playback_time = kf_time;
+                    if let Some(controller_arc) = audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        controller.seek(kf_time);
                     }
                 }
             }
