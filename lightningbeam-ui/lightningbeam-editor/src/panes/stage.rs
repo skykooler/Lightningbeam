@@ -999,6 +999,50 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     true, // Draw checkerboard for transparent backgrounds in the UI
                 )
             };
+
+            // Onion-skin ghost scenes for the active VECTOR layer (raster ghosts are
+            // handled in the render loop). Built at each neighbouring keyframe's time
+            // via the isolated-layer renderer; rendered + tinted before the active
+            // scene below. `ctx.onion.enabled` is already gated off during playback.
+            let mut onion_vector_ghosts: Vec<(vello::Scene, [f32; 3], f32)> = Vec::new();
+            if self.ctx.onion.enabled && !shared.is_cpu_renderer {
+                if let Some(active_id) = self.ctx.active_layer_id {
+                    if let Some(layer) = self.ctx.document.get_layer(&active_id) {
+                        if let lightningbeam_core::layer::AnyLayer::Vector(vl) = layer {
+                            let onion = self.ctx.onion;
+                            let after = vl.keyframes.partition_point(|kf| kf.time <= self.ctx.playback_time);
+                            if after > 0 {
+                                let cur = after - 1;
+                                let mut want: Vec<(usize, [f32; 3], f32)> = Vec::new();
+                                for d in 1..=onion.frames_before {
+                                    if cur >= d {
+                                        want.push((cur - d, crate::panes::OnionSkinSettings::PAST_TINT,
+                                            onion.ghost_opacity(d, onion.frames_before)));
+                                    }
+                                }
+                                for d in 1..=onion.frames_after {
+                                    if cur + d < vl.keyframes.len() {
+                                        want.push((cur + d, crate::panes::OnionSkinSettings::FUTURE_TINT,
+                                            onion.ghost_opacity(d, onion.frames_after)));
+                                    }
+                                }
+                                for (idx, tint, op) in want {
+                                    let kf_time = vl.keyframes[idx].time;
+                                    let rl = lightningbeam_core::renderer::render_layer_isolated(
+                                        &self.ctx.document, kf_time, layer, camera_transform,
+                                        &mut image_cache, &shared.video_manager,
+                                        self.ctx.webcam_frame.as_ref(),
+                                    );
+                                    if rl.has_content {
+                                        onion_vector_ghosts.push((rl.scene, tint, op));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             drop(image_cache);
             let _t_after_scene_build = std::time::Instant::now();
 
@@ -1252,6 +1296,40 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                 match &rendered_layer.layer_type {
                     RenderedLayerType::Vector => {
+                        // Onion-skin ghosts for the active vector layer: each neighbour
+                        // scene → sRGB → linear → composite with a screen tint + falloff,
+                        // behind the current frame.
+                        if Some(rendered_layer.layer_id) == self.ctx.active_layer_id {
+                            for (ghost_scene, tint, opacity) in &onion_vector_ghosts {
+                                let gsrgb = buffer_pool.acquire(device, layer_spec);
+                                let ghdr = buffer_pool.acquire(device, hdr_spec);
+                                if let (Some(gsrgb_view), Some(ghdr_view), Some(hdr_view)) = (
+                                    buffer_pool.get_view(gsrgb),
+                                    buffer_pool.get_view(ghdr),
+                                    &instance_resources.hdr_texture_view,
+                                ) {
+                                    if let Ok(mut renderer) = shared.renderer.lock() {
+                                        renderer.render_to_texture(device, queue, ghost_scene, gsrgb_view, &layer_render_params).ok();
+                                    }
+                                    let mut conv = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                        label: Some("onion_vec_ghost_convert"),
+                                    });
+                                    shared.srgb_to_linear.convert(device, &mut conv, gsrgb_view, ghdr_view);
+                                    queue.submit(Some(conv.finish()));
+                                    let cl = lightningbeam_core::gpu::CompositorLayer::new(
+                                        ghdr, rendered_layer.opacity * opacity, rendered_layer.blend_mode,
+                                    ).with_tint(tint[0], tint[1], tint[2]);
+                                    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                        label: Some("onion_vec_ghost_composite"),
+                                    });
+                                    shared.compositor.composite(device, queue, &mut enc, &[cl], &buffer_pool, hdr_view, None);
+                                    queue.submit(Some(enc.finish()));
+                                }
+                                buffer_pool.release(gsrgb);
+                                buffer_pool.release(ghdr);
+                            }
+                        }
+
                         // Vector/group layer — render Vello scene → sRGB → linear → composite.
                         let srgb_handle = buffer_pool.acquire(device, layer_spec);
                         let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
