@@ -140,7 +140,7 @@ fn main() -> eframe::Result {
     }
 
     // Load window icon
-    let icon_data = include_bytes!("../../../src-tauri/icons/icon.png");
+    let icon_data = include_bytes!("../assets/icons/256x256.png");
     let icon_image = match image::load_from_memory(icon_data) {
         Ok(img) => {
             let rgba = img.to_rgba8();

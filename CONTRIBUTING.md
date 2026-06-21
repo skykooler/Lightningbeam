@@ -122,8 +122,7 @@ lightningbeam-2/
 │       │   ├── track.rs        # Track management
 │       │   └── project.rs      # Project state
 │       └── effects/            # Audio effects
-├── src-tauri/                  # Legacy Tauri backend
-└── src/                        # Legacy JavaScript frontend
+└── src/                        # Legacy JavaScript frontend (browser-only)
 ```
 
 ## Making Changes

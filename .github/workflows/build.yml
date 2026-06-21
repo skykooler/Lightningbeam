@@ -130,14 +130,6 @@ jobs:
           # LLVM/libclang for bindgen
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Setup icons
-        shell: bash
-        run: |
-          mkdir -p lightningbeam-ui/lightningbeam-editor/assets/icons
-          cp -f src-tauri/icons/32x32.png lightningbeam-ui/lightningbeam-editor/assets/icons/
-          cp -f src-tauri/icons/128x128.png lightningbeam-ui/lightningbeam-editor/assets/icons/
-          cp -f src-tauri/icons/icon.png lightningbeam-ui/lightningbeam-editor/assets/icons/256x256.png
-
       - name: Stage factory presets
         shell: bash
         run: |
@@ -327,7 +319,7 @@ jobs:
           mkdir -p "$APP/Contents/Resources/presets"
 
           cp lightningbeam-ui/target/release/lightningbeam-editor "$APP/Contents/MacOS/"
-          cp src-tauri/icons/icon.icns "$APP/Contents/Resources/lightningbeam-editor.icns"
+          cp lightningbeam-ui/lightningbeam-editor/assets/icons/icon.icns "$APP/Contents/Resources/lightningbeam-editor.icns"
           cp -r lightningbeam-ui/lightningbeam-editor/assets/presets/* "$APP/Contents/Resources/presets/"
 
           cat > "$APP/Contents/Info.plist" << EOF

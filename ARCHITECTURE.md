@@ -486,8 +486,7 @@ lightningbeam-2/
 │       ├── synth/                 # Synthesizers
 │       └── midi/                  # MIDI handling
 │
-├── src-tauri/                     # Legacy Tauri backend
-├── src/                           # Legacy JavaScript frontend
+├── src/                           # Legacy JavaScript frontend (browser-only)
 ├── CONTRIBUTING.md                # Contributor guide
 ├── ARCHITECTURE.md                # This file
 ├── README.md                      # Project overview

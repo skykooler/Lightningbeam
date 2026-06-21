@@ -20,9 +20,7 @@ pkgbuild: setup-icons
 setup-icons:
 	@echo "==> Setting up icons..."
 	@mkdir -p $(EDITOR)/assets/icons
-	@cp -u $(REPO_ROOT)/src-tauri/icons/32x32.png $(EDITOR)/assets/icons/ 2>/dev/null || true
-	@cp -u $(REPO_ROOT)/src-tauri/icons/128x128.png $(EDITOR)/assets/icons/ 2>/dev/null || true
-	@cp -u $(REPO_ROOT)/src-tauri/icons/icon.png $(EDITOR)/assets/icons/256x256.png 2>/dev/null || true
+	@# Icons are committed under $(EDITOR)/assets/icons (32x32, 128x128, 256x256, icon.icns).
 	@echo "    Icons ready"
 
 clean:
