@@ -5283,13 +5283,30 @@ impl eframe::App for EditorApp {
                 }
             }
 
-            // 2) Dispatch background page-ins for newly-requested keyframes.
-            let wanted: Vec<uuid::Uuid> = {
+            // 2) Dispatch background page-ins: reactive misses, plus (during playback)
+            //    a prefetch of upcoming keyframes so their full pixels are resident
+            //    before the playhead reaches them — otherwise every frame shows the
+            //    low-res proxy and the proxy→full pops read as flicker.
+            let mut to_load: Vec<uuid::Uuid> = {
                 let mut s = self.raster_fault_requests.lock().unwrap();
                 s.drain().collect()
             };
+            if self.is_playing && self.raster_store.has_path() {
+                const PREFETCH_AHEAD: usize = 4;
+                let t = self.playback_time;
+                let doc = self.action_executor.document();
+                for layer in doc.all_layers() {
+                    if let lightningbeam_core::layer::AnyLayer::Raster(rl) = layer {
+                        for kf in rl.keyframes.iter().filter(|kf| kf.time >= t).take(PREFETCH_AHEAD) {
+                            if kf.raw_pixels.is_empty() && kf.needs_fault_in {
+                                to_load.push(kf.id);
+                            }
+                        }
+                    }
+                }
+            }
             if self.raster_store.has_path() {
-                for kf_id in wanted {
+                for kf_id in to_load {
                     if self.raster_loads_inflight.contains(&kf_id) {
                         continue;
                     }

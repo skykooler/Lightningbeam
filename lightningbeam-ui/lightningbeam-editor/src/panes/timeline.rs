@@ -4867,6 +4867,13 @@ impl TimelinePane {
             }
         }
 
+        // Pointing-hand cursor when hovering a clickable keyframe diamond.
+        if let Some(hover) = response.hover_pos() {
+            if self.keyframe_diamond_hits.iter().any(|(r, _)| r.contains(hover)) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+        }
+
         // Click a keyframe diamond → snap the playhead exactly to that keyframe.
         // (Hit targets come from the previous frame's render_layers; diamonds don't
         // move between frames, so a click lands on the right one.)
