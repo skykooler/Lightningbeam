@@ -11780,9 +11780,18 @@ impl PaneRenderer for StagePane {
                         if let Some(layer_id) = target_layer_id {
                             // For images, create a shape with image fill instead of a clip instance
                             if dragging.clip_type == DragClipType::Image {
-                                // TODO: Image fills on DCEL faces are a separate feature.
-                                let _ = (layer_id, world_pos);
-                                eprintln!("Image drag to stage not yet supported with DCEL backend");
+                                // Image-filled rectangle at the drop point (centered), native size.
+                                let dims = shared.action_executor.document()
+                                    .get_image_asset(&dragging.clip_id)
+                                    .map(|a| (a.width as f64, a.height as f64));
+                                if let Some((img_w, img_h)) = dims {
+                                    let x = world_pos.x as f64 - img_w / 2.0;
+                                    let y = world_pos.y as f64 - img_h / 2.0;
+                                    let action = lightningbeam_core::actions::AddShapeAction::image_rect(
+                                        layer_id, drop_time, x, y, img_w, img_h, dragging.clip_id,
+                                    );
+                                    let _ = shared.action_executor.execute(Box::new(action));
+                                }
                             } else if dragging.clip_type == DragClipType::Effect {
                                 // Handle effect drops specially
                                 // Get effect definition from registry or document

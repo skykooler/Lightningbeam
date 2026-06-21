@@ -4921,15 +4921,22 @@ impl EditorApp {
 
         // Add clip instance or shape to the target layer
         if let Some(layer_id) = target_layer_id {
-            // For images, create a shape with image fill instead of a clip instance
+            // For images, create an image-filled rectangle on the (vector) layer,
+            // centered on the canvas at native size.
             if asset_info.clip_type == panes::DragClipType::Image {
-                // Get image dimensions
-                let (width, height) = asset_info.dimensions.unwrap_or((100.0, 100.0));
-
-                // TODO: Image fills on DCEL faces are a separate feature.
-                // For now, just log a message.
-                let _ = (layer_id, width, height);
-                eprintln!("Image drop to canvas not yet supported with DCEL backend");
+                let (img_w, img_h) = asset_info.dimensions.unwrap_or((100.0, 100.0));
+                let (doc_w, doc_h) = {
+                    let d = self.action_executor.document();
+                    (d.width as f64, d.height as f64)
+                };
+                let x = (doc_w - img_w) / 2.0;
+                let y = (doc_h - img_h) / 2.0;
+                let action = lightningbeam_core::actions::AddShapeAction::image_rect(
+                    layer_id, self.playback_time, x, y, img_w, img_h, asset_info.clip_id,
+                );
+                if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                    eprintln!("Failed to place image: {}", e);
+                }
             } else {
                 // For clips, create a clip instance
                 let mut clip_instance = ClipInstance::new(asset_info.clip_id)
