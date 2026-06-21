@@ -1356,7 +1356,12 @@ fn render_vector_layer(
     // Cascade opacity: parent_opacity × layer.opacity
     let layer_opacity = parent_opacity * layer.layer.opacity;
 
-    // Render clip instances first (they appear under shape instances)
+    // Render the layer's own VectorGraph (loose shapes) first, then clip instances
+    // (groups / movie clips) on top.
+    if let Some(graph) = layer.graph_at_time(time) {
+        render_vector_graph(graph, scene, base_transform, layer_opacity, document, image_cache);
+    }
+
     for clip_instance in &layer.clip_instances {
         // For groups, compute the visibility end from keyframe data
         let group_end_time = document.vector_clips.get(&clip_instance.clip_id)
@@ -1366,11 +1371,6 @@ fn render_vector_layer(
                 layer.group_visibility_end(&clip_instance.id, clip_instance.timeline_start, frame_duration)
             });
         render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data, image_cache, video_manager, group_end_time);
-    }
-
-    // Render VectorGraph from active keyframe
-    if let Some(graph) = layer.graph_at_time(time) {
-        render_vector_graph(graph, scene, base_transform, layer_opacity, document, image_cache);
     }
 }
 
@@ -1667,6 +1667,11 @@ fn render_vector_layer_cpu(
 ) {
     let layer_opacity = parent_opacity * layer.layer.opacity;
 
+    // Loose shapes first, then clip instances (groups / movie clips) on top.
+    if let Some(graph) = layer.graph_at_time(time) {
+        render_vector_graph_cpu(graph, pixmap, affine_to_ts(base_transform), layer_opacity as f32, document, image_cache);
+    }
+
     for clip_instance in &layer.clip_instances {
         let group_end_time = document.vector_clips.get(&clip_instance.clip_id)
             .filter(|vc| vc.is_group)
@@ -1678,10 +1683,6 @@ fn render_vector_layer_cpu(
             document, time, clip_instance, layer_opacity, pixmap, base_transform,
             &layer.layer.animation_data, image_cache, group_end_time,
         );
-    }
-
-    if let Some(graph) = layer.graph_at_time(time) {
-        render_vector_graph_cpu(graph, pixmap, affine_to_ts(base_transform), layer_opacity as f32, document, image_cache);
     }
 }
 
