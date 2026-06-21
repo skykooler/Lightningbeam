@@ -325,8 +325,10 @@ pub struct SharedPaneState<'a> {
     pub script_to_edit: &'a mut Option<Uuid>,
     /// Script ID that was just saved (triggers auto-recompile of nodes using it)
     pub script_saved: &'a mut Option<Uuid>,
-    /// Active region selection (temporary split state)
-    pub region_selection: &'a mut Option<lightningbeam_core::selection::RegionSelection>,
+    /// Undo-stack depth recorded before the first region-select cut of the current
+    /// selection session. `Some` while a region selection is live and unchanged; lets a
+    /// later deselect heal (undo) the cut if nothing was edited. See `resolve_pending_region_cut`.
+    pub pending_region_cut_base: &'a mut Option<usize>,
     /// Region select mode (Rectangle or Lasso)
     pub region_select_mode: &'a mut lightningbeam_core::tool::RegionSelectMode,
     /// Lasso select sub-mode (Freehand / Polygonal / Magnetic)

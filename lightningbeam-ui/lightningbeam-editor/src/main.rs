@@ -984,8 +984,9 @@ struct EditorApp {
     snap_enabled: bool,              // Whether to snap to geometry (default: true)
     paint_bucket_gap_tolerance: f64, // Fill gap tolerance for paint bucket (default: 5.0)
     polygon_sides: u32,              // Number of sides for polygon tool (default: 5)
-    // Region select state
-    region_selection: Option<lightningbeam_core::selection::RegionSelection>,
+    /// Undo depth before the current region-select session's first cut (see
+    /// `resolve_pending_region_cut`). `None` when no region selection is pending.
+    pending_region_cut_base: Option<usize>,
     region_select_mode: lightningbeam_core::tool::RegionSelectMode,
     lasso_mode: lightningbeam_core::tool::LassoMode,
 
@@ -1303,7 +1304,7 @@ impl EditorApp {
             snap_enabled: true,              // Default to snapping
             paint_bucket_gap_tolerance: 5.0, // Default gap tolerance
             polygon_sides: 5,                // Default to pentagon
-            region_selection: None,
+            pending_region_cut_base: None,
             region_select_mode: lightningbeam_core::tool::RegionSelectMode::default(),
             lasso_mode: lightningbeam_core::tool::LassoMode::default(),
             input_level: 0.0,
@@ -2629,27 +2630,7 @@ impl EditorApp {
                 None => return,
             };
 
-            // Region selection case: faces are selected but no edges.
-            // The inside geometry was already extracted from the live DCEL;
-            // commit the current state (outside + boundary) using the
-            // pre-boundary snapshot as the "before" for undo.
-            if self.selection.selected_edges().is_empty() {
-                if let Some(region_sel) = self.region_selection.take() {
-                    // dcel_snapshot = state before boundary was inserted.
-                    // Current document DCEL = outside portion only (boundary edges present).
-                    // We commit the snapshot as "before" and the current state as "after",
-                    // then drop the region selection so it is not merged back.
-                    // TODO: Region selection delete requires converting Dcel snapshot
-                    // to VectorGraph for ModifyGraphAction. Deferred until RegionSelection
-                    // is migrated from Dcel to VectorGraph.
-                    eprintln!("Region selection delete: not yet ported to VectorGraph");
-                    // region_sel is dropped; the stage pane will see region_selection == None.
-                }
-                self.selection.clear_geometry_selection();
-                return;
-            }
-
-            // Select-tool case: delete the selected edges.
+            // Delete the selected edges (region/marquee/click all populate the same sets).
             let edge_ids: Vec<lightningbeam_core::vector_graph::EdgeId> =
                 self.selection.selected_edges().iter().copied().collect();
 
@@ -3036,38 +3017,31 @@ impl EditorApp {
         }
     }
 
-    /// Revert an uncommitted region selection, restoring original shapes
-    fn revert_region_selection(
-        region_selection: &mut Option<lightningbeam_core::selection::RegionSelection>,
-        action_executor: &mut lightningbeam_core::action::ActionExecutor,
-        selection: &mut lightningbeam_core::selection::Selection,
-    ) {
-        use lightningbeam_core::layer::AnyLayer;
-
-        let region_sel = match region_selection.take() {
-            Some(rs) => rs,
-            None => return,
-        };
-
-        if region_sel.committed {
+    /// Resolve a pending region-select cut once its selection has been cleared.
+    ///
+    /// A region/lasso selection cuts the geometry (an undoable `"Region select"` action)
+    /// and selects the resulting sub-pieces. When that selection is deselected:
+    ///   - if nothing was edited in between, the cut(s) are healed (undone) so the lasso
+    ///     was non-destructive — the shape returns to whole;
+    ///   - if anything was edited, everything is kept (the edits — and the cut they rely
+    ///     on — stay on the undo stack), i.e. the change is "merged" in place.
+    /// We tell the two apart by walking the undo stack down to the recorded base depth and
+    /// only undoing while the top action is itself a region-select cut; the first non-cut
+    /// action (an edit) stops the heal and leaves everything intact.
+    fn resolve_pending_region_cut(&mut self) {
+        let Some(base) = self.pending_region_cut_base else { return };
+        // Only resolve once the region selection has actually been deselected.
+        if self.selection.has_geometry_selection() {
             return;
         }
-
-        let doc = action_executor.document_mut();
-        let layer = match doc.get_layer_mut(&region_sel.layer_id) {
-            Some(l) => l,
-            None => return,
-        };
-        let vector_layer = match layer {
-            AnyLayer::Vector(vl) => vl,
-            _ => return,
-        };
-
-        // TODO: DCEL - region selection revert disabled during migration
-        // (was: remove/add_shape_from/to_keyframe for splits)
-        let _ = vector_layer;
-
-        selection.clear();
+        while self.action_executor.undo_depth() > base {
+            if self.action_executor.undo_description().as_deref() == Some("Region select") {
+                let _ = self.action_executor.undo();
+            } else {
+                break; // an edit sits on top → the user changed something; keep it all.
+            }
+        }
+        self.pending_region_cut_base = None;
     }
 
     fn handle_menu_action(&mut self, action: MenuAction) {
@@ -6563,7 +6537,7 @@ impl eframe::App for EditorApp {
                     graph_topology_generation: &mut self.graph_topology_generation,
                     script_to_edit: &mut self.script_to_edit,
                     script_saved: &mut self.script_saved,
-                    region_selection: &mut self.region_selection,
+                    pending_region_cut_base: &mut self.pending_region_cut_base,
                     region_select_mode: &mut self.region_select_mode,
                     lasso_mode: &mut self.lasso_mode,
                     pending_graph_loads: &self.pending_graph_loads,
@@ -7002,20 +6976,20 @@ impl eframe::App for EditorApp {
             }
         }
 
-        // Escape key: cancel floating raster selection or revert uncommitted region selection
+        // Escape key: cancel floating raster selection, or clear the geometry selection
         if !wants_keyboard && ctx.input(|i| self.keymap.action_pressed(keymap::AppAction::CancelAction, i)) {
             if self.selection.raster_floating.is_some() {
                 self.cancel_raster_floating();
             } else if self.selection.raster_selection.is_some() {
                 self.selection.raster_selection = None;
-            } else if self.region_selection.is_some() {
-                Self::revert_region_selection(
-                    &mut self.region_selection,
-                    &mut self.action_executor,
-                    &mut self.selection,
-                );
+            } else if self.selection.has_geometry_selection() {
+                self.selection.clear_geometry_selection();
             }
         }
+
+        // After all input is processed, if a region selection was deselected without any
+        // intervening edit, heal (undo) its cut so the lasso is non-destructive.
+        self.resolve_pending_region_cut();
 
         // F3 debug overlay toggle (works even when text input is active)
         if ctx.input(|i| self.keymap.action_pressed(keymap::AppAction::ToggleDebugOverlay, i)) {

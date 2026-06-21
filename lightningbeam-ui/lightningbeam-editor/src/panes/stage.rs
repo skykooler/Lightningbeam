@@ -472,8 +472,6 @@ struct VelloRenderContext {
     editing_instance_id: Option<uuid::Uuid>,
     /// The parent layer ID containing the clip instance being edited
     editing_parent_layer_id: Option<uuid::Uuid>,
-    /// Active region selection state (for rendering boundary overlay)
-    region_selection: Option<lightningbeam_core::selection::RegionSelection>,
     /// Mouse position in document-local (clip-local) world coordinates, for hover hit testing
     mouse_world_pos: Option<vello::kurbo::Point>,
     /// Latest webcam frame for live preview (if any camera is active)
@@ -1901,43 +1899,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 );
             }
 
-            // Render selected DCEL from active region selection (with transform)
-            if let Some(ref region_sel) = self.ctx.region_selection {
-                let sel_transform = overlay_transform * region_sel.transform;
-                lightningbeam_core::renderer::render_vector_graph(
-                    &region_sel.selected_graph,
-                    &mut scene,
-                    sel_transform,
-                    1.0,
-                    &self.ctx.document,
-                    &mut image_cache,
-                );
-            }
-
             drop(image_cache);
             scene
         };
-
-        // Render region selection fill into the overlay scene.
-        // In HDR mode the main scene-building block returns an empty scene (only layer content
-        // goes through the HDR pipeline), so we must add the selected-DCEL fill here so it
-        // appears underneath the stipple overlay. In legacy mode the render_dcel call inside
-        // the block already handled this, but running it again is harmless since `scene` would
-        // be a fresh empty scene only in HDR mode.
-        if USE_HDR_COMPOSITING {
-            if let Some(ref region_sel) = self.ctx.region_selection {
-                let sel_transform = overlay_transform * region_sel.transform;
-                let mut image_cache = shared.image_cache.lock().unwrap();
-                lightningbeam_core::renderer::render_vector_graph(
-                    &region_sel.selected_graph,
-                    &mut scene,
-                    sel_transform,
-                    1.0,
-                    &self.ctx.document,
-                    &mut image_cache,
-                );
-            }
-        }
 
         // Render drag preview objects with transparency
         if let (Some(delta), Some(active_layer_id)) = (self.ctx.drag_delta, self.ctx.active_layer_id) {
@@ -2115,50 +2079,6 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     );
                                 }
                             }
-                        }
-                    }
-
-                    // 1a. Draw stipple overlay on region-selected graph
-                    if let Some(ref region_sel) = self.ctx.region_selection {
-                        use lightningbeam_core::vector_graph::FillId;
-                        let sel_graph = &region_sel.selected_graph;
-                        let sel_transform = overlay_transform * region_sel.transform;
-                        let stipple_brush = selection_stipple_brush();
-                        let inv_zoom = 1.0 / self.ctx.zoom as f64;
-                        let brush_xform = Some(Affine::scale(inv_zoom));
-
-                        // Stipple fills with visible content
-                        for (i, fill) in sel_graph.fills.iter().enumerate() {
-                            if fill.deleted { continue; }
-                            if fill.color.is_none() && fill.image_fill.is_none() && fill.gradient_fill.is_none() { continue; }
-                            let fill_id = FillId(i as u32);
-                            let path = sel_graph.fill_to_bezpath(fill_id);
-                            scene.fill(
-                                vello::peniko::Fill::NonZero,
-                                sel_transform,
-                                stipple_brush,
-                                brush_xform,
-                                &path,
-                            );
-                        }
-
-                        // Stipple edges with visible stroke
-                        for edge in &sel_graph.edges {
-                            if edge.deleted { continue; }
-                            if edge.stroke_style.is_none() && edge.stroke_color.is_none() { continue; }
-                            let width = edge.stroke_style.as_ref()
-                                .map(|s| s.width)
-                                .unwrap_or(2.0);
-                            let mut path = vello::kurbo::BezPath::new();
-                            path.move_to(edge.curve.p0);
-                            path.curve_to(edge.curve.p1, edge.curve.p2, edge.curve.p3);
-                            scene.stroke(
-                                &vello::kurbo::Stroke::new(width),
-                                sel_transform,
-                                stipple_brush,
-                                brush_xform,
-                                &path,
-                            );
                         }
                     }
 
@@ -3738,12 +3658,6 @@ impl StagePane {
             None => return, // No active layer
         };
 
-        // Revert any active region selection on mouse press before borrowing the document
-        // immutably, so the two selection modes don't coexist.
-        if self.rsp_primary_pressed(ui) {
-            Self::revert_region_selection_static(shared);
-        }
-
         let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
             None => return,
@@ -5076,6 +4990,7 @@ impl StagePane {
         _ui: &mut egui::Ui,
         response: &egui::Response,
         world_pos: egui::Vec2,
+        shift_held: bool,
         shared: &mut SharedPaneState,
     ) {
         use lightningbeam_core::tool::{ToolState, RegionSelectMode};
@@ -5089,12 +5004,13 @@ impl StagePane {
             None => return,
         };
 
-        // Mouse down: start region selection
+        // Mouse down: start region selection. Clear the existing selection unless shift
+        // is held (additive), mirroring the marquee. Region select populates the same
+        // `Selection` ID sets as every other tool.
         if self.rsp_drag_started(response) {
-            // Revert any existing uncommitted region selection, and clear the
-            // regular selection so both selection modes don't coexist.
-            Self::revert_region_selection_static(shared);
-            shared.selection.clear();
+            if !shift_held {
+                shared.selection.clear();
+            }
 
             match *shared.region_select_mode {
                 RegionSelectMode::Rectangle => {
@@ -5165,7 +5081,10 @@ impl StagePane {
         }
     }
 
-    /// Execute region selection: snapshot DCEL, insert region boundary, extract inside geometry
+    /// Execute region selection (rect or lasso): cut the geometry along the region
+    /// outline (an undoable edit) and select the resulting inside sub-pieces into the
+    /// normal `Selection`. This is the single, unified selection path — there is no
+    /// separate floating "region selection" anymore.
     fn execute_region_select(
         shared: &mut SharedPaneState,
         region_path: vello::kurbo::BezPath,
@@ -5177,8 +5096,8 @@ impl StagePane {
 
         let time = *shared.playback_time;
 
-        use lightningbeam_core::vector_graph::{EdgeId, FillId, VertexId};
-        use std::collections::{HashMap, HashSet};
+        use lightningbeam_core::vector_graph::{EdgeId, FillId};
+        use std::collections::HashSet;
         use vello::kurbo::{ParamCurve, Shape as _};
 
         // Convert region path line segments to CubicBez for insert_stroke
@@ -5219,179 +5138,134 @@ impl StagePane {
             return;
         }
 
-        // Do all graph work in a block so the mutable borrow of shared ends
-        // before we assign to shared.region_selection.
-        let extraction_result = {
-            let document = shared.action_executor.document_mut();
-            let graph = match document.get_layer_mut(&layer_id) {
-                Some(AnyLayer::Vector(vl)) => match vl.graph_at_time_mut(time) {
+        // Cut a copy of the graph along the region outline, then classify which resulting
+        // pieces lie inside. We work on a clone so the cut can be committed as a single
+        // undoable action (or discarded entirely if the region caught nothing).
+        let (graph_before, graph_after, inside_edges, inside_fills) = {
+            let document = shared.action_executor.document();
+            let graph = match document.get_layer(&layer_id) {
+                Some(AnyLayer::Vector(vl)) => match vl.graph_at_time(time) {
                     Some(d) => d,
                     None => return,
                 },
                 _ => return,
             };
 
-            let snapshot = graph.clone();
+            let graph_before = graph.clone();
+            let mut graph_after = graph_before.clone();
 
-            // Insert region boundary as invisible edges (no stroke style/color)
-            let region_edge_ids = graph.insert_stroke(&segments, None, None, 1.0);
+            // Debug capture (set LIGHTNINGBEAM_DUMP_REGION=1): write the exact pre-cut graph
+            // + lasso segments to a numbered JSON file under the temp dir, so a misbehaving
+            // region select can be replayed deterministically as a regression test.
+            if std::env::var_os("LIGHTNINGBEAM_DUMP_REGION").is_some() {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static DUMP_N: AtomicUsize = AtomicUsize::new(0);
+                let n = DUMP_N.fetch_add(1, Ordering::Relaxed);
+                let seg_pts: Vec<[[f64; 2]; 4]> = segments
+                    .iter()
+                    .map(|c| [[c.p0.x, c.p0.y], [c.p1.x, c.p1.y], [c.p2.x, c.p2.y], [c.p3.x, c.p3.y]])
+                    .collect();
+                if let Ok(graph_json) = serde_json::to_value(&graph_before) {
+                    let dump = serde_json::json!({ "graph": graph_json, "segments": seg_pts });
+                    let path = std::env::temp_dir().join(format!("lightningbeam_region_dump_{n}.json"));
+                    match serde_json::to_string_pretty(&dump).map(|s| std::fs::write(&path, s)) {
+                        Ok(Ok(())) => eprintln!("[region dump] wrote {}", path.display()),
+                        e => eprintln!("[region dump] failed: {e:?}"),
+                    }
+                }
+            }
 
+            // Insert the region boundary as invisible edges (no stroke style/color) so any
+            // shape the region crosses is split into inside/outside sub-fills.
+            let region_edge_ids = graph_after.insert_stroke(&segments, None, None, 1.0);
             let region_edge_set: HashSet<EdgeId> = region_edge_ids.iter().copied().collect();
 
-            // Classify edges: inside vs outside by midpoint winding
-            let mut inside_edges = HashSet::new();
-            for (i, edge) in graph.edges.iter().enumerate() {
+            // The lasso outline portions that DON'T cross geometry leave dangling invisible
+            // edges (no stroke, not part of any fill). Drop them so they can't be selected
+            // or edited later; the cut edges (now part of a fill boundary) are kept.
+            graph_after.gc_invisible_edges();
+
+            // Classify edges: inside by midpoint winding (excluding the cut edges themselves).
+            let mut inside_edges: Vec<EdgeId> = Vec::new();
+            for (i, edge) in graph_after.edges.iter().enumerate() {
                 let eid = EdgeId(i as u32);
                 if edge.deleted || region_edge_set.contains(&eid) {
                     continue;
                 }
                 let mid = edge.curve.eval(0.5);
                 if region_path.winding(mid) != 0 {
-                    inside_edges.insert(eid);
+                    inside_edges.push(eid);
                 }
             }
 
-            // Classify fills: inside vs outside by boundary centroid winding
-            let mut inside_fills = HashSet::new();
-            for (i, fill) in graph.fills.iter().enumerate() {
+            // Classify fills: inside if a guaranteed-interior point of the fill is inside
+            // the lasso. (A non-convex sub-fill's edge-midpoint average can fall inside the
+            // lasso even when the shape is mostly outside, so use fill_interior_point.)
+            let mut inside_fills: Vec<FillId> = Vec::new();
+            for (i, fill) in graph_after.fills.iter().enumerate() {
                 let fid = FillId(i as u32);
                 if fill.deleted {
                     continue;
                 }
-                let centroid = Self::compute_fill_centroid(graph, fid);
-                if region_path.winding(centroid) != 0 {
-                    inside_fills.insert(fid);
+                let probe = graph_after.fill_interior_point(fid);
+                if region_path.winding(probe) != 0 {
+                    inside_fills.push(fid);
                 }
             }
 
-            // If nothing is inside, restore snapshot and bail
-            if inside_edges.is_empty() && inside_fills.is_empty() {
-                *graph = snapshot;
-                None
-            } else {
-                // Extract subgraph (boundary edges get duplicated into both graphs)
-                let (selected_graph, vtx_map, edge_map) = graph.extract_subgraph(
-                    &inside_edges,
-                    &inside_fills,
-                    &region_edge_set,
-                );
-
-                // Build boundary maps for merge-back
-                let boundary_vertex_map: HashMap<VertexId, VertexId> = vtx_map
-                    .iter()
-                    .filter(|(&old_vid, _)| !graph.vertex(old_vid).deleted)
-                    .map(|(&old, &new)| (new, old))
-                    .collect();
-
-                let boundary_edge_map: HashMap<EdgeId, EdgeId> = edge_map
-                    .iter()
-                    .filter(|(old_eid, _)| region_edge_set.contains(old_eid))
-                    .map(|(&old, &new)| (new, old))
-                    .collect();
-
-                Some((snapshot, selected_graph, region_edge_ids, boundary_vertex_map, boundary_edge_map))
-            }
+            (graph_before, graph_after, inside_edges, inside_fills)
         };
 
-        let Some((snapshot, selected_graph, region_edge_ids, boundary_vertex_map, boundary_edge_map)) = extraction_result else {
+        // Nothing inside: don't mutate the graph (avoid littering it with stray cut
+        // edges), leaving the selection as cleared/extended on drag-start.
+        if inside_edges.is_empty() && inside_fills.is_empty() {
             #[cfg(debug_assertions)]
             shared.test_mode.clear_pending_geometry();
             return;
-        };
+        }
 
-        *shared.region_selection = Some(lightningbeam_core::selection::RegionSelection {
-            region_path: region_path.clone(),
+        // Record the undo depth before the first cut of this selection session, so a
+        // later deselect can heal (undo) the cut(s) if nothing was changed in between.
+        // A shift-additive series of cuts keeps the same base (it accumulates).
+        if shared.pending_region_cut_base.is_none() {
+            *shared.pending_region_cut_base = Some(shared.action_executor.undo_depth());
+        }
+
+        // Commit the cut as one undoable edit.
+        let action = lightningbeam_core::actions::ModifyGraphAction::new(
             layer_id,
             time,
-            graph_snapshot: snapshot,
-            selected_graph,
-            transform: vello::kurbo::Affine::IDENTITY,
-            committed: false,
-            region_edge_ids,
-            action_epoch_at_selection: shared.action_executor.epoch(),
-            boundary_vertex_map,
-            boundary_edge_map,
-        });
-
-        shared.selection.clear_geometry_selection();
-
-        #[cfg(debug_assertions)]
-        shared.test_mode.clear_pending_geometry();
-    }
-
-    /// Compute the centroid of a fill's boundary edge midpoints.
-    fn compute_fill_centroid(
-        graph: &lightningbeam_core::vector_graph::VectorGraph,
-        fid: lightningbeam_core::vector_graph::FillId,
-    ) -> vello::kurbo::Point {
-        use vello::kurbo::{ParamCurve, Point};
-        let fill = graph.fill(fid);
-        let mut sum_x = 0.0;
-        let mut sum_y = 0.0;
-        let mut count = 0;
-        for &(eid, _) in &fill.boundary {
-            if eid.is_none() {
-                continue;
-            }
-            let mid = graph.edge(eid).curve.eval(0.5);
-            sum_x += mid.x;
-            sum_y += mid.y;
-            count += 1;
-        }
-        if count > 0 {
-            Point::new(sum_x / count as f64, sum_y / count as f64)
-        } else {
-            Point::ZERO
-        }
-    }
-
-    /// Revert an uncommitted region selection, restoring the DCEL from snapshot
-    fn revert_region_selection_static(shared: &mut SharedPaneState) {
-        use lightningbeam_core::layer::AnyLayer;
-
-        let region_sel = match shared.region_selection.take() {
-            Some(rs) => rs,
-            None => return,
-        };
-
-        if region_sel.committed {
-            // Already committed via action system, nothing to revert
+            graph_before,
+            graph_after,
+            "Region select",
+        );
+        if let Err(e) = shared.action_executor.execute(Box::new(action)) {
+            eprintln!("Region select cut failed: {}", e);
+            #[cfg(debug_assertions)]
+            shared.test_mode.clear_pending_geometry();
             return;
         }
 
-        let no_actions_taken =
-            shared.action_executor.epoch() == region_sel.action_epoch_at_selection;
-        let no_transform = region_sel.transform == vello::kurbo::Affine::IDENTITY;
-
-        let doc = shared.action_executor.document_mut();
-        if let Some(AnyLayer::Vector(vl)) = doc.get_layer_mut(&region_sel.layer_id) {
-            if let Some(graph) = vl.graph_at_time_mut(region_sel.time) {
-                if no_actions_taken && no_transform {
-                    // Fast path: nothing changed, restore from snapshot
-                    *graph = region_sel.graph_snapshot;
-                } else {
-                    // Delete the main graph's copy of boundary edges
-                    for &eid in &region_sel.region_edge_ids {
-                        if !graph.edge(eid).deleted {
-                            graph.free_edge(eid);
-                        }
-                    }
-
-                    // Merge the (possibly transformed) selected_graph back
-                    graph.merge_subgraph(
-                        &region_sel.selected_graph,
-                        region_sel.transform,
-                        &region_sel.boundary_vertex_map,
-                        &region_sel.boundary_edge_map,
-                    );
-
-                    // Clean up invisible edges left from the boundary
-                    graph.gc_invisible_edges();
+        // Select the inside sub-pieces from the now-current (post-cut) graph. The fill/edge
+        // ids are stable because the committed graph is exactly `graph_after`.
+        if let Some(AnyLayer::Vector(vl)) = shared.action_executor.document().get_layer(&layer_id) {
+            if let Some(graph) = vl.graph_at_time(time) {
+                for fid in &inside_fills {
+                    shared.selection.select_fill(*fid, graph);
+                }
+                for eid in &inside_edges {
+                    shared.selection.select_edge(*eid, graph);
                 }
             }
         }
 
-        shared.selection.clear_geometry_selection();
+        if shared.selection.has_geometry_selection() {
+            *shared.focus =
+                lightningbeam_core::selection::FocusSelection::Geometry { layer_id, time };
+        }
+
+        #[cfg(debug_assertions)]
+        shared.test_mode.clear_pending_geometry();
     }
 
     /// Create a rectangle path centered at origin (easier for curve editing later)
@@ -10874,7 +10748,7 @@ impl StagePane {
                     self.handle_eyedropper_tool(ui, &response, mouse_pos, shared);
                 }
                 Tool::RegionSelect => {
-                    self.handle_region_select_tool(ui, &response, world_pos, shared);
+                    self.handle_region_select_tool(ui, &response, world_pos, shift_held, shared);
                 }
                 Tool::Warp => {
                     self.handle_raster_warp_tool(ui, &response, world_pos, shared);
@@ -12112,7 +11986,6 @@ impl PaneRenderer for StagePane {
             editing_clip_id: shared.editing_clip_id,
             editing_instance_id: shared.editing_instance_id,
             editing_parent_layer_id: shared.editing_parent_layer_id,
-            region_selection: shared.region_selection.clone(),
             mouse_world_pos,
             webcam_frame: shared.webcam_frame.clone(),
             pending_raster_dabs: self.pending_raster_dabs.take(),
