@@ -392,6 +392,44 @@ dirty never evicted. 4. 3c GPU bound. 5. 3d undo diffs reproduce pre-stroke buff
 
 ---
 
+## Phase 3.5 — Image textures in vector scenes  *(prereq for testing Phase 4; fixes DCEL-broken image import)*
+
+**Why:** Phase 4 pages *image assets*, but there's currently no way to get an image asset into a
+vector scene — so nothing to page. This also repairs image import, half-broken since the DCEL switch.
+
+**Current state (audited 2026-06-21):**
+- *Works:* `import_image` (`main.rs`) decodes dims + creates an `ImageAsset` (raw bytes embedded in
+  `Document::image_assets`, serialized as **base64 in project JSON**). The renderer's image-fill paths
+  are **complete** — GPU/Vello (`renderer.rs:~1160`, `ImageBrush` via `ImageCache.get_or_decode`) and
+  CPU/tiny-skia (`renderer.rs:~1486`). `Fill::image_fill` (`vector_graph/mod.rs:110`) and
+  `Face::image_fill` (`dcel2/mod.rs:117`) fields exist and render when set.
+- *Broken/missing (the workflow):*
+  1. **Drop image → canvas is stubbed:** `stage.rs:~11782` and `main.rs:~4924` both just print
+     "Image drag to stage not yet supported with DCEL backend". Nothing is added to the scene.
+  2. **No way to assign an image fill:** no `SetImageFillAction` (only `SetFillPaintAction` for
+     color/gradient); no Info-Panel picker. `Fill`/`Face.image_fill` are never populated.
+  3. **DCEL faces never get `image_fill`** (`dcel2/import.rs:275` always `None`; topology copies from
+     parent which is also `None`).
+  4. **Not in the container:** `MediaKind::ImageAsset` exists but is **dead** — image bytes live only
+     as base64 in project JSON. Not chunked, not pageable (so Phase 4 can't page them).
+
+**Tasks:**
+- **3.5a — Place + assign.** Replace the two drop stubs: dropping an image onto a vector layer creates
+  a rectangle face sized to the image at the drop point with `image_fill = asset_id`. Add
+  `SetImageFillAction` (set/clear an image fill on the selected face/shape; mirrors `SetFillPaintAction`)
+  + an Info-Panel image-asset picker for the selected shape's fill. Populate `Face.image_fill` in DCEL
+  (and keep it through topology ops — already copied from parent).
+- **3.5b — Persist in the container.** Write image assets as `MediaKind::ImageAsset` rows in the `.beam`
+  SQLite (like raster/audio: write on save kept-in-place on re-save; read on load), keyed by asset id;
+  drop the base64-in-JSON embedding (or keep a tiny ref). This is the storage Phase 4 pages from.
+- **3.5c — Lazy decode hook.** Image bytes load from the container into `ImageCache` on first render
+  (decode → `ImageBrush`/`Pixmap`). Leave `ImageCache` **unbounded for now**; Phase 4 adds the
+  usage-based LRU/eviction (this phase just makes there *be* real, container-backed image assets to page).
+- **Tests:** import→drop→render round-trip; save/reload preserves the image fill + reads bytes from the
+  container (not JSON); CPU and GPU render paths both show the image.
+
+---
+
 ## Phase 4 — Asset paging by usage + LRU  *(vector's real cost is assets, not geometry)*
 
 Vector geometry is compact flat POD (tens of KB/frame, no cached tessellation/DCEL) — leave
