@@ -1162,7 +1162,15 @@ pub fn render_vector_graph(
             if let Some(image_asset) = document.get_image_asset(&image_asset_id) {
                 if let Some(image) = image_cache.get_or_decode(image_asset) {
                     let image_with_alpha = (*image).clone().with_alpha(opacity_f32);
-                    scene.fill(fill_rule, base_transform, &image_with_alpha, None, &path);
+                    // Map the image (native pixel space, origin 0,0) onto the fill's
+                    // bounding box, so it sits where the shape is and scales to fit
+                    // (1:1 for an image-sized rectangle).
+                    let bbox = vello::kurbo::Shape::bounding_box(&path);
+                    let iw = (image_asset.width.max(1)) as f64;
+                    let ih = (image_asset.height.max(1)) as f64;
+                    let brush_transform = Affine::translate((bbox.x0, bbox.y0))
+                        * Affine::scale_non_uniform(bbox.width() / iw, bbox.height() / ih);
+                    scene.fill(fill_rule, base_transform, &image_with_alpha, Some(brush_transform), &path);
                     filled = true;
                 }
             }
@@ -1486,12 +1494,21 @@ fn render_vector_graph_cpu(
         if let Some(image_asset_id) = fill.image_fill {
             if let Some(asset) = document.get_image_asset(&image_asset_id) {
                 if let Some(img_pixmap) = image_cache.get_or_decode_cpu(asset) {
+                    // Map the image's native pixel space onto the fill's bounding box.
+                    let bbox: kurbo::Rect = vello::kurbo::Shape::bounding_box(&path);
+                    let iw = (asset.width.max(1)) as f32;
+                    let ih = (asset.height.max(1)) as f32;
+                    let sx = (bbox.width() as f32) / iw;
+                    let sy = (bbox.height() as f32) / ih;
+                    let pat_tf = tiny_skia::Transform::from_row(
+                        sx, 0.0, 0.0, sy, bbox.x0 as f32, bbox.y0 as f32,
+                    );
                     let pattern = tiny_skia::Pattern::new(
                         tiny_skia::Pixmap::as_ref(&img_pixmap),
                         tiny_skia::SpreadMode::Pad,
                         tiny_skia::FilterQuality::Bilinear,
                         opacity,
-                        tiny_skia::Transform::identity(),
+                        pat_tf,
                     );
                     let mut paint = tiny_skia::Paint::default();
                     paint.shader = pattern;
