@@ -326,7 +326,12 @@ clone). Not worth 64 edits. Start at 3a.
   armed recursively; canvas records misses → App pages in via `RasterStore.load_pixels`.
 - **[DONE 3a-2]** Async: page-in runs on a background thread (deduped via `raster_loads_inflight`);
   results applied at top of `update()`. No UI block on cold scrub.
-- **[TODO 3a-3]** Image proxy (below) to remove the brief blank gap before a full PNG lands.
+- **[DONE 3a-3]** Image proxy: `MediaKind::RasterProxy` (≤192px PNG, derived id), written
+  beside each resident full PNG on save + eager-decoded on load into `RasterKeyframe::proxy`.
+  Separate `proxy_layer_cache` (own LRU, budget 64); the raster render blits the proxy mapped to
+  the keyframe's FULL logical dims (upscales via sampler) when the full texture isn't resident.
+  *(Proxies exist only after a save+reload; eager decode → lazy/paged is a refinement for huge
+  paint projects.)*
 
 - **`RasterStore`** (core): current `.beam` path + a read-only connection; `load_pixels(kf_id,w,h)`
   reads the `Raster` row and `decode_png`s it. Set/cleared by the editor on load + save-as.
