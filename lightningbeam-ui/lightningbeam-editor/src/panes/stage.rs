@@ -1250,12 +1250,6 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     None
                 };
 
-                if !rendered_layer.has_content && gpu_canvas_kf.is_none() && raster_cache_kf.is_none()
-                    && raster_proxy_blit.is_none()
-                {
-                    continue;
-                }
-
                 match &rendered_layer.layer_type {
                     RenderedLayerType::Vector => {
                         // Vector/group layer — render Vello scene → sRGB → linear → composite.
@@ -1343,34 +1337,58 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     &instance_resources.hdr_texture_view,
                                 ) {
                                     let mut drew = false;
+                                    let mut need_fault = false;
                                     if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
-                                        let has_full = gpu_brush.raster_layer_cache.contains_key(&kf_id);
-                                        if !has_full {
-                                            // Upload the proxy on demand from the keyframe's pixels.
-                                            if let Some(lightningbeam_core::layer::AnyLayer::Raster(rl)) =
-                                                self.ctx.document.get_layer(&rendered_layer.layer_id)
-                                            {
-                                                if let Some(p) = rl.keyframes.iter().find(|k| k.id == kf_id)
-                                                    .and_then(|k| k.proxy.as_ref())
-                                                {
-                                                    gpu_brush.ensure_proxy_texture(device, queue, kf_id, &p.pixels, p.width, p.height);
+                                        // Resolve a texture, in priority order:
+                                        //  1) cached full texture
+                                        //  2) resident raw_pixels → upload full (e.g. an
+                                        //     unsaved neighbour whose GPU texture evicted)
+                                        //  3) in-memory proxy → upload proxy
+                                        //  4) none → request a fault-in (seek to a paged-out frame)
+                                        let resolved: Option<(u32, u32, bool)> =
+                                            if gpu_brush.raster_layer_cache.contains_key(&kf_id) {
+                                                gpu_brush.raster_layer_cache.get(&kf_id).map(|c| (c.width, c.height, false))
+                                            } else {
+                                                let kf = match self.ctx.document.get_layer(&rendered_layer.layer_id) {
+                                                    Some(lightningbeam_core::layer::AnyLayer::Raster(rl)) =>
+                                                        rl.keyframes.iter().find(|k| k.id == kf_id),
+                                                    _ => None,
+                                                };
+                                                match kf {
+                                                    Some(kf) if kf.raw_pixels.len() == (kf.width * kf.height * 4) as usize => {
+                                                        gpu_brush.ensure_layer_texture(device, queue, kf_id, &kf.raw_pixels, kf.width, kf.height, false);
+                                                        Some((kf.width, kf.height, false))
+                                                    }
+                                                    Some(kf) if kf.proxy.is_some() => {
+                                                        let p = kf.proxy.as_ref().unwrap();
+                                                        gpu_brush.ensure_proxy_texture(device, queue, kf_id, &p.pixels, p.width, p.height);
+                                                        Some((lw, lh, true))
+                                                    }
+                                                    Some(kf) if kf.needs_fault_in => { need_fault = true; None }
+                                                    _ => None,
                                                 }
+                                            };
+                                        if let Some((sw, sh, is_proxy)) = resolved {
+                                            let tex = if is_proxy {
+                                                gpu_brush.get_proxy_texture(&kf_id)
+                                            } else {
+                                                gpu_brush.raster_layer_cache.get(&kf_id)
+                                            };
+                                            if let Some(canvas) = tex {
+                                                let bt = crate::gpu_brush::BlitTransform::new(*layer_transform, sw, sh, width, height)
+                                                    .with_tint(tint[0], tint[1], tint[2]);
+                                                if is_proxy {
+                                                    shared.canvas_blit.blit_smooth(device, queue, canvas.src_view(), gv, &bt, None);
+                                                } else {
+                                                    shared.canvas_blit.blit(device, queue, canvas.src_view(), gv, &bt, None);
+                                                }
+                                                drew = true;
                                             }
                                         }
-                                        let src = if has_full {
-                                            gpu_brush.raster_layer_cache.get(&kf_id).map(|c| (c, c.width, c.height, false))
-                                        } else {
-                                            gpu_brush.get_proxy_texture(&kf_id).map(|c| (c, lw, lh, true))
-                                        };
-                                        if let Some((canvas, sw, sh, is_proxy)) = src {
-                                            let bt = crate::gpu_brush::BlitTransform::new(*layer_transform, sw, sh, width, height)
-                                                .with_tint(tint[0], tint[1], tint[2]);
-                                            if is_proxy {
-                                                shared.canvas_blit.blit_smooth(device, queue, canvas.src_view(), gv, &bt, None);
-                                            } else {
-                                                shared.canvas_blit.blit(device, queue, canvas.src_view(), gv, &bt, None);
-                                            }
-                                            drew = true;
+                                    }
+                                    if need_fault {
+                                        if let Ok(mut reqs) = self.ctx.raster_fault_requests.lock() {
+                                            reqs.insert(kf_id);
                                         }
                                     }
                                     if drew {
