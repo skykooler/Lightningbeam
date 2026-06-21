@@ -41,10 +41,25 @@ are both fixed.
   paths (only when `dst==2 && src>2`; unknown layouts fall back to front L/R). Compiles clean.
   *(Needs in-app check: a 5.1 file now has centre/dialog present and isn't thin; not distorted/clipping.)*
   Native multichannel support remains a separate, larger project.
-- **Export speed:** a 1:14 1080p MP4 took ~9:06 to export (~7.4x slower than realtime). The video
-  export pipeline re-seeks + decodes per output frame (see `[Video Seek]`/`[Video Timing]` logs) and
-  does CPU YUV conversion; likely wins from sequential decode (avoid per-frame seeks), reusing the
-  decode cache, and/or GPU-side color conversion. Profile before optimizing.
+- **Export speed (audited 2026-06-21):** a 1:14 1080p MP4 took ~9:06 (~7.4x realtime, ~135 ms/frame).
+  Audit **refuted** the per-frame-seek theory — export decodes the source *sequentially*
+  (`video.rs` `need_seek` is false once advancing forward), and readback is already async +
+  triple-buffered. Real hotspots:
+  - **[DONE] #1 — per-frame renderer rebuild.** The export pump built a fresh `vello::Renderer`
+    (full wgpu pipeline init) + empty `ImageCache` *every egui repaint* (`main.rs` ~6218). Now built
+    once per export and reused; also fixed lazy-image export (the throwaway cache had no container
+    path). **Expected the dominant win.**
+  - **[DONE] #2a — encode swscale rebuilt per frame.** `CpuYuvConverter::convert` now caches the
+    RGBA→YUV420p `scaling::Context` + frames in `new()` instead of per call.
+  - **[TODO] #2b — decode swscale + stride-repack** per frame in `video.rs:294-320` (shared with
+    scrubbing; cache the YUV→RGBA scaler on the decoder). Small win, modest risk.
+  - **[TODO] #3 — GPU color conversion.** Move YUV→RGB (decode) and RGB→YUV420p (pre-readback, read
+    back YUV planes ~1.5 B/px vs 4) onto the GPU (`gpu/yuv_converter.rs` exists) — removes the two
+    heaviest CPU swscale passes + ~half the readback bytes. Biggest remaining win after #1.
+  - **[TODO] #5 — pacing.** Export is gated to one `render_next_video_frame` per egui repaint; a
+    tighter/threaded loop would lift the throughput ceiling.
+  - Non-issues: per-frame seek, blocking readback, audio. (`video.rs:237` container-reopen-on-seek is
+    a latent cost but doesn't fire on forward export.)
 - **AAC export NaN guard (done):** `convert_chunk_to_planar_f32` now sanitizes non-finite samples
   (NaN/Inf → 0, finite clamped to [-1,1]) like the integer paths, with a one-time warning — a stray
   non-finite render sample no longer fails the whole export. Upstream NaN source (effect/automation/
