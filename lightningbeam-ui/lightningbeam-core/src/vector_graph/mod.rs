@@ -417,6 +417,152 @@ impl VectorGraph {
         self.boundary_to_bezpath(&fill.boundary)
     }
 
+    /// Interpolate toward `other` by `t` ∈ [0,1] for a same-topology shape tween.
+    ///
+    /// Returns `None` if the two graphs don't share identical topology — same vertex,
+    /// edge and fill structure (counts, deleted flags, edge endpoints, fill boundaries).
+    /// In that case the caller should hold the source keyframe instead of morphing.
+    /// Vertex positions, edge curves, stroke widths and stroke/fill colours are lerped.
+    pub fn interpolated(&self, other: &VectorGraph, t: f64) -> Option<VectorGraph> {
+        if self.vertices.len() != other.vertices.len()
+            || self.edges.len() != other.edges.len()
+            || self.fills.len() != other.fills.len()
+        {
+            return None;
+        }
+        for (a, b) in self.vertices.iter().zip(&other.vertices) {
+            if a.deleted != b.deleted {
+                return None;
+            }
+        }
+        for (a, b) in self.edges.iter().zip(&other.edges) {
+            if a.deleted != b.deleted || a.vertices != b.vertices {
+                return None;
+            }
+        }
+        for (a, b) in self.fills.iter().zip(&other.fills) {
+            if a.deleted != b.deleted || a.boundary != b.boundary {
+                return None;
+            }
+        }
+
+        let lf = |x: f64, y: f64| x + (y - x) * t;
+        let lp = |p: Point, q: Point| Point::new(lf(p.x, q.x), lf(p.y, q.y));
+        let lc = |a: Option<ShapeColor>, b: Option<ShapeColor>| match (a, b) {
+            (Some(a), Some(b)) => {
+                let c = |x: u8, y: u8| (lf(x as f64, y as f64)).round().clamp(0.0, 255.0) as u8;
+                Some(ShapeColor::new(c(a.r, b.r), c(a.g, b.g), c(a.b, b.b), c(a.a, b.a)))
+            }
+            (a, _) => a,
+        };
+
+        let mut g = self.clone();
+        for (i, v) in g.vertices.iter_mut().enumerate() {
+            v.position = lp(self.vertices[i].position, other.vertices[i].position);
+        }
+        for (i, e) in g.edges.iter_mut().enumerate() {
+            let (a, b) = (self.edges[i].curve, other.edges[i].curve);
+            e.curve = CubicBez::new(lp(a.p0, b.p0), lp(a.p1, b.p1), lp(a.p2, b.p2), lp(a.p3, b.p3));
+            if let (Some(s), Some(sa), Some(sb)) = (
+                e.stroke_style.as_mut(),
+                self.edges[i].stroke_style.as_ref(),
+                other.edges[i].stroke_style.as_ref(),
+            ) {
+                s.width = lf(sa.width, sb.width);
+            }
+            e.stroke_color = lc(self.edges[i].stroke_color, other.edges[i].stroke_color);
+        }
+        for (i, f) in g.fills.iter_mut().enumerate() {
+            f.color = lc(self.fills[i].color, other.fills[i].color);
+        }
+        Some(g)
+    }
+
+    /// A point guaranteed to lie inside the fill — for point-in-region classification
+    /// (e.g. deciding whether a fill is inside a lasso). Prefers the polygon area-centroid,
+    /// but for a non-convex fill (e.g. an L-shape, where the area-centroid can fall in the
+    /// concavity *outside* the shape) it steps just inward from a boundary edge instead.
+    /// The naive average of boundary-edge midpoints is NOT reliable here — it can land
+    /// outside a non-convex fill and misclassify it.
+    pub fn fill_interior_point(&self, fill_id: FillId) -> Point {
+        let boundary = self.fills[fill_id.idx()].boundary.clone();
+        self.boundary_interior_point(&boundary)
+    }
+
+    /// A point guaranteed to lie inside the region enclosed by a `(edge, direction)`
+    /// boundary loop. See [`fill_interior_point`].
+    pub fn boundary_interior_point(&self, boundary: &[(EdgeId, Direction)]) -> Point {
+        use kurbo::{ParamCurve, Shape, Vec2};
+        let path = self.boundary_to_bezpath(boundary);
+
+        // Ordered polygon corners: the directed start point of each boundary edge.
+        let mut pts: Vec<Point> = Vec::new();
+        for &(eid, dir) in boundary {
+            if eid.is_none() {
+                continue;
+            }
+            let c = self.edges[eid.idx()].curve;
+            pts.push(match dir {
+                Direction::Forward => c.p0,
+                Direction::Backward => c.p3,
+            });
+        }
+        if pts.len() < 3 {
+            if pts.is_empty() {
+                return Point::ZERO;
+            }
+            let (sx, sy) = pts.iter().fold((0.0, 0.0), |(x, y), p| (x + p.x, y + p.y));
+            return Point::new(sx / pts.len() as f64, sy / pts.len() as f64);
+        }
+
+        // Shoelace area-centroid.
+        let (mut a2, mut cx, mut cy) = (0.0, 0.0, 0.0);
+        for i in 0..pts.len() {
+            let p0 = pts[i];
+            let p1 = pts[(i + 1) % pts.len()];
+            let cross = p0.x * p1.y - p1.x * p0.y;
+            a2 += cross;
+            cx += (p0.x + p1.x) * cross;
+            cy += (p0.y + p1.y) * cross;
+        }
+        if a2.abs() > 1e-9 {
+            let c = Point::new(cx / (3.0 * a2), cy / (3.0 * a2));
+            if path.winding(c) != 0 {
+                return c;
+            }
+        }
+
+        // Fallback: step a small distance inward from a boundary edge midpoint.
+        let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for p in &pts {
+            minx = minx.min(p.x);
+            miny = miny.min(p.y);
+            maxx = maxx.max(p.x);
+            maxy = maxy.max(p.y);
+        }
+        let eps = ((maxx - minx).min(maxy - miny) * 1e-3).max(1e-4);
+        for &(eid, _) in boundary {
+            if eid.is_none() {
+                continue;
+            }
+            let c = self.edges[eid.idx()].curve;
+            let mid = c.eval(0.5);
+            let tangent = c.eval(0.5001) - c.eval(0.4999);
+            let len = tangent.hypot();
+            if len < 1e-12 {
+                continue;
+            }
+            let n = Vec2::new(-tangent.y / len, tangent.x / len);
+            for s in [1.0_f64, -1.0] {
+                let cand = mid + n * (s * eps);
+                if path.winding(cand) != 0 {
+                    return cand;
+                }
+            }
+        }
+        pts[0]
+    }
+
     // -------------------------------------------------------------------
     // Vertex editing
     // -------------------------------------------------------------------
@@ -653,6 +799,10 @@ impl VectorGraph {
         }
 
         let mut all_new_edges = Vec::new();
+        // Sub-edges produced when a stroke segment splits an existing edge (incl. an earlier
+        // segment of this same stroke). Tracked separately so they reach the fill re-tracer
+        // without polluting the returned edge list.
+        let mut split_products: Vec<EdgeId> = Vec::new();
         let mut prev_end_vertex: Option<VertexId> = None;
 
         for (seg_idx, seg) in expanded_segments.iter().enumerate() {
@@ -706,7 +856,14 @@ impl VectorGraph {
                     let remapped_t = original_edge_t / head_end;
                     let remapped_t = remapped_t.clamp(ENDPOINT_T_MARGIN, 1.0 - ENDPOINT_T_MARGIN);
 
-                    let (mid_v, _sub_a, _sub_b) = self.split_edge(eid, remapped_t);
+                    let (mid_v, sub_a, sub_b) = self.split_edge(eid, remapped_t);
+                    // Track the split products so the fill re-tracer sees them: when a later
+                    // stroke segment crosses an earlier one, these sub-edges are part of the
+                    // stroke's arrangement but would otherwise be invisible to the re-trace.
+                    // (Kept out of `all_new_edges` so the returned edge list stays the stroke's
+                    // own edges only.)
+                    split_products.push(sub_a);
+                    split_products.push(sub_b);
                     // Snap vertex to intersection point
                     self.vertices[mid_v.idx()].position = point;
                     // Merge with nearby existing vertex if within snap distance
@@ -791,127 +948,511 @@ impl VectorGraph {
             prev_end_vertex = Some(end_v);
         }
 
-        // Fill splitting pass: for each new edge, check if both endpoints
-        // lie on any fill's boundary — if so, split that fill.
-        let edges_to_check = all_new_edges.clone();
-        for &eid in &edges_to_check {
-            let v0 = self.edges[eid.idx()].vertices[0];
-            let v1 = self.edges[eid.idx()].vertices[1];
+        // Weld dangling stroke endpoints onto a near-coincident existing vertex. A
+        // self-intersecting freehand stroke can create an intersection vertex a fraction of
+        // a pixel away from a segment endpoint that should be the same point; if they don't
+        // merge, the stroke's loop is broken by a degree-1 stub and the cut is lost.
+        self.weld_dangling_endpoints(&all_new_edges, snap_epsilon.max(1.0));
 
-            // Find fills where both v0 and v1 appear as boundary vertices
-            let fill_ids: Vec<FillId> = self.fills
-                .iter()
-                .enumerate()
-                .filter(|(_, f)| !f.deleted)
-                .filter(|(_, f)| {
-                    let has_v0 = f.boundary.iter().any(|&(be, _)| {
-                        let e = &self.edges[be.idx()];
-                        e.vertices[0] == v0 || e.vertices[1] == v0
-                    });
-                    let has_v1 = f.boundary.iter().any(|&(be, _)| {
-                        let e = &self.edges[be.idx()];
-                        e.vertices[0] == v1 || e.vertices[1] == v1
-                    });
-                    has_v0 && has_v1
-                })
-                .map(|(i, _)| FillId(i as u32))
-                .collect();
+        // Coincident-edge cleanup: a new edge that lands exactly on an existing edge
+        // between the same two vertices (e.g. drawing a shape whose edge snaps onto an
+        // existing one) must not be duplicated — duplicates produce zero-area "sliver"
+        // fills. Merge such duplicates before splitting/filling.
+        self.dedupe_coincident_new_edges(&all_new_edges);
 
-            for fid in fill_ids {
-                self.split_fill_by_edge(fid, eid);
-            }
-        }
+        // Re-derive the fills touched by the new edges. Rather than incrementally splitting
+        // along single cut edges (which can't handle a lasso whose path is interrupted by a
+        // hole/notch in a non-convex fill), we re-trace the planar faces of the affected
+        // sub-arrangement and rebuild the fills from them. This is robust for arbitrary
+        // holed/concave fills (e.g. cutting across geometry left behind by a prior group).
+        // Include split products so a self-crossing stroke's full arrangement is seen.
+        let mut retrace_edges = all_new_edges.clone();
+        retrace_edges.extend(split_products);
+        self.retrace_fills_after_cut(&retrace_edges);
+
+        // Drop any zero-area fills (e.g. slivers left between coincident edges).
+        self.remove_degenerate_fills();
 
         all_new_edges
     }
 
-    /// When a new edge splits a fill (both endpoints on the fill's boundary),
-    /// split the fill into two fills.
-    pub fn split_fill_by_edge(
-        &mut self,
-        fill_id: FillId,
-        splitting_edge: EdgeId,
-    ) -> Option<(FillId, FillId)> {
-        let fill = &self.fills[fill_id.idx()];
-        if fill.deleted {
-            return None;
+    /// Merge edges from the latest stroke that are geometrically coincident with an
+    /// existing edge between the same two vertices (drawing a shape whose edge lands exactly
+    /// on an existing edge). Keeps the existing edge, redirects fill references, and frees
+    /// the duplicate — preventing zero-area "sliver" fills between the two copies.
+    /// Weld degree-1 endpoints of freshly inserted edges onto a near-coincident existing
+    /// vertex. A self-intersecting freehand stroke can create an intersection vertex a
+    /// fraction of a pixel from a segment endpoint that should be the same point; if they
+    /// don't merge, the stroke's loop is broken by a degree-1 stub and the cut is lost.
+    fn weld_dangling_endpoints(&mut self, new_edges: &[EdgeId], eps: f64) {
+        // Repeatedly weld the closest dangling new endpoint to its nearest neighbour.
+        loop {
+            let mut to_merge: Option<(VertexId, VertexId)> = None; // (keep, merge)
+            'scan: for &e in new_edges {
+                if self.edges[e.idx()].deleted {
+                    continue;
+                }
+                for &v in &self.edges[e.idx()].vertices {
+                    if self.vertices[v.idx()].deleted || self.edges_at_vertex(v).len() != 1 {
+                        continue;
+                    }
+                    let pv = self.vertices[v.idx()].position;
+                    let mut best: Option<(f64, VertexId)> = None;
+                    for ui in 0..self.vertices.len() {
+                        if ui == v.idx() || self.vertices[ui].deleted {
+                            continue;
+                        }
+                        let pu = self.vertices[ui].position;
+                        let d = (pu.x - pv.x).hypot(pu.y - pv.y);
+                        if d < eps && best.map_or(true, |(bd, _)| d < bd) {
+                            best = Some((d, VertexId(ui as u32)));
+                        }
+                    }
+                    if let Some((_, keep)) = best {
+                        to_merge = Some((keep, v));
+                        break 'scan;
+                    }
+                }
+            }
+            match to_merge {
+                Some((keep, merge)) => self.merge_vertices(keep, merge),
+                None => break,
+            }
+        }
+        // Drop any edges that collapsed to zero length (both endpoints welded together).
+        let degenerate: Vec<EdgeId> = self
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.deleted && e.vertices[0] == e.vertices[1])
+            .map(|(i, _)| EdgeId(i as u32))
+            .collect();
+        for e in degenerate {
+            for fill in &mut self.fills {
+                if !fill.deleted {
+                    fill.boundary.retain(|&(fe, _)| fe != e);
+                }
+            }
+            self.free_edge(e);
+        }
+    }
+
+    fn dedupe_coincident_new_edges(&mut self, new_edges: &[EdgeId]) {
+        for &ne in new_edges {
+            if self.edges[ne.idx()].deleted {
+                continue;
+            }
+            let va = self.edges[ne.idx()].vertices[0];
+            let vb = self.edges[ne.idx()].vertices[1];
+            let candidates: Vec<EdgeId> = self
+                .edges_at_vertex(va)
+                .into_iter()
+                .filter(|&e| e != ne && !self.edges[e.idx()].deleted)
+                .filter(|&e| {
+                    let v = self.edges[e.idx()].vertices;
+                    (v[0] == va && v[1] == vb) || (v[0] == vb && v[1] == va)
+                })
+                .collect();
+            for c in candidates {
+                if self.edges[c.idx()].deleted {
+                    continue;
+                }
+                if self.curves_coincident(ne, c) {
+                    self.redirect_edge_in_fills(ne, c);
+                    self.free_edge(ne);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Whether two edges (already known to share both endpoints) trace the same path.
+    /// Coincident duplicates in practice are straight collinear segments (a shape edge
+    /// snapping onto an existing edge), so we treat "both are straight lines between the
+    /// same endpoints" as coincident. Comparing curve `eval(t)` directly is unreliable —
+    /// split sub-edges are non-uniformly parameterised, so equal `t` ≠ equal point.
+    fn curves_coincident(&self, a: EdgeId, b: EdgeId) -> bool {
+        let is_straight = |c: kurbo::CubicBez| {
+            let chord = c.p3 - c.p0;
+            let len = chord.hypot();
+            if len < 1e-9 {
+                return true; // zero-length chord — degenerate, treat as coincident
+            }
+            // Perpendicular distance of each control point from the p0→p3 chord.
+            let dist = |p: Point| ((p - c.p0).cross(chord)).abs() / len;
+            dist(c.p1) < 1e-2 && dist(c.p2) < 1e-2
+        };
+        is_straight(self.edges[a.idx()].curve) && is_straight(self.edges[b.idx()].curve)
+    }
+
+    /// Replace every `from` boundary reference with `to`, preserving traversal direction.
+    fn redirect_edge_in_fills(&mut self, from: EdgeId, to: EdgeId) {
+        let f = self.edges[from.idx()].vertices;
+        let t = self.edges[to.idx()].vertices;
+        let same_dir = t[0] == f[0] && t[1] == f[1];
+        for fill in &mut self.fills {
+            if fill.deleted {
+                continue;
+            }
+            for entry in &mut fill.boundary {
+                if entry.0 == from {
+                    entry.1 = match (entry.1, same_dir) {
+                        (Direction::Forward, true) | (Direction::Backward, false) => {
+                            Direction::Forward
+                        }
+                        (Direction::Backward, true) | (Direction::Forward, false) => {
+                            Direction::Backward
+                        }
+                    };
+                    entry.0 = to;
+                }
+            }
+        }
+    }
+
+    /// Drop fills that enclose ~zero area (degenerate slivers from coincident edges).
+    fn remove_degenerate_fills(&mut self) {
+        for i in 0..self.fills.len() {
+            if self.fills[i].deleted {
+                continue;
+            }
+            let mut pts: Vec<Point> = Vec::new();
+            for &(eid, dir) in &self.fills[i].boundary {
+                if eid.is_none() {
+                    continue;
+                }
+                let c = self.edges[eid.idx()].curve;
+                pts.push(match dir {
+                    Direction::Forward => c.p0,
+                    Direction::Backward => c.p3,
+                });
+            }
+            let area = if pts.len() < 3 {
+                0.0
+            } else {
+                let mut a2 = 0.0;
+                for k in 0..pts.len() {
+                    let p0 = pts[k];
+                    let p1 = pts[(k + 1) % pts.len()];
+                    a2 += p0.x * p1.y - p1.x * p0.y;
+                }
+                (a2 * 0.5).abs()
+            };
+            if area < 1e-6 {
+                self.fills[i].deleted = true;
+                self.free_fills.push(i as u32);
+            }
+        }
+    }
+
+    /// Directed end vertex of a `(edge, direction)` boundary entry.
+    #[inline]
+    fn entry_end_vertex(&self, eid: EdgeId, dir: Direction) -> VertexId {
+        match dir {
+            Direction::Forward => self.edges[eid.idx()].vertices[1],
+            Direction::Backward => self.edges[eid.idx()].vertices[0],
+        }
+    }
+
+    /// Re-derive the fills touched by a freshly inserted stroke by re-tracing the planar
+    /// faces of the affected sub-arrangement. This replaces incremental "split a fill by a
+    /// cut edge" logic, which can't handle a cut whose path is interrupted by a hole/notch
+    /// in a non-convex fill. Each affected fill is deleted and rebuilt from the traced
+    /// faces that lie inside it (inheriting its colour/rule); faces outside it — or in a
+    /// hole — are dropped.
+    fn retrace_fills_after_cut(&mut self, new_edges: &[EdgeId]) {
+        use kurbo::{ParamCurve, Shape};
+        let new_set: HashSet<EdgeId> = new_edges
+            .iter()
+            .filter(|&&e| !e.is_none() && !self.edges[e.idx()].deleted)
+            .copied()
+            .collect();
+        if new_set.is_empty() {
+            return;
+        }
+        let new_verts: HashSet<VertexId> =
+            new_set.iter().flat_map(|&e| self.edges[e.idx()].vertices).collect();
+
+        // Affected fills: any non-deleted fill that shares a vertex with a new edge.
+        let affected: Vec<FillId> = (0..self.fills.len())
+            .filter(|&i| !self.fills[i].deleted)
+            .filter(|&i| {
+                self.fills[i].boundary.iter().any(|&(e, _)| {
+                    !e.is_none()
+                        && self.edges[e.idx()].vertices.iter().any(|v| new_verts.contains(v))
+                })
+            })
+            .map(|i| FillId(i as u32))
+            .collect();
+        if affected.is_empty() {
+            return;
         }
 
-        let split_v0 = self.edges[splitting_edge.idx()].vertices[0];
-        let split_v1 = self.edges[splitting_edge.idx()].vertices[1];
+        // Snapshot each affected fill's path + attributes before we delete them.
+        let originals: Vec<(kurbo::BezPath, Option<ShapeColor>, FillRule)> = affected
+            .iter()
+            .map(|&f| {
+                (
+                    self.fill_to_bezpath(f),
+                    self.fills[f.idx()].color,
+                    self.fills[f.idx()].fill_rule,
+                )
+            })
+            .collect();
 
-        // Find the positions in the boundary where the splitting edge's
-        // endpoint vertices appear as the "arrival" vertex of a directed edge.
-        let boundary = fill.boundary.clone();
+        // Edge set for the local arrangement: every affected fill's boundary edges plus the
+        // ENTIRE inserted stroke. We include the whole stroke (not just the segments whose
+        // midpoint is inside a fill) because a wiggly freehand lasso has segments that dip
+        // just outside the fill; excluding them would break the inside-arc chain into
+        // dangling fragments that then get pruned away, losing the cut entirely. The stroke
+        // forms closed loops, so it contributes no dangling edges; faces that end up outside
+        // every affected fill are discarded by the classification below.
+        let mut edge_set: HashSet<EdgeId> = HashSet::new();
+        for &f in &affected {
+            for &(e, _) in &self.fills[f.idx()].boundary {
+                if !e.is_none() && !self.edges[e.idx()].deleted {
+                    edge_set.insert(e);
+                }
+            }
+        }
+        edge_set.extend(new_set.iter().copied());
 
-        // Helper: get the "end" vertex of a directed boundary edge
-        let end_vertex = |eid: EdgeId, dir: Direction| -> VertexId {
-            match dir {
-                Direction::Forward => self.edges[eid.idx()].vertices[1],
-                Direction::Backward => self.edges[eid.idx()].vertices[0],
+        // Expand to the induced subgraph on the covered vertices. A self-intersecting
+        // freehand stroke splits its own edges via `split_edge`, whose sub-edges aren't in
+        // `new_edges`; without them the local arrangement has gaps and the stroke's loop
+        // looks like dangling fragments. Adding every edge whose endpoints are both already
+        // covered closes those gaps (the sub-edges connect already-covered stroke vertices).
+        loop {
+            let verts: HashSet<VertexId> = edge_set
+                .iter()
+                .flat_map(|&e| self.edges[e.idx()].vertices)
+                .collect();
+            let added: Vec<EdgeId> = (0..self.edges.len())
+                .map(|i| EdgeId(i as u32))
+                .filter(|&e| !self.edges[e.idx()].deleted && !edge_set.contains(&e))
+                .filter(|&e| {
+                    let [a, b] = self.edges[e.idx()].vertices;
+                    verts.contains(&a) && verts.contains(&b)
+                })
+                .collect();
+            if added.is_empty() {
+                break;
+            }
+            edge_set.extend(added);
+        }
+
+        // Prune dangling edges (a vertex with degree < 2 in the local arrangement). They
+        // form spikes, never real face boundaries — a freehand lasso that wiggles or nearly
+        // self-touches leaves such stubs, and tracing them produces a face that runs out and
+        // back along the same edge (a degenerate self-touching boundary). Iterate, since
+        // removing one stub can expose another.
+        loop {
+            let mut degree: HashMap<VertexId, usize> = HashMap::new();
+            for &e in &edge_set {
+                for &v in &self.edges[e.idx()].vertices {
+                    *degree.entry(v).or_default() += 1;
+                }
+            }
+            let dangling: Vec<EdgeId> = edge_set
+                .iter()
+                .copied()
+                .filter(|&e| {
+                    let [a, b] = self.edges[e.idx()].vertices;
+                    a == b || degree[&a] < 2 || degree[&b] < 2
+                })
+                .collect();
+            if dangling.is_empty() {
+                break;
+            }
+            for e in dangling {
+                edge_set.remove(&e);
+            }
+        }
+
+        let faces = self.trace_faces(&edge_set);
+
+        // Replace the affected fills with the re-traced bounded faces that fall inside them.
+        for &f in &affected {
+            self.fills[f.idx()].deleted = true;
+            self.free_fills.push(f.0);
+        }
+        for mut face in faces {
+            // Collapse degenerate "spikes" — a sequence that runs out to a point and back
+            // (e.g. across near-coincident duplicate tiny edges from a dense freehand path).
+            self.collapse_boundary_spikes(&mut face);
+            if face.len() < 3 {
+                continue;
+            }
+            // Only bounded (counter-clockwise, positive-area) faces are real regions; the
+            // outer face is clockwise/negative.
+            if self.face_signed_area(&face) <= 1e-6 {
+                continue;
+            }
+            let sample = self.boundary_interior_point(&face);
+            if let Some((_, color, rule)) =
+                originals.iter().find(|(p, _, _)| p.winding(sample) != 0)
+            {
+                self.alloc_fill(face, *color, *rule);
+            }
+        }
+    }
+
+    /// Remove out-and-back "spikes" from a face boundary: consecutive entries where the
+    /// second exactly reverses the first (the boundary returns to where it started, e.g.
+    /// bouncing across near-coincident duplicate edges). These are zero-area and would make
+    /// `boundary_to_bezpath` render a stray hair; collapsing them yields a simple loop.
+    fn collapse_boundary_spikes(&self, face: &mut Vec<(EdgeId, Direction)>) {
+        let dstart = |entry: &(EdgeId, Direction)| -> Point {
+            let c = self.edges[entry.0.idx()].curve;
+            match entry.1 {
+                Direction::Forward => c.p0,
+                Direction::Backward => c.p3,
             }
         };
-
-        // Find positions where boundary edges arrive at split_v0 and split_v1
-        let mut pos_v0: Option<usize> = None;
-        let mut pos_v1: Option<usize> = None;
-
-        for (i, &(eid, dir)) in boundary.iter().enumerate() {
-            let ev = end_vertex(eid, dir);
-            if ev == split_v0 && pos_v0.is_none() {
-                pos_v0 = Some(i);
+        let dend = |entry: &(EdgeId, Direction)| -> Point {
+            let c = self.edges[entry.0.idx()].curve;
+            match entry.1 {
+                Direction::Forward => c.p3,
+                Direction::Backward => c.p0,
             }
-            if ev == split_v1 && pos_v1.is_none() {
-                pos_v1 = Some(i);
-            }
-        }
-
-        let pos_v0 = pos_v0?;
-        let pos_v1 = pos_v1?;
-
-        // Ensure we have two distinct positions
-        if pos_v0 == pos_v1 {
-            return None;
-        }
-
-        // Walk boundary in two halves:
-        // Half A: from pos_v0+1 to pos_v1 (inclusive), then splitting_edge Forward
-        // Half B: from pos_v1+1 to pos_v0 (wrapping), then splitting_edge Backward
-        let n = boundary.len();
-        let color = fill.color;
-        let fill_rule = fill.fill_rule;
-
-        let mut half_a = Vec::new();
-        let mut idx = (pos_v0 + 1) % n;
+        };
+        const EPS: f64 = 0.5;
         loop {
-            half_a.push(boundary[idx]);
-            if idx == pos_v1 {
+            let n = face.len();
+            if n < 2 {
                 break;
             }
-            idx = (idx + 1) % n;
-        }
-        half_a.push((splitting_edge, Direction::Forward));
-
-        let mut half_b = Vec::new();
-        idx = (pos_v1 + 1) % n;
-        loop {
-            half_b.push(boundary[idx]);
-            if idx == pos_v0 {
+            let mut collapsed = false;
+            for i in 0..n {
+                let j = (i + 1) % n;
+                // entries i and j cancel when j ends back at i's start.
+                let si = dstart(&face[i]);
+                let ej = dend(&face[j]);
+                if (si.x - ej.x).hypot(si.y - ej.y) < EPS {
+                    let (hi, lo) = if i > j { (i, j) } else { (j, i) };
+                    face.remove(hi);
+                    face.remove(lo);
+                    collapsed = true;
+                    break;
+                }
+            }
+            if !collapsed {
                 break;
             }
-            idx = (idx + 1) % n;
         }
-        half_b.push((splitting_edge, Direction::Backward));
+    }
 
-        // Delete the original fill
-        self.fills[fill_id.idx()].deleted = true;
-        self.free_fills.push(fill_id.0);
+    /// Trace all faces of the planar arrangement formed by `edge_set`, using the standard
+    /// angular next-edge rule (turn to the clockwise-adjacent dart of the twin at each
+    /// vertex). Returns each face as an ordered `(edge, direction)` loop. Bounded faces
+    /// come out counter-clockwise (positive signed area); the outer face clockwise.
+    fn trace_faces(&self, edge_set: &HashSet<EdgeId>) -> Vec<Vec<(EdgeId, Direction)>> {
+        // Outgoing darts per vertex, sorted by outgoing angle (CCW).
+        let mut out: HashMap<VertexId, Vec<(f64, (EdgeId, Direction))>> = HashMap::new();
+        for &e in edge_set {
+            if self.edges[e.idx()].deleted {
+                continue;
+            }
+            let [a, b] = self.edges[e.idx()].vertices;
+            out.entry(a)
+                .or_default()
+                .push((self.dart_angle(e, Direction::Forward), (e, Direction::Forward)));
+            out.entry(b)
+                .or_default()
+                .push((self.dart_angle(e, Direction::Backward), (e, Direction::Backward)));
+        }
+        for darts in out.values_mut() {
+            darts.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+        }
 
-        // Create two new fills
-        let fill_a = self.alloc_fill(half_a, color, fill_rule);
-        let fill_b = self.alloc_fill(half_b, color, fill_rule);
+        let mut visited: HashSet<(EdgeId, Direction)> = HashSet::new();
+        let mut faces: Vec<Vec<(EdgeId, Direction)>> = Vec::new();
+        let cap = edge_set.len() * 2 + 4;
+        for &e in edge_set {
+            if self.edges[e.idx()].deleted {
+                continue;
+            }
+            for dir in [Direction::Forward, Direction::Backward] {
+                let start = (e, dir);
+                if visited.contains(&start) {
+                    continue;
+                }
+                let mut face: Vec<(EdgeId, Direction)> = Vec::new();
+                let mut d = start;
+                loop {
+                    visited.insert(d);
+                    face.push(d);
+                    // Next dart: at the end vertex, the dart clockwise-adjacent to the twin.
+                    let end_v = self.entry_end_vertex(d.0, d.1);
+                    let twin = (
+                        d.0,
+                        match d.1 {
+                            Direction::Forward => Direction::Backward,
+                            Direction::Backward => Direction::Forward,
+                        },
+                    );
+                    let darts = match out.get(&end_v) {
+                        Some(d) => d,
+                        None => break,
+                    };
+                    let Some(idx) = darts.iter().position(|&(_, dd)| dd == twin) else {
+                        break;
+                    };
+                    let next = darts[(idx + darts.len() - 1) % darts.len()].1;
+                    if next == start {
+                        break;
+                    }
+                    if visited.contains(&next) || face.len() > cap {
+                        break;
+                    }
+                    d = next;
+                }
+                if face.len() >= 3 {
+                    faces.push(face);
+                }
+            }
+        }
+        faces
+    }
 
-        Some((fill_a, fill_b))
+    /// Outgoing direction angle of a dart at its start vertex.
+    fn dart_angle(&self, e: EdgeId, dir: Direction) -> f64 {
+        let c = self.edges[e.idx()].curve;
+        let (base, cands) = match dir {
+            Direction::Forward => (c.p0, [c.p1, c.p2, c.p3]),
+            Direction::Backward => (c.p3, [c.p2, c.p1, c.p0]),
+        };
+        for cand in cands {
+            let d = cand - base;
+            if d.hypot() > 1e-9 {
+                return d.y.atan2(d.x);
+            }
+        }
+        0.0
+    }
+
+    /// Signed area of a face given as an ordered `(edge, direction)` loop (CCW positive).
+    fn face_signed_area(&self, face: &[(EdgeId, Direction)]) -> f64 {
+        let pts: Vec<Point> = face
+            .iter()
+            .map(|&(e, dir)| {
+                let c = self.edges[e.idx()].curve;
+                match dir {
+                    Direction::Forward => c.p0,
+                    Direction::Backward => c.p3,
+                }
+            })
+            .collect();
+        if pts.len() < 3 {
+            return 0.0;
+        }
+        let mut a2 = 0.0;
+        for i in 0..pts.len() {
+            let p0 = pts[i];
+            let p1 = pts[(i + 1) % pts.len()];
+            a2 += p0.x * p1.y - p1.x * p0.y;
+        }
+        a2 * 0.5
     }
 
     /// Merge two fills that share a boundary edge (e.g., after edge deletion).
@@ -1458,11 +1999,14 @@ impl VectorGraph {
 
     // ── Region selection: extract / merge subgraph ──────────────────────
 
-    /// Extract a subgraph containing `inside_edges` and `inside_fills`.
+    /// Extract a subgraph containing `inside_edges` and `inside_fills` (typically a
+    /// geometry selection — `select_fill` already includes each fill's boundary edges).
     ///
-    /// Boundary edges (`boundary_edge_ids`) are **duplicated** — they exist in
-    /// both the returned graph and `self`, so both sides have closed fill
-    /// boundaries when the selection is moved.
+    /// **Boundary edges** are *duplicated* (copied into the returned graph but kept in
+    /// `self`, so remaining shapes keep closed boundaries). They are `explicit_boundary`
+    /// (a cut the caller knows about, e.g. a lasso region — pass an empty set if none)
+    /// UNION any inside edge still shared with a non-extracted fill (derived here, so a
+    /// plain geometry selection needs no boundary analysis from the caller).
     ///
     /// Returns `(new_graph, vertex_map, edge_map)` where the maps go from
     /// old (self) IDs to new (returned graph) IDs.
@@ -1470,17 +2014,58 @@ impl VectorGraph {
         &mut self,
         inside_edges: &HashSet<EdgeId>,
         inside_fills: &HashSet<FillId>,
-        boundary_edge_ids: &HashSet<EdgeId>,
+        explicit_boundary: &HashSet<EdgeId>,
     ) -> (VectorGraph, HashMap<VertexId, VertexId>, HashMap<EdgeId, EdgeId>) {
         let mut new_graph = VectorGraph::new();
         let mut vtx_map: HashMap<VertexId, VertexId> = HashMap::new();
         let mut edge_map: HashMap<EdgeId, EdgeId> = HashMap::new();
 
-        // Collect all edge IDs we need to copy into the new graph
-        let edges_to_copy: HashSet<EdgeId> = inside_edges
-            .union(boundary_edge_ids)
-            .copied()
-            .collect();
+        // Augment the inside set with every boundary edge of an extracted fill. A
+        // selection might not enumerate them all (e.g. lasso/region selection populates
+        // edges differently than `select_fill`); without this an extracted fill would be
+        // copied with `EdgeId::NONE` standing in for a missing edge, and that NONE later
+        // panics any code that indexes `fill.boundary` (e.g. `insert_stroke`).
+        let inside_edges: HashSet<EdgeId> = {
+            let mut s = inside_edges.clone();
+            for &fid in inside_fills {
+                if fid.is_none() {
+                    continue;
+                }
+                if let Some(fill) = self.fills.get(fid.idx()) {
+                    if fill.deleted {
+                        continue;
+                    }
+                    for &(eid, _) in &fill.boundary {
+                        if !eid.is_none() {
+                            s.insert(eid);
+                        }
+                    }
+                }
+            }
+            s
+        };
+        let inside_edges = &inside_edges;
+
+        // Boundary = `explicit_boundary` (e.g. a region/lasso cut the caller knows about)
+        // UNION any inside edge still referenced by a fill we're NOT extracting (a shared
+        // DCEL edge — must be duplicated, not moved, or that fill dangles). Deriving the
+        // latter here means a plain geometry selection needs no boundary analysis.
+        let mut boundary_edge_ids: HashSet<EdgeId> = explicit_boundary.clone();
+        for (i, fill) in self.fills.iter().enumerate() {
+            if fill.deleted || inside_fills.contains(&FillId(i as u32)) {
+                continue;
+            }
+            for &(eid, _) in &fill.boundary {
+                if !eid.is_none() && inside_edges.contains(&eid) {
+                    boundary_edge_ids.insert(eid);
+                }
+            }
+        }
+        let boundary_edge_ids = &boundary_edge_ids;
+
+        // Copy all inside edges + any boundary edges (the explicit ones may not be in
+        // inside_edges); boundary edges are kept in self below.
+        let edges_to_copy: HashSet<EdgeId> = inside_edges.union(boundary_edge_ids).copied().collect();
 
         // Collect all vertices referenced by edges we're copying
         let mut referenced_vids: HashSet<VertexId> = HashSet::new();
@@ -1493,16 +2078,21 @@ impl VectorGraph {
             }
         }
 
-        // Determine which vertices are interior (exclusively owned by the
-        // extracted subgraph) vs boundary (shared with remaining geometry).
-        // A vertex is interior if ALL of its incident edges are either in
-        // inside_edges or boundary_edge_ids.
+        // Determine which vertices are safe to free from `self`. A vertex can only be
+        // freed if EVERY one of its incident edges is actually being removed from `self`,
+        // i.e. is an inside edge that is NOT a boundary edge. Boundary edges are kept
+        // (duplicated) in `self`, so a vertex touching one is still referenced and must
+        // remain — otherwise it becomes a freed-but-referenced vertex whose slot a later
+        // `alloc_vertex` reuses, corrupting the remaining fill.
         let mut interior_vertices: HashSet<VertexId> = HashSet::new();
         let mut boundary_vertices: HashSet<VertexId> = HashSet::new();
         for &vid in &referenced_vids {
             let incident = self.edges_at_vertex(vid);
-            let all_inside = incident.iter().all(|&eid| edges_to_copy.contains(&eid));
-            if all_inside {
+            let all_removed = !incident.is_empty()
+                && incident
+                    .iter()
+                    .all(|&eid| inside_edges.contains(&eid) && !boundary_edge_ids.contains(&eid));
+            if all_removed {
                 interior_vertices.insert(vid);
             } else {
                 boundary_vertices.insert(vid);
@@ -1566,9 +2156,10 @@ impl VectorGraph {
             new_graph.fills[new_fid.idx()].image_fill = fill.image_fill;
         }
 
-        // Remove inside_edges from self (but NOT boundary edges — those are duplicated)
+        // Remove inside_edges from self, EXCEPT boundary edges (those are duplicated —
+        // a non-extracted fill still needs them).
         for &eid in inside_edges {
-            if !eid.is_none() && !self.edges[eid.idx()].deleted {
+            if !eid.is_none() && !boundary_edge_ids.contains(&eid) && !self.edges[eid.idx()].deleted {
                 self.free_edge(eid);
             }
         }

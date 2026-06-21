@@ -22,43 +22,111 @@ use vello::peniko::{Blob, Fill, ImageAlphaType, ImageBrush, ImageData, ImageForm
 use vello::Scene;
 
 /// Cache for decoded image data to avoid re-decoding every frame
+/// Decoded-image cache, bounded by a byte budget with usage-LRU eviction (Phase 4
+/// asset paging). The decoded RGBA (~`w·h·4` per image) is the heavy, evictable cost;
+/// a miss re-decodes from `asset.data`. Recency is bumped on every access, so images
+/// actually rendered each frame stay resident and unused ones age out under pressure.
 pub struct ImageCache {
     cache: HashMap<Uuid, Arc<ImageBrush>>,
     /// CPU path: tiny-skia pixmaps decoded from the same assets (premultiplied RGBA8)
     cpu_cache: HashMap<Uuid, Arc<tiny_skia::Pixmap>>,
+    /// Recency order (least-recent first) of resident asset ids.
+    lru: Vec<Uuid>,
+    /// Decoded bytes per resident asset (counted once; GPU/CPU are ~equal and a render
+    /// session uses one path) and the running total.
+    sizes: HashMap<Uuid, usize>,
+    bytes: usize,
+    /// `.beam` container path for lazily loading compressed `ImageAsset` bytes on a
+    /// decode miss (Tier 1 paging) when `asset.data` isn't resident.
+    container_path: Option<std::path::PathBuf>,
 }
 
 impl ImageCache {
+    /// Max decoded-image bytes kept resident before LRU eviction.
+    const BUDGET: usize = 256 * 1024 * 1024;
+
     /// Create a new empty image cache
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
             cpu_cache: HashMap::new(),
+            lru: Vec::new(),
+            sizes: HashMap::new(),
+            bytes: 0,
+            container_path: None,
+        }
+    }
+
+    /// Set the `.beam` container path used to lazily load image bytes that aren't
+    /// resident in `asset.data` (Tier 1 paging). Cheap to call each frame.
+    pub fn set_container_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.container_path = path;
+    }
+
+    /// Resolve an asset's compressed bytes: prefer the resident `asset.data` (imported
+    /// this session, or an old base64 project), else page from the container.
+    fn resolve_bytes<'a>(&self, asset: &'a ImageAsset) -> Option<std::borrow::Cow<'a, [u8]>> {
+        if let Some(d) = &asset.data {
+            return Some(std::borrow::Cow::Borrowed(d.as_slice()));
+        }
+        let path = self.container_path.as_ref()?;
+        crate::beam_archive::read_packed_media_readonly(path, asset.id)
+            .ok()
+            .flatten()
+            .map(std::borrow::Cow::Owned)
+    }
+
+    /// Mark `id` (size `size` bytes) as most-recently-used; evict LRU entries over budget.
+    fn touch(&mut self, id: Uuid, size: usize) {
+        if !self.sizes.contains_key(&id) {
+            self.sizes.insert(id, size);
+            self.bytes += size;
+        }
+        if let Some(pos) = self.lru.iter().position(|x| *x == id) {
+            self.lru.remove(pos);
+        }
+        self.lru.push(id);
+        // Keep at least the just-touched entry resident.
+        while self.bytes > Self::BUDGET && self.lru.len() > 1 {
+            let old = self.lru.remove(0);
+            self.cache.remove(&old);
+            self.cpu_cache.remove(&old);
+            if let Some(sz) = self.sizes.remove(&old) {
+                self.bytes -= sz;
+            }
         }
     }
 
     /// Get or decode an image, caching the result
     pub fn get_or_decode(&mut self, asset: &ImageAsset) -> Option<Arc<ImageBrush>> {
-        if let Some(cached) = self.cache.get(&asset.id) {
-            return Some(Arc::clone(cached));
+        let size = (asset.width as usize) * (asset.height as usize) * 4;
+        if let Some(cached) = self.cache.get(&asset.id).map(Arc::clone) {
+            self.touch(asset.id, size);
+            return Some(cached);
         }
 
-        // Decode and cache
-        let image = decode_image_asset(asset)?;
+        // Decode and cache (bytes from asset.data or paged from the container).
+        let bytes = self.resolve_bytes(asset)?;
+        let image = decode_image_brush(&bytes)?;
         let arc_image = Arc::new(image);
         self.cache.insert(asset.id, Arc::clone(&arc_image));
+        self.touch(asset.id, size);
         Some(arc_image)
     }
 
     /// Get or decode an image as a premultiplied tiny-skia Pixmap (CPU render path).
     pub fn get_or_decode_cpu(&mut self, asset: &ImageAsset) -> Option<Arc<tiny_skia::Pixmap>> {
-        if let Some(cached) = self.cpu_cache.get(&asset.id) {
-            return Some(Arc::clone(cached));
+        let size = (asset.width as usize) * (asset.height as usize) * 4;
+        if let Some(cached) = self.cpu_cache.get(&asset.id).map(Arc::clone) {
+            self.touch(asset.id, size);
+            return Some(cached);
         }
 
-        let pixmap = decode_image_to_pixmap(asset)?;
+        let bytes = self.resolve_bytes(asset)?;
+        let pixmap = decode_image_to_pixmap(&bytes)?;
         let arc = Arc::new(pixmap);
         self.cpu_cache.insert(asset.id, Arc::clone(&arc));
+        self.touch(asset.id, size);
         Some(arc)
     }
 
@@ -66,12 +134,21 @@ impl ImageCache {
     pub fn invalidate(&mut self, id: &Uuid) {
         self.cache.remove(id);
         self.cpu_cache.remove(id);
+        if let Some(pos) = self.lru.iter().position(|x| x == id) {
+            self.lru.remove(pos);
+        }
+        if let Some(sz) = self.sizes.remove(id) {
+            self.bytes -= sz;
+        }
     }
 
     /// Clear all cached images
     pub fn clear(&mut self) {
         self.cache.clear();
         self.cpu_cache.clear();
+        self.lru.clear();
+        self.sizes.clear();
+        self.bytes = 0;
     }
 }
 
@@ -81,12 +158,34 @@ impl Default for ImageCache {
     }
 }
 
-/// Decode an image asset to a premultiplied tiny-skia Pixmap (CPU render path).
-fn decode_image_to_pixmap(asset: &ImageAsset) -> Option<tiny_skia::Pixmap> {
-    let data = asset.data.as_ref()?;
+/// Image asset ids referenced by the visible vector layers' active keyframes at `time`
+/// (top-level + group children). Used to prefetch/decode images ahead during playback.
+/// (Recursing into nested clip instances is a refinement.)
+pub fn assets_needed_at(document: &Document, time: f64) -> Vec<Uuid> {
+    let mut ids = Vec::new();
+    for layer in document.all_layers() {
+        if let crate::layer::AnyLayer::Vector(vl) = layer {
+            if !vl.layer.visible {
+                continue;
+            }
+            if let Some(kf) = vl.keyframe_at(time) {
+                for fill in &kf.graph.fills {
+                    if let Some(id) = fill.image_fill {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// Decode image bytes to a premultiplied tiny-skia Pixmap (CPU render path).
+fn decode_image_to_pixmap(data: &[u8]) -> Option<tiny_skia::Pixmap> {
     let img = image::load_from_memory(data).ok()?;
     let rgba = img.to_rgba8();
-    let mut pixmap = tiny_skia::Pixmap::new(asset.width, asset.height)?;
+    let (iw, ih) = rgba.dimensions();
+    let mut pixmap = tiny_skia::Pixmap::new(iw, ih)?;
     for (dst, src) in pixmap.pixels_mut().iter_mut().zip(rgba.pixels()) {
         let [r, g, b, a] = src.0;
         // Convert straight alpha (image crate output) to premultiplied (tiny-skia internal format)
@@ -100,21 +199,17 @@ fn decode_image_to_pixmap(asset: &ImageAsset) -> Option<tiny_skia::Pixmap> {
     Some(pixmap)
 }
 
-/// Decode an image asset to peniko ImageBrush
-fn decode_image_asset(asset: &ImageAsset) -> Option<ImageBrush> {
-    // Get the raw file data
-    let data = asset.data.as_ref()?;
-
-    // Decode using the image crate
+/// Decode image bytes to a peniko ImageBrush (GPU render path).
+fn decode_image_brush(data: &[u8]) -> Option<ImageBrush> {
     let img = image::load_from_memory(data).ok()?;
     let rgba = img.to_rgba8();
+    let (iw, ih) = rgba.dimensions();
 
-    // Create peniko ImageData then ImageBrush
     let image_data = ImageData {
         data: Blob::from(rgba.into_raw()),
         format: ImageFormat::Rgba8,
-        width: asset.width,
-        height: asset.height,
+        width: iw,
+        height: ih,
         alpha_type: ImageAlphaType::Alpha,
     };
     Some(ImageBrush::new(image_data))
@@ -423,11 +518,25 @@ pub fn render_layer_isolated(
                     * Affine::scale_non_uniform(scale_x, scale_y)
                     * skew_transform;
 
+                // The decoded frame is scaled down to fit the document (decoder caps
+                // at the canvas size), so its pixel size is smaller than the clip's
+                // native dimensions. The instance is blitted treating the texture as
+                // `frame.width × frame.height`, while `clip_transform` is expressed in
+                // the clip's native space — so scale frame-px → clip-native-px first,
+                // else the frame renders small in a corner with its edges streaked.
+                let frame_to_clip = if frame.width > 0 && frame.height > 0 {
+                    Affine::scale_non_uniform(
+                        video_clip.width / frame.width as f64,
+                        video_clip.height / frame.height as f64,
+                    )
+                } else {
+                    Affine::IDENTITY
+                };
                 instances.push(VideoRenderInstance {
                     rgba_data: frame.rgba_data.clone(),
                     width: frame.width,
                     height: frame.height,
-                    transform: base_transform * clip_transform,
+                    transform: base_transform * clip_transform * frame_to_clip,
                     opacity: (layer_opacity * inst_opacity) as f32,
                 });
             }
@@ -1028,12 +1137,26 @@ fn render_video_layer(
         // Create rectangle path for the video frame
         let video_rect = Rect::new(0.0, 0.0, video_clip.width, video_clip.height);
 
+        // The decoded frame is scaled down to fit the document (the decoder caps at
+        // the canvas size to bound memory), so its pixel dimensions are smaller than
+        // the clip's native display size. Scale the image brush from frame-pixel
+        // space to the clip rect; without this the image is drawn 1:1 in a corner
+        // and its edge pixels pad the rest (small frame with "stretched corners").
+        let brush_transform = if frame.width > 0 && frame.height > 0 {
+            Affine::scale_non_uniform(
+                video_clip.width / frame.width as f64,
+                video_clip.height / frame.height as f64,
+            )
+        } else {
+            Affine::IDENTITY
+        };
+
         // Render video frame as image fill
         scene.fill(
             Fill::NonZero,
             instance_transform,
             &image_with_alpha,
-            None,
+            Some(brush_transform),
             &video_rect,
         );
         clip_rendered = true;
@@ -1134,7 +1257,15 @@ pub fn render_vector_graph(
             if let Some(image_asset) = document.get_image_asset(&image_asset_id) {
                 if let Some(image) = image_cache.get_or_decode(image_asset) {
                     let image_with_alpha = (*image).clone().with_alpha(opacity_f32);
-                    scene.fill(fill_rule, base_transform, &image_with_alpha, None, &path);
+                    // Map the image (native pixel space, origin 0,0) onto the fill's
+                    // bounding box, so it sits where the shape is and scales to fit
+                    // (1:1 for an image-sized rectangle).
+                    let bbox = vello::kurbo::Shape::bounding_box(&path);
+                    let iw = (image_asset.width.max(1)) as f64;
+                    let ih = (image_asset.height.max(1)) as f64;
+                    let brush_transform = Affine::translate((bbox.x0, bbox.y0))
+                        * Affine::scale_non_uniform(bbox.width() / iw, bbox.height() / ih);
+                    scene.fill(fill_rule, base_transform, &image_with_alpha, Some(brush_transform), &path);
                     filled = true;
                 }
             }
@@ -1225,7 +1356,12 @@ fn render_vector_layer(
     // Cascade opacity: parent_opacity × layer.opacity
     let layer_opacity = parent_opacity * layer.layer.opacity;
 
-    // Render clip instances first (they appear under shape instances)
+    // Render the layer's own VectorGraph (loose shapes) first, then clip instances
+    // (groups / movie clips) on top. Shape tweens are applied here.
+    if let Some(graph) = layer.tweened_graph_at(time) {
+        render_vector_graph(&graph, scene, base_transform, layer_opacity, document, image_cache);
+    }
+
     for clip_instance in &layer.clip_instances {
         // For groups, compute the visibility end from keyframe data
         let group_end_time = document.vector_clips.get(&clip_instance.clip_id)
@@ -1235,11 +1371,6 @@ fn render_vector_layer(
                 layer.group_visibility_end(&clip_instance.id, clip_instance.timeline_start, frame_duration)
             });
         render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data, image_cache, video_manager, group_end_time);
-    }
-
-    // Render VectorGraph from active keyframe
-    if let Some(graph) = layer.graph_at_time(time) {
-        render_vector_graph(graph, scene, base_transform, layer_opacity, document, image_cache);
     }
 }
 
@@ -1458,12 +1589,21 @@ fn render_vector_graph_cpu(
         if let Some(image_asset_id) = fill.image_fill {
             if let Some(asset) = document.get_image_asset(&image_asset_id) {
                 if let Some(img_pixmap) = image_cache.get_or_decode_cpu(asset) {
+                    // Map the image's native pixel space onto the fill's bounding box.
+                    let bbox: kurbo::Rect = vello::kurbo::Shape::bounding_box(&path);
+                    let iw = (asset.width.max(1)) as f32;
+                    let ih = (asset.height.max(1)) as f32;
+                    let sx = (bbox.width() as f32) / iw;
+                    let sy = (bbox.height() as f32) / ih;
+                    let pat_tf = tiny_skia::Transform::from_row(
+                        sx, 0.0, 0.0, sy, bbox.x0 as f32, bbox.y0 as f32,
+                    );
                     let pattern = tiny_skia::Pattern::new(
                         tiny_skia::Pixmap::as_ref(&img_pixmap),
                         tiny_skia::SpreadMode::Pad,
                         tiny_skia::FilterQuality::Bilinear,
                         opacity,
-                        tiny_skia::Transform::identity(),
+                        pat_tf,
                     );
                     let mut paint = tiny_skia::Paint::default();
                     paint.shader = pattern;
@@ -1527,6 +1667,11 @@ fn render_vector_layer_cpu(
 ) {
     let layer_opacity = parent_opacity * layer.layer.opacity;
 
+    // Loose shapes first, then clip instances (groups / movie clips) on top.
+    if let Some(graph) = layer.tweened_graph_at(time) {
+        render_vector_graph_cpu(&graph, pixmap, affine_to_ts(base_transform), layer_opacity as f32, document, image_cache);
+    }
+
     for clip_instance in &layer.clip_instances {
         let group_end_time = document.vector_clips.get(&clip_instance.clip_id)
             .filter(|vc| vc.is_group)
@@ -1538,10 +1683,6 @@ fn render_vector_layer_cpu(
             document, time, clip_instance, layer_opacity, pixmap, base_transform,
             &layer.layer.animation_data, image_cache, group_end_time,
         );
-    }
-
-    if let Some(graph) = layer.graph_at_time(time) {
-        render_vector_graph_cpu(graph, pixmap, affine_to_ts(base_transform), layer_opacity as f32, document, image_cache);
     }
 }
 

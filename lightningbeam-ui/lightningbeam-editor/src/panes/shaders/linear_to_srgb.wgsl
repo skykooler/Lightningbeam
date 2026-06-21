@@ -30,27 +30,23 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-// Linear to sRGB conversion for a single channel
-// Formula: c <= 0.0031308 ? c*12.92 : 1.055*pow(c, 1/2.4) - 0.055
-fn linear_to_srgb_channel(c: f32) -> f32 {
-    let clamped = clamp(c, 0.0, 1.0);
-    return select(
-        1.055 * pow(clamped, 1.0 / 2.4) - 0.055,
-        clamped * 12.92,
-        clamped <= 0.0031308
-    );
-}
+// linear_to_srgb_channel is provided by the prepended COLOR_WGSL prelude.
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Sample linear HDR texture
+    // Sample linear HDR texture. The compositor accumulates PREMULTIPLIED
+    // linear color, so unpremultiply before applying the sRGB OETF:
+    // srgb(rgb*a) != srgb(rgb)*a, so encoding premultiplied color directly
+    // corrupts antialiased edges and transparent pixels. We output straight
+    // alpha to match the straight-alpha display blit and PNG export.
     let linear = textureSample(input_tex, input_sampler, in.uv);
+    let a = linear.a;
+    let straight = select(linear.rgb / a, vec3<f32>(0.0), a <= 0.0);
 
-    // Convert from linear to sRGB for display (alpha stays linear)
     return vec4<f32>(
-        linear_to_srgb_channel(linear.r),
-        linear_to_srgb_channel(linear.g),
-        linear_to_srgb_channel(linear.b),
-        linear.a
+        linear_to_srgb_channel(straight.r),
+        linear_to_srgb_channel(straight.g),
+        linear_to_srgb_channel(straight.b),
+        a
     );
 }

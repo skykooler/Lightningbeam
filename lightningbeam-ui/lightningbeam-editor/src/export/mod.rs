@@ -113,10 +113,10 @@ struct ParallelExportState {
     video_progress_rx: Receiver<ExportProgress>,
     /// Audio progress channel
     audio_progress_rx: Receiver<ExportProgress>,
-    /// Video encoder thread handle
-    video_thread: std::thread::JoinHandle<()>,
-    /// Audio export thread handle
-    audio_thread: std::thread::JoinHandle<()>,
+    /// Video encoder thread handle (taken when the mux thread is spawned).
+    video_thread: Option<std::thread::JoinHandle<()>>,
+    /// Audio export thread handle (taken when the mux thread is spawned).
+    audio_thread: Option<std::thread::JoinHandle<()>>,
     /// Temporary video file path
     temp_video_path: PathBuf,
     /// Temporary audio file path
@@ -127,6 +127,9 @@ struct ParallelExportState {
     video_progress: Option<ExportProgress>,
     /// Latest audio progress
     audio_progress: Option<ExportProgress>,
+    /// Result channel for the background mux. `Some` once muxing has started; the
+    /// mux runs off the UI thread so the app stays responsive during finalization.
+    mux_rx: Option<Receiver<Result<(), String>>>,
 }
 
 impl ExportOrchestrator {
@@ -220,52 +223,62 @@ impl ExportOrchestrator {
             parallel.audio_progress = Some(progress);
         }
 
-        // Check if both are complete
-        let video_complete = matches!(parallel.video_progress, Some(ExportProgress::Complete { .. }));
-        let audio_complete = matches!(parallel.audio_progress, Some(ExportProgress::Complete { .. }));
-
-        if video_complete && audio_complete {
-            println!("🎬🎵 [PARALLEL] Both video and audio complete, starting mux");
-
-            // Take parallel state to extract file paths
-            let parallel_state = self.parallel_export.take().unwrap();
-
-            // Wait for threads to finish
-            parallel_state.video_thread.join().ok();
-            parallel_state.audio_thread.join().ok();
-
-            // Start muxing
-            match Self::mux_video_and_audio(
-                &parallel_state.temp_video_path,
-                &parallel_state.temp_audio_path,
-                &parallel_state.final_output_path,
-            ) {
-                Ok(()) => {
+        // If a background mux is already running, poll it without blocking the UI.
+        if parallel.mux_rx.is_some() {
+            match parallel.mux_rx.as_ref().unwrap().try_recv() {
+                Ok(Ok(())) => {
                     println!("✅ [MUX] Muxing complete, cleaning up temp files");
-
-                    // Clean up temp files
-                    std::fs::remove_file(&parallel_state.temp_video_path).ok();
-                    std::fs::remove_file(&parallel_state.temp_audio_path).ok();
-
-                    return Some(ExportProgress::Complete {
-                        output_path: parallel_state.final_output_path,
-                    });
+                    let state = self.parallel_export.take().unwrap();
+                    std::fs::remove_file(&state.temp_video_path).ok();
+                    std::fs::remove_file(&state.temp_audio_path).ok();
+                    return Some(ExportProgress::Complete { output_path: state.final_output_path });
                 }
-                Err(err) => {
+                Ok(Err(err)) => {
                     println!("❌ [MUX] Muxing failed: {}", err);
-                    return Some(ExportProgress::Error {
-                        message: format!("Muxing failed: {}", err),
-                    });
+                    self.parallel_export = None;
+                    return Some(ExportProgress::Error { message: format!("Muxing failed: {}", err) });
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still muxing — keep the UI responsive and show finalizing state.
+                    return Some(ExportProgress::Finalizing);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.parallel_export = None;
+                    return Some(ExportProgress::Error { message: "Mux thread terminated unexpectedly".to_string() });
                 }
             }
         }
 
-        // Check for errors
+        // Check for errors before completion.
         if let Some(ExportProgress::Error { ref message }) = parallel.video_progress {
             return Some(ExportProgress::Error { message: format!("Video: {}", message) });
         }
         if let Some(ExportProgress::Error { ref message }) = parallel.audio_progress {
             return Some(ExportProgress::Error { message: format!("Audio: {}", message) });
+        }
+
+        // Both streams done → spawn the mux on a background thread (the previous
+        // implementation muxed synchronously here on the UI thread, which froze the
+        // app for the whole re-mux pass after progress already hit 100%).
+        let video_complete = matches!(parallel.video_progress, Some(ExportProgress::Complete { .. }));
+        let audio_complete = matches!(parallel.audio_progress, Some(ExportProgress::Complete { .. }));
+        if video_complete && audio_complete {
+            println!("🎬🎵 [PARALLEL] Both video and audio complete, starting background mux");
+            let video_thread = parallel.video_thread.take();
+            let audio_thread = parallel.audio_thread.take();
+            let video_path = parallel.temp_video_path.clone();
+            let audio_path = parallel.temp_audio_path.clone();
+            let output_path = parallel.final_output_path.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                // The export threads have signalled Complete; join is near-instant.
+                if let Some(t) = video_thread { t.join().ok(); }
+                if let Some(t) = audio_thread { t.join().ok(); }
+                let result = Self::mux_video_and_audio(&video_path, &audio_path, &output_path);
+                tx.send(result).ok();
+            });
+            parallel.mux_rx = Some(rx);
+            return Some(ExportProgress::Finalizing);
         }
 
         // Return combined progress
@@ -371,90 +384,90 @@ impl ExportOrchestrator {
         println!("🎵 [MUX] Audio stream - Input TB: {}/{}, Output TB: {}/{}",
                  audio_input_tb.0, audio_input_tb.1, audio_output_tb.0, audio_output_tb.1);
 
-        // Collect all packets with their stream info and timestamps
-        let mut video_packets = Vec::new();
-        for (stream, packet) in video_input.packets() {
-            if stream.index() == video_stream_index {
-                video_packets.push(packet);
+        // Stream-merge the two inputs by PTS, writing each packet as it's read —
+        // O(1) memory (one pending packet per stream) instead of collecting every
+        // packet first, so muxing a long export never grows unbounded.
+        let video_idx = video_stream_index;
+        let audio_idx = audio_stream_index;
+        let mut v_iter = video_input.packets();
+        let mut a_iter = audio_input.packets();
+
+        // Pull the next packet belonging to the desired stream from each input.
+        let mut next_video = move || -> Option<ffmpeg::Packet> {
+            loop {
+                match v_iter.next() {
+                    Some((stream, packet)) => {
+                        if stream.index() == video_idx {
+                            return Some(packet);
+                        }
+                    }
+                    None => return None,
+                }
             }
-        }
-
-        let mut audio_packets = Vec::new();
-        for (stream, packet) in audio_input.packets() {
-            if stream.index() == audio_stream_index {
-                audio_packets.push(packet);
+        };
+        let mut next_audio = move || -> Option<ffmpeg::Packet> {
+            loop {
+                match a_iter.next() {
+                    Some((stream, packet)) => {
+                        if stream.index() == audio_idx {
+                            return Some(packet);
+                        }
+                    }
+                    None => return None,
+                }
             }
-        }
+        };
 
-        println!("🎬 [MUX] Collected {} video packets, {} audio packets",
-                 video_packets.len(), audio_packets.len());
+        let mut pending_v = next_video();
+        let mut pending_a = next_audio();
+        let mut v_count = 0usize;
+        let mut a_count = 0usize;
+        let mut log_count = 0;
 
-        // Report first and last timestamps
-        if !video_packets.is_empty() {
-            println!("🎬 [MUX] Video PTS range: {} to {}",
-                     video_packets[0].pts().unwrap_or(0),
-                     video_packets[video_packets.len()-1].pts().unwrap_or(0));
-        }
-        if !audio_packets.is_empty() {
-            println!("🎵 [MUX] Audio PTS range: {} to {}",
-                     audio_packets[0].pts().unwrap_or(0),
-                     audio_packets[audio_packets.len()-1].pts().unwrap_or(0));
-        }
-
-        // Interleave packets by comparing timestamps in a common time base (use microseconds)
-        let mut v_idx = 0;
-        let mut a_idx = 0;
-        let mut interleave_log_count = 0;
-
-        while v_idx < video_packets.len() || a_idx < audio_packets.len() {
-            let write_video = if v_idx >= video_packets.len() {
-                false // No more video
-            } else if a_idx >= audio_packets.len() {
-                true // No more audio, write video
-            } else {
-                // Compare timestamps - convert both to microseconds
-                let v_pts = video_packets[v_idx].pts().unwrap_or(0);
-                let a_pts = audio_packets[a_idx].pts().unwrap_or(0);
-
-                // Convert to microseconds: pts * 1000000 * tb.num / tb.den
-                let v_us = v_pts * 1_000_000 * video_input_tb.0 as i64 / video_input_tb.1 as i64;
-                let a_us = a_pts * 1_000_000 * audio_input_tb.0 as i64 / audio_input_tb.1 as i64;
-
-                v_us <= a_us // Write video if it comes before or at same time as audio
+        loop {
+            // Write whichever pending packet has the earlier PTS (in a common
+            // microsecond base); when one stream is exhausted, drain the other.
+            let write_video = match (&pending_v, &pending_a) {
+                (None, None) => break,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (Some(v), Some(a)) => {
+                    let v_us = v.pts().unwrap_or(0) * 1_000_000 * video_input_tb.0 as i64
+                        / video_input_tb.1 as i64;
+                    let a_us = a.pts().unwrap_or(0) * 1_000_000 * audio_input_tb.0 as i64
+                        / audio_input_tb.1 as i64;
+                    v_us <= a_us
+                }
             };
 
             if write_video {
-                let mut packet = video_packets[v_idx].clone();
+                let mut packet = pending_v.take().unwrap();
                 packet.set_stream(0);
                 packet.rescale_ts(video_input_tb, video_output_tb);
-
-                if interleave_log_count < 10 {
-                    println!("🎬 [MUX] Writing V packet {} - PTS={:?}, DTS={:?}, Duration={:?}",
-                             v_idx, packet.pts(), packet.dts(), packet.duration());
-                    interleave_log_count += 1;
+                if log_count < 10 {
+                    println!("🎬 [MUX] Writing V packet - PTS={:?}, DTS={:?}", packet.pts(), packet.dts());
+                    log_count += 1;
                 }
-
                 packet.write_interleaved(&mut output)
                     .map_err(|e| format!("Failed to write video packet: {}", e))?;
-                v_idx += 1;
+                v_count += 1;
+                pending_v = next_video();
             } else {
-                let mut packet = audio_packets[a_idx].clone();
+                let mut packet = pending_a.take().unwrap();
                 packet.set_stream(1);
                 packet.rescale_ts(audio_input_tb, audio_output_tb);
-
-                if interleave_log_count < 10 {
-                    println!("🎵 [MUX] Writing A packet {} - PTS={:?}, DTS={:?}, Duration={:?}",
-                             a_idx, packet.pts(), packet.dts(), packet.duration());
-                    interleave_log_count += 1;
+                if log_count < 10 {
+                    println!("🎵 [MUX] Writing A packet - PTS={:?}, DTS={:?}", packet.pts(), packet.dts());
+                    log_count += 1;
                 }
-
                 packet.write_interleaved(&mut output)
                     .map_err(|e| format!("Failed to write audio packet: {}", e))?;
-                a_idx += 1;
+                a_count += 1;
+                pending_a = next_audio();
             }
         }
 
-        println!("🎬 [MUX] Wrote {} video packets, {} audio packets", v_idx, a_idx);
+        println!("🎬 [MUX] Wrote {} video packets, {} audio packets", v_count, a_count);
 
         // Write trailer
         output.write_trailer().map_err(|e| format!("Failed to write trailer: {}", e))?;
@@ -515,6 +528,7 @@ impl ExportOrchestrator {
         image_cache: &mut ImageCache,
         video_manager: &Arc<std::sync::Mutex<VideoManager>>,
         floating_selection: Option<&lightningbeam_core::selection::RasterFloatingSelection>,
+        raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
     ) -> Result<bool, String> {
         if self.cancel_flag.load(Ordering::Relaxed) {
             self.image_state = None;
@@ -562,6 +576,7 @@ impl ExportOrchestrator {
                 output_view,
                 floating_selection,
                 state.settings.allow_transparency,
+                raster_store,
             )?;
             queue.submit(Some(encoder.finish()));
 
@@ -979,13 +994,14 @@ impl ExportOrchestrator {
         self.parallel_export = Some(ParallelExportState {
             video_progress_rx,
             audio_progress_rx,
-            video_thread,
-            audio_thread,
+            video_thread: Some(video_thread),
+            audio_thread: Some(audio_thread),
             temp_video_path,
             temp_audio_path,
             final_output_path: output_path,
             video_progress: None,
             audio_progress: None,
+            mux_rx: None,
         });
 
         println!("🎬🎵 [PARALLEL EXPORT] Both threads spawned, ready for frames");
@@ -1015,6 +1031,7 @@ impl ExportOrchestrator {
         renderer: &mut vello::Renderer,
         image_cache: &mut ImageCache,
         video_manager: &Arc<std::sync::Mutex<VideoManager>>,
+        raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
     ) -> Result<bool, String> {
         use std::time::Instant;
 
@@ -1112,6 +1129,7 @@ impl ExportOrchestrator {
                     gpu_resources, &acquired.rgba_texture_view,
                     None,  // No floating selection during video export
                     false, // Video export is never transparent
+                    raster_store,
                 )?;
                 let render_end = Instant::now();
 

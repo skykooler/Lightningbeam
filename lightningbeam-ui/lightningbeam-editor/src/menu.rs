@@ -332,6 +332,7 @@ pub enum MenuAction {
     ZoomOut,
     ActualSize,
     RecenterView,
+    ToggleOnionSkin,
     NextLayout,
     PreviousLayout,
     #[allow(dead_code)] // Handler exists in main.rs, menu item not yet wired
@@ -432,6 +433,7 @@ impl MenuItemDef {
     const ZOOM_OUT: Self = Self { label: "Zoom Out", action: MenuAction::ZoomOut, shortcut: Some(Shortcut::new(ShortcutKey::Minus, CTRL, NO_SHIFT, NO_ALT)) };
     const ACTUAL_SIZE: Self = Self { label: "Actual Size", action: MenuAction::ActualSize, shortcut: Some(Shortcut::new(ShortcutKey::Num0, CTRL, NO_SHIFT, NO_ALT)) };
     const RECENTER_VIEW: Self = Self { label: "Recenter View", action: MenuAction::RecenterView, shortcut: None };
+    const TOGGLE_ONION_SKIN: Self = Self { label: "Onion Skinning", action: MenuAction::ToggleOnionSkin, shortcut: Some(Shortcut::new(ShortcutKey::O, NO_CTRL, NO_SHIFT, NO_ALT)) };
     const NEXT_LAYOUT: Self = Self { label: "Next Layout", action: MenuAction::NextLayout, shortcut: Some(Shortcut::new(ShortcutKey::BracketRight, CTRL, NO_SHIFT, NO_ALT)) };
     const PREVIOUS_LAYOUT: Self = Self { label: "Previous Layout", action: MenuAction::PreviousLayout, shortcut: Some(Shortcut::new(ShortcutKey::BracketLeft, CTRL, NO_SHIFT, NO_ALT)) };
 
@@ -455,6 +457,7 @@ impl MenuItemDef {
             &Self::DELETE, &Self::SELECT_ALL, &Self::SELECT_NONE,
             &Self::GROUP, &Self::ADD_LAYER, &Self::NEW_KEYFRAME,
             &Self::ZOOM_IN, &Self::ZOOM_OUT, &Self::ACTUAL_SIZE,
+            &Self::TOGGLE_ONION_SKIN,
             &Self::NEXT_LAYOUT, &Self::PREVIOUS_LAYOUT,
             &Self::SETTINGS, &Self::CLOSE_WINDOW,
         ]
@@ -566,6 +569,7 @@ impl MenuItemDef {
                     MenuDef::Item(&Self::ZOOM_OUT),
                     MenuDef::Item(&Self::ACTUAL_SIZE),
                     MenuDef::Item(&Self::RECENTER_VIEW),
+                    MenuDef::Item(&Self::TOGGLE_ONION_SKIN),
                     MenuDef::Separator,
                     MenuDef::Submenu {
                         label: "Layout",

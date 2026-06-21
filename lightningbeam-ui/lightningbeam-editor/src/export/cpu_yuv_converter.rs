@@ -13,6 +13,11 @@ use ffmpeg_next as ffmpeg;
 pub struct CpuYuvConverter {
     width: u32,
     height: u32,
+    /// swscale context + reusable source/dest frames, built once and reused every frame
+    /// (creating them per call was a measurable per-output-frame export cost).
+    scaler: ffmpeg::software::scaling::Context,
+    rgba_frame: ffmpeg::frame::Video,
+    yuv_frame: ffmpeg::frame::Video,
 }
 
 impl CpuYuvConverter {
@@ -22,7 +27,20 @@ impl CpuYuvConverter {
     /// * `width` - Frame width in pixels
     /// * `height` - Frame height in pixels
     pub fn new(width: u32, height: u32) -> Result<Self, String> {
-        Ok(Self { width, height })
+        // BT.709 (HD) RGBA→YUV420p context, created once.
+        let scaler = ffmpeg::software::scaling::Context::get(
+            ffmpeg::format::Pixel::RGBA,
+            width,
+            height,
+            ffmpeg::format::Pixel::YUV420P,
+            width,
+            height,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        )
+        .map_err(|e| format!("Failed to create swscale context: {}", e))?;
+        let rgba_frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA, width, height);
+        let yuv_frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, width, height);
+        Ok(Self { width, height, scaler, rgba_frame, yuv_frame })
     }
 
     /// Convert RGBA data to YUV420p planes
@@ -40,7 +58,7 @@ impl CpuYuvConverter {
     ///
     /// # Panics
     /// Panics if rgba_data length doesn't match width * height * 4
-    pub fn convert(&self, rgba_data: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
+    pub fn convert(&mut self, rgba_data: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
         let expected_size = (self.width * self.height * 4) as usize;
         assert_eq!(
             rgba_data.len(),
@@ -50,51 +68,17 @@ impl CpuYuvConverter {
             rgba_data.len()
         );
 
-        // Create source RGBA frame
-        let mut rgba_frame = ffmpeg::frame::Video::new(
-            ffmpeg::format::Pixel::RGBA,
-            self.width,
-            self.height,
-        );
-
-        // Copy RGBA data into source frame
-        // ffmpeg-next provides mutable access to the frame data
-        let frame_data = rgba_frame.data_mut(0);
-        frame_data.copy_from_slice(rgba_data);
-
-        // Create destination YUV420p frame
-        let mut yuv_frame = ffmpeg::frame::Video::new(
-            ffmpeg::format::Pixel::YUV420P,
-            self.width,
-            self.height,
-        );
-
-        // Create swscale context for RGBA→YUV420p conversion
-        // Uses BT.709 color matrix (HD standard)
-        let mut scaler = ffmpeg::software::scaling::Context::get(
-            ffmpeg::format::Pixel::RGBA,
-            self.width,
-            self.height,
-            ffmpeg::format::Pixel::YUV420P,
-            self.width,
-            self.height,
-            ffmpeg::software::scaling::Flags::BILINEAR,
-        )
-        .map_err(|e| format!("Failed to create swscale context: {}", e))?;
-
-        // Perform the conversion (SIMD-optimized)
-        scaler
-            .run(&rgba_frame, &mut yuv_frame)
+        // Copy RGBA into the reused source frame, run the reused scaler into the reused
+        // dest frame (SIMD-optimized), then extract planes.
+        self.rgba_frame.data_mut(0).copy_from_slice(rgba_data);
+        self.scaler
+            .run(&self.rgba_frame, &mut self.yuv_frame)
             .map_err(|e| format!("swscale conversion failed: {}", e))?;
 
-        // Extract planar YUV data
-        // YUV420p has 3 planes:
-        // - Y: full resolution (width × height)
-        // - U: quarter resolution (width/2 × height/2)
-        // - V: quarter resolution (width/2 × height/2)
-        let y_plane = yuv_frame.data(0).to_vec();
-        let u_plane = yuv_frame.data(1).to_vec();
-        let v_plane = yuv_frame.data(2).to_vec();
+        // YUV420p planes: Y full-res, U/V quarter-res (2×2 subsampled).
+        let y_plane = self.yuv_frame.data(0).to_vec();
+        let u_plane = self.yuv_frame.data(1).to_vec();
+        let v_plane = self.yuv_frame.data(2).to_vec();
 
         Ok((y_plane, u_plane, v_plane))
     }
@@ -112,7 +96,7 @@ mod tests {
 
     #[test]
     fn test_conversion_output_sizes() {
-        let converter = CpuYuvConverter::new(1920, 1080).unwrap();
+        let mut converter = CpuYuvConverter::new(1920, 1080).unwrap();
 
         // Create dummy RGBA data (all black)
         let rgba_data = vec![0u8; 1920 * 1080 * 4];
@@ -133,7 +117,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "RGBA data size mismatch")]
     fn test_wrong_input_size_panics() {
-        let converter = CpuYuvConverter::new(1920, 1080).unwrap();
+        let mut converter = CpuYuvConverter::new(1920, 1080).unwrap();
 
         // Wrong size input
         let rgba_data = vec![0u8; 1000];

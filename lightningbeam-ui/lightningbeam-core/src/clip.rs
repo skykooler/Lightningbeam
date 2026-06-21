@@ -263,9 +263,11 @@ pub struct ImageAsset {
     /// Image height in pixels
     pub height: u32,
 
-    /// Embedded image data (for project portability)
-    /// If None, the image will be loaded from path when needed
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Raw image file bytes. NOT serialized to project JSON — persisted as a
+    /// `MediaKind::ImageAsset` row in the `.beam` container (chunked, pageable) and
+    /// read back on load. `default` so new projects (bytes in the container, not JSON)
+    /// deserialize; old projects with base64-embedded `data` still load via deserialize.
+    #[serde(default, skip_serializing)]
     pub data: Option<Vec<u8>>,
 
     /// Folder this asset belongs to (None = root of category)
@@ -902,7 +904,7 @@ mod tests {
 
     #[test]
     fn test_audio_clip_midi() {
-        let clip = AudioClip::new_midi("Piano Melody", 1, 60.0);
+        let clip = AudioClip::new_midi("Piano Melody", 1, daw_backend::Beats(60.0));
         assert_eq!(clip.name, "Piano Melody");
         assert_eq!(clip.duration, 60.0);
         match &clip.clip_type {
@@ -952,7 +954,10 @@ mod tests {
 
         assert_eq!(instance.trim_start, 2.0);
         assert_eq!(instance.trim_end, Some(8.0));
-        assert_eq!(instance.effective_duration(10.0), 6.0);
+        // At 60 BPM the tempo map is identity (1 beat == 1 second), so the
+        // beats-domain effective duration equals the seconds content window.
+        let tempo_map = crate::tempo_map::TempoMap::constant(60.0);
+        assert_eq!(instance.effective_duration(10.0, &tempo_map), 6.0);
     }
 
     #[test]
@@ -963,7 +968,9 @@ mod tests {
 
         assert_eq!(instance.trim_start, 2.0);
         assert_eq!(instance.trim_end, None);
-        assert_eq!(instance.effective_duration(10.0), 8.0);
+        // At 60 BPM the tempo map is identity (1 beat == 1 second).
+        let tempo_map = crate::tempo_map::TempoMap::constant(60.0);
+        assert_eq!(instance.effective_duration(10.0, &tempo_map), 8.0);
     }
 
     #[test]

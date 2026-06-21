@@ -217,7 +217,9 @@ impl SharedVelloResources {
         // Uses linear_to_srgb.wgsl which reads from Rgba16Float HDR texture
         let hdr_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("hdr_blit_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/linear_to_srgb.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{}", lightningbeam_core::gpu::COLOR_WGSL, include_str!("shaders/linear_to_srgb.wgsl")).into(),
+            ),
         });
 
         let hdr_blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -433,6 +435,12 @@ struct VelloRenderContext {
     document: std::sync::Arc<lightningbeam_core::document::Document>,
     /// Current tool interaction state
     tool_state: lightningbeam_core::tool::ToolState,
+    /// Onion-skinning settings (already gated off during playback).
+    onion: crate::panes::OnionSkinSettings,
+    /// `.beam` container path for lazily paging image-asset bytes in the ImageCache.
+    container_path: Option<std::path::PathBuf>,
+    /// Whether playback is active (gates image prefetch).
+    is_playing: bool,
     /// Active layer for tool operations
     active_layer_id: Option<uuid::Uuid>,
     /// Delta for drag preview (world space)
@@ -464,8 +472,6 @@ struct VelloRenderContext {
     editing_instance_id: Option<uuid::Uuid>,
     /// The parent layer ID containing the clip instance being edited
     editing_parent_layer_id: Option<uuid::Uuid>,
-    /// Active region selection state (for rendering boundary overlay)
-    region_selection: Option<lightningbeam_core::selection::RegionSelection>,
     /// Mouse position in document-local (clip-local) world coordinates, for hover hit testing
     mouse_world_pos: Option<vello::kurbo::Point>,
     /// Latest webcam frame for live preview (if any camera is active)
@@ -521,6 +527,12 @@ struct VelloRenderContext {
     /// When `Some`, readback this B-canvas into `RASTER_READBACK_RESULTS` after
     /// dispatching GPU tool work.  Set on mouseup by the unified raster tool commit path.
     pending_tool_readback_b: Option<uuid::Uuid>,
+    /// Miss-sink for on-demand raster keyframe pixel faulting (Phase 3 paging).
+    /// When the compositor wants to upload an idle raster keyframe whose `raw_pixels`
+    /// aren't resident, it inserts the keyframe id here; the App drains this at the
+    /// top of the next `update()` and faults the pixels in from the project container.
+    raster_fault_requests:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>>,
 }
 
 /// Callback for Vello rendering within egui
@@ -965,6 +977,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             let _t_after_gpu_dispatches = std::time::Instant::now();
 
             let mut image_cache = shared.image_cache.lock().unwrap();
+            // Let the cache page image bytes from the project container on a decode miss.
+            image_cache.set_container_path(self.ctx.container_path.clone());
 
             let composite_result = if shared.is_cpu_renderer {
                 lightningbeam_core::renderer::render_document_for_compositing_cpu(
@@ -989,6 +1003,66 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     true, // Draw checkerboard for transparent backgrounds in the UI
                 )
             };
+
+            // Onion-skin ghost scenes for the active VECTOR layer (raster ghosts are
+            // handled in the render loop). Built at each neighbouring keyframe's time
+            // via the isolated-layer renderer; rendered + tinted before the active
+            // scene below. `ctx.onion.enabled` is already gated off during playback.
+            let mut onion_vector_ghosts: Vec<(vello::Scene, [f32; 3], f32)> = Vec::new();
+            if self.ctx.onion.enabled && !shared.is_cpu_renderer {
+                if let Some(active_id) = self.ctx.active_layer_id {
+                    if let Some(layer) = self.ctx.document.get_layer(&active_id) {
+                        if let lightningbeam_core::layer::AnyLayer::Vector(vl) = layer {
+                            let onion = self.ctx.onion;
+                            let after = vl.keyframes.partition_point(|kf| kf.time <= self.ctx.playback_time);
+                            if after > 0 {
+                                let cur = after - 1;
+                                let mut want: Vec<(usize, [f32; 3], f32)> = Vec::new();
+                                for d in 1..=onion.frames_before {
+                                    if cur >= d {
+                                        want.push((cur - d, crate::panes::OnionSkinSettings::PAST_TINT,
+                                            onion.ghost_opacity(d, onion.frames_before)));
+                                    }
+                                }
+                                for d in 1..=onion.frames_after {
+                                    if cur + d < vl.keyframes.len() {
+                                        want.push((cur + d, crate::panes::OnionSkinSettings::FUTURE_TINT,
+                                            onion.ghost_opacity(d, onion.frames_after)));
+                                    }
+                                }
+                                for (idx, tint, op) in want {
+                                    let kf_time = vl.keyframes[idx].time;
+                                    let rl = lightningbeam_core::renderer::render_layer_isolated(
+                                        &self.ctx.document, kf_time, layer, camera_transform,
+                                        &mut image_cache, &shared.video_manager,
+                                        self.ctx.webcam_frame.as_ref(),
+                                    );
+                                    if rl.has_content {
+                                        onion_vector_ghosts.push((rl.scene, tint, op));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Prefetch: during playback, decode images the upcoming frames will need
+            // (a short lookahead) into the bounded cache, so a keyframe that swaps image
+            // fills doesn't hitch when the playhead reaches it.
+            if self.ctx.is_playing {
+                const PREFETCH_LOOKAHEAD: f64 = 0.5;
+                let ahead = lightningbeam_core::renderer::assets_needed_at(
+                    &self.ctx.document,
+                    self.ctx.playback_time + PREFETCH_LOOKAHEAD,
+                );
+                for id in ahead {
+                    if let Some(asset) = self.ctx.document.get_image_asset(&id) {
+                        let _ = image_cache.get_or_decode(asset);
+                    }
+                }
+            }
+
             drop(image_cache);
             let _t_after_scene_build = std::time::Instant::now();
 
@@ -1167,6 +1241,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                 // 4. Raster layer texture cache: for idle raster layers (no active tool canvas).
                 // Upload raw_pixels to the cache if texture_dirty; then use the cache entry.
+                // If the full pixels aren't resident, fall back to the low-res proxy:
+                // (kf_id, logical_w, logical_h) so the blit upscales it to full size.
+                let mut raster_proxy_blit: Option<(uuid::Uuid, u32, u32)> = None;
                 let raster_cache_kf: Option<uuid::Uuid> = if gpu_canvas_kf.is_none() {
                     // Find the active keyframe for this raster layer.
                     let doc = &self.ctx.document;
@@ -1204,6 +1281,24 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     );
                                     Some(kf_id)
                                 } else {
+                                    // Empty pixels: if the frame is paged out (lives in the
+                                    // container), record a fault-in request so the App pages it
+                                    // in at the top of the next frame. A new blank keyframe
+                                    // (needs_fault_in == false) has nothing to load — skip it.
+                                    if kf.needs_fault_in {
+                                        if let Ok(mut reqs) = self.ctx.raster_fault_requests.lock() {
+                                            reqs.insert(kf_id);
+                                        }
+                                    }
+                                    // Show the low-res proxy (if decoded) while the full
+                                    // pages in, so the cold scrub doesn't flash blank.
+                                    if let Some(proxy) = &kf.proxy {
+                                        gpu_brush.ensure_proxy_texture(
+                                            device, queue, kf_id,
+                                            &proxy.pixels, proxy.width, proxy.height,
+                                        );
+                                        raster_proxy_blit = Some((kf_id, kf.width, kf.height));
+                                    }
                                     None
                                 }
                             } else {
@@ -1219,12 +1314,42 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     None
                 };
 
-                if !rendered_layer.has_content && gpu_canvas_kf.is_none() && raster_cache_kf.is_none() {
-                    continue;
-                }
-
                 match &rendered_layer.layer_type {
                     RenderedLayerType::Vector => {
+                        // Onion-skin ghosts for the active vector layer: each neighbour
+                        // scene → sRGB → linear → composite with a screen tint + falloff,
+                        // behind the current frame.
+                        if Some(rendered_layer.layer_id) == self.ctx.active_layer_id {
+                            for (ghost_scene, tint, opacity) in &onion_vector_ghosts {
+                                let gsrgb = buffer_pool.acquire(device, layer_spec);
+                                let ghdr = buffer_pool.acquire(device, hdr_spec);
+                                if let (Some(gsrgb_view), Some(ghdr_view), Some(hdr_view)) = (
+                                    buffer_pool.get_view(gsrgb),
+                                    buffer_pool.get_view(ghdr),
+                                    &instance_resources.hdr_texture_view,
+                                ) {
+                                    if let Ok(mut renderer) = shared.renderer.lock() {
+                                        renderer.render_to_texture(device, queue, ghost_scene, gsrgb_view, &layer_render_params).ok();
+                                    }
+                                    let mut conv = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                        label: Some("onion_vec_ghost_convert"),
+                                    });
+                                    shared.srgb_to_linear.convert(device, &mut conv, gsrgb_view, ghdr_view);
+                                    queue.submit(Some(conv.finish()));
+                                    let cl = lightningbeam_core::gpu::CompositorLayer::new(
+                                        ghdr, rendered_layer.opacity * opacity, rendered_layer.blend_mode,
+                                    ).with_tint(tint[0], tint[1], tint[2]);
+                                    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                        label: Some("onion_vec_ghost_composite"),
+                                    });
+                                    shared.compositor.composite(device, queue, &mut enc, &[cl], &buffer_pool, hdr_view, None);
+                                    queue.submit(Some(enc.finish()));
+                                }
+                                buffer_pool.release(gsrgb);
+                                buffer_pool.release(ghdr);
+                            }
+                        }
+
                         // Vector/group layer — render Vello scene → sRGB → linear → composite.
                         let srgb_handle = buffer_pool.acquire(device, layer_spec);
                         let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
@@ -1265,26 +1390,160 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         buffer_pool.release(hdr_layer_handle);
                     }
                     RenderedLayerType::Raster { transform: layer_transform, .. } => {
+                        // --- Onion-skin ghosts: the active layer's neighbouring keyframes,
+                        // warm-tinted for past / cool for future, faint and behind the
+                        // current frame. `ctx.onion.enabled` is already gated off during
+                        // playback. Ghosts use the full texture if resident, else the proxy.
+                        if self.ctx.onion.enabled
+                            && Some(rendered_layer.layer_id) == self.ctx.active_layer_id
+                        {
+                            let onion = self.ctx.onion;
+                            let ghosts: Vec<(uuid::Uuid, u32, u32, [f32; 3], f32)> = {
+                                let doc = &self.ctx.document;
+                                match doc.get_layer(&rendered_layer.layer_id) {
+                                    Some(lightningbeam_core::layer::AnyLayer::Raster(rl)) => {
+                                        let after = rl.keyframes.partition_point(|kf| kf.time <= self.ctx.playback_time);
+                                        let mut v = Vec::new();
+                                        if after > 0 {
+                                            let cur = after - 1;
+                                            for d in 1..=onion.frames_before {
+                                                if cur >= d {
+                                                    let kf = &rl.keyframes[cur - d];
+                                                    v.push((kf.id, kf.width, kf.height,
+                                                        crate::panes::OnionSkinSettings::PAST_TINT,
+                                                        onion.ghost_opacity(d, onion.frames_before)));
+                                                }
+                                            }
+                                            for d in 1..=onion.frames_after {
+                                                if cur + d < rl.keyframes.len() {
+                                                    let kf = &rl.keyframes[cur + d];
+                                                    v.push((kf.id, kf.width, kf.height,
+                                                        crate::panes::OnionSkinSettings::FUTURE_TINT,
+                                                        onion.ghost_opacity(d, onion.frames_after)));
+                                                }
+                                            }
+                                        }
+                                        v
+                                    }
+                                    _ => Vec::new(),
+                                }
+                            };
+                            for (kf_id, lw, lh, tint, opacity) in ghosts {
+                                let gh = buffer_pool.acquire(device, hdr_spec);
+                                if let (Some(gv), Some(hdr_view)) = (
+                                    buffer_pool.get_view(gh),
+                                    &instance_resources.hdr_texture_view,
+                                ) {
+                                    let mut drew = false;
+                                    let mut need_fault = false;
+                                    if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                                        // Resolve a texture, in priority order:
+                                        //  1) cached full texture
+                                        //  2) resident raw_pixels → upload full (e.g. an
+                                        //     unsaved neighbour whose GPU texture evicted)
+                                        //  3) in-memory proxy → upload proxy
+                                        //  4) none → request a fault-in (seek to a paged-out frame)
+                                        let resolved: Option<(u32, u32, bool)> =
+                                            if gpu_brush.raster_layer_cache.contains_key(&kf_id) {
+                                                gpu_brush.raster_layer_cache.get(&kf_id).map(|c| (c.width, c.height, false))
+                                            } else {
+                                                let kf = match self.ctx.document.get_layer(&rendered_layer.layer_id) {
+                                                    Some(lightningbeam_core::layer::AnyLayer::Raster(rl)) =>
+                                                        rl.keyframes.iter().find(|k| k.id == kf_id),
+                                                    _ => None,
+                                                };
+                                                match kf {
+                                                    Some(kf) if kf.raw_pixels.len() == (kf.width * kf.height * 4) as usize => {
+                                                        gpu_brush.ensure_layer_texture(device, queue, kf_id, &kf.raw_pixels, kf.width, kf.height, false);
+                                                        Some((kf.width, kf.height, false))
+                                                    }
+                                                    Some(kf) if kf.proxy.is_some() => {
+                                                        let p = kf.proxy.as_ref().unwrap();
+                                                        gpu_brush.ensure_proxy_texture(device, queue, kf_id, &p.pixels, p.width, p.height);
+                                                        Some((lw, lh, true))
+                                                    }
+                                                    Some(kf) if kf.needs_fault_in => { need_fault = true; None }
+                                                    _ => None,
+                                                }
+                                            };
+                                        if let Some((sw, sh, is_proxy)) = resolved {
+                                            let tex = if is_proxy {
+                                                gpu_brush.get_proxy_texture(&kf_id)
+                                            } else {
+                                                gpu_brush.raster_layer_cache.get(&kf_id)
+                                            };
+                                            if let Some(canvas) = tex {
+                                                let bt = crate::gpu_brush::BlitTransform::new(*layer_transform, sw, sh, width, height)
+                                                    .with_tint(tint[0], tint[1], tint[2]);
+                                                if is_proxy {
+                                                    shared.canvas_blit.blit_smooth(device, queue, canvas.src_view(), gv, &bt, None);
+                                                } else {
+                                                    shared.canvas_blit.blit(device, queue, canvas.src_view(), gv, &bt, None);
+                                                }
+                                                drew = true;
+                                            }
+                                        }
+                                    }
+                                    if need_fault {
+                                        if let Ok(mut reqs) = self.ctx.raster_fault_requests.lock() {
+                                            reqs.insert(kf_id);
+                                        }
+                                    }
+                                    if drew {
+                                        let cl = lightningbeam_core::gpu::CompositorLayer::new(
+                                            gh, rendered_layer.opacity * opacity, rendered_layer.blend_mode,
+                                        );
+                                        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                            label: Some("onion_ghost_encoder"),
+                                        });
+                                        shared.compositor.composite(device, queue, &mut enc, &[cl], &buffer_pool, hdr_view, None);
+                                        queue.submit(Some(enc.finish()));
+                                    }
+                                }
+                                buffer_pool.release(gh);
+                            }
+                        }
+
                         // Raster layer — GPU canvas blit directly to HDR (bypasses Vello).
-                        // Tool override canvas (gpu_canvas_kf) takes priority over cached texture.
-                        if let Some(use_kf_id) = gpu_canvas_kf.or(raster_cache_kf) {
+                        // Tool override canvas (gpu_canvas_kf) takes priority over cached
+                        // texture; if neither full-res source is present, the low-res proxy.
+                        let full_kf = gpu_canvas_kf.or(raster_cache_kf);
+                        if full_kf.is_some() || raster_proxy_blit.is_some() {
                             let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
                             if let (Some(hdr_layer_view), Some(hdr_view)) = (
                                 buffer_pool.get_view(hdr_layer_handle),
                                 &instance_resources.hdr_texture_view,
                             ) {
                                 if let Ok(gpu_brush) = shared.gpu_brush.lock() {
-                                    let canvas = gpu_brush.canvases.get(&use_kf_id)
-                                        .or_else(|| gpu_brush.raster_layer_cache.get(&use_kf_id));
-                                    if let Some(canvas) = canvas {
+                                    // Pick the source texture and the LOGICAL dims the blit
+                                    // should map it to. A full texture uses its own dims; a
+                                    // proxy uses the keyframe's full dims so it upscales.
+                                    let blit = if let Some(use_kf_id) = full_kf {
+                                        gpu_brush.canvases.get(&use_kf_id)
+                                            .or_else(|| gpu_brush.raster_layer_cache.get(&use_kf_id))
+                                            .map(|c| (c, c.width, c.height, false))
+                                    } else if let Some((pkf, lw, lh)) = raster_proxy_blit {
+                                        gpu_brush.get_proxy_texture(&pkf).map(|c| (c, lw, lh, true))
+                                    } else {
+                                        None
+                                    };
+                                    if let Some((canvas, logical_w, logical_h, is_proxy)) = blit {
                                         let bt = crate::gpu_brush::BlitTransform::new(
                                             *layer_transform,
-                                            canvas.width, canvas.height,
+                                            logical_w, logical_h,
                                             width, height,
                                         );
-                                        shared.canvas_blit.blit(
-                                            device, queue, canvas.src_view(), hdr_layer_view, &bt, None,
-                                        );
+                                        // Proxies are upscaled, so sample them bilinearly;
+                                        // the real canvas stays nearest (crisp pixels).
+                                        if is_proxy {
+                                            shared.canvas_blit.blit_smooth(
+                                                device, queue, canvas.src_view(), hdr_layer_view, &bt, None,
+                                            );
+                                        } else {
+                                            shared.canvas_blit.blit(
+                                                device, queue, canvas.src_view(), hdr_layer_view, &bt, None,
+                                            );
+                                        }
                                     }
                                 }
                                 let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
@@ -1640,43 +1899,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                 );
             }
 
-            // Render selected DCEL from active region selection (with transform)
-            if let Some(ref region_sel) = self.ctx.region_selection {
-                let sel_transform = overlay_transform * region_sel.transform;
-                lightningbeam_core::renderer::render_vector_graph(
-                    &region_sel.selected_graph,
-                    &mut scene,
-                    sel_transform,
-                    1.0,
-                    &self.ctx.document,
-                    &mut image_cache,
-                );
-            }
-
             drop(image_cache);
             scene
         };
-
-        // Render region selection fill into the overlay scene.
-        // In HDR mode the main scene-building block returns an empty scene (only layer content
-        // goes through the HDR pipeline), so we must add the selected-DCEL fill here so it
-        // appears underneath the stipple overlay. In legacy mode the render_dcel call inside
-        // the block already handled this, but running it again is harmless since `scene` would
-        // be a fresh empty scene only in HDR mode.
-        if USE_HDR_COMPOSITING {
-            if let Some(ref region_sel) = self.ctx.region_selection {
-                let sel_transform = overlay_transform * region_sel.transform;
-                let mut image_cache = shared.image_cache.lock().unwrap();
-                lightningbeam_core::renderer::render_vector_graph(
-                    &region_sel.selected_graph,
-                    &mut scene,
-                    sel_transform,
-                    1.0,
-                    &self.ctx.document,
-                    &mut image_cache,
-                );
-            }
-        }
 
         // Render drag preview objects with transparency
         if let (Some(delta), Some(active_layer_id)) = (self.ctx.drag_delta, self.ctx.active_layer_id) {
@@ -1854,50 +2079,6 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     );
                                 }
                             }
-                        }
-                    }
-
-                    // 1a. Draw stipple overlay on region-selected graph
-                    if let Some(ref region_sel) = self.ctx.region_selection {
-                        use lightningbeam_core::vector_graph::FillId;
-                        let sel_graph = &region_sel.selected_graph;
-                        let sel_transform = overlay_transform * region_sel.transform;
-                        let stipple_brush = selection_stipple_brush();
-                        let inv_zoom = 1.0 / self.ctx.zoom as f64;
-                        let brush_xform = Some(Affine::scale(inv_zoom));
-
-                        // Stipple fills with visible content
-                        for (i, fill) in sel_graph.fills.iter().enumerate() {
-                            if fill.deleted { continue; }
-                            if fill.color.is_none() && fill.image_fill.is_none() && fill.gradient_fill.is_none() { continue; }
-                            let fill_id = FillId(i as u32);
-                            let path = sel_graph.fill_to_bezpath(fill_id);
-                            scene.fill(
-                                vello::peniko::Fill::NonZero,
-                                sel_transform,
-                                stipple_brush,
-                                brush_xform,
-                                &path,
-                            );
-                        }
-
-                        // Stipple edges with visible stroke
-                        for edge in &sel_graph.edges {
-                            if edge.deleted { continue; }
-                            if edge.stroke_style.is_none() && edge.stroke_color.is_none() { continue; }
-                            let width = edge.stroke_style.as_ref()
-                                .map(|s| s.width)
-                                .unwrap_or(2.0);
-                            let mut path = vello::kurbo::BezPath::new();
-                            path.move_to(edge.curve.p0);
-                            path.curve_to(edge.curve.p1, edge.curve.p2, edge.curve.p3);
-                            scene.stroke(
-                                &vello::kurbo::Stroke::new(width),
-                                sel_transform,
-                                stipple_brush,
-                                brush_xform,
-                                &path,
-                            );
                         }
                     }
 
@@ -3477,12 +3658,6 @@ impl StagePane {
             None => return, // No active layer
         };
 
-        // Revert any active region selection on mouse press before borrowing the document
-        // immutably, so the two selection modes don't coexist.
-        if self.rsp_primary_pressed(ui) {
-            Self::revert_region_selection_static(shared);
-        }
-
         let active_layer = match shared.action_executor.document().get_layer(&active_layer_id) {
             Some(layer) => layer,
             None => return,
@@ -3495,6 +3670,11 @@ impl StagePane {
         };
 
         let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+
+        // On a shape-tween in-between frame the displayed geometry is interpolated, not a
+        // real keyframe — editing it would silently mutate the left keyframe. Lock out
+        // geometry selection/editing there; clip-instance interaction stays available.
+        let inbetween = vector_layer.is_tween_inbetween(*shared.playback_time);
 
         // Double-click: enter/exit movie clip editing
         if response.double_clicked() {
@@ -3535,16 +3715,21 @@ impl StagePane {
         // Scope this section to drop vector_layer borrow before drag handling
         let mouse_pressed = self.rsp_primary_pressed(ui);
         if mouse_pressed {
-            // VECTOR EDITING: Check for vertex/curve editing first (higher priority than selection)
+            // VECTOR EDITING: Check for vertex/curve editing first (higher priority than
+            // selection). Skipped on tween in-between frames — geometry isn't editable there.
             let tolerance = EditingHitTolerance::scaled_by_zoom(self.zoom as f64);
-            let vector_hit = hit_test_vector_editing(
-                vector_layer,
-                *shared.playback_time,
-                point,
-                &tolerance,
-                Affine::IDENTITY,
-                false, // Select tool doesn't show control points
-            );
+            let vector_hit = if inbetween {
+                None
+            } else {
+                hit_test_vector_editing(
+                    vector_layer,
+                    *shared.playback_time,
+                    point,
+                    &tolerance,
+                    Affine::IDENTITY,
+                    false, // Select tool doesn't show control points
+                )
+            };
             // Priority 1: Vector editing (vertices immediately, curves deferred)
             if let Some(hit) = vector_hit {
                 match hit {
@@ -3581,6 +3766,9 @@ impl StagePane {
 
             let hit_result = if let Some(clip_id) = clip_hit {
                 Some(hit_test::HitResult::ClipInstance(clip_id))
+            } else if inbetween {
+                // Geometry not selectable on an in-between frame.
+                None
             } else {
                 // No clip hit, test DCEL edges and faces
                 hit_test::hit_test_layer(vector_layer, *shared.playback_time, point, 5.0, Affine::IDENTITY)
@@ -3631,8 +3819,16 @@ impl StagePane {
                         }
                         *shared.focus = lightningbeam_core::selection::FocusSelection::ClipInstances(shared.selection.clip_instances().to_vec());
 
-                        // If clip instance is now selected, prepare for dragging
-                        if shared.selection.contains_clip_instance(&clip_id) {
+                        // A clip mid motion-tween shows an interpolated position; moving it
+                        // there would silently insert a keyframe and disturb the tween. Allow
+                        // selecting it, but don't start a drag.
+                        let clip_motion_locked = vector_layer
+                            .layer
+                            .animation_data
+                            .is_object_tweened_at(clip_id, *shared.playback_time);
+
+                        // If clip instance is now selected (and editable), prepare for dragging
+                        if !clip_motion_locked && shared.selection.contains_clip_instance(&clip_id) {
                             // Store original positions of all selected clip instances
                             let mut original_positions = std::collections::HashMap::new();
                             for &clip_inst_id in shared.selection.clip_instances() {
@@ -4815,6 +5011,7 @@ impl StagePane {
         _ui: &mut egui::Ui,
         response: &egui::Response,
         world_pos: egui::Vec2,
+        shift_held: bool,
         shared: &mut SharedPaneState,
     ) {
         use lightningbeam_core::tool::{ToolState, RegionSelectMode};
@@ -4828,12 +5025,13 @@ impl StagePane {
             None => return,
         };
 
-        // Mouse down: start region selection
+        // Mouse down: start region selection. Clear the existing selection unless shift
+        // is held (additive), mirroring the marquee. Region select populates the same
+        // `Selection` ID sets as every other tool.
         if self.rsp_drag_started(response) {
-            // Revert any existing uncommitted region selection, and clear the
-            // regular selection so both selection modes don't coexist.
-            Self::revert_region_selection_static(shared);
-            shared.selection.clear();
+            if !shift_held {
+                shared.selection.clear();
+            }
 
             match *shared.region_select_mode {
                 RegionSelectMode::Rectangle => {
@@ -4904,7 +5102,10 @@ impl StagePane {
         }
     }
 
-    /// Execute region selection: snapshot DCEL, insert region boundary, extract inside geometry
+    /// Execute region selection (rect or lasso): cut the geometry along the region
+    /// outline (an undoable edit) and select the resulting inside sub-pieces into the
+    /// normal `Selection`. This is the single, unified selection path — there is no
+    /// separate floating "region selection" anymore.
     fn execute_region_select(
         shared: &mut SharedPaneState,
         region_path: vello::kurbo::BezPath,
@@ -4916,8 +5117,8 @@ impl StagePane {
 
         let time = *shared.playback_time;
 
-        use lightningbeam_core::vector_graph::{EdgeId, FillId, VertexId};
-        use std::collections::{HashMap, HashSet};
+        use lightningbeam_core::vector_graph::{EdgeId, FillId};
+        use std::collections::HashSet;
         use vello::kurbo::{ParamCurve, Shape as _};
 
         // Convert region path line segments to CubicBez for insert_stroke
@@ -4958,179 +5159,134 @@ impl StagePane {
             return;
         }
 
-        // Do all graph work in a block so the mutable borrow of shared ends
-        // before we assign to shared.region_selection.
-        let extraction_result = {
-            let document = shared.action_executor.document_mut();
-            let graph = match document.get_layer_mut(&layer_id) {
-                Some(AnyLayer::Vector(vl)) => match vl.graph_at_time_mut(time) {
+        // Cut a copy of the graph along the region outline, then classify which resulting
+        // pieces lie inside. We work on a clone so the cut can be committed as a single
+        // undoable action (or discarded entirely if the region caught nothing).
+        let (graph_before, graph_after, inside_edges, inside_fills) = {
+            let document = shared.action_executor.document();
+            let graph = match document.get_layer(&layer_id) {
+                Some(AnyLayer::Vector(vl)) => match vl.graph_at_time(time) {
                     Some(d) => d,
                     None => return,
                 },
                 _ => return,
             };
 
-            let snapshot = graph.clone();
+            let graph_before = graph.clone();
+            let mut graph_after = graph_before.clone();
 
-            // Insert region boundary as invisible edges (no stroke style/color)
-            let region_edge_ids = graph.insert_stroke(&segments, None, None, 1.0);
+            // Debug capture (set LIGHTNINGBEAM_DUMP_REGION=1): write the exact pre-cut graph
+            // + lasso segments to a numbered JSON file under the temp dir, so a misbehaving
+            // region select can be replayed deterministically as a regression test.
+            if std::env::var_os("LIGHTNINGBEAM_DUMP_REGION").is_some() {
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static DUMP_N: AtomicUsize = AtomicUsize::new(0);
+                let n = DUMP_N.fetch_add(1, Ordering::Relaxed);
+                let seg_pts: Vec<[[f64; 2]; 4]> = segments
+                    .iter()
+                    .map(|c| [[c.p0.x, c.p0.y], [c.p1.x, c.p1.y], [c.p2.x, c.p2.y], [c.p3.x, c.p3.y]])
+                    .collect();
+                if let Ok(graph_json) = serde_json::to_value(&graph_before) {
+                    let dump = serde_json::json!({ "graph": graph_json, "segments": seg_pts });
+                    let path = std::env::temp_dir().join(format!("lightningbeam_region_dump_{n}.json"));
+                    match serde_json::to_string_pretty(&dump).map(|s| std::fs::write(&path, s)) {
+                        Ok(Ok(())) => eprintln!("[region dump] wrote {}", path.display()),
+                        e => eprintln!("[region dump] failed: {e:?}"),
+                    }
+                }
+            }
 
+            // Insert the region boundary as invisible edges (no stroke style/color) so any
+            // shape the region crosses is split into inside/outside sub-fills.
+            let region_edge_ids = graph_after.insert_stroke(&segments, None, None, 1.0);
             let region_edge_set: HashSet<EdgeId> = region_edge_ids.iter().copied().collect();
 
-            // Classify edges: inside vs outside by midpoint winding
-            let mut inside_edges = HashSet::new();
-            for (i, edge) in graph.edges.iter().enumerate() {
+            // The lasso outline portions that DON'T cross geometry leave dangling invisible
+            // edges (no stroke, not part of any fill). Drop them so they can't be selected
+            // or edited later; the cut edges (now part of a fill boundary) are kept.
+            graph_after.gc_invisible_edges();
+
+            // Classify edges: inside by midpoint winding (excluding the cut edges themselves).
+            let mut inside_edges: Vec<EdgeId> = Vec::new();
+            for (i, edge) in graph_after.edges.iter().enumerate() {
                 let eid = EdgeId(i as u32);
                 if edge.deleted || region_edge_set.contains(&eid) {
                     continue;
                 }
                 let mid = edge.curve.eval(0.5);
                 if region_path.winding(mid) != 0 {
-                    inside_edges.insert(eid);
+                    inside_edges.push(eid);
                 }
             }
 
-            // Classify fills: inside vs outside by boundary centroid winding
-            let mut inside_fills = HashSet::new();
-            for (i, fill) in graph.fills.iter().enumerate() {
+            // Classify fills: inside if a guaranteed-interior point of the fill is inside
+            // the lasso. (A non-convex sub-fill's edge-midpoint average can fall inside the
+            // lasso even when the shape is mostly outside, so use fill_interior_point.)
+            let mut inside_fills: Vec<FillId> = Vec::new();
+            for (i, fill) in graph_after.fills.iter().enumerate() {
                 let fid = FillId(i as u32);
                 if fill.deleted {
                     continue;
                 }
-                let centroid = Self::compute_fill_centroid(graph, fid);
-                if region_path.winding(centroid) != 0 {
-                    inside_fills.insert(fid);
+                let probe = graph_after.fill_interior_point(fid);
+                if region_path.winding(probe) != 0 {
+                    inside_fills.push(fid);
                 }
             }
 
-            // If nothing is inside, restore snapshot and bail
-            if inside_edges.is_empty() && inside_fills.is_empty() {
-                *graph = snapshot;
-                None
-            } else {
-                // Extract subgraph (boundary edges get duplicated into both graphs)
-                let (selected_graph, vtx_map, edge_map) = graph.extract_subgraph(
-                    &inside_edges,
-                    &inside_fills,
-                    &region_edge_set,
-                );
-
-                // Build boundary maps for merge-back
-                let boundary_vertex_map: HashMap<VertexId, VertexId> = vtx_map
-                    .iter()
-                    .filter(|(&old_vid, _)| !graph.vertex(old_vid).deleted)
-                    .map(|(&old, &new)| (new, old))
-                    .collect();
-
-                let boundary_edge_map: HashMap<EdgeId, EdgeId> = edge_map
-                    .iter()
-                    .filter(|(old_eid, _)| region_edge_set.contains(old_eid))
-                    .map(|(&old, &new)| (new, old))
-                    .collect();
-
-                Some((snapshot, selected_graph, region_edge_ids, boundary_vertex_map, boundary_edge_map))
-            }
+            (graph_before, graph_after, inside_edges, inside_fills)
         };
 
-        let Some((snapshot, selected_graph, region_edge_ids, boundary_vertex_map, boundary_edge_map)) = extraction_result else {
+        // Nothing inside: don't mutate the graph (avoid littering it with stray cut
+        // edges), leaving the selection as cleared/extended on drag-start.
+        if inside_edges.is_empty() && inside_fills.is_empty() {
             #[cfg(debug_assertions)]
             shared.test_mode.clear_pending_geometry();
             return;
-        };
+        }
 
-        *shared.region_selection = Some(lightningbeam_core::selection::RegionSelection {
-            region_path: region_path.clone(),
+        // Record the undo depth before the first cut of this selection session, so a
+        // later deselect can heal (undo) the cut(s) if nothing was changed in between.
+        // A shift-additive series of cuts keeps the same base (it accumulates).
+        if shared.pending_region_cut_base.is_none() {
+            *shared.pending_region_cut_base = Some(shared.action_executor.undo_depth());
+        }
+
+        // Commit the cut as one undoable edit.
+        let action = lightningbeam_core::actions::ModifyGraphAction::new(
             layer_id,
             time,
-            graph_snapshot: snapshot,
-            selected_graph,
-            transform: vello::kurbo::Affine::IDENTITY,
-            committed: false,
-            region_edge_ids,
-            action_epoch_at_selection: shared.action_executor.epoch(),
-            boundary_vertex_map,
-            boundary_edge_map,
-        });
-
-        shared.selection.clear_geometry_selection();
-
-        #[cfg(debug_assertions)]
-        shared.test_mode.clear_pending_geometry();
-    }
-
-    /// Compute the centroid of a fill's boundary edge midpoints.
-    fn compute_fill_centroid(
-        graph: &lightningbeam_core::vector_graph::VectorGraph,
-        fid: lightningbeam_core::vector_graph::FillId,
-    ) -> vello::kurbo::Point {
-        use vello::kurbo::{ParamCurve, Point};
-        let fill = graph.fill(fid);
-        let mut sum_x = 0.0;
-        let mut sum_y = 0.0;
-        let mut count = 0;
-        for &(eid, _) in &fill.boundary {
-            if eid.is_none() {
-                continue;
-            }
-            let mid = graph.edge(eid).curve.eval(0.5);
-            sum_x += mid.x;
-            sum_y += mid.y;
-            count += 1;
-        }
-        if count > 0 {
-            Point::new(sum_x / count as f64, sum_y / count as f64)
-        } else {
-            Point::ZERO
-        }
-    }
-
-    /// Revert an uncommitted region selection, restoring the DCEL from snapshot
-    fn revert_region_selection_static(shared: &mut SharedPaneState) {
-        use lightningbeam_core::layer::AnyLayer;
-
-        let region_sel = match shared.region_selection.take() {
-            Some(rs) => rs,
-            None => return,
-        };
-
-        if region_sel.committed {
-            // Already committed via action system, nothing to revert
+            graph_before,
+            graph_after,
+            "Region select",
+        );
+        if let Err(e) = shared.action_executor.execute(Box::new(action)) {
+            eprintln!("Region select cut failed: {}", e);
+            #[cfg(debug_assertions)]
+            shared.test_mode.clear_pending_geometry();
             return;
         }
 
-        let no_actions_taken =
-            shared.action_executor.epoch() == region_sel.action_epoch_at_selection;
-        let no_transform = region_sel.transform == vello::kurbo::Affine::IDENTITY;
-
-        let doc = shared.action_executor.document_mut();
-        if let Some(AnyLayer::Vector(vl)) = doc.get_layer_mut(&region_sel.layer_id) {
-            if let Some(graph) = vl.graph_at_time_mut(region_sel.time) {
-                if no_actions_taken && no_transform {
-                    // Fast path: nothing changed, restore from snapshot
-                    *graph = region_sel.graph_snapshot;
-                } else {
-                    // Delete the main graph's copy of boundary edges
-                    for &eid in &region_sel.region_edge_ids {
-                        if !graph.edge(eid).deleted {
-                            graph.free_edge(eid);
-                        }
-                    }
-
-                    // Merge the (possibly transformed) selected_graph back
-                    graph.merge_subgraph(
-                        &region_sel.selected_graph,
-                        region_sel.transform,
-                        &region_sel.boundary_vertex_map,
-                        &region_sel.boundary_edge_map,
-                    );
-
-                    // Clean up invisible edges left from the boundary
-                    graph.gc_invisible_edges();
+        // Select the inside sub-pieces from the now-current (post-cut) graph. The fill/edge
+        // ids are stable because the committed graph is exactly `graph_after`.
+        if let Some(AnyLayer::Vector(vl)) = shared.action_executor.document().get_layer(&layer_id) {
+            if let Some(graph) = vl.graph_at_time(time) {
+                for fid in &inside_fills {
+                    shared.selection.select_fill(*fid, graph);
+                }
+                for eid in &inside_edges {
+                    shared.selection.select_edge(*eid, graph);
                 }
             }
         }
 
-        shared.selection.clear_geometry_selection();
+        if shared.selection.has_geometry_selection() {
+            *shared.focus =
+                lightningbeam_core::selection::FocusSelection::Geometry { layer_id, time };
+        }
+
+        #[cfg(debug_assertions)]
+        shared.test_mode.clear_pending_geometry();
     }
 
     /// Create a rectangle path centered at origin (easier for curve editing later)
@@ -5573,15 +5729,8 @@ impl StagePane {
                 (doc.width as u32, doc.height as u32)
             };
 
-            // Ensure the keyframe exists before reading its ID.
-            {
-                let doc = shared.action_executor.document_mut();
-                if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
-                    rl.ensure_keyframe_at(time, doc_w, doc_h);
-                } else {
-                    return None; // not a raster layer
-                }
-            }
+            // Don't create a keyframe — explicit "New Keyframe" only. The read below
+            // returns None (no workspace) if there's no active keyframe to lift from.
 
             // Read keyframe id and pixels.
             let (kf_id, w, h, pixels) = {
@@ -5804,6 +5953,9 @@ impl StagePane {
                     kf.raw_pixels[si..si + 4].fill(0);
                 }
             }
+            // Punching the hole edits raw_pixels but is NOT committed through an
+            // action yet — mark dirty so eviction can't drop the un-persisted hole.
+            kf.dirty = true;
         }
 
         // Re-set selection (commit_raster_floating_now cleared it) and create float.
@@ -6012,21 +6164,12 @@ impl StagePane {
                     (doc.width as u32, doc.height as u32)
                 };
 
-                // Ensure the keyframe exists BEFORE reading its ID, so we always get
-                // the real UUID.  Previously we read the ID first and fell back to a
-                // randomly-generated UUID when no keyframe existed; that fake UUID was
-                // stored in painting_canvas but subsequent drag frames used the real UUID
-                // from keyframe_at(), causing the GPU canvas to be a different object from
-                // the one being composited.
-                {
-                    let doc = shared.action_executor.document_mut();
-                    if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&active_layer_id) {
-                        rl.ensure_keyframe_at(*shared.playback_time, doc_width, doc_height);
-                    }
-                }
-
-                // Now read the guaranteed-to-exist keyframe to get the real UUID.
-                let (keyframe_id, canvas_width, canvas_height, buffer_before, initial_pixels) = {
+                // Paint into the ACTIVE keyframe (the one at-or-before the playhead) —
+                // do NOT create one. Keyframes are made explicitly via "New Keyframe"
+                // (a new layer already seeds one). If none exists at-or-before the
+                // playhead, there's nothing to paint into; bail.
+                let _ = (doc_width, doc_height);
+                let (keyframe_id, kf_time, canvas_width, canvas_height, buffer_before, initial_pixels) = {
                     let doc = shared.action_executor.document();
                     if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&active_layer_id) {
                         if let Some(kf) = rl.keyframe_at(*shared.playback_time) {
@@ -6036,9 +6179,9 @@ impl StagePane {
                             } else {
                                 raw.clone()
                             };
-                            (kf.id, kf.width, kf.height, raw, init)
+                            (kf.id, kf.time, kf.width, kf.height, raw, init)
                         } else {
-                            return; // shouldn't happen after ensure_keyframe_at
+                            return; // no keyframe at/before the playhead — nothing to paint
                         }
                     } else {
                         return;
@@ -6070,7 +6213,7 @@ impl StagePane {
                 self.painting_canvas = Some((active_layer_id, keyframe_id));
                 self.pending_undo_before = Some((
                     active_layer_id,
-                    *shared.playback_time,
+                    kf_time,
                     canvas_width,
                     canvas_height,
                     buffer_before,
@@ -6078,7 +6221,7 @@ impl StagePane {
                 self.pending_raster_dabs = Some(PendingRasterDabs {
                     keyframe_id,
                     layer_id: active_layer_id,
-                    time: *shared.playback_time,
+                    time: kf_time,
                     canvas_width,
                     canvas_height,
                     initial_pixels: Some(initial_pixels),
@@ -6088,7 +6231,7 @@ impl StagePane {
                 });
                 self.raster_stroke_state = Some((
                     active_layer_id,
-                    *shared.playback_time,
+                    kf_time,
                     stroke_state,
                     Vec::new(), // buffer_before now lives in pending_undo_before
                 ));
@@ -6314,17 +6457,13 @@ impl StagePane {
 
         let time = *shared.playback_time;
         // Canvas dimensions (to create keyframe if needed).
-        let (doc_w, doc_h) = {
+        let (_doc_w, _doc_h) = {
             let doc = shared.action_executor.document();
             (doc.width as u32, doc.height as u32)
         };
         // Ensure a keyframe exists at the current time.
-        {
-            let doc = shared.action_executor.document_mut();
-            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
-                rl.ensure_keyframe_at(time, doc_w, doc_h);
-            }
-        }
+        // Don't create a keyframe — keyframes are made explicitly via "New Keyframe".
+        // The snapshot below edits the active keyframe and bails if none exists.
         // Snapshot the pixel buffer before drawing.
         let (buffer_before, w, h) = {
             let doc = shared.action_executor.document();
@@ -6667,16 +6806,12 @@ impl StagePane {
         let time = *shared.playback_time;
 
         // Ensure a keyframe exists at the current time.
-        let (doc_w, doc_h) = {
+        let (_doc_w, _doc_h) = {
             let doc = shared.action_executor.document();
             (doc.width as u32, doc.height as u32)
         };
-        {
-            let doc = shared.action_executor.document_mut();
-            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
-                rl.ensure_keyframe_at(time, doc_w, doc_h);
-            }
-        }
+        // Don't create a keyframe — keyframes are made explicitly via "New Keyframe".
+        // The snapshot below edits the active keyframe and bails if none exists.
 
         // Snapshot current pixels.
         let (buffer_before, width, height) = {
@@ -6748,16 +6883,12 @@ impl StagePane {
         let time = *shared.playback_time;
 
         // Ensure keyframe exists.
-        let (doc_w, doc_h) = {
+        let (_doc_w, _doc_h) = {
             let doc = shared.action_executor.document();
             (doc.width as u32, doc.height as u32)
         };
-        {
-            let doc = shared.action_executor.document_mut();
-            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
-                rl.ensure_keyframe_at(time, doc_w, doc_h);
-            }
-        }
+        // Don't create a keyframe — keyframes are made explicitly via "New Keyframe".
+        // The snapshot below edits the active keyframe and bails if none exists.
 
         let (pixels, width, height) = {
             let doc = shared.action_executor.document();
@@ -6834,16 +6965,11 @@ impl StagePane {
             Self::commit_raster_floating_now(shared);
 
             // Ensure the keyframe exists.
-            let (doc_w, doc_h) = {
+            let (_doc_w, _doc_h) = {
                 let doc = shared.action_executor.document();
                 (doc.width as u32, doc.height as u32)
             };
-            {
-                let doc = shared.action_executor.document_mut();
-                if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
-                    rl.ensure_keyframe_at(time, doc_w, doc_h);
-                }
-            }
+            // Don't create a keyframe — explicit "New Keyframe" only; bail below if none.
 
             // Snapshot canvas pixels.
             let (pixels, width, height) = {
@@ -9325,6 +9451,20 @@ impl StagePane {
             return;
         }
 
+        // Block transforming a clip instance that's mid motion-tween (on an in-between
+        // frame) — it would silently insert a keyframe and disturb the tween.
+        if is_vector_layer {
+            let locked = match shared.action_executor.document().get_layer(&active_layer_id) {
+                Some(AnyLayer::Vector(vl)) => shared.selection.clip_instances().iter().any(|id| {
+                    vl.layer.animation_data.is_object_tweened_at(*id, *shared.playback_time)
+                }),
+                _ => false,
+            };
+            if locked {
+                return;
+            }
+        }
+
         let point = Point::new(world_pos.x as f64, world_pos.y as f64);
 
         // For video layers, transform the visible clip at playback time (no selection needed)
@@ -10583,6 +10723,17 @@ impl StagePane {
         if !alt_held {
             use lightningbeam_core::tool::Tool;
 
+            // On a shape-tween in-between frame the active vector layer's geometry is an
+            // interpolated preview, not a real keyframe — lock out the editing tools.
+            let vector_inbetween = shared.active_layer_id.and_then(|id| {
+                match shared.action_executor.document().get_layer(&id) {
+                    Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => {
+                        Some(vl.is_tween_inbetween(*shared.playback_time))
+                    }
+                    _ => None,
+                }
+            }).unwrap_or(false);
+
             match *shared.selected_tool {
                 Tool::Select => {
                     let is_raster = shared.active_layer_id.and_then(|id| {
@@ -10594,13 +10745,13 @@ impl StagePane {
                         self.handle_select_tool(ui, &response, world_pos, shift_held, shared);
                     }
                 }
-                Tool::BezierEdit => {
+                Tool::BezierEdit if !vector_inbetween => {
                     self.handle_bezier_edit_tool(ui, &response, world_pos, shift_held, shared);
                 }
-                Tool::Rectangle => {
+                Tool::Rectangle if !vector_inbetween => {
                     self.handle_rectangle_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
-                Tool::Ellipse => {
+                Tool::Ellipse if !vector_inbetween => {
                     self.handle_ellipse_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
                 Tool::Draw => {
@@ -10610,7 +10761,7 @@ impl StagePane {
                     }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
                     if is_raster {
                         self.handle_unified_raster_stroke_tool(ui, &response, world_pos, &crate::tools::paint::PAINT, shared);
-                    } else {
+                    } else if !vector_inbetween {
                         self.handle_draw_tool(ui, &response, world_pos, shared);
                     }
                 }
@@ -10630,20 +10781,20 @@ impl StagePane {
                 Tool::Transform => {
                     self.handle_transform_tool(ui, &response, world_pos, shared);
                 }
-                Tool::PaintBucket => {
+                Tool::PaintBucket if !vector_inbetween => {
                     self.handle_paint_bucket_tool(&response, world_pos, shared);
                 }
-                Tool::Line => {
+                Tool::Line if !vector_inbetween => {
                     self.handle_line_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
-                Tool::Polygon => {
+                Tool::Polygon if !vector_inbetween => {
                     self.handle_polygon_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
                 Tool::Eyedropper => {
                     self.handle_eyedropper_tool(ui, &response, mouse_pos, shared);
                 }
-                Tool::RegionSelect => {
-                    self.handle_region_select_tool(ui, &response, world_pos, shared);
+                Tool::RegionSelect if !vector_inbetween => {
+                    self.handle_region_select_tool(ui, &response, world_pos, shift_held, shared);
                 }
                 Tool::Warp => {
                     self.handle_raster_warp_tool(ui, &response, world_pos, shared);
@@ -11571,9 +11722,18 @@ impl PaneRenderer for StagePane {
                         if let Some(layer_id) = target_layer_id {
                             // For images, create a shape with image fill instead of a clip instance
                             if dragging.clip_type == DragClipType::Image {
-                                // TODO: Image fills on DCEL faces are a separate feature.
-                                let _ = (layer_id, world_pos);
-                                eprintln!("Image drag to stage not yet supported with DCEL backend");
+                                // Image-filled rectangle at the drop point (centered), native size.
+                                let dims = shared.action_executor.document()
+                                    .get_image_asset(&dragging.clip_id)
+                                    .map(|a| (a.width as f64, a.height as f64));
+                                if let Some((img_w, img_h)) = dims {
+                                    let x = world_pos.x as f64 - img_w / 2.0;
+                                    let y = world_pos.y as f64 - img_h / 2.0;
+                                    let action = lightningbeam_core::actions::AddShapeAction::image_rect(
+                                        layer_id, drop_time, x, y, img_w, img_h, dragging.clip_id,
+                                    );
+                                    let _ = shared.action_executor.execute(Box::new(action));
+                                }
                             } else if dragging.clip_type == DragClipType::Effect {
                                 // Handle effect drops specially
                                 // Get effect definition from registry or document
@@ -11854,6 +12014,9 @@ impl PaneRenderer for StagePane {
             instance_id: self.instance_id,
             document: shared.action_executor.document_arc(),
             tool_state: shared.tool_state.clone(),
+            onion: shared.onion,
+            container_path: shared.container_path.clone(),
+            is_playing: *shared.is_playing,
             active_layer_id: *shared.active_layer_id,
             drag_delta,
             selection: shared.selection.clone(),
@@ -11869,7 +12032,6 @@ impl PaneRenderer for StagePane {
             editing_clip_id: shared.editing_clip_id,
             editing_instance_id: shared.editing_instance_id,
             editing_parent_layer_id: shared.editing_parent_layer_id,
-            region_selection: shared.region_selection.clone(),
             mouse_world_pos,
             webcam_frame: shared.webcam_frame.clone(),
             pending_raster_dabs: self.pending_raster_dabs.take(),
@@ -11900,6 +12062,7 @@ impl PaneRenderer for StagePane {
                 .and_then(|(tool, _)| tool.take_pending_gpu_work()),
             pending_layer_cache_removals: std::mem::take(&mut self.pending_layer_cache_removals),
             pending_tool_readback_b: self.pending_tool_readback_b.take(),
+            raster_fault_requests: std::sync::Arc::clone(shared.raster_fault_requests),
         }};
 
         let cb = egui_wgpu::Callback::new_paint_callback(

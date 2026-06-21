@@ -14,7 +14,7 @@ pub mod yuv_converter;
 
 // Re-export commonly used types
 pub use buffer_pool::{BufferHandle, BufferPool, BufferSpec, BufferFormat};
-pub use color_convert::SrgbToLinearConverter;
+pub use color_convert::{SrgbToLinearConverter, COLOR_WGSL, srgb_to_linear, linear_to_srgb};
 pub use compositor::{Compositor, CompositorLayer, BlendMode};
 pub use effect_processor::{EffectProcessor, EffectUniforms};
 pub use yuv_converter::YuvConverter;

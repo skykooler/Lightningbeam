@@ -8,7 +8,7 @@
 //! | **B** | Write-only | Output / display. Compositor shows B while the tool is active. |
 //! | **C** | Read+Write | Scratch. Dabs accumulate here across the stroke; composite A+C→B each frame. |
 //!
-//! All three are `Rgba8Unorm` with the same pixel dimensions.  The framework
+//! All three are `Rgba16Float` with the same pixel dimensions.  The framework
 //! allocates and validates them in [`begin_raster_workspace`]; tools only
 //! dispatch shaders.
 
@@ -45,11 +45,11 @@ pub enum WorkspaceSource {
 /// commit or cancel.
 #[derive(Debug)]
 pub struct RasterWorkspace {
-    /// A canvas (Rgba8Unorm) — source pixels, uploaded at mousedown, read-only for tools.
+    /// A canvas (Rgba16Float) — source pixels, uploaded at mousedown, read-only for tools.
     pub a_canvas_id: Uuid,
-    /// B canvas (Rgba8Unorm) — output / display; compositor shows this while active.
+    /// B canvas (Rgba16Float) — output / display; compositor shows this while active.
     pub b_canvas_id: Uuid,
-    /// C canvas (Rgba8Unorm) — scratch; tools accumulate dabs here across the stroke.
+    /// C canvas (Rgba16Float) — scratch; tools accumulate dabs here across the stroke.
     pub c_canvas_id: Uuid,
     /// Optional R8Unorm selection mask (same pixel dimensions as A/B/C).
     /// `None` means the entire workspace is selected.

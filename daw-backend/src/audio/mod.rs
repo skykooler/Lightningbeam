@@ -15,10 +15,12 @@ pub mod recording;
 pub mod sample_loader;
 pub mod track;
 pub mod waveform_cache;
+pub mod waveform_pyramid;
 
 pub use automation::{AutomationLane, AutomationLaneId, AutomationPoint, CurveType, ParameterId};
 pub use buffer_pool::BufferPool;
 pub use clip::{AudioClipInstance, AudioClipInstanceId, Clip, ClipId};
+pub use disk_reader::{AudioBlobSourceFactory, MediaByteSource};
 pub use engine::{AudioClipSnapshot, Engine, EngineController};
 pub use export::{export_audio, ExportFormat, ExportSettings};
 pub use metronome::Metronome;

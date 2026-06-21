@@ -67,5 +67,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let mask = textureSample(mask_tex, mask_sampler, canvas_uv).r;
     let masked_a = c.a * mask;
     let inv_a = select(0.0, 1.0 / c.a, c.a > 1e-6);
-    return vec4<f32>(c.r * inv_a, c.g * inv_a, c.b * inv_a, masked_a);
+    // RGB tint packed into the matrix uniform's unused .w slots ((0,0,0) = no tint).
+    // Screen-blended so it recolors blacks too (outlines → warm/cool ghosts) and
+    // leaves white alone: out = base + tint - base*tint. Used by onion-skin ghosts.
+    let tint = vec3<f32>(transform.col0.w, transform.col1.w, transform.col2.w);
+    let base = vec3<f32>(c.r * inv_a, c.g * inv_a, c.b * inv_a);
+    let tinted = base + tint - base * tint;
+    return vec4<f32>(tinted, masked_a);
 }

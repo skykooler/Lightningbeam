@@ -92,6 +92,16 @@ impl Default for TweenType {
     }
 }
 
+/// A low-res decoded RGBA proxy of a keyframe's pixels, shown while the full-res
+/// buffer pages in from the container so cold scrubs don't flash blank.
+#[derive(Clone, Debug)]
+pub struct RasterProxy {
+    pub width: u32,
+    pub height: u32,
+    /// RGBA, `width * height * 4` bytes.
+    pub pixels: Vec<u8>,
+}
+
 /// A single keyframe of a raster layer
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RasterKeyframe {
@@ -117,6 +127,24 @@ pub struct RasterKeyframe {
     /// Always `true` after load; cleared by the renderer after uploading.
     #[serde(skip, default = "default_true")]
     pub texture_dirty: bool,
+    /// Phase 3 paging: the keyframe's pixels live in the container and must be
+    /// faulted in (`raw_pixels` empty *and* this true ⇒ page in from the store).
+    /// A *new* keyframe is `false` (intentionally blank/resident, nothing to load);
+    /// set true on load and again when evicted. Never serialized.
+    #[serde(skip)]
+    pub needs_fault_in: bool,
+    /// Phase 3a eviction: set `true` whenever user editing mutates `raw_pixels`
+    /// (brush, fill, paint-bucket, floating-selection commit/lift, undo/redo of
+    /// those). A dirty keyframe's current pixels are NOT yet persisted in the
+    /// container, so it must NEVER be evicted (doing so would silently lose the
+    /// unsaved edit). Cleared on a successful save. Never serialized.
+    #[serde(skip)]
+    pub dirty: bool,
+    /// Phase 3a-3: low-res proxy decoded from the container on load, rendered while
+    /// the full pixels page in (removes the cold-scrub blank flash). `None` if the
+    /// keyframe has no persisted proxy yet (new/unsaved, or pre-proxy project).
+    #[serde(skip)]
+    pub proxy: Option<RasterProxy>,
 }
 
 fn default_true() -> bool { true }
@@ -140,6 +168,9 @@ impl RasterKeyframe {
             tween_after: TweenType::Hold,
             raw_pixels: Vec::new(),
             texture_dirty: true,
+            needs_fault_in: false,
+            dirty: false,
+            proxy: None,
         }
     }
 }
@@ -202,6 +233,35 @@ impl RasterLayer {
         let insert_idx = self.keyframes.partition_point(|kf| kf.time < time);
         self.keyframes.insert(insert_idx, RasterKeyframe::new(time, w, h));
         &mut self.keyframes[insert_idx]
+    }
+
+    /// Insert a blank keyframe at `time` if none exists there (within tolerance).
+    /// Returns the new keyframe's id if one was created, `None` if a keyframe already
+    /// existed. Used by the explicit "New Keyframe" command (blank cel).
+    pub fn insert_blank_keyframe_at(&mut self, time: f64, width: u32, height: u32) -> Option<Uuid> {
+        if self.keyframe_index_at_exact(time, 0.001).is_some() {
+            return None;
+        }
+        let (w, h) = if width == 0 || height == 0 {
+            self.keyframe_at(time)
+                .map(|kf| (kf.width, kf.height))
+                .unwrap_or((1920, 1080))
+        } else {
+            (width, height)
+        };
+        let insert_idx = self.keyframes.partition_point(|kf| kf.time < time);
+        let kf = RasterKeyframe::new(time, w, h);
+        let id = kf.id;
+        self.keyframes.insert(insert_idx, kf);
+        Some(id)
+    }
+
+    /// Remove the keyframe with the given id, returning it if found.
+    pub fn remove_keyframe(&mut self, id: Uuid) -> Option<RasterKeyframe> {
+        self.keyframes
+            .iter()
+            .position(|kf| kf.id == id)
+            .map(|pos| self.keyframes.remove(pos))
     }
 
     /// Return the ZIP-relative PNG path for the active keyframe at `time`, or `None`.

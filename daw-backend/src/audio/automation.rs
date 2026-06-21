@@ -189,22 +189,22 @@ mod tests {
     fn test_add_points_sorted() {
         let mut lane = AutomationLane::new(0, ParameterId::TrackVolume);
 
-        lane.add_point(AutomationPoint::new(2.0, 0.5, CurveType::Linear));
-        lane.add_point(AutomationPoint::new(1.0, 0.3, CurveType::Linear));
-        lane.add_point(AutomationPoint::new(3.0, 0.8, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(2.0), 0.5, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(1.0), 0.3, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(3.0), 0.8, CurveType::Linear));
 
         assert_eq!(lane.points().len(), 3);
-        assert_eq!(lane.points()[0].time, 1.0);
-        assert_eq!(lane.points()[1].time, 2.0);
-        assert_eq!(lane.points()[2].time, 3.0);
+        assert_eq!(lane.points()[0].time, Beats(1.0));
+        assert_eq!(lane.points()[1].time, Beats(2.0));
+        assert_eq!(lane.points()[2].time, Beats(3.0));
     }
 
     #[test]
     fn test_replace_point_at_same_time() {
         let mut lane = AutomationLane::new(0, ParameterId::TrackVolume);
 
-        lane.add_point(AutomationPoint::new(1.0, 0.3, CurveType::Linear));
-        lane.add_point(AutomationPoint::new(1.0, 0.5, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(1.0), 0.3, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(1.0), 0.5, CurveType::Linear));
 
         assert_eq!(lane.points().len(), 1);
         assert_eq!(lane.points()[0].value, 0.5);
@@ -214,59 +214,59 @@ mod tests {
     fn test_linear_interpolation() {
         let mut lane = AutomationLane::new(0, ParameterId::TrackVolume);
 
-        lane.add_point(AutomationPoint::new(0.0, 0.0, CurveType::Linear));
-        lane.add_point(AutomationPoint::new(1.0, 1.0, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(0.0), 0.0, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(1.0), 1.0, CurveType::Linear));
 
-        assert_eq!(lane.evaluate(0.0), Some(0.0));
-        assert_eq!(lane.evaluate(0.5), Some(0.5));
-        assert_eq!(lane.evaluate(1.0), Some(1.0));
+        assert_eq!(lane.evaluate(Beats(0.0)), Some(0.0));
+        assert_eq!(lane.evaluate(Beats(0.5)), Some(0.5));
+        assert_eq!(lane.evaluate(Beats(1.0)), Some(1.0));
     }
 
     #[test]
     fn test_step_interpolation() {
         let mut lane = AutomationLane::new(0, ParameterId::TrackVolume);
 
-        lane.add_point(AutomationPoint::new(0.0, 0.5, CurveType::Step));
-        lane.add_point(AutomationPoint::new(1.0, 1.0, CurveType::Step));
+        lane.add_point(AutomationPoint::new(Beats(0.0), 0.5, CurveType::Step));
+        lane.add_point(AutomationPoint::new(Beats(1.0), 1.0, CurveType::Step));
 
-        assert_eq!(lane.evaluate(0.0), Some(0.5));
-        assert_eq!(lane.evaluate(0.5), Some(0.5));
-        assert_eq!(lane.evaluate(0.99), Some(0.5));
-        assert_eq!(lane.evaluate(1.0), Some(1.0));
+        assert_eq!(lane.evaluate(Beats(0.0)), Some(0.5));
+        assert_eq!(lane.evaluate(Beats(0.5)), Some(0.5));
+        assert_eq!(lane.evaluate(Beats(0.99)), Some(0.5));
+        assert_eq!(lane.evaluate(Beats(1.0)), Some(1.0));
     }
 
     #[test]
     fn test_evaluate_outside_range() {
         let mut lane = AutomationLane::new(0, ParameterId::TrackVolume);
 
-        lane.add_point(AutomationPoint::new(1.0, 0.5, CurveType::Linear));
-        lane.add_point(AutomationPoint::new(2.0, 1.0, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(1.0), 0.5, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(2.0), 1.0, CurveType::Linear));
 
         // Before first point
-        assert_eq!(lane.evaluate(0.0), Some(0.5));
+        assert_eq!(lane.evaluate(Beats(0.0)), Some(0.5));
         // After last point
-        assert_eq!(lane.evaluate(3.0), Some(1.0));
+        assert_eq!(lane.evaluate(Beats(3.0)), Some(1.0));
     }
 
     #[test]
     fn test_disabled_lane() {
         let mut lane = AutomationLane::new(0, ParameterId::TrackVolume);
 
-        lane.add_point(AutomationPoint::new(0.0, 0.5, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(0.0), 0.5, CurveType::Linear));
         lane.enabled = false;
 
-        assert_eq!(lane.evaluate(0.0), None);
+        assert_eq!(lane.evaluate(Beats(0.0)), None);
     }
 
     #[test]
     fn test_remove_point() {
         let mut lane = AutomationLane::new(0, ParameterId::TrackVolume);
 
-        lane.add_point(AutomationPoint::new(1.0, 0.5, CurveType::Linear));
-        lane.add_point(AutomationPoint::new(2.0, 0.8, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(1.0), 0.5, CurveType::Linear));
+        lane.add_point(AutomationPoint::new(Beats(2.0), 0.8, CurveType::Linear));
 
-        assert!(lane.remove_point_at_time(1.0, 0.001));
+        assert!(lane.remove_point_at_time(Beats(1.0), Beats(0.001)));
         assert_eq!(lane.points().len(), 1);
-        assert_eq!(lane.points()[0].time, 2.0);
+        assert_eq!(lane.points()[0].time, Beats(2.0));
     }
 }

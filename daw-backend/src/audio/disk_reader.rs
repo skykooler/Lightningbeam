@@ -307,23 +307,96 @@ impl ReadAheadBuffer {
 // ---------------------------------------------------------------------------
 
 /// Wraps a Symphonia decoder for streaming a single compressed audio file.
-struct CompressedReader {
+///
+/// Public (like [`VideoAudioReader`]) only so integration tests can exercise it
+/// directly; treat it as crate-internal.
+pub struct CompressedReader {
     format_reader: Box<dyn symphonia::core::formats::FormatReader>,
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     track_id: u32,
     /// Current decoder position in frames.
     current_frame: u64,
+    /// Frames still to drop from the front of decoded output, so that after a
+    /// (coarse) seek the next emitted sample lands exactly on the target frame.
+    pending_discard: u64,
     sample_rate: u32,
     channels: u32,
-    #[allow(dead_code)]
     total_frames: u64,
     /// Temporary decode buffer.
     sample_buf: Option<SampleBuffer<f32>>,
 }
 
+/// A seekable byte stream for packed media held in the host's project container.
+///
+/// `daw-backend` stays container-agnostic: it never references the `.beam` SQLite
+/// store directly. Instead the host (lightningbeam-core) implements this trait over
+/// its incremental blob reader and installs a factory ([`AudioBlobSourceFactory`])
+/// into the engine, so packed compressed audio can be stream-decoded without ever
+/// being fully loaded into RAM.
+pub trait MediaByteSource: std::io::Read + std::io::Seek + Send + Sync {
+    /// Total length of the stream in bytes (Symphonia needs this for seeking).
+    fn byte_len(&self) -> u64;
+}
+
+/// Opens fresh byte streams for packed media by id. Installed into the engine by
+/// the host; invoked when activating a clip backed by container-packed audio.
+/// (`Debug` so it can ride in the `Query` enum, which derives `Debug`.)
+pub trait AudioBlobSourceFactory: Send + Sync + std::fmt::Debug {
+    /// Open a new independent reader for the packed media item `media_id`
+    /// (the UUID string stored on the audio pool entry).
+    fn open(&self, media_id: &str) -> Result<Box<dyn MediaByteSource>, String>;
+}
+
+/// Adapts a [`MediaByteSource`] to Symphonia's `MediaSource` (adds the seekable +
+/// byte-length metadata Symphonia's probe/seek require).
+struct SymphoniaByteSource(Box<dyn MediaByteSource>);
+
+impl std::io::Read for SymphoniaByteSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+impl std::io::Seek for SymphoniaByteSource {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+impl symphonia::core::io::MediaSource for SymphoniaByteSource {
+    fn is_seekable(&self) -> bool {
+        true
+    }
+    fn byte_len(&self) -> Option<u64> {
+        Some(self.0.byte_len())
+    }
+}
+
+/// How to open a streaming audio source: a filesystem path (referenced media or a
+/// video file) or a host-provided byte stream (container-packed media).
+pub enum StreamOpen {
+    Path(PathBuf),
+    Source {
+        src: Box<dyn MediaByteSource>,
+        /// Codec/extension hint for the Symphonia probe (e.g. `"mp3"`, `"flac"`).
+        ext: Option<String>,
+    },
+}
+
 impl CompressedReader {
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> u32 {
+        self.channels
+    }
+
+    /// Total frames from the codec header (0 if the format doesn't report it).
+    pub fn total_frames(&self) -> u64 {
+        self.total_frames
+    }
+
     /// Open a compressed audio file and prepare for streaming decode.
-    fn open(path: &Path) -> Result<Self, String> {
+    pub fn open(path: &Path) -> Result<Self, String> {
         let file =
             std::fs::File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -332,7 +405,21 @@ impl CompressedReader {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
         }
+        Self::from_mss(mss, hint)
+    }
 
+    /// Open a compressed stream from a host-provided byte source (packed media).
+    pub fn open_source(src: Box<dyn MediaByteSource>, ext: Option<&str>) -> Result<Self, String> {
+        let mss = MediaSourceStream::new(Box::new(SymphoniaByteSource(src)), Default::default());
+        let mut hint = Hint::new();
+        if let Some(ext) = ext {
+            hint.with_extension(ext);
+        }
+        Self::from_mss(mss, hint)
+    }
+
+    /// Shared probe + decoder setup over an already-built media stream.
+    fn from_mss(mss: MediaSourceStream, hint: Hint) -> Result<Self, String> {
         let probed = symphonia::default::get_probe()
             .format(
                 &hint,
@@ -368,6 +455,7 @@ impl CompressedReader {
             decoder,
             track_id,
             current_frame: 0,
+            pending_discard: 0,
             sample_rate,
             channels,
             total_frames,
@@ -375,9 +463,17 @@ impl CompressedReader {
         })
     }
 
-    /// Seek to a specific frame. Returns the actual frame reached (may differ
-    /// for compressed formats that can only seek to keyframes).
-    fn seek(&mut self, target_frame: u64) -> Result<u64, String> {
+    /// Seek to `target_frame`, **sample-accurately**. Uses `SeekMode::Accurate`:
+    /// for an elementary stream like MP3 a *coarse* seek byte-estimates the
+    /// position and seeds the timestamp from that estimate — which for VBR (or a
+    /// file whose header padding the estimate ignores) lands off by up to ~1s.
+    /// Accurate mode instead counts frame *headers* (no decode) from a true anchor
+    /// (the current position, or a rewind to the start for backward seeks), so the
+    /// returned `actual_ts` is exact; the small residual to `target_frame` is then
+    /// dropped in `decode_next`. Container formats with seek tables (FLAC/OGG) seek
+    /// cheaply; a long MP3 walks headers from the anchor (I/O, not decode) — a
+    /// per-file seek index would make that O(1) (future work).
+    pub fn seek(&mut self, target_frame: u64) -> Result<u64, String> {
         let seek_to = SeekTo::TimeStamp {
             ts: target_frame,
             track_id: self.track_id,
@@ -385,21 +481,23 @@ impl CompressedReader {
 
         let seeked = self
             .format_reader
-            .seek(SeekMode::Coarse, seek_to)
+            .seek(SeekMode::Accurate, seek_to)
             .map_err(|e| format!("Seek failed: {}", e))?;
 
         let actual_frame = seeked.actual_ts;
         self.current_frame = actual_frame;
+        // Drop the frames between where the coarse seek landed and the target.
+        self.pending_discard = target_frame.saturating_sub(actual_frame);
 
         // Reset the decoder after seeking.
         self.decoder.reset();
 
-        Ok(actual_frame)
+        Ok(target_frame)
     }
 
     /// Decode the next chunk of audio into `out`. Returns the number of frames
     /// decoded. Returns `Ok(0)` at end-of-file.
-    fn decode_next(&mut self, out: &mut Vec<f32>) -> Result<usize, String> {
+    pub fn decode_next(&mut self, out: &mut Vec<f32>) -> Result<usize, String> {
         out.clear();
 
         loop {
@@ -428,10 +526,22 @@ impl CompressedReader {
                     if let Some(ref mut buf) = self.sample_buf {
                         buf.copy_interleaved_ref(decoded);
                         let samples = buf.samples();
-                        out.extend_from_slice(samples);
-                        let frames = samples.len() / self.channels as usize;
-                        self.current_frame += frames as u64;
-                        return Ok(frames);
+                        let ch = self.channels as usize;
+                        let frames = samples.len() / ch;
+
+                        // Drop leading frames for sample-accurate seek alignment.
+                        let discard = self.pending_discard.min(frames as u64) as usize;
+                        self.pending_discard -= discard as u64;
+                        out.extend_from_slice(&samples[discard * ch..]);
+                        let emitted = frames - discard;
+                        self.current_frame += emitted as u64;
+
+                        if emitted > 0 {
+                            return Ok(emitted);
+                        }
+                        // Whole packet discarded for alignment — keep decoding so
+                        // we never falsely report EOF (Ok(0)).
+                        continue;
                     }
 
                     return Ok(0);
@@ -446,15 +556,382 @@ impl CompressedReader {
 }
 
 // ---------------------------------------------------------------------------
+// VideoAudioReader
+// ---------------------------------------------------------------------------
+
+/// Streams the audio track out of a media file (a video container, or any audio
+/// file) using FFmpeg, decoding on demand. Mirrors [`CompressedReader`]'s
+/// interface so the disk reader can drive either through [`StreamSource`].
+///
+/// Seeking is **sample-accurate**: after `seek(target)`, the next `decode_next`
+/// yields samples beginning at exactly `target`. FFmpeg's container seek only
+/// lands at-or-before the target, so we decode forward and discard the leading
+/// samples to hit the frame precisely — this keeps video audio frame-synced with
+/// other (mmap/in-memory) clips.
+///
+/// Public (vs. the private `CompressedReader`) only so integration tests can
+/// exercise it directly; treat it as crate-internal.
+pub struct VideoAudioReader {
+    input: ffmpeg_next::format::context::Input,
+    decoder: ffmpeg_next::decoder::Audio,
+    /// Built lazily from the first decoded frame's format/layout → interleaved f32.
+    resampler: Option<ffmpeg_next::software::resampling::Context>,
+    stream_index: usize,
+    /// Seconds per stream-timestamp unit.
+    time_base: f64,
+    sample_rate: u32,
+    channels: u32,
+    total_frames: u64,
+    /// Absolute frame index of the next sample `decode_next` will output.
+    current_frame: u64,
+    /// Frames still to drop from the front of decoded output (seek alignment).
+    pending_discard: u64,
+    /// When set, the next decoded frame establishes the discard needed to land on
+    /// this absolute target frame (sample-accurate seek).
+    align_to: Option<u64>,
+}
+
+impl VideoAudioReader {
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    pub fn channels(&self) -> u32 {
+        self.channels
+    }
+
+    /// Estimated total audio frames (from the stream/container duration).
+    pub fn total_frames(&self) -> u64 {
+        self.total_frames
+    }
+
+    pub fn open(path: &Path) -> Result<Self, String> {
+        ffmpeg_next::init().map_err(|e| e.to_string())?;
+        let input = ffmpeg_next::format::input(&path)
+            .map_err(|e| format!("Failed to open media: {}", e))?;
+
+        // Pull stream scalars + build the decoder inside a scope so the stream
+        // borrow of `input` ends before we use `input` again.
+        let (stream_index, time_base, stream_duration, decoder) = {
+            let stream = input
+                .streams()
+                .best(ffmpeg_next::media::Type::Audio)
+                .ok_or_else(|| "No audio stream found".to_string())?;
+            let stream_index = stream.index();
+            let time_base = f64::from(stream.time_base());
+            let stream_duration = stream.duration();
+            let ctx = ffmpeg_next::codec::context::Context::from_parameters(stream.parameters())
+                .map_err(|e| e.to_string())?;
+            let decoder = ctx.decoder().audio().map_err(|e| e.to_string())?;
+            (stream_index, time_base, stream_duration, decoder)
+        };
+
+        let sample_rate = decoder.rate();
+        let channels = decoder.channels() as u32;
+
+        let duration_secs = if stream_duration > 0 {
+            stream_duration as f64 * time_base
+        } else if input.duration() > 0 {
+            input.duration() as f64 / f64::from(ffmpeg_next::ffi::AV_TIME_BASE)
+        } else {
+            0.0
+        };
+        let total_frames = (duration_secs * sample_rate as f64).max(0.0) as u64;
+
+        Ok(Self {
+            input,
+            decoder,
+            resampler: None,
+            stream_index,
+            time_base,
+            sample_rate,
+            channels,
+            total_frames,
+            current_frame: 0,
+            pending_discard: 0,
+            align_to: None,
+        })
+    }
+
+    pub fn seek(&mut self, target_frame: u64) -> Result<u64, String> {
+        let seconds = target_frame as f64 / self.sample_rate.max(1) as f64;
+        let ts_av = (seconds * f64::from(ffmpeg_next::ffi::AV_TIME_BASE)) as i64;
+        // Seek to at-or-before the target (max_ts = ts_av) so we can decode
+        // forward to it exactly. ffmpeg-next's `seek` wants a bounded range.
+        self.input
+            .seek(ts_av, 0..(ts_av + 1))
+            .map_err(|e| format!("Seek failed: {}", e))?;
+        self.decoder.flush();
+        self.pending_discard = 0;
+        self.align_to = Some(target_frame);
+        self.current_frame = target_frame;
+        // We align to the exact frame below, so the effective position IS target.
+        Ok(target_frame)
+    }
+
+    pub fn decode_next(&mut self, out: &mut Vec<f32>) -> Result<usize, String> {
+        out.clear();
+        loop {
+            // Drain a decoded frame if one is ready.
+            let mut decoded = ffmpeg_next::frame::Audio::empty();
+            if self.decoder.receive_frame(&mut decoded).is_ok() {
+                self.ensure_layout(&mut decoded);
+                let n = self.emit(&decoded, out);
+                if n > 0 {
+                    return Ok(n);
+                }
+                continue; // frame fully discarded by seek-alignment; keep going
+            }
+
+            // Read one packet (owned), releasing the `input` borrow before decoding.
+            let packet = self.input.packets().next().map(|(_, p)| p);
+            match packet {
+                Some(packet) => {
+                    if packet.stream() == self.stream_index {
+                        self.decoder
+                            .send_packet(&packet)
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                None => {
+                    // EOF: flush and drain whatever remains.
+                    let _ = self.decoder.send_eof();
+                    let mut decoded = ffmpeg_next::frame::Audio::empty();
+                    if self.decoder.receive_frame(&mut decoded).is_ok() {
+                        self.ensure_layout(&mut decoded);
+                        return Ok(self.emit(&decoded, out));
+                    }
+                    return Ok(0);
+                }
+            }
+        }
+    }
+
+    /// Decoders for some formats (e.g. raw mono WAV) leave the frame's channel
+    /// layout unset. The resampler needs a concrete layout that matches the
+    /// frame, so fill one in from the channel count when it's missing.
+    fn ensure_layout(&self, frame: &mut ffmpeg_next::frame::Audio) {
+        if frame.channel_layout().is_empty() {
+            frame.set_channel_layout(
+                ffmpeg_next::channel_layout::ChannelLayout::default(self.channels as i32),
+            );
+        }
+    }
+
+    /// Resample one decoded frame to interleaved f32, apply any pending
+    /// seek-alignment discard, append to `out`, return frames emitted.
+    fn emit(&mut self, frame: &ffmpeg_next::frame::Audio, out: &mut Vec<f32>) -> usize {
+        // `frame` already has a non-empty channel layout (set by `ensure_layout`
+        // before this call), so the resampler config and the actual frame agree
+        // — otherwise swr fails with AVERROR_INPUT_CHANGED.
+        if self.resampler.is_none() {
+            match ffmpeg_next::software::resampling::Context::get(
+                frame.format(),
+                frame.channel_layout(),
+                self.sample_rate,
+                ffmpeg_next::format::Sample::F32(ffmpeg_next::format::sample::Type::Packed),
+                frame.channel_layout(),
+                self.sample_rate,
+            ) {
+                Ok(r) => self.resampler = Some(r),
+                Err(_) => return 0,
+            }
+        }
+
+        let mut resampled = ffmpeg_next::frame::Audio::empty();
+        if self
+            .resampler
+            .as_mut()
+            .unwrap()
+            .run(frame, &mut resampled)
+            .is_err()
+        {
+            return 0;
+        }
+
+        // The output is packed (interleaved) f32. Read it from the raw byte plane
+        // `data(0)` — its length is correct (`frames * channels * 4`), whereas
+        // `plane::<f32>(0)` is a known ffmpeg-next footgun that reports only
+        // `samples()` elements (ignoring channels) and would slice out of range
+        // for multi-channel audio.
+        let ch = self.channels.max(1) as usize;
+        let bytes = resampled.data(0);
+        let n_frames = (bytes.len() / 4) / ch;
+        if n_frames == 0 {
+            return 0;
+        }
+
+        // On the first frame after a seek, compute how many leading frames to
+        // drop so output begins exactly at the seek target.
+        if let Some(target) = self.align_to.take() {
+            let frame_start = self.pts_to_frame(frame.pts());
+            self.pending_discard = target.saturating_sub(frame_start);
+        }
+
+        let discard = (self.pending_discard.min(n_frames as u64)) as usize;
+        self.pending_discard -= discard as u64;
+
+        let start_byte = discard * ch * 4;
+        let end_byte = n_frames * ch * 4;
+        out.extend(
+            bytes[start_byte..end_byte]
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+        );
+        let emitted = n_frames - discard;
+        self.current_frame += emitted as u64;
+        emitted
+    }
+
+    /// Convert a stream PTS to an absolute audio frame index.
+    fn pts_to_frame(&self, pts: Option<i64>) -> u64 {
+        match pts {
+            Some(p) if p >= 0 => {
+                ((p as f64 * self.time_base) * self.sample_rate as f64).round() as u64
+            }
+            _ => self.current_frame,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StreamSource — dispatches the disk reader over either decoder backend.
+// (Wired into the reader thread in a later step.)
+// ---------------------------------------------------------------------------
+
+/// Which decoder backend a streaming source uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// Symphonia, for compressed audio files (MP3, FLAC, OGG, …).
+    CompressedAudio,
+    /// FFmpeg, for the audio track of a video container.
+    VideoAudio,
+}
+
+/// A streaming audio source backing one active clip: either Symphonia
+/// ([`CompressedReader`]) or FFmpeg ([`VideoAudioReader`]).
+enum StreamSource {
+    Compressed(CompressedReader),
+    Video(VideoAudioReader),
+}
+
+impl StreamSource {
+    fn open(open: StreamOpen, kind: SourceKind) -> Result<Self, String> {
+        match (kind, open) {
+            (SourceKind::CompressedAudio, StreamOpen::Path(p)) => {
+                Ok(StreamSource::Compressed(CompressedReader::open(&p)?))
+            }
+            (SourceKind::CompressedAudio, StreamOpen::Source { src, ext }) => {
+                Ok(StreamSource::Compressed(CompressedReader::open_source(src, ext.as_deref())?))
+            }
+            (SourceKind::VideoAudio, StreamOpen::Path(p)) => {
+                Ok(StreamSource::Video(VideoAudioReader::open(&p)?))
+            }
+            (SourceKind::VideoAudio, StreamOpen::Source { .. }) => {
+                Err("VideoAudio cannot be opened from a packed byte source".to_string())
+            }
+        }
+    }
+
+    fn sample_rate(&self) -> u32 {
+        match self {
+            StreamSource::Compressed(r) => r.sample_rate,
+            StreamSource::Video(r) => r.sample_rate,
+        }
+    }
+
+    fn channels(&self) -> u32 {
+        match self {
+            StreamSource::Compressed(r) => r.channels,
+            StreamSource::Video(r) => r.channels,
+        }
+    }
+
+    fn seek(&mut self, target_frame: u64) -> Result<u64, String> {
+        match self {
+            StreamSource::Compressed(r) => r.seek(target_frame),
+            StreamSource::Video(r) => r.seek(target_frame),
+        }
+    }
+
+    fn decode_next(&mut self, out: &mut Vec<f32>) -> Result<usize, String> {
+        match self {
+            StreamSource::Compressed(r) => r.decode_next(out),
+            StreamSource::Video(r) => r.decode_next(out),
+        }
+    }
+
+    fn total_frames(&self) -> u64 {
+        match self {
+            StreamSource::Compressed(r) => r.total_frames(),
+            StreamSource::Video(r) => r.total_frames(),
+        }
+    }
+}
+
+/// Decode a media source end-to-end and build its [`WaveformPyramid`] overview,
+/// streaming — only one decode chunk plus the (bounded) pyramid are ever in
+/// memory, never the full sample buffer. `floor_samples_per_texel` is the
+/// finest-level resolution (see [`crate::audio::waveform_pyramid`]).
+pub fn build_waveform_pyramid(
+    path: &Path,
+    kind: SourceKind,
+    floor_samples_per_texel: u32,
+) -> Result<crate::audio::waveform_pyramid::WaveformPyramid, String> {
+    let src = StreamSource::open(StreamOpen::Path(path.to_path_buf()), kind)?;
+    build_pyramid_from_streamsource(src, floor_samples_per_texel)
+}
+
+/// Build a waveform pyramid from a host-provided byte source (container-packed
+/// compressed audio) — the load-time counterpart of [`build_waveform_pyramid`]
+/// for media that has no filesystem path.
+pub fn build_waveform_pyramid_from_source(
+    src: Box<dyn MediaByteSource>,
+    ext: Option<&str>,
+    floor_samples_per_texel: u32,
+) -> Result<crate::audio::waveform_pyramid::WaveformPyramid, String> {
+    let src = StreamSource::open(
+        StreamOpen::Source { src, ext: ext.map(|s| s.to_string()) },
+        SourceKind::CompressedAudio,
+    )?;
+    build_pyramid_from_streamsource(src, floor_samples_per_texel)
+}
+
+fn build_pyramid_from_streamsource(
+    mut src: StreamSource,
+    floor_samples_per_texel: u32,
+) -> Result<crate::audio::waveform_pyramid::WaveformPyramid, String> {
+    use crate::audio::waveform_pyramid::WaveformPyramidBuilder;
+
+    let channels = src.channels();
+    let mut builder = WaveformPyramidBuilder::new(channels, floor_samples_per_texel);
+    builder.reserve_for_frames(src.total_frames());
+
+    let mut buf = Vec::new();
+    loop {
+        let frames = src.decode_next(&mut buf)?;
+        if frames == 0 {
+            break;
+        }
+        builder.push_interleaved(&buf);
+    }
+    Ok(builder.finish())
+}
+
+// ---------------------------------------------------------------------------
 // DiskReaderCommand
 // ---------------------------------------------------------------------------
 
 /// Commands sent from the engine to the disk reader thread.
 pub enum DiskReaderCommand {
-    /// Start streaming a compressed file for a clip instance.
+    /// Start streaming a file for a clip instance, using the decoder backend
+    /// selected by `kind` (compressed audio vs. a video's audio track). `open`
+    /// is either a filesystem path (referenced media / video) or a host-provided
+    /// byte stream (container-packed media).
     ActivateFile {
         reader_id: u64,
-        path: PathBuf,
+        open: StreamOpen,
+        kind: SourceKind,
         buffer: Arc<ReadAheadBuffer>,
     },
     /// Stop streaming for a clip instance.
@@ -529,7 +1006,7 @@ impl DiskReader {
         mut command_rx: rtrb::Consumer<DiskReaderCommand>,
         running: Arc<AtomicBool>,
     ) {
-        let mut active_files: HashMap<u64, (CompressedReader, Arc<ReadAheadBuffer>)> =
+        let mut active_files: HashMap<u64, (StreamSource, Arc<ReadAheadBuffer>)> =
             HashMap::new();
         let mut decode_buf = Vec::with_capacity(8192);
 
@@ -539,18 +1016,19 @@ impl DiskReader {
                 match cmd {
                     DiskReaderCommand::ActivateFile {
                         reader_id,
-                        path,
+                        open,
+                        kind,
                         buffer,
-                    } => match CompressedReader::open(&path) {
+                    } => match StreamSource::open(open, kind) {
                         Ok(reader) => {
-                            eprintln!("[DiskReader] Activated reader={}, ch={}, sr={}, path={:?}",
-                                reader_id, reader.channels, reader.sample_rate, path);
+                            eprintln!("[DiskReader] Activated reader={}, kind={:?}, ch={}, sr={}",
+                                reader_id, kind, reader.channels(), reader.sample_rate());
                             active_files.insert(reader_id, (reader, buffer));
                         }
                         Err(e) => {
                             eprintln!(
-                                "[DiskReader] Failed to open compressed file {:?}: {}",
-                                path, e
+                                "[DiskReader] Failed to open reader={} ({:?}): {}",
+                                reader_id, kind, e
                             );
                         }
                     },
@@ -588,7 +1066,7 @@ impl DiskReader {
 
                 // If the target has jumped behind or far ahead of the buffer,
                 // seek the decoder and reset.
-                if target < buf_start || target > buf_end + reader.sample_rate as u64 {
+                if target < buf_start || target > buf_end + reader.sample_rate() as u64 {
                     buffer.reset(target);
                     let _ = reader.seek(target);
                     continue;
@@ -607,7 +1085,7 @@ impl DiskReader {
                 let buf_valid = buffer.valid_frames_count();
                 let buf_end = buf_start + buf_valid;
                 let prefetch_target =
-                    target + (PREFETCH_SECONDS * reader.sample_rate as f64) as u64;
+                    target + (PREFETCH_SECONDS * reader.sample_rate() as f64) as u64;
 
                 if buf_end >= prefetch_target {
                     continue; // Already filled far enough ahead.
@@ -649,3 +1127,7 @@ impl Drop for DiskReader {
         }
     }
 }
+
+// Tests for VideoAudioReader live in `daw-backend/tests/video_audio_stream.rs`
+// (integration tests) so they build the lib in normal mode, independent of
+// pre-existing breakage in the crate's `#[cfg(test)]` unit tests (automation.rs).

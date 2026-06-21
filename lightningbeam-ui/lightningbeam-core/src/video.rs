@@ -97,7 +97,7 @@ impl VideoDecoder {
         // Optionally build keyframe index for fast seeking
         let keyframe_positions = if build_keyframes {
             eprintln!("[Video Decoder] Building keyframe index for {}", path);
-            let positions = Self::build_keyframe_index(&path, stream_index)?;
+            let positions = Self::scan_keyframes(&path, stream_index)?;
             eprintln!("[Video Decoder] Found {} keyframes", positions.len());
             positions
         } else {
@@ -125,14 +125,19 @@ impl VideoDecoder {
         })
     }
 
-    /// Build keyframe index for this decoder
-    /// This can be called asynchronously after decoder creation
-    fn build_and_set_keyframe_index(&mut self) -> Result<(), String> {
-        eprintln!("[Video Decoder] Building keyframe index for {}", self.path);
-        let positions = Self::build_keyframe_index(&self.path, self.stream_index)?;
-        eprintln!("[Video Decoder] Found {} keyframes", positions.len());
+    /// Source file path this decoder reads from.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Parameters needed to scan keyframes off-thread (path + video stream index).
+    pub fn keyframe_scan_params(&self) -> (String, usize) {
+        (self.path.clone(), self.stream_index)
+    }
+
+    /// Replace the keyframe index (built off-thread via [`VideoDecoder::scan_keyframes`]).
+    pub fn set_keyframe_index(&mut self, positions: Vec<i64>) {
         self.keyframe_positions = positions;
-        Ok(())
     }
 
     /// Get the output width (scaled dimensions)
@@ -150,9 +155,10 @@ impl VideoDecoder {
         self.get_frame(timestamp)
     }
 
-    /// Build an index of all keyframe positions in the video
-    /// This enables fast seeking by knowing exactly where keyframes are
-    fn build_keyframe_index(path: &str, stream_index: usize) -> Result<Vec<i64>, String> {
+    /// Build an index of all keyframe positions in the video by scanning packets
+    /// from a fresh input. Does not touch `self` — call it off-thread (it is slow
+    /// on long videos) and hand the result to [`VideoDecoder::set_keyframe_index`].
+    pub fn scan_keyframes(path: &str, stream_index: usize) -> Result<Vec<i64>, String> {
         let mut input = ffmpeg::format::input(path)
             .map_err(|e| format!("Failed to open video for indexing: {}", e))?;
 
@@ -340,6 +346,58 @@ impl VideoDecoder {
     }
 }
 
+/// Generate timeline thumbnails for a video using a **dedicated** decoder that
+/// is independent of any shared playback decoder — so thumbnail work never holds
+/// a lock the UI/playback needs.
+///
+/// Thumbnails are sampled at keyframes ~`interval_secs` apart. Decoding at a
+/// keyframe is cheap (≈one frame) versus decoding forward to an arbitrary
+/// timestamp (the whole GOP). Frames are decoded directly at `thumb_width` (so
+/// `get_thumbnail_at`'s 128-wide assumption holds) and tightly packed RGBA is
+/// handed to `on_thumb` as `(timestamp_secs, data)`.
+pub fn generate_keyframe_thumbnails(
+    path: &str,
+    interval_secs: f64,
+    thumb_width: u32,
+    mut should_skip: impl FnMut(f64) -> bool,
+    mut on_thumb: impl FnMut(f64, Arc<Vec<u8>>),
+) -> Result<(), String> {
+    // Own decoder at thumbnail resolution; builds its own keyframe index. The
+    // large max-height lets width be the constraining dimension, so output width
+    // is exactly `thumb_width`.
+    let mut decoder = VideoDecoder::new(
+        path.to_string(),
+        4,
+        Some(thumb_width),
+        Some(100_000),
+        true, // build keyframe index (needed to sample at keyframes)
+    )?;
+
+    let keyframe_secs: Vec<f64> = decoder
+        .keyframe_positions
+        .iter()
+        .map(|&ts| ts as f64 * decoder.time_base)
+        .collect();
+
+    let mut last_emitted = f64::NEG_INFINITY;
+    for ks in keyframe_secs {
+        if ks - last_emitted < interval_secs {
+            continue;
+        }
+        // This keyframe is a target slot; advance regardless of skip so the chosen
+        // slots are deterministic (lets a resumed pass target the same timestamps).
+        last_emitted = ks;
+        // Skip slots already covered (resume after a partial save / dedup).
+        if should_skip(ks) {
+            continue;
+        }
+        if let Ok(rgba) = decoder.get_frame(ks) {
+            on_thumb(ks, Arc::new(rgba));
+        }
+    }
+    Ok(())
+}
+
 /// Probe video file for metadata without creating a full decoder
 pub fn probe_video(path: &str) -> Result<VideoMetadata, String> {
     ffmpeg::init().map_err(|e| e.to_string())?;
@@ -407,17 +465,32 @@ pub struct VideoManager {
     /// Pool of video decoders, one per clip
     decoders: HashMap<Uuid, Arc<Mutex<VideoDecoder>>>,
 
-    /// Frame cache: (clip_id, timestamp_ms) -> frame
-    /// Stores raw RGBA data for zero-copy rendering
-    frame_cache: HashMap<(Uuid, i64), Arc<VideoFrame>>,
+    /// Frame cache: (clip_id, timestamp_ms) -> frame. Stores decoded RGBA for
+    /// zero-copy rendering. Bounded by a **byte budget** (not a frame count, which
+    /// would be unsafe across resolutions — a 4K frame is ~33MB vs ~2MB at 800x600)
+    /// so playback of arbitrarily long video never grows unbounded.
+    frame_cache: LruCache<(Uuid, i64), Arc<VideoFrame>>,
+    /// Running total of bytes held in `frame_cache` (sum of each frame's RGBA len),
+    /// kept in sync on insert/evict/remove so eviction is O(1) per frame.
+    frame_cache_bytes: usize,
 
     /// Thumbnail cache: clip_id -> Vec of (timestamp, rgba_data)
     /// Low-resolution (64px width) thumbnails for scrubbing
     thumbnail_cache: HashMap<Uuid, Vec<(f64, Arc<Vec<u8>>)>>,
 
+    /// Clips whose thumbnail generation finished. Only complete sets are worth
+    /// persisting — a partial set (saved mid-generation) is dropped so the load
+    /// regenerates it fully rather than leaving it permanently incomplete.
+    thumbnails_complete: std::collections::HashSet<Uuid>,
+
     /// Maximum number of frames to cache per decoder
     cache_size: usize,
 }
+
+/// Byte budget for [`VideoManager::frame_cache`] (decoded full-resolution frames).
+/// At ~2MB/frame (800x600) this holds ~128 frames; at ~33MB/frame (4K) ~8 — in
+/// both cases enough for the current frame plus a scrub window, while bounding RAM.
+const FRAME_CACHE_BYTE_BUDGET: usize = 256 * 1024 * 1024;
 
 impl VideoManager {
     /// Create a new video manager with default cache size
@@ -429,8 +502,10 @@ impl VideoManager {
     pub fn with_cache_size(cache_size: usize) -> Self {
         Self {
             decoders: HashMap::new(),
-            frame_cache: HashMap::new(),
+            frame_cache: LruCache::unbounded(),
+            frame_cache_bytes: 0,
             thumbnail_cache: HashMap::new(),
+            thumbnails_complete: std::collections::HashSet::new(),
             cache_size,
         }
     }
@@ -440,8 +515,9 @@ impl VideoManager {
     /// `target_width` and `target_height` specify the maximum dimensions
     /// for decoded frames. Video will be scaled down if larger.
     ///
-    /// The keyframe index is NOT built during this call - use `build_keyframe_index_async`
-    /// in a background thread to build it asynchronously.
+    /// The keyframe index is NOT built during this call — scan it off-thread via
+    /// [`VideoDecoder::scan_keyframes`] and store it with
+    /// [`VideoDecoder::set_keyframe_index`] so the slow scan never blocks playback.
     pub fn load_video(
         &mut self,
         clip_id: Uuid,
@@ -467,20 +543,6 @@ impl VideoManager {
         Ok(metadata)
     }
 
-    /// Build keyframe index for a loaded video asynchronously
-    ///
-    /// This should be called from a background thread after load_video()
-    /// to avoid blocking the UI during import.
-    pub fn build_keyframe_index(&self, clip_id: &Uuid) -> Result<(), String> {
-        let decoder_arc = self.decoders.get(clip_id)
-            .ok_or_else(|| format!("Video clip {} not found", clip_id))?;
-
-        let mut decoder = decoder_arc.lock()
-            .map_err(|e| format!("Failed to lock decoder: {}", e))?;
-
-        decoder.build_and_set_keyframe_index()
-    }
-
     /// Get a decoded frame for a specific clip at a specific timestamp
     ///
     /// Returns None if the clip is not loaded or decoding fails.
@@ -495,14 +557,16 @@ impl VideoManager {
             return Some(Arc::clone(cached_frame));
         }
 
-        // Get decoder for this clip
-        let decoder_arc = self.decoders.get(clip_id)?;
+        // Get decoder for this clip. Clone the Arc so we don't hold a borrow of
+        // `self.decoders` across the `&mut self` cache insert below.
+        let decoder_arc = Arc::clone(self.decoders.get(clip_id)?);
         let mut decoder = decoder_arc.lock().ok()?;
 
         // Decode the frame
         let rgba_data = decoder.get_frame(timestamp).ok()?;
         let width = decoder.output_width;
         let height = decoder.output_height;
+        drop(decoder); // release the lock before touching `self`
 
         // Create VideoFrame and cache it
         let frame = Arc::new(VideoFrame {
@@ -512,65 +576,27 @@ impl VideoManager {
             timestamp,
         });
 
-        self.frame_cache.insert(cache_key, Arc::clone(&frame));
+        self.cache_frame(cache_key, Arc::clone(&frame));
 
         Some(frame)
     }
 
-    /// Generate thumbnails for a video clip (single batch version - use generate_thumbnails_progressive instead)
-    ///
-    /// Thumbnails are generated every 5 seconds at 128px width.
-    /// This should be called in a background thread to avoid blocking.
-    /// Thumbnails are inserted into the cache progressively as they're generated,
-    /// allowing the UI to display them immediately.
-    ///
-    /// DEPRECATED: Use generate_thumbnails_progressive which releases the lock between thumbnails.
-    pub fn generate_thumbnails(&mut self, clip_id: &Uuid, duration: f64) -> Result<(), String> {
-        let decoder_arc = self.decoders.get(clip_id)
-            .ok_or("Clip not loaded")?
-            .clone();
-
-        let mut decoder = decoder_arc.lock()
-            .map_err(|e| format!("Failed to lock decoder: {}", e))?;
-
-        // Initialize thumbnail cache entry with empty vec
-        self.thumbnail_cache.insert(*clip_id, Vec::new());
-
-        let interval = 5.0; // Generate thumbnail every 5 seconds
-        let mut t = 0.0;
-
-        while t < duration {
-            // Decode frame at this timestamp
-            if let Ok(rgba_data) = decoder.get_frame(t) {
-                // Decode already scaled to output dimensions, but we want 128px width for thumbnails
-                // We need to scale down further
-                let current_width = decoder.output_width;
-                let current_height = decoder.output_height;
-
-                // Calculate thumbnail dimensions (128px width, maintain aspect ratio)
-                let thumb_width = 128u32;
-                let aspect_ratio = current_height as f32 / current_width as f32;
-                let thumb_height = (thumb_width as f32 * aspect_ratio) as u32;
-
-                // Simple nearest-neighbor downsampling for thumbnails
-                let thumb_data = downsample_rgba(
-                    &rgba_data,
-                    current_width,
-                    current_height,
-                    thumb_width,
-                    thumb_height,
-                );
-
-                // Insert thumbnail into cache immediately so UI can display it
-                if let Some(thumbnails) = self.thumbnail_cache.get_mut(clip_id) {
-                    thumbnails.push((t, Arc::new(thumb_data)));
-                }
-            }
-
-            t += interval;
+    /// Insert a frame into the byte-budgeted cache, evicting least-recently-used
+    /// frames until the total is within [`FRAME_CACHE_BYTE_BUDGET`].
+    fn cache_frame(&mut self, key: (Uuid, i64), frame: Arc<VideoFrame>) {
+        let bytes = frame.rgba_data.len();
+        if let Some(old) = self.frame_cache.put(key, frame) {
+            self.frame_cache_bytes = self.frame_cache_bytes.saturating_sub(old.rgba_data.len());
         }
-
-        Ok(())
+        self.frame_cache_bytes += bytes;
+        // Keep at least one frame resident even if it alone exceeds the budget.
+        while self.frame_cache_bytes > FRAME_CACHE_BYTE_BUDGET && self.frame_cache.len() > 1 {
+            if let Some((_, evicted)) = self.frame_cache.pop_lru() {
+                self.frame_cache_bytes = self.frame_cache_bytes.saturating_sub(evicted.rgba_data.len());
+            } else {
+                break;
+            }
+        }
     }
 
     /// Get the decoder Arc for a clip (for external thumbnail generation)
@@ -579,18 +605,57 @@ impl VideoManager {
         self.decoders.get(clip_id).cloned()
     }
 
-    /// Insert a thumbnail into the cache (for external thumbnail generation)
-    pub fn insert_thumbnail(&mut self, clip_id: &Uuid, timestamp: f64, data: Arc<Vec<u8>>) {
-        self.thumbnail_cache
-            .entry(*clip_id)
-            .or_insert_with(Vec::new)
-            .push((timestamp, data));
+    /// Snapshot all cached thumbnails for persistence (clip id -> sorted
+    /// (timestamp, rgba) pairs). Cheap: clones the `Arc`s, not the pixel data.
+    /// Partial sets are persisted too — pair with [`complete_thumbnail_clips`] so
+    /// the load knows which clips still need generation resumed.
+    pub fn snapshot_all_thumbnails(&self) -> HashMap<Uuid, Vec<(f64, Arc<Vec<u8>>)>> {
+        self.thumbnail_cache.clone()
     }
 
-    /// Get the thumbnail closest to the specified timestamp
+    /// The set of clips whose thumbnail generation has finished (a full keyframe
+    /// pass). A persisted set flagged incomplete is resumed on load.
+    pub fn complete_thumbnail_clips(&self) -> std::collections::HashSet<Uuid> {
+        self.thumbnails_complete.clone()
+    }
+
+    /// Mark a clip's thumbnail generation as complete (called when the background
+    /// generator finishes the full keyframe pass).
+    pub fn mark_thumbnails_complete(&mut self, clip_id: &Uuid) {
+        self.thumbnails_complete.insert(*clip_id);
+    }
+
+    /// Whether the clip already has a thumbnail within `tol` seconds of `ts`.
+    /// Lets the generator skip keyframes already covered (resume / dedup).
+    pub fn has_thumbnail_near(&self, clip_id: &Uuid, ts: f64, tol: f64) -> bool {
+        self.thumbnail_cache
+            .get(clip_id)
+            .map_or(false, |v| v.iter().any(|(t, _)| (t - ts).abs() < tol))
+    }
+
+    /// Insert a thumbnail into the cache, keeping it **sorted by timestamp** and
+    /// **deduped** (an existing entry at the same timestamp is replaced). Sorted
+    /// order is required by `get_thumbnail_at`'s binary search, and dedup makes
+    /// concurrent restore + resumed generation idempotent (no double inserts).
+    pub fn insert_thumbnail(&mut self, clip_id: &Uuid, timestamp: f64, data: Arc<Vec<u8>>) {
+        let vec = self.thumbnail_cache.entry(*clip_id).or_default();
+        match vec.binary_search_by(|(t, _)| {
+            t.partial_cmp(&timestamp).unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            Ok(i) => vec[i] = (timestamp, data),
+            Err(i) => vec.insert(i, (timestamp, data)),
+        }
+    }
+
+    /// Get the thumbnail closest to the specified timestamp.
     ///
+    /// Returns `(actual_timestamp, width, height, data)` — `actual_timestamp` is
+    /// the time of the thumbnail actually chosen (which may differ from the
+    /// requested `timestamp`, and changes as closer thumbnails finish generating).
+    /// Callers key their GPU texture cache on it so the on-clip strip refreshes as
+    /// better thumbnails load instead of freezing on the first one.
     /// Returns None if no thumbnails have been generated for this clip.
-    pub fn get_thumbnail_at(&self, clip_id: &Uuid, timestamp: f64) -> Option<(u32, u32, Arc<Vec<u8>>)> {
+    pub fn get_thumbnail_at(&self, clip_id: &Uuid, timestamp: f64) -> Option<(f64, u32, u32, Arc<Vec<u8>>)> {
         let thumbnails = self.thumbnail_cache.get(clip_id)?;
 
         if thumbnails.is_empty() {
@@ -618,30 +683,43 @@ impl VideoManager {
             }
         });
 
-        let (_, rgba_data) = &thumbnails[idx];
+        let (actual_ts, rgba_data) = &thumbnails[idx];
 
-        // Return (width, height, data)
+        // Return (actual_timestamp, width, height, data)
         // Thumbnails are always 128px width
         let thumb_width = 128;
         let thumb_height = (rgba_data.len() / (thumb_width * 4)) as u32;
 
-        Some((thumb_width as u32, thumb_height, Arc::clone(rgba_data)))
+        Some((*actual_ts, thumb_width as u32, thumb_height, Arc::clone(rgba_data)))
     }
 
     /// Remove a video clip and its cached data
     pub fn unload_video(&mut self, clip_id: &Uuid) {
         self.decoders.remove(clip_id);
 
-        // Remove all cached frames for this clip
-        self.frame_cache.retain(|(id, _), _| id != clip_id);
+        // Remove all cached frames for this clip (LruCache has no retain; collect
+        // matching keys, then pop each, keeping the byte total in sync).
+        let keys: Vec<(Uuid, i64)> = self
+            .frame_cache
+            .iter()
+            .filter(|((id, _), _)| id == clip_id)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in keys {
+            if let Some(frame) = self.frame_cache.pop(&key) {
+                self.frame_cache_bytes = self.frame_cache_bytes.saturating_sub(frame.rgba_data.len());
+            }
+        }
 
         // Remove thumbnails
         self.thumbnail_cache.remove(clip_id);
+        self.thumbnails_complete.remove(clip_id);
     }
 
     /// Clear all frame caches (useful for memory management)
     pub fn clear_frame_cache(&mut self) {
         self.frame_cache.clear();
+        self.frame_cache_bytes = 0;
     }
 }
 
@@ -649,212 +727,4 @@ impl Default for VideoManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Simple nearest-neighbor downsampling for RGBA images
-pub fn downsample_rgba_public(
-    src: &[u8],
-    src_width: u32,
-    src_height: u32,
-    dst_width: u32,
-    dst_height: u32,
-) -> Vec<u8> {
-    downsample_rgba(src, src_width, src_height, dst_width, dst_height)
-}
-
-/// Simple nearest-neighbor downsampling for RGBA images (internal)
-fn downsample_rgba(
-    src: &[u8],
-    src_width: u32,
-    src_height: u32,
-    dst_width: u32,
-    dst_height: u32,
-) -> Vec<u8> {
-    let mut dst = Vec::with_capacity((dst_width * dst_height * 4) as usize);
-
-    let x_ratio = src_width as f32 / dst_width as f32;
-    let y_ratio = src_height as f32 / dst_height as f32;
-
-    for y in 0..dst_height {
-        for x in 0..dst_width {
-            let src_x = (x as f32 * x_ratio) as u32;
-            let src_y = (y as f32 * y_ratio) as u32;
-
-            let src_idx = ((src_y * src_width + src_x) * 4) as usize;
-
-            // Copy RGBA bytes
-            dst.push(src[src_idx]);     // R
-            dst.push(src[src_idx + 1]); // G
-            dst.push(src[src_idx + 2]); // B
-            dst.push(src[src_idx + 3]); // A
-        }
-    }
-
-    dst
-}
-
-/// Extracted audio data from a video file
-#[derive(Debug, Clone)]
-pub struct ExtractedAudio {
-    pub samples: Vec<f32>,
-    pub channels: u32,
-    pub sample_rate: u32,
-    pub duration: f64,
-}
-
-/// Extract audio from a video file
-///
-/// This function performs the slow FFmpeg decoding without holding any locks.
-/// The caller can then quickly add the audio to the DAW backend in a background thread.
-///
-/// Returns None if the video has no audio stream.
-pub fn extract_audio_from_video(path: &str) -> Result<Option<ExtractedAudio>, String> {
-    ffmpeg::init().map_err(|e| e.to_string())?;
-
-    // Open video file
-    let mut input = ffmpeg::format::input(path)
-        .map_err(|e| format!("Failed to open video: {}", e))?;
-
-    // Find audio stream
-    let audio_stream_opt = input.streams()
-        .best(ffmpeg::media::Type::Audio);
-
-    // Return None if no audio stream
-    if audio_stream_opt.is_none() {
-        return Ok(None);
-    }
-
-    let audio_stream = audio_stream_opt.unwrap();
-    let audio_index = audio_stream.index();
-
-    // Get audio properties
-    let context_decoder = ffmpeg::codec::context::Context::from_parameters(
-        audio_stream.parameters()
-    ).map_err(|e| e.to_string())?;
-
-    let mut audio_decoder = context_decoder.decoder().audio()
-        .map_err(|e| e.to_string())?;
-
-    let sample_rate = audio_decoder.rate();
-    let channels = audio_decoder.channels() as u32;
-
-    // Decode all audio frames
-    let mut audio_samples: Vec<f32> = Vec::new();
-
-    for (stream, packet) in input.packets() {
-        if stream.index() == audio_index {
-            audio_decoder.send_packet(&packet)
-                .map_err(|e| e.to_string())?;
-
-            let mut audio_frame = ffmpeg::util::frame::Audio::empty();
-            while audio_decoder.receive_frame(&mut audio_frame).is_ok() {
-                // Convert audio to f32 packed format
-                let format = audio_frame.format();
-                let frame_channels = audio_frame.channels() as usize;
-
-                // Create resampler to convert to f32 packed
-                let mut resampler = ffmpeg::software::resampling::context::Context::get(
-                    format,
-                    audio_frame.channel_layout(),
-                    sample_rate,
-                    ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
-                    audio_frame.channel_layout(),
-                    sample_rate,
-                ).map_err(|e| e.to_string())?;
-
-                let mut resampled_frame = ffmpeg::util::frame::Audio::empty();
-                resampler.run(&audio_frame, &mut resampled_frame)
-                    .map_err(|e| e.to_string())?;
-
-                // Extract f32 samples (interleaved format)
-                let data_ptr = resampled_frame.data(0).as_ptr() as *const f32;
-                let total_samples = resampled_frame.samples() * frame_channels;
-
-                // Safety checks before creating slice from FFmpeg data
-                // 1. Verify f32 alignment (required: 4 bytes)
-                if data_ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
-                    return Err("FFmpeg audio data is not properly aligned for f32".to_string());
-                }
-
-                // 2. Verify the frame actually has enough data
-                let byte_size = resampled_frame.data(0).len();
-                let expected_bytes = total_samples * std::mem::size_of::<f32>();
-                if byte_size < expected_bytes {
-                    return Err(format!(
-                        "FFmpeg frame buffer too small: {} bytes, need {} bytes",
-                        byte_size, expected_bytes
-                    ));
-                }
-
-                // SAFETY: We verified alignment and bounds above.
-                // The slice lifetime is tied to resampled_frame which lives until
-                // after extend_from_slice completes.
-                let samples_slice = unsafe {
-                    std::slice::from_raw_parts(data_ptr, total_samples)
-                };
-
-                audio_samples.extend_from_slice(samples_slice);
-            }
-        }
-    }
-
-    // Flush audio decoder
-    audio_decoder.send_eof().map_err(|e| e.to_string())?;
-    let mut audio_frame = ffmpeg::util::frame::Audio::empty();
-    while audio_decoder.receive_frame(&mut audio_frame).is_ok() {
-        let format = audio_frame.format();
-        let frame_channels = audio_frame.channels() as usize;
-
-        let mut resampler = ffmpeg::software::resampling::context::Context::get(
-            format,
-            audio_frame.channel_layout(),
-            sample_rate,
-            ffmpeg::format::Sample::F32(ffmpeg::format::sample::Type::Packed),
-            audio_frame.channel_layout(),
-            sample_rate,
-        ).map_err(|e| e.to_string())?;
-
-        let mut resampled_frame = ffmpeg::util::frame::Audio::empty();
-        resampler.run(&audio_frame, &mut resampled_frame)
-            .map_err(|e| e.to_string())?;
-
-        let data_ptr = resampled_frame.data(0).as_ptr() as *const f32;
-        let total_samples = resampled_frame.samples() * frame_channels;
-
-        // Safety checks before creating slice from FFmpeg data
-        // 1. Verify f32 alignment (required: 4 bytes)
-        if data_ptr.align_offset(std::mem::align_of::<f32>()) != 0 {
-            return Err("FFmpeg audio data is not properly aligned for f32".to_string());
-        }
-
-        // 2. Verify the frame actually has enough data
-        let byte_size = resampled_frame.data(0).len();
-        let expected_bytes = total_samples * std::mem::size_of::<f32>();
-        if byte_size < expected_bytes {
-            return Err(format!(
-                "FFmpeg frame buffer too small: {} bytes, need {} bytes",
-                byte_size, expected_bytes
-            ));
-        }
-
-        // SAFETY: We verified alignment and bounds above.
-        // The slice lifetime is tied to resampled_frame which lives until
-        // after extend_from_slice completes.
-        let samples_slice = unsafe {
-            std::slice::from_raw_parts(data_ptr, total_samples)
-        };
-
-        audio_samples.extend_from_slice(samples_slice);
-    }
-
-    // Calculate duration
-    let total_samples_per_channel = audio_samples.len() / channels as usize;
-    let duration = total_samples_per_channel as f64 / sample_rate as f64;
-
-    Ok(Some(ExtractedAudio {
-        samples: audio_samples,
-        channels,
-        sample_rate,
-        duration,
-    }))
 }

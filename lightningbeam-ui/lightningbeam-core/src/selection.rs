@@ -4,9 +4,8 @@
 
 use crate::vector_graph::{VectorGraph, EdgeId, FillId, VertexId};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use uuid::Uuid;
-use vello::kurbo::{Affine, BezPath};
 
 /// Shape of a raster pixel selection, in canvas pixel coordinates.
 #[derive(Clone, Debug)]
@@ -438,42 +437,6 @@ impl Selection {
             && self.selected_fills.is_empty()
             && self.selected_clip_instances.is_empty()
     }
-}
-
-/// Represents a temporary region-based selection.
-///
-/// When a region select is active, the region boundary is inserted into the
-/// DCEL as invisible edges, splitting existing geometry. Faces inside the
-/// region are added to the normal `Selection`. If the user performs an
-/// operation, the selection is committed; if they deselect, the DCEL is
-/// restored from the snapshot.
-#[derive(Clone, Debug)]
-pub struct RegionSelection {
-    /// The clipping region as a closed BezPath (polygon or rect)
-    pub region_path: BezPath,
-    /// Layer containing the affected elements
-    pub layer_id: Uuid,
-    /// Keyframe time
-    pub time: f64,
-    /// Snapshot of the graph before region boundary insertion, for revert
-    pub graph_snapshot: VectorGraph,
-    /// The extracted graph containing geometry inside the region
-    pub selected_graph: VectorGraph,
-    /// Transform applied to the selected graph (e.g. from dragging)
-    pub transform: Affine,
-    /// Whether the selection has been committed (via an operation on the selection)
-    pub committed: bool,
-    /// IDs of the invisible edges inserted for the region boundary stroke.
-    /// These exist in the main graph (remainder side). Deleted during merge-back.
-    pub region_edge_ids: Vec<EdgeId>,
-    /// Action epoch recorded when this selection was created.
-    /// Compared against `ActionExecutor::epoch()` on deselect to decide
-    /// whether merge-back is needed or a clean snapshot restore suffices.
-    pub action_epoch_at_selection: u64,
-    /// selected_graph VID → main graph VID for boundary vertices (shared between both graphs).
-    pub boundary_vertex_map: HashMap<VertexId, VertexId>,
-    /// selected_graph boundary EID → main graph boundary EID (duplicated edges to skip on merge).
-    pub boundary_edge_map: HashMap<EdgeId, EdgeId>,
 }
 
 #[cfg(test)]

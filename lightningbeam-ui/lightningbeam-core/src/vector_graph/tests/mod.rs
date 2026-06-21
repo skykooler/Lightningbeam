@@ -10,3 +10,7 @@ mod editing;
 mod gap_close;
 #[cfg(test)]
 mod region;
+#[cfg(test)]
+mod region_cut_select;
+#[cfg(test)]
+mod tween;

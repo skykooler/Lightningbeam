@@ -322,6 +322,20 @@ impl AnimationCurve {
         }
     }
 
+    /// True when `time` lies strictly between two keyframes — an in-between frame of a
+    /// tween (not on a keyframe, not in the pre/post-extrapolation tails).
+    pub fn is_tween_inbetween(&self, time: f64, tol: f64) -> bool {
+        if self.keyframes.len() < 2 {
+            return false;
+        }
+        let first = self.keyframes.first().unwrap().time;
+        let last = self.keyframes.last().unwrap().time;
+        if time <= first + tol || time >= last - tol {
+            return false;
+        }
+        !self.keyframes.iter().any(|kf| (kf.time - time).abs() <= tol)
+    }
+
     /// Extrapolate before the first keyframe
     fn extrapolate_pre(&self, time: f64, first_kf: &Keyframe) -> f64 {
         match self.pre_extrapolation {
@@ -516,6 +530,17 @@ impl AnimationData {
         self.curves.remove(target)
     }
 
+    /// True when the object (e.g. a clip instance) is mid motion-tween at `time` — any of
+    /// its curves has `time` strictly between two keyframes. Used to lock out editing on
+    /// in-between frames (editing there would silently insert a keyframe and disturb the tween).
+    pub fn is_object_tweened_at(&self, id: uuid::Uuid, time: f64) -> bool {
+        const TOL: f64 = 0.001;
+        self.curves.iter().any(|(target, curve)| {
+            matches!(target, AnimationTarget::Object { id: oid, .. } if *oid == id)
+                && curve.is_tween_inbetween(time, TOL)
+        })
+    }
+
     /// Evaluate a property at a given time
     pub fn eval(&self, target: &AnimationTarget, time: f64, default: f64) -> f64 {
         self.curves
@@ -543,5 +568,53 @@ impl AnimationData {
         t.skew_y = self.eval(&AnimationTarget::Object { id: instance_id, property: TransformProperty::SkewY }, time, base.skew_y);
         let opacity = self.eval(&AnimationTarget::Object { id: instance_id, property: TransformProperty::Opacity }, time, base_opacity);
         (t, opacity)
+    }
+}
+
+#[cfg(test)]
+mod tween_lock_tests {
+    use super::*;
+
+    #[test]
+    fn curve_in_between_detection() {
+        let mut c = AnimationCurve::new(
+            AnimationTarget::Object { id: uuid::Uuid::nil(), property: TransformProperty::X },
+            0.0,
+        );
+        c.set_keyframe(Keyframe::linear(0.0, 0.0));
+        c.set_keyframe(Keyframe::linear(10.0, 100.0));
+
+        assert!(c.is_tween_inbetween(5.0, 0.001), "strictly between keyframes");
+        assert!(!c.is_tween_inbetween(0.0, 0.001), "on a keyframe");
+        assert!(!c.is_tween_inbetween(10.0, 0.001), "on a keyframe");
+        assert!(!c.is_tween_inbetween(15.0, 0.001), "past the last keyframe (extrapolation tail)");
+    }
+
+    #[test]
+    fn single_keyframe_is_never_in_between() {
+        let mut c = AnimationCurve::new(
+            AnimationTarget::Object { id: uuid::Uuid::nil(), property: TransformProperty::X },
+            0.0,
+        );
+        c.set_keyframe(Keyframe::linear(10.0, 100.0));
+        assert!(!c.is_tween_inbetween(5.0, 0.001));
+        assert!(!c.is_tween_inbetween(20.0, 0.001));
+    }
+
+    #[test]
+    fn object_tweened_when_any_curve_is_in_between() {
+        let id = uuid::Uuid::new_v4();
+        let mut data = AnimationData::new();
+        let mut cx = AnimationCurve::new(
+            AnimationTarget::Object { id, property: TransformProperty::X },
+            0.0,
+        );
+        cx.set_keyframe(Keyframe::linear(0.0, 0.0));
+        cx.set_keyframe(Keyframe::linear(10.0, 100.0));
+        data.set_curve(cx);
+
+        assert!(data.is_object_tweened_at(id, 5.0));
+        assert!(!data.is_object_tweened_at(id, 0.0));
+        assert!(!data.is_object_tweened_at(uuid::Uuid::new_v4(), 5.0), "different object");
     }
 }

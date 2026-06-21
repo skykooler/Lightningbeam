@@ -112,6 +112,37 @@ pub struct PendingUpload {
     /// The texture is allocated at full size, but total_frames is set to
     /// the limited count so subsequent calls use the incremental path.
     pub frame_limit: Option<usize>,
+    /// When true, `samples` is interpreted as **pre-packed min/max texels**:
+    /// 4 floats per "frame" = `[l_min, l_max, r_min, r_max]` (a waveform-pyramid
+    /// floor level). The caller passes the *effective* `sample_rate` (`sr / B`)
+    /// so the shader's time→texel mapping covers `B` source samples per texel.
+    /// When false, `samples` is raw interleaved audio (min = max per texel).
+    pub minmax: bool,
+}
+
+/// Pack one source "frame" into an `Rgba16Float` texel `(Lmin,Lmax,Rmin,Rmax)`.
+/// Raw audio sets min = max per channel; min/max input copies the 4 values.
+#[inline]
+fn pack_texel(samples: &[f32], global_frame: usize, channels: usize, minmax: bool) -> [half::f16; 4] {
+    if minmax {
+        let o = global_frame * 4;
+        [
+            half::f16::from_f32(samples.get(o).copied().unwrap_or(0.0)),
+            half::f16::from_f32(samples.get(o + 1).copied().unwrap_or(0.0)),
+            half::f16::from_f32(samples.get(o + 2).copied().unwrap_or(0.0)),
+            half::f16::from_f32(samples.get(o + 3).copied().unwrap_or(0.0)),
+        ]
+    } else {
+        let so = global_frame * channels;
+        let left = samples.get(so).copied().unwrap_or(0.0);
+        let right = if channels >= 2 {
+            samples.get(so + 1).copied().unwrap_or(left)
+        } else {
+            left
+        };
+        let (l, r) = (half::f16::from_f32(left), half::f16::from_f32(right));
+        [l, l, r, r]
+    }
 }
 
 /// Maximum frames to convert and upload per frame (~250K frames ≈ 5.6s at 44.1kHz).
@@ -291,8 +322,11 @@ impl WaveformGpuResources {
         sample_rate: u32,
         channels: u32,
         frame_limit: Option<usize>,
+        minmax: bool,
     ) -> Vec<wgpu::CommandBuffer> {
-        let new_total_frames = samples.len() / channels.max(1) as usize;
+        // For min/max input each "frame" is 4 floats; for raw it's `channels`.
+        let frame_stride = if minmax { 4 } else { channels.max(1) as usize };
+        let new_total_frames = samples.len() / frame_stride;
         if new_total_frames == 0 {
             return Vec::new();
         }
@@ -329,22 +363,9 @@ impl WaveformGpuResources {
                 if global_frame >= effective_frames {
                     break;
                 }
-                let sample_offset = global_frame * channels as usize;
-                let left = if sample_offset < samples.len() {
-                    samples[sample_offset]
-                } else {
-                    0.0
-                };
-                let right = if channels >= 2 && sample_offset + 1 < samples.len() {
-                    samples[sample_offset + 1]
-                } else {
-                    left
-                };
                 let texel_offset = frame * 4;
-                row_data[texel_offset] = half::f16::from_f32(left);
-                row_data[texel_offset + 1] = half::f16::from_f32(left);
-                row_data[texel_offset + 2] = half::f16::from_f32(right);
-                row_data[texel_offset + 3] = half::f16::from_f32(right);
+                let t = pack_texel(samples, global_frame, channels as usize, minmax);
+                row_data[texel_offset..texel_offset + 4].copy_from_slice(&t);
             }
 
             let entry = self.entries.get(&pool_index).unwrap();
@@ -466,24 +487,9 @@ impl WaveformGpuResources {
 
             for frame in 0..seg_upload_count as usize {
                 let global_frame = seg_start_frame as usize + frame;
-                let sample_offset = global_frame * channels as usize;
-
-                let left = if sample_offset < samples.len() {
-                    samples[sample_offset]
-                } else {
-                    0.0
-                };
-                let right = if channels >= 2 && sample_offset + 1 < samples.len() {
-                    samples[sample_offset + 1]
-                } else {
-                    left
-                };
-
                 let texel_offset = frame * 4;
-                mip0_data[texel_offset] = half::f16::from_f32(left);
-                mip0_data[texel_offset + 1] = half::f16::from_f32(left);
-                mip0_data[texel_offset + 2] = half::f16::from_f32(right);
-                mip0_data[texel_offset + 3] = half::f16::from_f32(right);
+                let t = pack_texel(samples, global_frame, channels as usize, minmax);
+                mip0_data[texel_offset..texel_offset + 4].copy_from_slice(&t);
             }
 
             // Upload mip 0 (only rows with actual data)
@@ -701,6 +707,7 @@ impl egui_wgpu::CallbackTrait for WaveformCallback {
                 upload.sample_rate,
                 upload.channels,
                 upload.frame_limit,
+                upload.minmax,
             );
             cmds.extend(new_cmds);
         }

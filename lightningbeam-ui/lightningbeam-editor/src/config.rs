@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use crate::keymap::KeybindingConfig;
+use lightningbeam_core::file_io::LargeMediaMode;
 
 /// Application configuration (persistent)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +58,18 @@ pub struct AppConfig {
     /// Custom keyboard shortcut overrides (sparse — only non-default bindings stored)
     #[serde(default)]
     pub keybindings: KeybindingConfig,
+
+    /// How to store media files at/above the large-media threshold (~2GB).
+    /// `Ask` (default) prompts the first time such a file is imported, then the
+    /// chosen mode is persisted here. Reset to `Ask` to be prompted again.
+    #[serde(default)]
+    pub large_media_default: LargeMediaMode,
+
+    /// Finest-level resolution of the waveform LOD pyramid: source frames per
+    /// floor texel (`B`). Smaller = larger on-disk pyramid but zoom-in re-decodes
+    /// sooner; larger = smaller pyramid, wider re-decode span. Default 256.
+    #[serde(default = "defaults::waveform_floor_samples_per_texel")]
+    pub waveform_floor_samples_per_texel: u32,
 }
 
 impl Default for AppConfig {
@@ -75,6 +88,8 @@ impl Default for AppConfig {
             waveform_stereo: defaults::waveform_stereo(),
             theme_mode: defaults::theme_mode(),
             keybindings: KeybindingConfig::default(),
+            large_media_default: LargeMediaMode::default(),
+            waveform_floor_samples_per_texel: defaults::waveform_floor_samples_per_texel(),
         }
     }
 }
@@ -276,4 +291,5 @@ mod defaults {
     pub fn debug() -> bool { false }
     pub fn waveform_stereo() -> bool { false }
     pub fn theme_mode() -> String { "system".to_string() }
+    pub fn waveform_floor_samples_per_texel() -> u32 { 256 }
 }

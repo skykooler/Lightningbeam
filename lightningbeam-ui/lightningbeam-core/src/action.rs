@@ -71,6 +71,15 @@ pub trait Action: Send {
     /// Get a human-readable description of this action (for UI display)
     fn description(&self) -> String;
 
+    /// For raster actions that store dirty-rect diffs: the `(layer_id, time)` of the
+    /// keyframe whose full pixels must be resident before `execute`/`rollback` can
+    /// apply the diff. The editor faults the frame in (synchronously) before undo/redo
+    /// so a paged-out clean frame is restored to its container state first. Non-raster
+    /// actions (and full-buffer ones) return `None`.
+    fn raster_resident_hint(&self) -> Option<(Uuid, f64)> {
+        None
+    }
+
     /// Execute backend operations after document changes
     ///
     /// Called AFTER execute() succeeds. If this returns an error, execute()
@@ -288,6 +297,18 @@ impl ActionExecutor {
     /// Get the description of the next action to undo
     pub fn undo_description(&self) -> Option<String> {
         self.undo_stack.last().map(|a| a.description())
+    }
+
+    /// `(layer_id, time)` of the raster keyframe the next undo needs resident, if any.
+    /// The editor faults it in before calling `undo()` so a paged-out clean frame is
+    /// restored to its container state, giving the diff a correct base to apply onto.
+    pub fn peek_undo_raster_hint(&self) -> Option<(Uuid, f64)> {
+        self.undo_stack.last().and_then(|a| a.raster_resident_hint())
+    }
+
+    /// `(layer_id, time)` of the raster keyframe the next redo needs resident, if any.
+    pub fn peek_redo_raster_hint(&self) -> Option<(Uuid, f64)> {
+        self.redo_stack.last().and_then(|a| a.raster_resident_hint())
     }
 
     /// Get MIDI cache data from the last action on the undo stack (after redo).

@@ -9,6 +9,7 @@ use crate::config::AppConfig;
 use crate::keymap::{self, AppAction, KeymapManager};
 use crate::menu::{MenuSystem, Shortcut, ShortcutKey};
 use crate::theme::{Theme, ThemeMode};
+use lightningbeam_core::file_io::LargeMediaMode;
 
 /// Which tab is selected in the preferences dialog
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +60,7 @@ struct PreferencesState {
     debug: bool,
     waveform_stereo: bool,
     theme_mode: ThemeMode,
+    large_media_default: LargeMediaMode,
 }
 
 impl From<(&AppConfig, &Theme)> for PreferencesState {
@@ -75,6 +77,7 @@ impl From<(&AppConfig, &Theme)> for PreferencesState {
             debug: config.debug,
             waveform_stereo: config.waveform_stereo,
             theme_mode: theme.mode(),
+            large_media_default: config.large_media_default,
         }
     }
 }
@@ -93,6 +96,7 @@ impl Default for PreferencesState {
             debug: false,
             waveform_stereo: false,
             theme_mode: ThemeMode::System,
+            large_media_default: LargeMediaMode::default(),
         }
     }
 }
@@ -567,6 +571,24 @@ impl PreferencesDialog {
                     &mut self.working_prefs.waveform_stereo,
                     "Show waveforms as stacked stereo",
                 );
+                ui.horizontal(|ui| {
+                    let threshold_gb = lightningbeam_core::beam_archive::LARGE_MEDIA_THRESHOLD
+                        as f64
+                        / (1024.0 * 1024.0 * 1024.0);
+                    ui.label(format!("Large media (>{:.0} GB):", threshold_gb));
+                    let label = |m: LargeMediaMode| match m {
+                        LargeMediaMode::Ask => "Ask each time",
+                        LargeMediaMode::Pack => "Pack into project",
+                        LargeMediaMode::Reference => "Reference external file",
+                    };
+                    egui::ComboBox::from_id_salt("large_media_default")
+                        .selected_text(label(self.working_prefs.large_media_default))
+                        .show_ui(ui, |ui| {
+                            for mode in [LargeMediaMode::Ask, LargeMediaMode::Pack, LargeMediaMode::Reference] {
+                                ui.selectable_value(&mut self.working_prefs.large_media_default, mode, label(mode));
+                            }
+                        });
+                });
             });
     }
 
@@ -629,6 +651,7 @@ impl PreferencesDialog {
         config.debug = self.working_prefs.debug;
         config.waveform_stereo = self.working_prefs.waveform_stereo;
         config.theme_mode = self.working_prefs.theme_mode.to_string_lower();
+        config.large_media_default = self.working_prefs.large_media_default;
         config.keybindings = keybinding_config;
 
         // Apply theme immediately

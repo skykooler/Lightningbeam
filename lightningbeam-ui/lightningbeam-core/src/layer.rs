@@ -382,6 +382,29 @@ impl VectorLayer {
         self.keyframe_at(time).map(|kf| &kf.graph)
     }
 
+    /// The VectorGraph to *render* at `time`. When the keyframe at-or-before `time` has
+    /// `tween_after == Shape` and the next keyframe shares its topology, returns an owned
+    /// graph morphed between them; otherwise borrows the held keyframe's graph. Editing
+    /// should keep using `graph_at_time`/`graph_at_time_mut` (the held keyframe).
+    pub fn tweened_graph_at(&self, time: f64) -> Option<std::borrow::Cow<'_, VectorGraph>> {
+        use std::borrow::Cow;
+        let idx = self.keyframes.partition_point(|kf| kf.time <= time);
+        if idx == 0 {
+            return None;
+        }
+        let a = &self.keyframes[idx - 1];
+        if a.tween_after == TweenType::Shape && idx < self.keyframes.len() {
+            let b = &self.keyframes[idx];
+            if b.time > a.time {
+                let t = ((time - a.time) / (b.time - a.time)).clamp(0.0, 1.0);
+                if let Some(g) = a.graph.interpolated(&b.graph, t) {
+                    return Some(Cow::Owned(g));
+                }
+            }
+        }
+        Some(Cow::Borrowed(&a.graph))
+    }
+
     /// Get a mutable VectorGraph at a given time
     pub fn graph_at_time_mut(&mut self, time: f64) -> Option<&mut VectorGraph> {
         self.keyframe_at_mut(time).map(|kf| &mut kf.graph)
@@ -433,6 +456,25 @@ impl VectorLayer {
         time + frame_duration
     }
 
+    /// Start time of the group clip instance's visibility region that contains `time`:
+    /// the time of the earliest keyframe reachable by walking back through consecutive
+    /// keyframes that all contain the clip instance. Returns `None` if the clip instance
+    /// isn't a keyframe-gated group visible at `time` (e.g. a movie clip).
+    pub fn group_visibility_start(&self, clip_instance_id: &Uuid, time: f64) -> Option<f64> {
+        let after = self.keyframes.partition_point(|kf| kf.time <= time);
+        if after == 0 {
+            return None;
+        }
+        let mut idx = after - 1; // keyframe at-or-before `time`
+        if !self.keyframes[idx].clip_instance_ids.contains(clip_instance_id) {
+            return None;
+        }
+        while idx > 0 && self.keyframes[idx - 1].clip_instance_ids.contains(clip_instance_id) {
+            idx -= 1;
+        }
+        Some(self.keyframes[idx].time)
+    }
+
     // Shape-based methods removed — use DCEL methods instead.
     // - shapes_at_time_mut → graph_at_time_mut
     // - get_shape_in_keyframe → use DCEL vertex/edge/face accessors
@@ -451,28 +493,51 @@ impl VectorLayer {
         &mut self.keyframes[insert_idx]
     }
 
-    /// Insert a new keyframe at time by cloning the DCEL from the active keyframe.
+    /// Insert a new keyframe at time, taking the geometry the layer shows there.
     /// If a keyframe already exists at the exact time, does nothing and returns it.
+    ///
+    /// Inside a shape-tween span this captures the *interpolated* geometry at `time` (not
+    /// the left keyframe's), and inherits the span's `tween_after` so the new keyframe keeps
+    /// tweening toward the next one — i.e. splitting a tween in two leaves the motion intact.
     pub fn insert_keyframe_from_current(&mut self, time: f64) -> &mut ShapeKeyframe {
         let tolerance = 0.001;
         if let Some(idx) = self.keyframe_index_at_exact(time, tolerance) {
             return &mut self.keyframes[idx];
         }
 
-        // Clone graph and clip instance IDs from the active keyframe
-        let (cloned_graph, cloned_clip_ids) = self
+        // Geometry shown at `time` (interpolated if mid-tween, else the held keyframe).
+        let cloned_graph = self
+            .tweened_graph_at(time)
+            .map(|g| g.into_owned())
+            .unwrap_or_else(VectorGraph::new);
+        // Inherit tween + clip instances from the active (left) keyframe.
+        let (tween_after, cloned_clip_ids) = self
             .keyframe_at(time)
-            .map(|kf| {
-                (kf.graph.clone(), kf.clip_instance_ids.clone())
-            })
-            .unwrap_or_else(|| (VectorGraph::new(), Vec::new()));
+            .map(|kf| (kf.tween_after, kf.clip_instance_ids.clone()))
+            .unwrap_or((TweenType::None, Vec::new()));
 
         let insert_idx = self.keyframes.partition_point(|kf| kf.time < time);
         let mut kf = ShapeKeyframe::new(time);
         kf.graph = cloned_graph;
+        kf.tween_after = tween_after;
         kf.clip_instance_ids = cloned_clip_ids;
         self.keyframes.insert(insert_idx, kf);
         &mut self.keyframes[insert_idx]
+    }
+
+    /// True when `time` falls strictly inside a shape-tween span — i.e. an in-between frame
+    /// (the left keyframe has `tween_after == Shape` and `time` is not on either keyframe).
+    /// Editing such a frame would silently modify the left keyframe, so the editor blocks it.
+    pub fn is_tween_inbetween(&self, time: f64) -> bool {
+        let tol = 0.001;
+        let idx = self.keyframes.partition_point(|kf| kf.time <= time);
+        if idx == 0 || idx >= self.keyframes.len() {
+            return false;
+        }
+        let (a, b) = (&self.keyframes[idx - 1], &self.keyframes[idx]);
+        a.tween_after == TweenType::Shape
+            && (time - a.time).abs() > tol
+            && (b.time - time).abs() > tol
     }
 
     /// Remove a keyframe at the exact time (within tolerance).
@@ -1049,6 +1114,97 @@ impl AnyLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tweened_graph_at_morphs_between_shape_keyframes() {
+        use crate::vector_graph::{Direction, FillRule, ShapeColor};
+        use kurbo::{CubicBez, Point};
+
+        // Build a single-vertex-ish graph at a given x via one degenerate fill is overkill;
+        // use one vertex + one edge (a loop) is also odd. Use two vertices + one edge and
+        // just check the vertex lerp through the layer's tween path.
+        let mk = |x: f64| {
+            let mut g = VectorGraph::new();
+            let v0 = g.alloc_vertex(Point::new(x, 0.0));
+            let v1 = g.alloc_vertex(Point::new(x + 10.0, 0.0));
+            let c = CubicBez::new(
+                Point::new(x, 0.0),
+                Point::new(x + 3.0, 0.0),
+                Point::new(x + 7.0, 0.0),
+                Point::new(x + 10.0, 0.0),
+            );
+            g.alloc_edge(c, v0, v1, None, Some(ShapeColor::rgb(0, 0, 0)));
+            g.alloc_fill(vec![(crate::vector_graph::EdgeId(0), Direction::Forward)],
+                ShapeColor::rgb(255, 0, 0), FillRule::NonZero);
+            g
+        };
+
+        let mut layer = VectorLayer::new("L");
+        layer.keyframes.clear();
+        let mut kf0 = ShapeKeyframe::new(0.0);
+        kf0.graph = mk(0.0);
+        kf0.tween_after = TweenType::Shape;
+        let mut kf10 = ShapeKeyframe::new(10.0);
+        kf10.graph = mk(100.0);
+        layer.keyframes.push(kf0);
+        layer.keyframes.push(kf10);
+
+        // Midway through the tween, vertex 0 is halfway (x=50).
+        let g = layer.tweened_graph_at(5.0).unwrap();
+        assert!((g.vertices[0].position.x - 50.0).abs() < 1e-6);
+
+        // Without the tween flag, it holds the left keyframe (x=0).
+        layer.keyframes[0].tween_after = TweenType::None;
+        let g = layer.tweened_graph_at(5.0).unwrap();
+        assert!((g.vertices[0].position.x - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn inserting_keyframe_mid_tween_captures_interpolated_geometry_and_inherits_tween() {
+        use crate::vector_graph::{Direction, FillRule, ShapeColor};
+        use kurbo::{CubicBez, Point};
+
+        let mk = |x: f64| {
+            let mut g = VectorGraph::new();
+            let v0 = g.alloc_vertex(Point::new(x, 0.0));
+            let v1 = g.alloc_vertex(Point::new(x + 10.0, 0.0));
+            let c = CubicBez::new(
+                Point::new(x, 0.0),
+                Point::new(x + 3.0, 0.0),
+                Point::new(x + 7.0, 0.0),
+                Point::new(x + 10.0, 0.0),
+            );
+            g.alloc_edge(c, v0, v1, None, Some(ShapeColor::rgb(0, 0, 0)));
+            g.alloc_fill(vec![(crate::vector_graph::EdgeId(0), Direction::Forward)],
+                ShapeColor::rgb(255, 0, 0), FillRule::NonZero);
+            g
+        };
+
+        let mut layer = VectorLayer::new("L");
+        layer.keyframes.clear();
+        let mut kf_a = ShapeKeyframe::new(0.0);
+        kf_a.graph = mk(0.0);
+        kf_a.tween_after = TweenType::Shape;
+        let mut kf_b = ShapeKeyframe::new(10.0);
+        kf_b.graph = mk(100.0);
+        layer.keyframes.push(kf_a);
+        layer.keyframes.push(kf_b);
+
+        // Insert keyframe C at the midpoint of the A→B shape tween.
+        layer.insert_keyframe_from_current(5.0);
+
+        let c = layer.keyframe_at(5.0).expect("keyframe C exists");
+        // C took the interpolated geometry (x=50), not A's geometry (x=0).
+        assert!((c.graph.vertices[0].position.x - 50.0).abs() < 1e-6,
+            "C should hold interpolated geometry, got {}", c.graph.vertices[0].position.x);
+        // C inherits the shape tween so it still morphs toward B.
+        assert_eq!(c.tween_after, TweenType::Shape, "C should inherit the shape tween");
+
+        // The frame between C and B is still an in-between (tween continues past C).
+        assert!(layer.is_tween_inbetween(7.0));
+        // C itself is a keyframe, not an in-between.
+        assert!(!layer.is_tween_inbetween(5.0));
+    }
 
     #[test]
     fn test_layer_creation() {

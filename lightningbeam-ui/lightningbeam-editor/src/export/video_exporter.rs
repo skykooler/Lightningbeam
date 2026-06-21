@@ -191,7 +191,9 @@ impl ExportGpuResources {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("linear_to_srgb_shader"),
-            source: wgpu::ShaderSource::Wgsl(LINEAR_TO_SRGB_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}\n{}", lightningbeam_core::gpu::COLOR_WGSL, LINEAR_TO_SRGB_SHADER).into(),
+            ),
         });
 
         let linear_to_srgb_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -310,32 +312,24 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-// Linear to sRGB color space conversion (per channel)
-fn linear_to_srgb_channel(c: f32) -> f32 {
-    return select(
-        1.055 * pow(c, 1.0 / 2.4) - 0.055,
-        c * 12.92,
-        c <= 0.0031308
-    );
-}
-
-fn linear_to_srgb(color: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        linear_to_srgb_channel(color.r),
-        linear_to_srgb_channel(color.g),
-        linear_to_srgb_channel(color.b)
-    );
-}
+// linear_to_srgb / linear_to_srgb_channel are provided by the prepended
+// COLOR_WGSL prelude (see the create_shader_module call site).
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let src = textureSample(source_tex, source_sampler, in.uv);
 
-    // Convert linear HDR to sRGB
-    let srgb = linear_to_srgb(src.rgb);
+    // The compositor accumulates PREMULTIPLIED linear color. Unpremultiply
+    // before the sRGB OETF (srgb(rgb*a) != srgb(rgb)*a) and emit STRAIGHT
+    // alpha, which is what PNG export / the readback path expect. For opaque
+    // pixels (a == 1, the normal video case) this is an exact identity.
+    let a = src.a;
+    let straight = select(src.rgb / a, vec3<f32>(0.0), a <= 0.0);
 
-    // Alpha stays unchanged
-    return vec4<f32>(srgb, src.a);
+    // Convert linear HDR to sRGB
+    let srgb = linear_to_srgb(straight);
+
+    return vec4<f32>(srgb, a);
 }
 "#;
 
@@ -522,12 +516,27 @@ pub fn setup_video_encoder(
     encoder.set_bit_rate((bitrate_kbps * 1000) as usize);
     encoder.set_gop(framerate as u32); // 1 second GOP
 
+    // Tag the color metadata so players interpret the YUV correctly. Our
+    // RGB→YUV conversion uses the BT.709 matrix with FULL-range (0–255) luma
+    // and no transfer applied to the already-sRGB-encoded RGB. Tagging this
+    // as full-range BT.709 (matrix/primaries/transfer) prevents the level/
+    // hue shift that occurs when a player assumes limited-range or BT.601.
+    // colorspace (matrix) and range have safe setters; primaries and trc are
+    // generic AVCodecContext options set via the open dictionary below.
+    encoder.set_colorspace(ffmpeg::color::Space::BT709);
+    encoder.set_color_range(ffmpeg::color::Range::JPEG); // full range
+
     println!("📐 Video dimensions: {}×{} (aligned to {}×{} for H.264)",
              width, height, aligned_width, aligned_height);
 
-    // Open encoder with codec (like working MP3 export)
+    // Open encoder with codec (like working MP3 export). color_primaries and
+    // color_trc have no typed setter on the encoder, so pass them as generic
+    // AVCodecContext options (BT.709) through the open dictionary.
+    let mut color_opts = ffmpeg::Dictionary::new();
+    color_opts.set("color_primaries", "bt709");
+    color_opts.set("color_trc", "bt709");
     let encoder = encoder
-        .open_as(codec)
+        .open_as_with(codec, color_opts)
         .map_err(|e| format!("Failed to open video encoder: {}", e))?;
 
     Ok((encoder, codec))
@@ -973,8 +982,18 @@ pub fn render_frame_to_rgba_hdr(
     // Set document time to the frame timestamp
     document.current_time = timestamp;
 
-    // Use identity transform for export (document coordinates = pixel coordinates)
-    let base_transform = Affine::IDENTITY;
+    // Scale the document to the export resolution. The core renderer bakes this
+    // base transform into every layer (vector scenes, raster and video layer
+    // transforms), so the whole stage scales up/down to fill the output. When the
+    // export size matches the document this is the identity.
+    let base_transform = if document.width > 0.0 && document.height > 0.0 {
+        Affine::scale_non_uniform(
+            width as f64 / document.width,
+            height as f64 / document.height,
+        )
+    } else {
+        Affine::IDENTITY
+    };
 
     // Render document for compositing (returns per-layer scenes)
     let composite_result = render_document_for_compositing(
@@ -1160,6 +1179,39 @@ pub fn render_frame_to_rgba_hdr(
 ///
 /// # Returns
 /// Command encoder ready for submission (caller submits via ReadbackPipeline)
+/// Fault in raster keyframe pixels needed to composite the document at its current
+/// time, decoding them from the project `.beam` container via `raster_store`.
+///
+/// Mutates the document in place: for every raster layer's active keyframe whose
+/// `raw_pixels` are empty, loads + sets them (and marks `texture_dirty`). A no-op
+/// when `raster_store` is `None`/unsaved or everything is already resident.
+fn fault_in_raster_for_frame(
+    document: &mut Document,
+    raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
+) {
+    let store = match raster_store {
+        Some(s) if s.has_path() => s,
+        _ => return,
+    };
+    let now = document.current_time;
+    for layer in document.all_layers_mut() {
+        if let lightningbeam_core::layer::AnyLayer::Raster(rl) = layer {
+            // Resolve the active keyframe id at the current time, then fault it in.
+            let kf_id = match rl.keyframe_at(now) {
+                Some(kf) if kf.raw_pixels.is_empty() && kf.needs_fault_in => kf.id,
+                _ => continue,
+            };
+            if let Some(kf) = rl.keyframes.iter_mut().find(|kf| kf.id == kf_id) {
+                if let Some(pixels) = store.load_pixels(kf_id) {
+                    kf.raw_pixels = pixels;
+                    kf.texture_dirty = true;
+                }
+                kf.needs_fault_in = false;
+            }
+        }
+    }
+}
+
 pub fn render_frame_to_gpu_rgba(
     document: &mut Document,
     timestamp: f64,
@@ -1174,14 +1226,31 @@ pub fn render_frame_to_gpu_rgba(
     rgba_texture_view: &wgpu::TextureView,
     floating_selection: Option<&lightningbeam_core::selection::RasterFloatingSelection>,
     allow_transparency: bool,
+    raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
 ) -> Result<wgpu::CommandEncoder, String> {
     use vello::kurbo::Affine;
 
     // Set document time to the frame timestamp
     document.current_time = timestamp;
 
-    // Use identity transform for export (document coordinates = pixel coordinates)
-    let base_transform = Affine::IDENTITY;
+    // Fault in raster keyframe pixels for this frame (Phase 3 paging). Offline
+    // export renders synchronously with no "next frame", so unlike the live canvas
+    // we must page the pixels in here, before compositing. Cheap no-op when every
+    // keyframe is already resident or when the document is unsaved (no store path).
+    fault_in_raster_for_frame(document, raster_store);
+
+    // Scale the document to the export resolution. The core renderer bakes this
+    // base transform into every layer (vector scenes, raster and video layer
+    // transforms), so the whole stage scales up/down to fill the output. When the
+    // export size matches the document this is the identity.
+    let base_transform = if document.width > 0.0 && document.height > 0.0 {
+        Affine::scale_non_uniform(
+            width as f64 / document.width,
+            height as f64 / document.height,
+        )
+    } else {
+        Affine::IDENTITY
+    };
 
     // Render document for compositing (returns per-layer scenes)
     let composite_result = render_document_for_compositing(

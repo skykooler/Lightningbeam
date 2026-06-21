@@ -486,12 +486,96 @@ impl FocusIconCache {
     }
 }
 
+/// Serialize a clip's thumbnails to an `LBTN` blob (version 2): a `complete` flag
+/// then each frame PNG-encoded and packed with its timestamp. Thumbnails are 128px
+/// wide; height is implied by the PNG. `complete` records whether the generating
+/// pass finished — a partial pack is persisted and resumed on load. Frames that
+/// fail to encode are skipped (the count reflects what's written).
+fn encode_thumbnail_blob(thumbs: &[(f64, std::sync::Arc<Vec<u8>>)], complete: bool) -> Vec<u8> {
+    let mut entries: Vec<(f64, Vec<u8>)> = Vec::with_capacity(thumbs.len());
+    for (ts, rgba) in thumbs {
+        let width = 128u32;
+        let height = (rgba.len() / (width as usize * 4)) as u32;
+        if height == 0 {
+            continue;
+        }
+        let img = lightningbeam_core::brush_engine::image_from_raw((**rgba).clone(), width, height);
+        if let Ok(png) = lightningbeam_core::brush_engine::encode_png(&img) {
+            entries.push((*ts, png));
+        }
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(b"LBTN");
+    out.extend_from_slice(&2u32.to_le_bytes()); // version
+    out.push(if complete { 1 } else { 0 });
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for (ts, png) in &entries {
+        out.extend_from_slice(&ts.to_le_bytes());
+        out.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        out.extend_from_slice(png);
+    }
+    out
+}
+
+/// Read just the `complete` flag from an `LBTN` blob (cheap header read, no PNG
+/// decode). Unknown/old versions are treated as incomplete (→ regenerate).
+fn thumbnail_blob_is_complete(blob: &[u8]) -> bool {
+    blob.len() >= 9
+        && &blob[0..4] == b"LBTN"
+        && u32::from_le_bytes(blob[4..8].try_into().unwrap()) == 2
+        && blob[8] == 1
+}
+
+/// Decode an `LBTN` blob into `(timestamp, rgba)` thumbnails (128px wide). Returns
+/// empty for unknown/old versions.
+fn decode_thumbnail_blob(blob: &[u8]) -> Vec<(f64, std::sync::Arc<Vec<u8>>)> {
+    let mut out = Vec::new();
+    if blob.len() < 13 || &blob[0..4] != b"LBTN" {
+        return out;
+    }
+    if u32::from_le_bytes(blob[4..8].try_into().unwrap()) != 2 {
+        return out;
+    }
+    // blob[8] = complete flag (read separately via thumbnail_blob_is_complete)
+    let count = u32::from_le_bytes(blob[9..13].try_into().unwrap()) as usize;
+    let mut pos = 13;
+    for _ in 0..count {
+        if pos + 12 > blob.len() {
+            break;
+        }
+        let ts = f64::from_le_bytes(blob[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        let png_len = u32::from_le_bytes(blob[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + png_len > blob.len() {
+            break;
+        }
+        if let Ok(img) = lightningbeam_core::brush_engine::decode_png(&blob[pos..pos + png_len]) {
+            out.push((ts, std::sync::Arc::new(img.into_raw())));
+        }
+        pos += png_len;
+    }
+    out
+}
+
 /// Command sent to file operations worker thread
 enum FileCommand {
     Save {
         path: std::path::PathBuf,
         document: lightningbeam_core::document::Document,
         layer_to_track_map: std::collections::HashMap<uuid::Uuid, u32>,
+        /// How to store large media on this save (from the user's preference).
+        large_media_mode: lightningbeam_core::file_io::LargeMediaMode,
+        /// Serialized waveform-pyramid blobs per audio pool index, persisted into
+        /// the container so a later load needn't re-decode the source media.
+        waveform_blobs: std::collections::HashMap<usize, Vec<u8>>,
+        /// Raw video thumbnails by clip id (cheap Arc-clone snapshot). The worker
+        /// PNG-encodes them off the UI thread, then persists them in the container.
+        thumbnail_snapshot: std::collections::HashMap<uuid::Uuid, Vec<(f64, std::sync::Arc<Vec<u8>>)>>,
+        /// Clips whose thumbnail generation has finished — partial sets are still
+        /// persisted (and resumed on load), but flagged incomplete.
+        complete_thumbnail_clips: std::collections::HashSet<uuid::Uuid>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     },
     Load {
@@ -566,8 +650,8 @@ impl FileOperationsWorker {
     fn run(self) {
         while let Ok(command) = self.command_rx.recv() {
             match command {
-                FileCommand::Save { path, document, layer_to_track_map, progress_tx } => {
-                    self.handle_save(path, document, &layer_to_track_map, progress_tx);
+                FileCommand::Save { path, document, layer_to_track_map, large_media_mode, waveform_blobs, thumbnail_snapshot, complete_thumbnail_clips, progress_tx } => {
+                    self.handle_save(path, document, &layer_to_track_map, large_media_mode, waveform_blobs, thumbnail_snapshot, complete_thumbnail_clips, progress_tx);
                 }
                 FileCommand::Load { path, progress_tx } => {
                     self.handle_load(path, progress_tx);
@@ -582,9 +666,24 @@ impl FileOperationsWorker {
         path: std::path::PathBuf,
         document: lightningbeam_core::document::Document,
         layer_to_track_map: &std::collections::HashMap<uuid::Uuid, u32>,
+        large_media_mode: lightningbeam_core::file_io::LargeMediaMode,
+        waveform_blobs: std::collections::HashMap<usize, Vec<u8>>,
+        thumbnail_snapshot: std::collections::HashMap<uuid::Uuid, Vec<(f64, std::sync::Arc<Vec<u8>>)>>,
+        complete_thumbnail_clips: std::collections::HashSet<uuid::Uuid>,
         progress_tx: std::sync::mpsc::Sender<FileProgress>,
     ) {
         use lightningbeam_core::file_io::{save_beam, SaveSettings};
+
+        // PNG-encode the thumbnail snapshot into per-clip LBTN blobs (off the UI
+        // thread), flagging each pack complete-or-partial so the load can resume.
+        let thumbnail_blobs: std::collections::HashMap<uuid::Uuid, Vec<u8>> = thumbnail_snapshot
+            .iter()
+            .filter(|(_, thumbs)| !thumbs.is_empty())
+            .map(|(clip_id, thumbs)| {
+                let complete = complete_thumbnail_clips.contains(clip_id);
+                (*clip_id, encode_thumbnail_blob(thumbs, complete))
+            })
+            .collect();
 
         let save_start = std::time::Instant::now();
         eprintln!("📊 [SAVE] Starting save operation...");
@@ -593,7 +692,7 @@ impl FileOperationsWorker {
         let _ = progress_tx.send(FileProgress::SerializingAudioPool);
         let step1_start = std::time::Instant::now();
 
-        let audio_pool_entries = {
+        let mut audio_pool_entries = {
             let mut controller = self.audio_controller.lock().unwrap();
             match controller.serialize_audio_pool(&path) {
                 Ok(entries) => entries,
@@ -603,6 +702,13 @@ impl FileOperationsWorker {
                 }
             }
         };
+        // Attach precomputed waveform pyramids so save_beam can persist them
+        // (keyed by pool index inside the container).
+        for entry in &mut audio_pool_entries {
+            if let Some(blob) = waveform_blobs.get(&entry.pool_index) {
+                entry.waveform_blob = Some(blob.clone());
+            }
+        }
         eprintln!("📊 [SAVE] Step 1: Serialize audio pool took {:.2}ms", step1_start.elapsed().as_secs_f64() * 1000.0);
 
         // Step 2: Get project
@@ -623,8 +729,11 @@ impl FileOperationsWorker {
         let _ = progress_tx.send(FileProgress::WritingZip);
         let step3_start = std::time::Instant::now();
 
-        let settings = SaveSettings::default();
-        match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, &settings) {
+        let settings = SaveSettings {
+            large_media_mode,
+            ..SaveSettings::default()
+        };
+        match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, &thumbnail_blobs, &settings) {
             Ok(()) => {
                 eprintln!("📊 [SAVE] Step 3: save_beam() took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
                 eprintln!("📊 [SAVE] ✅ Total save time: {:.2}ms", save_start.elapsed().as_secs_f64() * 1000.0);
@@ -686,9 +795,6 @@ enum AudioExtractionResult {
         video_name: String,
         channels: u32,
         sample_rate: u32,
-    },
-    NoAudio {
-        video_clip_id: Uuid,
     },
     Error {
         video_clip_id: Uuid,
@@ -878,8 +984,9 @@ struct EditorApp {
     snap_enabled: bool,              // Whether to snap to geometry (default: true)
     paint_bucket_gap_tolerance: f64, // Fill gap tolerance for paint bucket (default: 5.0)
     polygon_sides: u32,              // Number of sides for polygon tool (default: 5)
-    // Region select state
-    region_selection: Option<lightningbeam_core::selection::RegionSelection>,
+    /// Undo depth before the current region-select session's first cut (see
+    /// `resolve_pending_region_cut`). `None` when no region selection is pending.
+    pending_region_cut_base: Option<usize>,
     region_select_mode: lightningbeam_core::tool::RegionSelectMode,
     lasso_mode: lightningbeam_core::tool::LassoMode,
 
@@ -901,10 +1008,45 @@ struct EditorApp {
     raw_audio_cache: HashMap<usize, (Arc<Vec<f32>>, u32, u32)>,
     /// Pool indices that need GPU texture upload (set when raw audio arrives, cleared after upload)
     waveform_gpu_dirty: HashSet<usize>,
+    /// Pool indices whose `raw_audio_cache` entry holds a packed min/max floor
+    /// (4 f32 per texel: Lmin,Lmax,Rmin,Rmax) rather than raw per-sample data.
+    /// Maps pool_index -> `B` (floor frames-per-texel), so the timeline render can
+    /// derive the floor's effective rate `sr/B` with full float precision. Populated
+    /// for streamed video-audio, which has no in-RAM samples to draw per-sample.
+    waveform_minmax_pools: HashMap<usize, u32>,
+    /// Serialized waveform-pyramid blobs (LBWF bytes) per pool, kept so a save can
+    /// persist them into the `.beam` container without re-decoding. Populated on
+    /// generation and on load. See `daw_backend::audio::waveform_pyramid::to_bytes`.
+    waveform_pyramid_blobs: HashMap<usize, Arc<Vec<u8>>>,
+    /// Receives generated waveforms from a background thread:
+    /// (pool_index, packed_floor_texels, source_sample_rate, channels, B, pyramid_blob).
+    waveform_result_rx: std::sync::mpsc::Receiver<(usize, Vec<f32>, u32, u32, u32, Vec<u8>)>,
+    /// Sender handed to background waveform-pyramid generation threads.
+    waveform_result_tx: std::sync::mpsc::Sender<(usize, Vec<f32>, u32, u32, u32, Vec<u8>)>,
     /// Consumer for recording audio mirror (streams recorded samples to UI for live waveform)
     recording_mirror_rx: Option<rtrb::Consumer<f32>>,
     /// Current file path (None if not yet saved)
     current_file_path: Option<std::path::PathBuf>,
+    /// Onion-skinning view settings (toggle + frame counts + opacity).
+    onion_skin: crate::panes::OnionSkinSettings,
+    /// On-demand loader for raster keyframe pixels from the project `.beam` container.
+    raster_store: lightningbeam_core::raster_store::RasterStore,
+    /// Miss-sink: raster keyframe ids the canvas wanted but whose pixels weren't
+    /// resident. Drained and faulted in at the top of the next `update()`.
+    raster_fault_requests:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>>,
+    /// Async raster page-in: background decode results `(kf_id, pixels-or-None)`.
+    /// `None` = the keyframe genuinely isn't in the container (blank).
+    raster_load_result_tx: std::sync::mpsc::Sender<(uuid::Uuid, Option<Vec<u8>>)>,
+    raster_load_result_rx: std::sync::mpsc::Receiver<(uuid::Uuid, Option<Vec<u8>>)>,
+    /// Keyframe ids whose page-in is currently running on a background thread
+    /// (prevents duplicate loads while the canvas keeps re-requesting them).
+    raster_loads_inflight: std::collections::HashSet<uuid::Uuid>,
+    /// Fault-in-recency LRU of resident raster keyframe ids. Most-recently
+    /// paged-in is at the back; eviction pops the front when over budget
+    /// (`RASTER_RESIDENT_MAX`). The currently-shown frame is always the most
+    /// recent fault-in, so it's never evicted.
+    raster_resident_lru: std::collections::VecDeque<uuid::Uuid>,
     /// Application configuration (recent files, etc.)
     config: AppConfig,
     /// Remappable keyboard shortcut manager
@@ -923,10 +1065,19 @@ struct EditorApp {
     export_dialog: export::dialog::ExportDialog,
     /// Export progress dialog
     export_progress_dialog: export::dialog::ExportProgressDialog,
+    /// When `Some(name)`, show the "large media: pack or reference?" prompt for the
+    /// named just-imported file. Set on the first large import while the
+    /// `large_media_default` preference is still `Ask`.
+    large_media_prompt: Option<String>,
     /// Preferences dialog
     preferences_dialog: preferences::dialog::PreferencesDialog,
     /// Export orchestrator for background exports
     export_orchestrator: Option<export::ExportOrchestrator>,
+    /// Vello renderer + image cache reused across all frames of an in-progress export
+    /// (built once on the first export pump, dropped when export ends) — building a new
+    /// renderer per frame was the dominant export cost.
+    export_renderer: Option<vello::Renderer>,
+    export_image_cache: Option<lightningbeam_core::renderer::ImageCache>,
     /// GPU-rendered effect thumbnail generator
     effect_thumbnail_generator: Option<EffectThumbnailGenerator>,
 
@@ -962,6 +1113,11 @@ enum ImportFilter {
 }
 
 impl EditorApp {
+    /// Maximum number of raster keyframes whose `raw_pixels` stay resident in
+    /// RAM. Older clean keyframes beyond this are evicted (re-page on revisit);
+    /// the most-recently-shown frame is always protected.
+    const RASTER_RESIDENT_MAX: usize = 12;
+
     fn new(
         cc: &eframe::CreationContext,
         layouts: Vec<LayoutDefinition>,
@@ -1069,6 +1225,9 @@ impl EditorApp {
             .map(|rs| rs.target_format)
             .unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
 
+        let (waveform_result_tx, waveform_result_rx) = std::sync::mpsc::channel();
+        let (raster_load_result_tx, raster_load_result_rx) = std::sync::mpsc::channel();
+
         Self {
             layouts,
             current_layout_index: 0,
@@ -1145,7 +1304,7 @@ impl EditorApp {
             snap_enabled: true,              // Default to snapping
             paint_bucket_gap_tolerance: 5.0, // Default gap tolerance
             polygon_sides: 5,                // Default to pentagon
-            region_selection: None,
+            pending_region_cut_base: None,
             region_select_mode: lightningbeam_core::tool::RegionSelectMode::default(),
             lasso_mode: lightningbeam_core::tool::LassoMode::default(),
             input_level: 0.0,
@@ -1156,8 +1315,19 @@ impl EditorApp {
             audio_pools_with_new_waveforms: HashSet::new(), // Track pool indices with new raw audio
             raw_audio_cache: HashMap::new(),
             waveform_gpu_dirty: HashSet::new(),
+            waveform_minmax_pools: HashMap::new(),
+            waveform_pyramid_blobs: HashMap::new(),
+            waveform_result_rx,
+            waveform_result_tx,
             recording_mirror_rx,
             current_file_path: None, // No file loaded initially
+            onion_skin: crate::panes::OnionSkinSettings::default(),
+            raster_store: lightningbeam_core::raster_store::RasterStore::new(None),
+            raster_fault_requests: Default::default(),
+            raster_load_result_tx,
+            raster_load_result_rx,
+            raster_loads_inflight: Default::default(),
+            raster_resident_lru: Default::default(),
             keymap: KeymapManager::new(&config.keybindings),
             config,
             file_command_tx,
@@ -1166,8 +1336,11 @@ impl EditorApp {
             audio_extraction_rx,
             export_dialog: export::dialog::ExportDialog::default(),
             export_progress_dialog: export::dialog::ExportProgressDialog::default(),
+            large_media_prompt: None,
             preferences_dialog: preferences::dialog::PreferencesDialog::default(),
             export_orchestrator: None,
+            export_renderer: None,
+            export_image_cache: None,
             effect_thumbnail_generator: None, // Initialized when GPU available
 
             // Debug test mode (F5)
@@ -2162,6 +2335,39 @@ impl EditorApp {
 
     /// Cancel a floating raster selection: restore the canvas from the
     /// pre-cut/paste snapshot.  No undo entry is created.
+    /// Fault in the raster keyframe that a pending undo/redo needs resident, so its
+    /// dirty-rect diff applies onto the correct full base. A clean evicted frame's
+    /// container bytes equal its current logical state, so this restores the right
+    /// base. Synchronous — undo/redo is a discrete user action, not a hot path.
+    fn ensure_raster_resident_for_undo(&mut self, hint: Option<(uuid::Uuid, f64)>) {
+        use lightningbeam_core::layer::AnyLayer;
+        let Some((layer_id, time)) = hint else { return };
+        if !self.raster_store.has_path() { return; }
+        // Identify the (paged-out) keyframe the action will touch.
+        let target = {
+            let doc = self.action_executor.document();
+            match doc.get_layer(&layer_id) {
+                Some(AnyLayer::Raster(rl)) => rl
+                    .keyframe_at(time)
+                    .filter(|kf| kf.raw_pixels.is_empty() && kf.needs_fault_in)
+                    .map(|kf| kf.id),
+                _ => None,
+            }
+        };
+        if let Some(kf_id) = target {
+            if let Some(pixels) = self.raster_store.load_pixels(kf_id) {
+                let doc = self.action_executor.document_mut();
+                if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
+                    if let Some(kf) = rl.keyframes.iter_mut().find(|k| k.id == kf_id) {
+                        kf.raw_pixels = pixels;
+                        kf.texture_dirty = true;
+                        kf.needs_fault_in = false;
+                    }
+                }
+            }
+        }
+    }
+
     fn cancel_raster_floating(&mut self) {
         use lightningbeam_core::layer::AnyLayer;
 
@@ -2172,6 +2378,11 @@ impl EditorApp {
         let Some(AnyLayer::Raster(rl)) = document.get_layer_mut(&float.layer_id) else { return };
         let Some(kf) = rl.keyframe_at_mut(float.time) else { return };
         kf.raw_pixels = std::sync::Arc::try_unwrap(float.canvas_before).unwrap_or_else(|a| (*a).clone());
+        // Restoring the pre-lift snapshot rewrites raw_pixels in memory; that
+        // snapshot may itself contain un-persisted edits, and the lift had marked
+        // the kf dirty. Keep it pinned (dirty) so eviction can't lose it.
+        kf.dirty = true;
+        kf.texture_dirty = true;
     }
 
     /// Drop (discard) the floating selection keeping the hole punched in the
@@ -2419,27 +2630,7 @@ impl EditorApp {
                 None => return,
             };
 
-            // Region selection case: faces are selected but no edges.
-            // The inside geometry was already extracted from the live DCEL;
-            // commit the current state (outside + boundary) using the
-            // pre-boundary snapshot as the "before" for undo.
-            if self.selection.selected_edges().is_empty() {
-                if let Some(region_sel) = self.region_selection.take() {
-                    // dcel_snapshot = state before boundary was inserted.
-                    // Current document DCEL = outside portion only (boundary edges present).
-                    // We commit the snapshot as "before" and the current state as "after",
-                    // then drop the region selection so it is not merged back.
-                    // TODO: Region selection delete requires converting Dcel snapshot
-                    // to VectorGraph for ModifyGraphAction. Deferred until RegionSelection
-                    // is migrated from Dcel to VectorGraph.
-                    eprintln!("Region selection delete: not yet ported to VectorGraph");
-                    // region_sel is dropped; the stage pane will see region_selection == None.
-                }
-                self.selection.clear_geometry_selection();
-                return;
-            }
-
-            // Select-tool case: delete the selected edges.
+            // Delete the selected edges (region/marquee/click all populate the same sets).
             let edge_ids: Vec<lightningbeam_core::vector_graph::EdgeId> =
                 self.selection.selected_edges().iter().copied().collect();
 
@@ -2826,38 +3017,31 @@ impl EditorApp {
         }
     }
 
-    /// Revert an uncommitted region selection, restoring original shapes
-    fn revert_region_selection(
-        region_selection: &mut Option<lightningbeam_core::selection::RegionSelection>,
-        action_executor: &mut lightningbeam_core::action::ActionExecutor,
-        selection: &mut lightningbeam_core::selection::Selection,
-    ) {
-        use lightningbeam_core::layer::AnyLayer;
-
-        let region_sel = match region_selection.take() {
-            Some(rs) => rs,
-            None => return,
-        };
-
-        if region_sel.committed {
+    /// Resolve a pending region-select cut once its selection has been cleared.
+    ///
+    /// A region/lasso selection cuts the geometry (an undoable `"Region select"` action)
+    /// and selects the resulting sub-pieces. When that selection is deselected:
+    ///   - if nothing was edited in between, the cut(s) are healed (undone) so the lasso
+    ///     was non-destructive — the shape returns to whole;
+    ///   - if anything was edited, everything is kept (the edits — and the cut they rely
+    ///     on — stay on the undo stack), i.e. the change is "merged" in place.
+    /// We tell the two apart by walking the undo stack down to the recorded base depth and
+    /// only undoing while the top action is itself a region-select cut; the first non-cut
+    /// action (an edit) stops the heal and leaves everything intact.
+    fn resolve_pending_region_cut(&mut self) {
+        let Some(base) = self.pending_region_cut_base else { return };
+        // Only resolve once the region selection has actually been deselected.
+        if self.selection.has_geometry_selection() {
             return;
         }
-
-        let doc = action_executor.document_mut();
-        let layer = match doc.get_layer_mut(&region_sel.layer_id) {
-            Some(l) => l,
-            None => return,
-        };
-        let vector_layer = match layer {
-            AnyLayer::Vector(vl) => vl,
-            _ => return,
-        };
-
-        // TODO: DCEL - region selection revert disabled during migration
-        // (was: remove/add_shape_from/to_keyframe for splits)
-        let _ = vector_layer;
-
-        selection.clear();
+        while self.action_executor.undo_depth() > base {
+            if self.action_executor.undo_description().as_deref() == Some("Region select") {
+                let _ = self.action_executor.undo();
+            } else {
+                break; // an edit sits on top → the user changed something; keep it all.
+            }
+        }
+        self.pending_region_cut_base = None;
     }
 
     fn handle_menu_action(&mut self, action: MenuAction) {
@@ -2882,6 +3066,8 @@ impl EditorApp {
                 self.audio_duration_cache.clear();
                 self.raw_audio_cache.clear();
                 self.waveform_gpu_dirty.clear();
+                self.waveform_minmax_pools.clear();
+                self.waveform_pyramid_blobs.clear();
                 self.pane_instances.clear();
                 self.project_generation += 1;
                 self.app_mode = AppMode::StartScreen;
@@ -3113,6 +3299,10 @@ impl EditorApp {
                     self.cancel_raster_floating();
                     return;
                 }
+                // Page in the target raster frame first so its dirty-rect diff has a
+                // resident base to apply onto.
+                let hint = self.action_executor.peek_undo_raster_hint();
+                self.ensure_raster_resident_for_undo(hint);
                 let undo_succeeded = if let Some(ref controller_arc) = self.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
                     let mut backend_context = lightningbeam_core::action::BackendContext {
@@ -3162,6 +3352,8 @@ impl EditorApp {
                 }
             }
             MenuAction::Redo => {
+                let hint = self.action_executor.peek_redo_raster_hint();
+                self.ensure_raster_resident_for_undo(hint);
                 let redo_succeeded = if let Some(ref controller_arc) = self.audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
                     let mut backend_context = lightningbeam_core::action::BackendContext {
@@ -3253,26 +3445,24 @@ impl EditorApp {
                         self.pending_node_group = true;
                     }
                     _ => {
-                        // Existing clip instance grouping fallback (stub)
+                        // Group selected geometry into a group clip + clip instance.
                         if let Some(layer_id) = self.active_layer_id {
                             if self.selection.has_geometry_selection() {
-                                // TODO: DCEL group deferred to Phase 2
-                            } else {
-                                let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
-                                if clip_ids.len() >= 2 {
-                                    let instance_id = uuid::Uuid::new_v4();
-                                    let action = lightningbeam_core::actions::GroupAction::new(
-                                        layer_id, self.playback_time, Vec::new(), clip_ids, instance_id,
-                                    );
-                                    if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                                        eprintln!("Failed to group: {}", e);
-                                    } else {
-                                        self.selection.clear();
-                                        self.selection.add_clip_instance(instance_id);
-                                    }
+                                let fills: Vec<_> = self.selection.selected_fills().iter().copied().collect();
+                                let edges: Vec<_> = self.selection.selected_edges().iter().copied().collect();
+                                let clip_id = uuid::Uuid::new_v4();
+                                let instance_id = uuid::Uuid::new_v4();
+                                let action = lightningbeam_core::actions::GroupAction::new(
+                                    layer_id, self.playback_time, fills, edges, clip_id, instance_id,
+                                );
+                                if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                                    eprintln!("Failed to group: {}", e);
+                                } else {
+                                    self.selection.clear();
+                                    self.selection.add_clip_instance(instance_id);
                                 }
                             }
-                            let _ = layer_id;
+                            // (Grouping existing clip instances is a separate op, not wired.)
                         }
                     }
                 }
@@ -3280,24 +3470,18 @@ impl EditorApp {
             MenuAction::ConvertToMovieClip => {
                 if let Some(layer_id) = self.active_layer_id {
                     if self.selection.has_geometry_selection() {
-                        // TODO: DCEL convert-to-movie-clip deferred to Phase 2
-                    } else {
-                        let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
-                        if clip_ids.len() >= 1 {
-                            let instance_id = uuid::Uuid::new_v4();
-                            let action = lightningbeam_core::actions::ConvertToMovieClipAction::new(
-                                layer_id,
-                                self.playback_time,
-                                Vec::new(),
-                                clip_ids,
-                                instance_id,
-                            );
-                            if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                                eprintln!("Failed to convert to movie clip: {}", e);
-                            } else {
-                                self.selection.clear();
-                                self.selection.add_clip_instance(instance_id);
-                            }
+                        let fills: Vec<_> = self.selection.selected_fills().iter().copied().collect();
+                        let edges: Vec<_> = self.selection.selected_edges().iter().copied().collect();
+                        let clip_id = uuid::Uuid::new_v4();
+                        let instance_id = uuid::Uuid::new_v4();
+                        let action = lightningbeam_core::actions::ConvertToMovieClipAction::new(
+                            layer_id, self.playback_time, fills, edges, clip_id, instance_id,
+                        );
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Failed to convert to movie clip: {}", e);
+                        } else {
+                            self.selection.clear();
+                            self.selection.add_clip_instance(instance_id);
                         }
                     }
                 }
@@ -3522,27 +3706,39 @@ impl EditorApp {
             MenuAction::NewKeyframe | MenuAction::AddKeyframeAtPlayhead => {
                 if let Some(layer_id) = self.active_layer_id {
                     let document = self.action_executor.document();
-                    // Determine which selected objects are shape instances vs clip instances
-                    let _shape_ids: Vec<uuid::Uuid> = Vec::new();
-                    let mut clip_ids = Vec::new();
-                    if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
-                        // TODO: DCEL - shape instance lookup disabled during migration
-                        // (was: get_shape_in_keyframe to check which selected objects are shapes)
-                        for &id in self.selection.clip_instances() {
-                            if vl.clip_instances.iter().any(|ci| ci.id == id) {
-                                clip_ids.push(id);
-                            }
-                        }
-                    }
-                    // For vector layers, always create a shape keyframe (even without clip selection)
-                    if document.get_layer(&layer_id).map_or(false, |l| matches!(l, AnyLayer::Vector(_))) || !clip_ids.is_empty() {
-                        let action = lightningbeam_core::actions::SetKeyframeAction::new(
-                            layer_id,
-                            self.playback_time,
-                            clip_ids,
+                    let is_raster = matches!(document.get_layer(&layer_id), Some(AnyLayer::Raster(_)));
+                    if is_raster {
+                        // Raster layers: insert a blank cel at the playhead.
+                        let (doc_w, doc_h) = (document.width as u32, document.height as u32);
+                        let action = lightningbeam_core::actions::AddRasterKeyframeAction::new(
+                            layer_id, self.playback_time, doc_w, doc_h,
                         );
                         if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                            eprintln!("Failed to set keyframe: {}", e);
+                            eprintln!("Failed to add raster keyframe: {}", e);
+                        }
+                    } else {
+                        // Determine which selected objects are shape instances vs clip instances
+                        let _shape_ids: Vec<uuid::Uuid> = Vec::new();
+                        let mut clip_ids = Vec::new();
+                        if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+                            // TODO: DCEL - shape instance lookup disabled during migration
+                            // (was: get_shape_in_keyframe to check which selected objects are shapes)
+                            for &id in self.selection.clip_instances() {
+                                if vl.clip_instances.iter().any(|ci| ci.id == id) {
+                                    clip_ids.push(id);
+                                }
+                            }
+                        }
+                        // For vector layers, always create a shape keyframe (even without clip selection)
+                        if document.get_layer(&layer_id).map_or(false, |l| matches!(l, AnyLayer::Vector(_))) || !clip_ids.is_empty() {
+                            let action = lightningbeam_core::actions::SetKeyframeAction::new(
+                                layer_id,
+                                self.playback_time,
+                                clip_ids,
+                            );
+                            if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                                eprintln!("Failed to set keyframe: {}", e);
+                            }
                         }
                     }
                 }
@@ -3565,8 +3761,16 @@ impl EditorApp {
                 // TODO: Implement add motion tween
             }
             MenuAction::AddShapeTween => {
-                println!("Menu: Add Shape Tween");
-                // TODO: Implement add shape tween
+                if let Some(layer_id) = self.active_layer_id {
+                    let action = lightningbeam_core::actions::SetTweenAction::new(
+                        layer_id,
+                        self.playback_time,
+                        lightningbeam_core::layer::TweenType::Shape,
+                    );
+                    if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                        eprintln!("Failed to add shape tween: {}", e);
+                    }
+                }
             }
             MenuAction::ReturnToStart => {
                 println!("Menu: Return to Start");
@@ -3595,6 +3799,9 @@ impl EditorApp {
             }
             MenuAction::RecenterView => {
                 self.pending_view_action = Some(MenuAction::RecenterView);
+            }
+            MenuAction::ToggleOnionSkin => {
+                self.onion_skin.enabled = !self.onion_skin.enabled;
             }
             MenuAction::NextLayout => {
                 println!("Menu: Next Layout");
@@ -3666,11 +3873,31 @@ impl EditorApp {
         // Clone document for background thread
         let document = self.action_executor.document().clone();
 
+        // Snapshot the generated waveform pyramids (by pool index) so the worker
+        // can persist them into the container alongside the audio.
+        let waveform_blobs: std::collections::HashMap<usize, Vec<u8>> = self
+            .waveform_pyramid_blobs
+            .iter()
+            .map(|(&idx, blob)| (idx, blob.as_ref().clone()))
+            .collect();
+
+        // Snapshot all video thumbnails (cheap Arc-clone) + which clips finished
+        // generating; the worker PNG-encodes them with a complete/partial flag so a
+        // save mid-generation persists progress and resumes on load.
+        let (thumbnail_snapshot, complete_thumbnail_clips) = {
+            let vm = self.video_manager.lock().unwrap();
+            (vm.snapshot_all_thumbnails(), vm.complete_thumbnail_clips())
+        };
+
         // Send save command to worker thread
         let command = FileCommand::Save {
             path: path.clone(),
             document,
             layer_to_track_map: self.layer_to_track_map.clone(),
+            large_media_mode: self.config.large_media_default,
+            waveform_blobs,
+            thumbnail_snapshot,
+            complete_thumbnail_clips,
             progress_tx,
         };
 
@@ -3756,7 +3983,7 @@ impl EditorApp {
     }
 
     /// Apply loaded project data (called after successful load in background)
-    fn apply_loaded_project(&mut self, loaded_project: lightningbeam_core::file_io::LoadedProject, path: std::path::PathBuf) {
+    fn apply_loaded_project(&mut self, mut loaded_project: lightningbeam_core::file_io::LoadedProject, path: std::path::PathBuf) {
         use lightningbeam_core::action::ActionExecutor;
 
         let apply_start = std::time::Instant::now();
@@ -3781,6 +4008,34 @@ impl EditorApp {
         self.restore_layout_from_document();
         eprintln!("📊 [APPLY] Step 2: Restore UI layout took {:.2}ms", step2_start.elapsed().as_secs_f64() * 1000.0);
 
+        // Snapshot persisted waveform pyramids (with each entry's source sample
+        // rate) before the backend consumes the entries below. Restored into the
+        // GPU caches after the controller borrow ends, so a load needn't re-decode.
+        let loaded_waveforms: Vec<(usize, u32, Vec<u8>)> = loaded_project
+            .audio_pool_entries
+            .iter()
+            .filter_map(|e| e.waveform_blob.as_ref().map(|b| (e.pool_index, e.sample_rate, b.clone())))
+            .collect();
+
+        // Streamed (packed) audio entries that have NO persisted pyramid yet
+        // (e.g. saved before waveform persistence): generate one in the background
+        // from the packed blob so the overview appears without a full decode.
+        // (pool_index, media_id, codec/ext, sample_rate)
+        let streamed_needing_waveform: Vec<(usize, String, Option<String>, u32)> = loaded_project
+            .audio_pool_entries
+            .iter()
+            .filter(|e| e.waveform_blob.is_none() && e.embedded_data.is_none())
+            .filter_map(|e| {
+                e.media_id.clone().map(|id| {
+                    let ext = std::path::Path::new(&e.name)
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|s| s.to_lowercase());
+                    (e.pool_index, id, ext, e.sample_rate)
+                })
+            })
+            .collect();
+
         // Load audio pool FIRST (before setting project, so clips can reference pool entries)
         let step3_start = std::time::Instant::now();
         if let Some(ref controller_arc) = self.audio_controller {
@@ -3793,6 +4048,15 @@ impl EditorApp {
                 return;
             }
             eprintln!("📊 [APPLY] Step 3: Load audio pool took {:.2}ms", step3_start.elapsed().as_secs_f64() * 1000.0);
+
+            // Install the packed-media byte-source factory for this container before
+            // SetProject, so bulk activation can stream container-packed audio.
+            if lightningbeam_core::beam_archive::BeamArchive::is_sqlite(&path) {
+                let factory = lightningbeam_core::file_io::blob_source_factory(&path);
+                if let Err(e) = controller.set_blob_source_factory(factory) {
+                    eprintln!("⚠️ [APPLY] Failed to install blob source factory: {}", e);
+                }
+            }
 
             // Now set project (clips can now reference the loaded pool entries)
             let step4_start = std::time::Instant::now();
@@ -3808,6 +4072,86 @@ impl EditorApp {
                 doc.bpm() as f32,
                 (doc.time_signature.numerator, doc.time_signature.denominator),
             );
+        }
+
+        // Restore waveform overviews from the persisted pyramids (no re-decode).
+        // Clear first so stale pools from the previous project don't linger;
+        // on-demand audio repopulates raw_audio_cache lazily at render time.
+        self.raw_audio_cache.clear();
+        self.waveform_gpu_dirty.clear();
+        self.waveform_minmax_pools.clear();
+        self.waveform_pyramid_blobs.clear();
+        for (pool_index, sample_rate, blob) in loaded_waveforms {
+            match daw_backend::audio::waveform_pyramid::WaveformPyramid::from_bytes(&blob) {
+                Ok(pyramid) => {
+                    let b = pyramid.floor_samples_per_texel.max(1);
+                    let channels = pyramid.channels;
+                    let floor = pyramid.floor();
+                    let mut packed = Vec::with_capacity(floor.len() * 4);
+                    for t in floor {
+                        packed.push(t.l_min);
+                        packed.push(t.l_max);
+                        packed.push(t.r_min);
+                        packed.push(t.r_max);
+                    }
+                    self.raw_audio_cache.insert(pool_index, (Arc::new(packed), sample_rate, channels));
+                    self.waveform_minmax_pools.insert(pool_index, b);
+                    self.waveform_pyramid_blobs.insert(pool_index, Arc::new(blob));
+                    self.waveform_gpu_dirty.insert(pool_index);
+                }
+                Err(e) => eprintln!(
+                    "⚠️ [APPLY] Failed to parse persisted waveform for pool {}: {}",
+                    pool_index, e
+                ),
+            }
+        }
+
+        // Background-generate overviews for streamed audio that has no persisted
+        // pyramid yet (older saves). Streams the packed blob via the factory and
+        // sends the floor through the same channel `update()` already drains; the
+        // next save then persists it.
+        if !streamed_needing_waveform.is_empty() {
+            let wf_tx = self.waveform_result_tx.clone();
+            let floor_b = self.config.waveform_floor_samples_per_texel.max(1);
+            let beam_path = path.clone();
+            std::thread::spawn(move || {
+                let factory = lightningbeam_core::file_io::blob_source_factory(&beam_path);
+                for (pool_index, media_id, ext, sample_rate) in streamed_needing_waveform {
+                    let src = match factory.open(&media_id) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("[APPLY] waveform gen: open packed {} failed: {}", media_id, e);
+                            continue;
+                        }
+                    };
+                    match daw_backend::audio::disk_reader::build_waveform_pyramid_from_source(
+                        src,
+                        ext.as_deref(),
+                        floor_b,
+                    ) {
+                        Ok(pyramid) => {
+                            let floor = pyramid.floor();
+                            let mut packed = Vec::with_capacity(floor.len() * 4);
+                            for t in floor {
+                                packed.push(t.l_min);
+                                packed.push(t.l_max);
+                                packed.push(t.r_min);
+                                packed.push(t.r_max);
+                            }
+                            let blob = pyramid.to_bytes();
+                            let _ = wf_tx.send((
+                                pool_index,
+                                packed,
+                                sample_rate,
+                                pyramid.channels,
+                                pyramid.floor_samples_per_texel,
+                                blob,
+                            ));
+                        }
+                        Err(e) => eprintln!("[APPLY] waveform gen failed for pool {}: {}", pool_index, e),
+                    }
+                }
+            });
         }
 
         // Reset state and restore track mappings
@@ -3890,10 +4234,47 @@ impl EditorApp {
         }
         eprintln!("📊 [APPLY] Step 8: Rebuilt MIDI event cache for {} clips in {:.2}ms", midi_fetched, step8_start.elapsed().as_secs_f64() * 1000.0);
 
+        // Restore persisted video thumbnails (decode + insert off-thread). Only
+        // *complete* packs are skipped from regeneration; *partial* packs are
+        // restored AND have generation resumed below (it skips the keyframes already
+        // restored), so a save mid-generation continues from where it left off.
+        let skip_thumbnail_clips: std::collections::HashSet<uuid::Uuid> = loaded_project
+            .thumbnail_blobs
+            .iter()
+            .filter(|(_, blob)| thumbnail_blob_is_complete(blob))
+            .map(|(id, _)| *id)
+            .collect();
+        if !loaded_project.thumbnail_blobs.is_empty() {
+            let blobs = std::mem::take(&mut loaded_project.thumbnail_blobs);
+            let video_manager = Arc::clone(&self.video_manager);
+            std::thread::spawn(move || {
+                for (clip_id, blob) in blobs {
+                    let complete = thumbnail_blob_is_complete(&blob);
+                    let thumbs = decode_thumbnail_blob(&blob);
+                    let mut vm = video_manager.lock().unwrap();
+                    for (ts, rgba) in thumbs {
+                        vm.insert_thumbnail(&clip_id, ts, rgba);
+                    }
+                    if complete {
+                        vm.mark_thumbnails_complete(&clip_id);
+                    }
+                }
+            });
+        }
+
+        // Re-register video clips with the VideoManager (decoder + keyframe index +
+        // thumbnails). Restored video_clips carry only metadata + file_path; without
+        // this they render black with no thumbnails.
+        let step9_start = std::time::Instant::now();
+        self.register_loaded_videos(&skip_thumbnail_clips);
+        eprintln!("📊 [APPLY] Step 9: Registered loaded videos in {:.2}ms", step9_start.elapsed().as_secs_f64() * 1000.0);
+
         // Reset playback state
         self.playback_time = 0.0;
         self.is_playing = false;
         self.current_file_path = Some(path.clone());
+        // Point the raster paging store at the loaded container so faulting works.
+        self.raster_store.set_path(self.current_file_path.clone());
 
         // Add to recent files
         self.config.add_recent_file(path.clone());
@@ -3908,9 +4289,191 @@ impl EditorApp {
         println!("✅ Loaded from: {}", path.display());
     }
 
+    /// Register every video clip in the loaded document with the `VideoManager`
+    /// so it can decode and display. Mirrors the import path's setup (decoder +
+    /// background keyframe index + thumbnails) but does NOT re-extract audio —
+    /// the extracted audio is already restored via the audio pool.
+    fn register_loaded_videos(&mut self, skip_thumbnail_clips: &std::collections::HashSet<uuid::Uuid>) {
+        let doc_width = self.action_executor.document().width as u32;
+        let doc_height = self.action_executor.document().height as u32;
+
+        // Snapshot (id, path) so we don't hold the document borrow while locking
+        // the VideoManager / spawning threads.
+        let videos: Vec<_> = self
+            .action_executor
+            .document()
+            .video_clips
+            .values()
+            .map(|c| (c.id, c.file_path.clone()))
+            .collect();
+
+        for (clip_id, file_path) in videos {
+            if !std::path::Path::new(&file_path).exists() {
+                eprintln!("⚠️ [APPLY] Video file not found, skipping: {}", file_path);
+                continue;
+            }
+
+            {
+                let mut video_mgr = self.video_manager.lock().unwrap();
+                if let Err(e) = video_mgr.load_video(clip_id, file_path.clone(), doc_width, doc_height) {
+                    eprintln!("⚠️ [APPLY] Failed to load video {}: {}", file_path, e);
+                    continue;
+                }
+            }
+
+            self.spawn_keyframe_index(clip_id);
+            // Skip regeneration for clips whose thumbnails were restored from the
+            // container — they're being decoded + inserted in the background.
+            if !skip_thumbnail_clips.contains(&clip_id) {
+                self.spawn_thumbnail_generation(clip_id);
+            }
+        }
+    }
+
+    /// Spawn a background thread that builds the keyframe (seek) index for a
+    /// video clip. The clip must already be registered via `load_video`.
+    ///
+    /// The slow packet scan runs holding **no** lock — only brief locks bracket it
+    /// (to grab the decoder handle and to store the result) — so it never blocks
+    /// playback or the UI (which both need the VideoManager / decoder locks).
+    fn spawn_keyframe_index(&self, clip_id: uuid::Uuid) {
+        let video_manager = Arc::clone(&self.video_manager);
+        std::thread::spawn(move || {
+            let decoder_arc = {
+                let vm = video_manager.lock().unwrap();
+                vm.get_decoder(&clip_id)
+            };
+            let Some(decoder_arc) = decoder_arc else { return; };
+
+            let (path, stream_index) = {
+                let decoder = decoder_arc.lock().unwrap();
+                decoder.keyframe_scan_params()
+            };
+
+            // Slow scan, no locks held.
+            match lightningbeam_core::video::VideoDecoder::scan_keyframes(&path, stream_index) {
+                Ok(positions) => {
+                    let count = positions.len();
+                    decoder_arc.lock().unwrap().set_keyframe_index(positions);
+                    println!("  Built keyframe index ({} keyframes) for video clip {}", count, clip_id);
+                }
+                Err(e) => eprintln!("Failed to build keyframe index for {}: {}", clip_id, e),
+            }
+        });
+    }
+
+    /// Spawn a background thread that (re)generates timeline thumbnails for a
+    /// video clip. Uses a **dedicated** decoder (independent of the playback
+    /// decoder) and samples at keyframes, so it neither blocks playback nor pays
+    /// the cost of decoding whole GOPs. Safe to call on its own to refresh a
+    /// single clip's thumbnails.
+    fn spawn_thumbnail_generation(&self, clip_id: uuid::Uuid) {
+        let video_manager = Arc::clone(&self.video_manager);
+        std::thread::spawn(move || {
+            // Grab the source path from the playback decoder (brief lock), then do
+            // all decoding on an independent decoder.
+            let path = {
+                let decoder_arc = {
+                    let vm = video_manager.lock().unwrap();
+                    vm.get_decoder(&clip_id)
+                };
+                let Some(decoder_arc) = decoder_arc else { return; };
+                let decoder = decoder_arc.lock().unwrap();
+                decoder.path().to_string()
+            };
+
+            let vm_insert = Arc::clone(&video_manager);
+            let vm_skip = Arc::clone(&video_manager);
+            let result = lightningbeam_core::video::generate_keyframe_thumbnails(
+                &path,
+                5.0,
+                128,
+                // Resume: skip keyframes already covered (e.g. restored from a
+                // partial persisted pack), so generation only fills the gaps.
+                |ts| vm_skip.lock().unwrap().has_thumbnail_near(&clip_id, ts, 2.5),
+                |ts, rgba| {
+                    let mut vm = vm_insert.lock().unwrap();
+                    vm.insert_thumbnail(&clip_id, ts, rgba);
+                },
+            );
+            match result {
+                Ok(()) => {
+                    // Full keyframe pass finished — mark complete so this set is
+                    // worth persisting (a partial set is left unmarked → not saved).
+                    vm_insert.lock().unwrap().mark_thumbnails_complete(&clip_id);
+                }
+                Err(e) => eprintln!("Thumbnail generation failed for {}: {}", clip_id, e),
+            }
+        });
+    }
+
+    /// If `path` is a large media file (≥ the large-media threshold) and the user
+    /// hasn't yet chosen a default pack-vs-reference policy, queue the one-time
+    /// prompt. The actual storage decision happens at save time from the chosen
+    /// preference; this only establishes that preference.
+    fn note_possible_large_media(&mut self, path: &std::path::Path) {
+        use lightningbeam_core::file_io::LargeMediaMode;
+        if self.config.large_media_default != LargeMediaMode::Ask || self.large_media_prompt.is_some() {
+            return;
+        }
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        if size >= lightningbeam_core::beam_archive::LARGE_MEDIA_THRESHOLD {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            self.large_media_prompt = Some(name);
+        }
+    }
+
+    /// Render the one-time "pack vs reference large media" prompt, if pending.
+    /// The choice is persisted to config as the future default.
+    fn render_large_media_prompt(&mut self, ctx: &egui::Context) {
+        use lightningbeam_core::file_io::LargeMediaMode;
+        let Some(name) = self.large_media_prompt.clone() else {
+            return;
+        };
+        let threshold_gb = lightningbeam_core::beam_archive::LARGE_MEDIA_THRESHOLD as f64
+            / (1024.0 * 1024.0 * 1024.0);
+        let mut choice: Option<LargeMediaMode> = None;
+        egui::Window::new("Large media file")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!("\"{}\" is larger than {:.0} GB.", name, threshold_gb));
+                ui.add_space(6.0);
+                ui.label("How should large media be stored in projects from now on?");
+                ui.add_space(6.0);
+                ui.label("• Pack — copy the bytes into the .beam file (self-contained, larger project).");
+                ui.label("• Reference — keep the file on disk and store only its path (smaller project; the file must stay put).");
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Pack into project").clicked() {
+                        choice = Some(LargeMediaMode::Pack);
+                    }
+                    if ui.button("Reference external file").clicked() {
+                        choice = Some(LargeMediaMode::Reference);
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("You can change this later in Preferences.")
+                        .weak()
+                        .small(),
+                );
+            });
+        if let Some(mode) = choice {
+            self.config.large_media_default = mode;
+            self.config.save();
+            self.large_media_prompt = None;
+        }
+    }
+
     /// Import an image file as an ImageAsset
     fn import_image(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::ImageAsset;
+        self.note_possible_large_media(path);
 
         // Get filename for asset name
         let name = path.file_stem()
@@ -3963,6 +4526,7 @@ impl EditorApp {
     /// GPU waveform cache.
     fn import_audio(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::AudioClip;
+        self.note_possible_large_media(path);
 
         let name = path.file_stem()
             .and_then(|s| s.to_str())
@@ -4088,6 +4652,7 @@ impl EditorApp {
     fn import_video(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::VideoClip;
         use lightningbeam_core::video::probe_video;
+        self.note_possible_large_media(path);
 
         let name = path.file_stem()
             .and_then(|s| s.to_str())
@@ -4129,82 +4694,95 @@ impl EditorApp {
         drop(video_mgr);
 
         // Spawn background thread to build keyframe index asynchronously
-        let video_manager_clone = Arc::clone(&self.video_manager);
-        let keyframe_clip_id = clip_id;
-        std::thread::spawn(move || {
-            let video_mgr = video_manager_clone.lock().unwrap();
-            if let Err(e) = video_mgr.build_keyframe_index(&keyframe_clip_id) {
-                eprintln!("Failed to build keyframe index: {}", e);
-            } else {
-                println!("  Built keyframe index for video clip {}", keyframe_clip_id);
-            }
-        });
+        self.spawn_keyframe_index(clip_id);
 
-        // Spawn background thread for audio extraction if video has audio
+        // Register the video's audio track as a streaming pool entry if present.
         if metadata.has_audio {
             if let Some(ref audio_controller) = self.audio_controller {
                 let path_clone = path_str.clone();
                 let video_clip_id = clip_id;
                 let video_name = name.clone();
+                let video_duration = metadata.duration;
                 let audio_controller_clone = Arc::clone(audio_controller);
                 let tx = self.audio_extraction_tx.clone();
+                let wf_tx = self.waveform_result_tx.clone();
+                let floor_b = self.config.waveform_floor_samples_per_texel.max(1);
 
                 std::thread::spawn(move || {
-                    use lightningbeam_core::video::extract_audio_from_video;
                     use lightningbeam_core::clip::AudioClip;
 
-                    // Extract audio from video (slow FFmpeg operation)
-                    match extract_audio_from_video(&path_clone) {
-                        Ok(Some(extracted)) => {
-                            // Add audio to daw-backend pool synchronously to get pool index
-                            let pool_index = {
-                                let mut controller = audio_controller_clone.lock().unwrap();
-                                match controller.add_audio_file_sync(
-                                    path_clone.clone(),
-                                    extracted.samples,
-                                    extracted.channels,
-                                    extracted.sample_rate,
-                                ) {
-                                    Ok(index) => index,
-                                    Err(e) => {
-                                        eprintln!("Failed to add audio file to backend: {}", e);
-                                        let _ = tx.send(AudioExtractionResult::Error {
-                                            video_clip_id,
-                                            error: format!("Failed to add audio to backend: {}", e),
-                                        });
-                                        return;
-                                    }
-                                }
-                            };
+                    // Add the video's audio track as a streaming pool entry — it is
+                    // decoded on demand from the video file by the disk reader's
+                    // FFmpeg backend. No extraction to disk or RAM.
+                    let mut controller = audio_controller_clone.lock().unwrap();
+                    let pool_index =
+                        match controller.add_video_audio_sync(std::path::PathBuf::from(&path_clone)) {
+                            Ok(index) => index,
+                            Err(e) => {
+                                drop(controller);
+                                eprintln!("Failed to add video audio stream: {}", e);
+                                let _ = tx.send(AudioExtractionResult::Error {
+                                    video_clip_id,
+                                    error: format!("Failed to add video audio: {}", e),
+                                });
+                                return;
+                            }
+                        };
+                    // Pull the audio track's channels/sample_rate for reporting
+                    // (duration comes from the video itself, so the clip length
+                    // matches the video clip exactly).
+                    let (_dur, sample_rate, channels) = controller
+                        .get_pool_file_info(pool_index)
+                        .unwrap_or((video_duration, 0, 0));
+                    drop(controller);
 
-                            // Create AudioClip
-                            let audio_clip_name = format!("{} (Audio)", video_name);
-                            let audio_clip = AudioClip::new_sampled(
-                                &audio_clip_name,
-                                pool_index,
-                                extracted.duration,
-                            );
+                    let audio_clip_name = format!("{} (Audio)", video_name);
+                    let audio_clip =
+                        AudioClip::new_sampled(&audio_clip_name, pool_index, video_duration);
 
-                            // Send success result
-                            let _ = tx.send(AudioExtractionResult::Success {
-                                video_clip_id,
-                                audio_clip,
+                    let _ = tx.send(AudioExtractionResult::Success {
+                        video_clip_id,
+                        audio_clip,
+                        pool_index,
+                        video_name,
+                        channels,
+                        sample_rate,
+                    });
+
+                    // Build the min/max waveform overview pyramid by streaming the
+                    // video's audio through FFmpeg once. Video-audio has no in-RAM
+                    // samples, so without this the clip would draw no waveform.
+                    use daw_backend::audio::disk_reader::{build_waveform_pyramid, SourceKind};
+                    match build_waveform_pyramid(
+                        std::path::Path::new(&path_clone),
+                        SourceKind::VideoAudio,
+                        floor_b,
+                    ) {
+                        Ok(pyramid) => {
+                            // Pack the floor level interleaved as (Lmin,Lmax,Rmin,Rmax)
+                            // f32 per texel — the layout the GPU min/max upload expects.
+                            let floor = pyramid.floor();
+                            let mut packed = Vec::with_capacity(floor.len() * 4);
+                            for t in floor {
+                                packed.push(t.l_min);
+                                packed.push(t.l_max);
+                                packed.push(t.r_min);
+                                packed.push(t.r_max);
+                            }
+                            // Serialize the whole pyramid for persistence in the .beam
+                            // container (so a later load is a disk read, not a re-decode).
+                            let blob = pyramid.to_bytes();
+                            let _ = wf_tx.send((
                                 pool_index,
-                                video_name,
-                                channels: extracted.channels,
-                                sample_rate: extracted.sample_rate,
-                            });
-                        }
-                        Ok(None) => {
-                            // Video has no audio stream
-                            let _ = tx.send(AudioExtractionResult::NoAudio { video_clip_id });
+                                packed,
+                                sample_rate,
+                                channels,
+                                pyramid.floor_samples_per_texel,
+                                blob,
+                            ));
                         }
                         Err(e) => {
-                            // Audio extraction failed
-                            let _ = tx.send(AudioExtractionResult::Error {
-                                video_clip_id,
-                                error: e,
-                            });
+                            eprintln!("Failed to build waveform pyramid for video audio: {}", e);
                         }
                     }
                 });
@@ -4213,63 +4791,10 @@ impl EditorApp {
             }
         }
 
-        // Spawn background thread for thumbnail generation
-        // Get decoder once, then generate thumbnails without holding VideoManager lock
-        let video_manager_clone = Arc::clone(&self.video_manager);
-        let duration = metadata.duration;
-        let thumb_clip_id = clip_id;
-        std::thread::spawn(move || {
-            // Get decoder Arc with brief lock
-            let decoder_arc = {
-                let video_mgr = video_manager_clone.lock().unwrap();
-                match video_mgr.get_decoder(&thumb_clip_id) {
-                    Some(arc) => arc,
-                    None => {
-                        eprintln!("Failed to get decoder for thumbnail generation");
-                        return;
-                    }
-                }
-            };
-            // VideoManager lock released - video can now be displayed!
-
-            let interval = 5.0;
-            let mut t = 0.0;
-            let mut thumbnail_count = 0;
-
-            while t < duration {
-                // Decode frame WITHOUT holding VideoManager lock
-                let thumb_opt = {
-                    let mut decoder = decoder_arc.lock().unwrap();
-                    match decoder.decode_frame(t) {
-                        Ok(rgba_data) => {
-                            let w = decoder.get_output_width();
-                            let h = decoder.get_output_height();
-                            Some((rgba_data, w, h))
-                        }
-                        Err(_) => None,
-                    }
-                };
-
-                // Downsample without any locks
-                if let Some((rgba_data, w, h)) = thumb_opt {
-                    use lightningbeam_core::video::downsample_rgba_public;
-                    let thumb_w = 128u32;
-                    let thumb_h = (h as f32 / w as f32 * thumb_w as f32) as u32;
-                    let thumb_data = downsample_rgba_public(&rgba_data, w, h, thumb_w, thumb_h);
-
-                    // Brief lock just to insert
-                    {
-                        let mut video_mgr = video_manager_clone.lock().unwrap();
-                        video_mgr.insert_thumbnail(&thumb_clip_id, t, Arc::new(thumb_data));
-                    }
-                    thumbnail_count += 1;
-                }
-
-                t += interval;
-            }
-
-            println!("  Generated {} thumbnails for video clip {}", thumbnail_count, thumb_clip_id);
-        });
+        // Spawn background thread for thumbnail generation. The video becomes
+        // displayable as soon as the decoder is registered (above); thumbnails
+        // fill in without holding the VideoManager lock during decode.
+        self.spawn_thumbnail_generation(clip_id);
 
         // Add clip to document
         let clip_id = self.action_executor.document_mut().add_video_clip(clip);
@@ -4377,15 +4902,22 @@ impl EditorApp {
 
         // Add clip instance or shape to the target layer
         if let Some(layer_id) = target_layer_id {
-            // For images, create a shape with image fill instead of a clip instance
+            // For images, create an image-filled rectangle on the (vector) layer,
+            // centered on the canvas at native size.
             if asset_info.clip_type == panes::DragClipType::Image {
-                // Get image dimensions
-                let (width, height) = asset_info.dimensions.unwrap_or((100.0, 100.0));
-
-                // TODO: Image fills on DCEL faces are a separate feature.
-                // For now, just log a message.
-                let _ = (layer_id, width, height);
-                eprintln!("Image drop to canvas not yet supported with DCEL backend");
+                let (img_w, img_h) = asset_info.dimensions.unwrap_or((100.0, 100.0));
+                let (doc_w, doc_h) = {
+                    let d = self.action_executor.document();
+                    (d.width as f64, d.height as f64)
+                };
+                let x = (doc_w - img_w) / 2.0;
+                let y = (doc_h - img_h) / 2.0;
+                let action = lightningbeam_core::actions::AddShapeAction::image_rect(
+                    layer_id, self.playback_time, x, y, img_w, img_h, asset_info.clip_id,
+                );
+                if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                    eprintln!("Failed to place image: {}", e);
+                }
             } else {
                 // For clips, create a clip instance
                 let mut clip_instance = ClipInstance::new(asset_info.clip_id)
@@ -4665,9 +5197,6 @@ impl EditorApp {
                     eprintln!("⚠️  Audio extracted but VideoClip {} not found (may have been deleted)", video_clip_id);
                 }
             }
-            AudioExtractionResult::NoAudio { video_clip_id } => {
-                println!("ℹ️  Video {} has no audio stream", video_clip_id);
-            }
             AudioExtractionResult::Error { video_clip_id, error } => {
                 eprintln!("❌ Failed to extract audio from video {}: {}", video_clip_id, error);
             }
@@ -4686,6 +5215,112 @@ impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _frame_start = std::time::Instant::now();
 
+        // === Raster fault-in (Phase 3 paging) ===
+        // The canvas records raster keyframe ids whose `raw_pixels` weren't resident
+        // (it can't mutate the document while rendering). Drain that sink here, BEFORE
+        // any rendering, and fault the pixels in from the project container. A drain of
+        // an empty set is ~free, so this is cheap when everything is already resident.
+        {
+            // 1) Apply completed background page-ins.
+            let mut any_applied = false;
+            while let Ok((kf_id, result)) = self.raster_load_result_rx.try_recv() {
+                self.raster_loads_inflight.remove(&kf_id);
+                let doc = self.action_executor.document_mut();
+                let kf = doc.all_layers_mut().into_iter().find_map(|l| match l {
+                    lightningbeam_core::layer::AnyLayer::Raster(rl) => {
+                        rl.keyframes.iter_mut().find(|kf| kf.id == kf_id)
+                    }
+                    _ => None,
+                });
+                if let Some(kf) = kf {
+                    // Don't clobber pixels edited while the load was in flight.
+                    if kf.needs_fault_in && kf.raw_pixels.is_empty() {
+                        if let Some(pixels) = result {
+                            kf.raw_pixels = pixels;
+                            kf.texture_dirty = true;
+                            any_applied = true;
+                            // Record fault-in recency: most-recently paged-in is
+                            // moved to the back so it's evicted last. The shown
+                            // frame is always the most recent, so it's protected.
+                            self.raster_resident_lru.retain(|id| *id != kf_id);
+                            self.raster_resident_lru.push_back(kf_id);
+                        }
+                        // Resolved (loaded, or genuinely absent/blank).
+                        kf.needs_fault_in = false;
+                    }
+                }
+            }
+            if any_applied {
+                ctx.request_repaint();
+            }
+
+            // 1b) Evict over-budget resident keyframes (fault-in-recency LRU).
+            // Drop the pixels of the oldest *clean* keyframes and re-arm their
+            // fault-in so they re-page on revisit. DIRTY keyframes are never
+            // evicted (their pixels aren't in the container yet — evicting would
+            // silently lose the unsaved edit), so we just unpin them from the LRU.
+            while self.raster_resident_lru.len() > Self::RASTER_RESIDENT_MAX {
+                let old = self.raster_resident_lru.pop_front().unwrap();
+                let doc = self.action_executor.document_mut();
+                let kf = doc.all_layers_mut().into_iter().find_map(|l| match l {
+                    lightningbeam_core::layer::AnyLayer::Raster(rl) => {
+                        rl.keyframes.iter_mut().find(|kf| kf.id == old)
+                    }
+                    _ => None,
+                });
+                if let Some(kf) = kf {
+                    if !kf.dirty && !kf.raw_pixels.is_empty() {
+                        kf.raw_pixels = Vec::new();
+                        kf.needs_fault_in = true;
+                        kf.texture_dirty = true;
+                    }
+                }
+            }
+
+            // 2) Dispatch background page-ins: reactive misses, plus (during playback)
+            //    a prefetch of upcoming keyframes so their full pixels are resident
+            //    before the playhead reaches them — otherwise every frame shows the
+            //    low-res proxy and the proxy→full pops read as flicker.
+            let mut to_load: Vec<uuid::Uuid> = {
+                let mut s = self.raster_fault_requests.lock().unwrap();
+                s.drain().collect()
+            };
+            if self.is_playing && self.raster_store.has_path() {
+                const PREFETCH_AHEAD: usize = 4;
+                let t = self.playback_time;
+                let doc = self.action_executor.document();
+                for layer in doc.all_layers() {
+                    if let lightningbeam_core::layer::AnyLayer::Raster(rl) = layer {
+                        for kf in rl.keyframes.iter().filter(|kf| kf.time >= t).take(PREFETCH_AHEAD) {
+                            if kf.raw_pixels.is_empty() && kf.needs_fault_in {
+                                to_load.push(kf.id);
+                            }
+                        }
+                    }
+                }
+            }
+            if self.raster_store.has_path() {
+                for kf_id in to_load {
+                    if self.raster_loads_inflight.contains(&kf_id) {
+                        continue;
+                    }
+                    self.raster_loads_inflight.insert(kf_id);
+                    let store = self.raster_store.clone();
+                    let tx = self.raster_load_result_tx.clone();
+                    std::thread::spawn(move || {
+                        let pixels = store.load_pixels(kf_id);
+                        let _ = tx.send((kf_id, pixels));
+                    });
+                }
+            }
+
+            // Keep ticking while page-ins are running so their results get applied
+            // promptly (a background thread can't wake egui on its own).
+            if !self.raster_loads_inflight.is_empty() {
+                ctx.request_repaint();
+            }
+        }
+
         // Consume any pending tool switch from the tablet (eraser in/out).
         if let Some(tool) = self.tablet.pending_tool_switch.take() {
             self.selected_tool = tool;
@@ -4700,6 +5335,17 @@ impl eframe::App for EditorApp {
         // Poll audio extraction results from background threads
         while let Ok(result) = self.audio_extraction_rx.try_recv() {
             self.handle_audio_extraction_result(result);
+        }
+
+        // Poll completed waveform-overview pyramids (packed min/max floors).
+        // Stored in the same cache the GPU upload reads from, but flagged as
+        // min/max so the renderer uploads via the (Lmin,Lmax,Rmin,Rmax) path.
+        while let Ok((pool_index, packed, sample_rate, channels, b, blob)) = self.waveform_result_rx.try_recv() {
+            self.raw_audio_cache.insert(pool_index, (Arc::new(packed), sample_rate, channels));
+            self.waveform_minmax_pools.insert(pool_index, b.max(1));
+            self.waveform_pyramid_blobs.insert(pool_index, Arc::new(blob));
+            self.waveform_gpu_dirty.insert(pool_index);
+            self.audio_pools_with_new_waveforms.insert(pool_index);
         }
 
         // Webcam management: open/close based on camera_enabled layers, poll frames
@@ -4816,6 +5462,36 @@ impl eframe::App for EditorApp {
                             FileProgress::Done => {
                                 println!("✅ Save complete!");
                                 self.current_file_path = Some(path.clone());
+                                // Container path may be new (Save As); update the
+                                // raster paging store so future faults read the right file.
+                                self.raster_store.set_path(self.current_file_path.clone());
+
+                                // All raster keyframes are now persisted in the
+                                // container, so none are dirty — clearing the flag
+                                // lets eviction reclaim their pixels again.
+                                {
+                                    use lightningbeam_core::layer::AnyLayer;
+                                    let mut resident_ids = Vec::new();
+                                    let doc = self.action_executor.document_mut();
+                                    for layer in doc.all_layers_mut() {
+                                        if let AnyLayer::Raster(rl) = layer {
+                                            for kf in rl.keyframes.iter_mut() {
+                                                kf.dirty = false;
+                                                if !kf.raw_pixels.is_empty() {
+                                                    resident_ids.push(kf.id);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Frames edited this session were unpinned from the
+                                    // eviction LRU while dirty; now that they're clean and
+                                    // persisted, re-track them so the resident bound applies
+                                    // (the next fault-in trims the oldest, not the shown one).
+                                    for id in resident_ids {
+                                        self.raster_resident_lru.retain(|x| *x != id);
+                                        self.raster_resident_lru.push_back(id);
+                                    }
+                                }
 
                                 // Add to recent files
                                 self.config.add_recent_file(path.clone());
@@ -5509,18 +6185,21 @@ impl eframe::App for EditorApp {
             }
         }
 
-        // Render video frames incrementally (if video export in progress)
-        if let Some(orchestrator) = &mut self.export_orchestrator {
-            if orchestrator.is_exporting() {
-                // Get GPU resources from eframe's wgpu render state
-                if let Some(render_state) = frame.wgpu_render_state() {
-                    let device = &render_state.device;
-                    let queue = &render_state.queue;
+        // One-time prompt: how to store large media (pack vs reference).
+        self.render_large_media_prompt(ctx);
 
-                    // Create temporary renderer and image cache for export
-                    // Note: Creating a new renderer per frame is inefficient but simple
-                    // TODO: Reuse renderer across frames by storing it in EditorApp
-                    let mut temp_renderer = vello::Renderer::new(
+        // Render video frames incrementally (if video export in progress)
+        let exporting = self.export_orchestrator.as_ref().map_or(false, |o| o.is_exporting());
+        if exporting {
+            if let Some(render_state) = frame.wgpu_render_state() {
+                let device = &render_state.device;
+                let queue = &render_state.queue;
+
+                // Build the renderer + image cache ONCE per export (reused every frame).
+                // The image cache is given the container path so lazily-paged image assets
+                // (Phase 4 Tier 1) decode during export.
+                if self.export_renderer.is_none() {
+                    self.export_renderer = vello::Renderer::new(
                         device,
                         vello::RendererOptions {
                             use_cpu: false,
@@ -5529,41 +6208,52 @@ impl eframe::App for EditorApp {
                             pipeline_cache: None,
                         },
                     ).ok();
+                    let mut ic = lightningbeam_core::renderer::ImageCache::new();
+                    ic.set_container_path(self.current_file_path.clone());
+                    self.export_image_cache = Some(ic);
+                }
 
-                    let mut temp_image_cache = lightningbeam_core::renderer::ImageCache::new();
-
-                    if let Some(renderer) = &mut temp_renderer {
-                        // Drive incremental video export.
-                        if let Ok(has_more) = orchestrator.render_next_video_frame(
-                            self.action_executor.document_mut(),
-                            device,
-                            queue,
-                            renderer,
-                            &mut temp_image_cache,
-                            &self.video_manager,
-                        ) {
-                            if has_more {
-                                ctx.request_repaint();
-                            }
+                if let (Some(renderer), Some(image_cache), Some(orchestrator)) = (
+                    self.export_renderer.as_mut(),
+                    self.export_image_cache.as_mut(),
+                    self.export_orchestrator.as_mut(),
+                ) {
+                    // Drive incremental video export.
+                    if let Ok(has_more) = orchestrator.render_next_video_frame(
+                        self.action_executor.document_mut(),
+                        device,
+                        queue,
+                        renderer,
+                        image_cache,
+                        &self.video_manager,
+                        Some(&self.raster_store),
+                    ) {
+                        if has_more {
+                            ctx.request_repaint();
                         }
+                    }
 
-                        // Drive single-frame image export (two-frame async: render then readback).
-                        match orchestrator.render_image_frame(
-                            self.action_executor.document_mut(),
-                            device,
-                            queue,
-                            renderer,
-                            &mut temp_image_cache,
-                            &self.video_manager,
-                            self.selection.raster_floating.as_ref(),
-                        ) {
-                            Ok(false) => { ctx.request_repaint(); } // readback pending
-                            Ok(true)  => {}                          // done or cancelled
-                            Err(e)    => { eprintln!("Image export failed: {e}"); }
-                        }
+                    // Drive single-frame image export (two-frame async: render then readback).
+                    match orchestrator.render_image_frame(
+                        self.action_executor.document_mut(),
+                        device,
+                        queue,
+                        renderer,
+                        image_cache,
+                        &self.video_manager,
+                        self.selection.raster_floating.as_ref(),
+                        Some(&self.raster_store),
+                    ) {
+                        Ok(false) => { ctx.request_repaint(); } // readback pending
+                        Ok(true)  => {}                          // done or cancelled
+                        Err(e)    => { eprintln!("Image export failed: {e}"); }
                     }
                 }
             }
+        } else if self.export_renderer.is_some() {
+            // Export finished — free the renderer + cache.
+            self.export_renderer = None;
+            self.export_image_cache = None;
         }
 
         // Poll export orchestrator for progress
@@ -5616,11 +6306,8 @@ impl eframe::App for EditorApp {
                         // Close the progress dialog after a brief delay
                         self.export_progress_dialog.close();
 
-                        // Send desktop notification
-                        if let Err(e) = notifications::notify_export_complete(output_path) {
-                            // Log but don't fail - notifications are non-critical
-                            eprintln!("⚠️  Could not send desktop notification: {}", e);
-                        }
+                        // Send desktop notification (fire-and-forget; never blocks the UI)
+                        notifications::notify_export_complete(output_path);
                     }
                     lightningbeam_core::export::ExportProgress::Error { ref message } => {
                         eprintln!("❌ Export error: {}", message);
@@ -5630,11 +6317,8 @@ impl eframe::App for EditorApp {
                         );
                         // Keep the dialog open to show the error
 
-                        // Send desktop notification for error
-                        if let Err(e) = notifications::notify_export_error(message) {
-                            // Log but don't fail - notifications are non-critical
-                            eprintln!("⚠️  Could not send desktop notification: {}", e);
-                        }
+                        // Send desktop notification for error (fire-and-forget)
+                        notifications::notify_export_error(message);
                     }
                 }
             }
@@ -5778,6 +6462,14 @@ impl eframe::App for EditorApp {
             // Create render context
             let mut ctx = RenderContext {
                 shared: panes::SharedPaneState {
+                    container_path: self.current_file_path.clone(),
+                    onion: {
+                        // Onion skinning is disabled during playback.
+                        let mut o = self.onion_skin;
+                        o.enabled = o.enabled && !self.is_playing;
+                        o
+                    },
+                    onion_skin: &mut self.onion_skin,
                     tool_icon_cache: &mut self.tool_icon_cache,
                     icon_cache: &mut self.icon_cache,
                     selected_tool: &mut self.selected_tool,
@@ -5831,6 +6523,8 @@ impl eframe::App for EditorApp {
                     audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
                     raw_audio_cache: &self.raw_audio_cache,
                     waveform_gpu_dirty: &mut self.waveform_gpu_dirty,
+                    waveform_minmax_pools: &self.waveform_minmax_pools,
+                    raster_fault_requests: &self.raster_fault_requests,
                     effect_to_load: &mut self.effect_to_load,
                     effect_thumbnail_requests: &mut effect_thumbnail_requests,
                     effect_thumbnail_cache: self.effect_thumbnail_generator.as_ref()
@@ -5851,7 +6545,7 @@ impl eframe::App for EditorApp {
                     graph_topology_generation: &mut self.graph_topology_generation,
                     script_to_edit: &mut self.script_to_edit,
                     script_saved: &mut self.script_saved,
-                    region_selection: &mut self.region_selection,
+                    pending_region_cut_base: &mut self.pending_region_cut_base,
                     region_select_mode: &mut self.region_select_mode,
                     lasso_mode: &mut self.lasso_mode,
                     pending_graph_loads: &self.pending_graph_loads,
@@ -6072,24 +6766,9 @@ impl eframe::App for EditorApp {
                                                     }
                                                 }
 
-                                                // Generate thumbnails in background
-                                                let vm_clone = Arc::clone(&self.video_manager);
-                                                std::thread::spawn(move || {
-                                                    // Build keyframe index first
-                                                    {
-                                                        let vm = vm_clone.lock().unwrap();
-                                                        if let Err(e) = vm.build_keyframe_index(&clip_id) {
-                                                            eprintln!("[WEBCAM] Failed to build keyframe index: {e}");
-                                                        }
-                                                    }
-                                                    // Generate thumbnails
-                                                    {
-                                                        let mut vm = vm_clone.lock().unwrap();
-                                                        if let Err(e) = vm.generate_thumbnails(&clip_id, duration) {
-                                                            eprintln!("[WEBCAM] Failed to generate thumbnails: {e}");
-                                                        }
-                                                    }
-                                                });
+                                                // Build keyframe index + thumbnails in background.
+                                                self.spawn_keyframe_index(clip_id);
+                                                self.spawn_thumbnail_generation(clip_id);
 
                                                 eprintln!(
                                                     "[WEBCAM] probe_video: duration={:.4}s, fps={:.1}, {}x{}. Using probe duration for clip.",
@@ -6305,20 +6984,20 @@ impl eframe::App for EditorApp {
             }
         }
 
-        // Escape key: cancel floating raster selection or revert uncommitted region selection
+        // Escape key: cancel floating raster selection, or clear the geometry selection
         if !wants_keyboard && ctx.input(|i| self.keymap.action_pressed(keymap::AppAction::CancelAction, i)) {
             if self.selection.raster_floating.is_some() {
                 self.cancel_raster_floating();
             } else if self.selection.raster_selection.is_some() {
                 self.selection.raster_selection = None;
-            } else if self.region_selection.is_some() {
-                Self::revert_region_selection(
-                    &mut self.region_selection,
-                    &mut self.action_executor,
-                    &mut self.selection,
-                );
+            } else if self.selection.has_geometry_selection() {
+                self.selection.clear_geometry_selection();
             }
         }
+
+        // After all input is processed, if a region selection was deselected without any
+        // intervening edit, heal (undo) its cut so the lasso is non-destructive.
+        self.resolve_pending_region_cut();
 
         // F3 debug overlay toggle (works even when text input is active)
         if ctx.input(|i| self.keymap.action_pressed(keymap::AppAction::ToggleDebugOverlay, i)) {

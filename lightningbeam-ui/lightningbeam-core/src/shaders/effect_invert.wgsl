@@ -33,13 +33,19 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
+// The HDR pipeline feeds these shaders LINEAR light, but "invert" is a
+// perceptual operation defined in gamma/display space (Photoshop, GIMP, etc.).
+// Convert to sRGB, invert there, then convert back to linear. The sRGB helpers
+// (linear_to_srgb / srgb_to_linear) come from the prepended COLOR_WGSL prelude.
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let src = textureSample(source_tex, source_sampler, in.uv);
     let amount = uniforms.params0.x; // params[0]
 
-    let inverted = vec3<f32>(1.0) - src.rgb;
-    let result = mix(src.rgb, inverted, amount * uniforms.mix);
+    let src_srgb = linear_to_srgb(src.rgb);
+    let inverted = vec3<f32>(1.0) - src_srgb;
+    let result_srgb = mix(src_srgb, inverted, amount * uniforms.mix);
 
-    return vec4<f32>(result, src.a);
+    return vec4<f32>(srgb_to_linear(result_srgb), src.a);
 }

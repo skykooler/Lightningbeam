@@ -2,8 +2,10 @@
 //
 // Reads the anchor canvas (before_pixels), composites a gradient over it, and
 // writes the result to the display canvas.  All color values in the canvas are
-// linear premultiplied RGBA.  The stop colors passed via `stops` are linear
-// straight-alpha [0..1] (sRGB→linear conversion is done on the CPU).
+// linear premultiplied RGBA.  The stop colors passed via `stops` are sRGB
+// straight-alpha [0..1]; the gradient is interpolated in sRGB (gamma) space to
+// match the CPU raster and vector gradient paths, then the interpolated color is
+// converted to linear before compositing.
 //
 // Dispatch: ceil(canvas_w / 8) × ceil(canvas_h / 8) × 1
 
@@ -25,7 +27,7 @@ struct Params {
 // 32 bytes per stop (8 × f32), matching `GpuGradientStop` on the Rust side.
 struct GradientStop {
     position: f32,
-    r:        f32,  // linear [0..1], straight-alpha
+    r:        f32,  // sRGB [0..1], straight-alpha
     g:        f32,
     b:        f32,
     a:        f32,
@@ -34,10 +36,11 @@ struct GradientStop {
     _pad2:    f32,
 }
 
+// srgb_to_linear_channel is provided by the prepended COLOR_WGSL prelude.
 @group(0) @binding(0) var<uniform>       params: Params;
 @group(0) @binding(1) var                src:    texture_2d<f32>;
 @group(0) @binding(2) var<storage, read> stops:  array<GradientStop>;
-@group(0) @binding(3) var                dst:    texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var                dst:    texture_storage_2d<rgba16float, write>;
 
 fn apply_extend(t: f32) -> f32 {
     if params.extend_mode == 0u {
@@ -122,7 +125,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let t    = apply_extend(t_raw);
-    let grad = eval_gradient(t);  // straight-alpha linear RGBA
+    let grad = eval_gradient(t);  // straight-alpha sRGB RGBA (interpolated in gamma space)
+
+    // Convert the interpolated sRGB color to linear for compositing. Alpha is
+    // not gamma-encoded, so it passes through unchanged.
+    let grad_rgb_lin = vec3<f32>(
+        srgb_to_linear_channel(grad.r),
+        srgb_to_linear_channel(grad.g),
+        srgb_to_linear_channel(grad.b),
+    );
 
     // Effective alpha: gradient alpha × tool opacity.
     let a = grad.a * params.opacity;
@@ -131,7 +142,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // src_px.rgb is premultiplied (= straight_rgb * src_a).
     // Output is also premultiplied.
     let out_a   = a + src_px.a * (1.0 - a);
-    let out_rgb = grad.rgb * a + src_px.rgb * (1.0 - a);
+    let out_rgb = grad_rgb_lin * a + src_px.rgb * (1.0 - a);
 
     textureStore(dst, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(out_rgb, out_a));
 }

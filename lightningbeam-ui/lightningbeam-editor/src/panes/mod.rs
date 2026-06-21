@@ -143,7 +143,45 @@ pub fn find_sampled_audio_track(document: &lightningbeam_core::document::Documen
 }
 
 /// Shared state that all panes can access
+/// Onion-skinning view settings (editor-only; not saved with the document). Ghosts the
+/// active layer's neighbouring keyframes, warm-tinted for past and cool for future.
+#[derive(Clone, Copy, Debug)]
+pub struct OnionSkinSettings {
+    pub enabled: bool,
+    pub frames_before: usize,
+    pub frames_after: usize,
+    /// Opacity of the nearest ghost; further ghosts fall off linearly.
+    pub opacity: f32,
+}
+
+impl Default for OnionSkinSettings {
+    fn default() -> Self {
+        Self { enabled: false, frames_before: 2, frames_after: 2, opacity: 0.35 }
+    }
+}
+
+impl OnionSkinSettings {
+    /// RGB tint multipliers for past (warm) and future (cool) ghosts.
+    pub const PAST_TINT: [f32; 3] = [1.0, 0.45, 0.45];
+    pub const FUTURE_TINT: [f32; 3] = [0.45, 0.6, 1.0];
+
+    /// Opacity for the `n`-th ghost away from the current frame (n = 1 is nearest),
+    /// linearly falling off so the furthest ghost is faintest.
+    pub fn ghost_opacity(&self, n: usize, total: usize) -> f32 {
+        if total == 0 { return self.opacity; }
+        let falloff = 1.0 - (n.saturating_sub(1) as f32) / (total as f32);
+        self.opacity * falloff.clamp(0.15, 1.0)
+    }
+}
+
 pub struct SharedPaneState<'a> {
+    /// Current `.beam` container path (for lazily paging image-asset bytes in the
+    /// renderer's ImageCache). `None` before the project is first saved/loaded.
+    pub container_path: Option<std::path::PathBuf>,
+    /// Effective onion-skin settings (already gated to off during playback by main.rs).
+    pub onion: OnionSkinSettings,
+    /// The raw onion-skin settings, mutable — edited by the Info Panel's controls.
+    pub onion_skin: &'a mut OnionSkinSettings,
     pub tool_icon_cache: &'a mut crate::ToolIconCache,
     #[allow(dead_code)] // Used by pane chrome rendering in main.rs
     pub icon_cache: &'a mut crate::IconCache,
@@ -242,6 +280,16 @@ pub struct SharedPaneState<'a> {
     pub raw_audio_cache: &'a std::collections::HashMap<usize, (std::sync::Arc<Vec<f32>>, u32, u32)>,
     /// Pool indices needing GPU waveform texture upload
     pub waveform_gpu_dirty: &'a mut std::collections::HashSet<usize>,
+    /// Pools whose `raw_audio_cache` entry is a packed min/max floor rather than
+    /// raw samples (pool_index -> `B`, floor frames-per-texel). Drives the GPU
+    /// min/max upload path and the floor's effective rate `sr/B` in the renderer.
+    pub waveform_minmax_pools: &'a std::collections::HashMap<usize, u32>,
+    /// Miss-sink for on-demand raster keyframe pixel faulting (Phase 3 paging).
+    /// The canvas inserts the id of any raster keyframe it wants to upload whose
+    /// `raw_pixels` aren't resident; the App drains this at the top of the next
+    /// `update()` and faults the pixels in from the project container.
+    pub raster_fault_requests:
+        &'a std::sync::Arc<std::sync::Mutex<std::collections::HashSet<uuid::Uuid>>>,
     /// Effect ID to load into shader editor (set by asset library, consumed by shader editor)
     pub effect_to_load: &'a mut Option<Uuid>,
     /// Queue for effect thumbnail requests (effect IDs to generate thumbnails for)
@@ -277,8 +325,10 @@ pub struct SharedPaneState<'a> {
     pub script_to_edit: &'a mut Option<Uuid>,
     /// Script ID that was just saved (triggers auto-recompile of nodes using it)
     pub script_saved: &'a mut Option<Uuid>,
-    /// Active region selection (temporary split state)
-    pub region_selection: &'a mut Option<lightningbeam_core::selection::RegionSelection>,
+    /// Undo-stack depth recorded before the first region-select cut of the current
+    /// selection session. `Some` while a region selection is live and unchanged; lets a
+    /// later deselect heal (undo) the cut if nothing was edited. See `resolve_pending_region_cut`.
+    pub pending_region_cut_base: &'a mut Option<usize>,
     /// Region select mode (Rectangle or Lasso)
     pub region_select_mode: &'a mut lightningbeam_core::tool::RegionSelectMode,
     /// Lasso select sub-mode (Freehand / Polygonal / Magnetic)

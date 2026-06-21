@@ -91,6 +91,10 @@ pub struct Engine {
     // Disk reader for streaming playback of compressed files
     disk_reader: Option<crate::audio::disk_reader::DiskReader>,
 
+    // Host-installed factory for opening container-packed audio as a byte stream
+    // (set on load, before the project's clips are bulk-activated for streaming).
+    blob_source_factory: Option<Arc<dyn crate::audio::disk_reader::AudioBlobSourceFactory>>,
+
     // Input monitoring and metering
     input_monitoring: bool,
     input_gain: f32,
@@ -176,6 +180,7 @@ impl Engine {
             metronome: Metronome::new(sample_rate),
             recording_sample_buffer: Vec::with_capacity(4096),
             disk_reader: Some(disk_reader),
+            blob_source_factory: None,
             input_monitoring: false,
             input_gain: 1.0,
             input_level_peak: 0.0,
@@ -273,6 +278,97 @@ impl Engine {
 
     /// Rebuild the clip snapshot from the current project state.
     /// Call this after any command that adds, removes, or modifies clip instances.
+    /// Set up disk streaming for a clip backed by a streaming pool entry
+    /// (Compressed or VideoAudio). Sends `ActivateFile` to the disk reader and
+    /// returns the read-ahead buffer to attach to the clip. Returns `None` if the
+    /// entry isn't streamed, or a packed source can't be opened.
+    fn activate_streaming_for(
+        &mut self,
+        reader_id: u64,
+        pool_index: usize,
+    ) -> Option<Arc<crate::audio::disk_reader::ReadAheadBuffer>> {
+        use crate::audio::pool::AudioStorage;
+        use crate::audio::disk_reader::{DiskReader, DiskReaderCommand, SourceKind, StreamOpen};
+
+        // Decide how to open the source. `Packed` ⇒ via the host factory (bytes in
+        // the container); otherwise stream from the file path. Extract owned values
+        // first so the immutable pool borrow ends before we touch the disk reader.
+        enum OpenDesc {
+            Path(std::path::PathBuf),
+            Packed { media_id: String, ext: Option<String> },
+        }
+        let (kind, sample_rate, channels, desc) = {
+            let file = self.audio_pool.get_file(pool_index)?;
+            let kind = match file.storage {
+                AudioStorage::Compressed { .. } => SourceKind::CompressedAudio,
+                AudioStorage::VideoAudio { .. } => SourceKind::VideoAudio,
+                _ => return None,
+            };
+            let desc = match &file.packed_media_id {
+                Some(id) => OpenDesc::Packed { media_id: id.clone(), ext: file.original_format.clone() },
+                None => OpenDesc::Path(file.path.clone()),
+            };
+            (kind, file.sample_rate, file.channels, desc)
+        };
+
+        let open = match desc {
+            OpenDesc::Path(p) => StreamOpen::Path(p),
+            OpenDesc::Packed { media_id, ext } => {
+                let factory = match self.blob_source_factory.as_ref() {
+                    Some(f) => f,
+                    None => {
+                        eprintln!("[Engine] packed audio (pool {}) but no blob factory installed", pool_index);
+                        return None;
+                    }
+                };
+                match factory.open(&media_id) {
+                    Ok(src) => StreamOpen::Source { src, ext },
+                    Err(e) => {
+                        eprintln!("[Engine] blob factory open({}) failed: {}", media_id, e);
+                        return None;
+                    }
+                }
+            }
+        };
+
+        let buffer = DiskReader::create_buffer(sample_rate, channels);
+        if let Some(ref mut dr) = self.disk_reader {
+            dr.send(DiskReaderCommand::ActivateFile { reader_id, open, kind, buffer: buffer.clone() });
+        }
+        Some(buffer)
+    }
+
+    /// Activate disk streaming for every loaded clip backed by a streaming pool
+    /// entry. Called after `SetProject` since loaded clips bypass `AddAudioClip`.
+    fn activate_all_streaming_clips(&mut self) {
+        use crate::audio::track::TrackNode;
+        // Collect (track, clip, pool) first via an immutable walk, then activate
+        // (needs &mut self) and attach the buffer back to the clip.
+        let targets: Vec<(TrackId, u64, usize)> = self
+            .project
+            .track_iter()
+            .filter_map(|(track_id, node)| match node {
+                TrackNode::Audio(t) => Some((track_id, t)),
+                _ => None,
+            })
+            .flat_map(|(track_id, t)| {
+                t.clips
+                    .iter()
+                    .map(move |c| (track_id, c.id as u64, c.audio_pool_index))
+            })
+            .collect();
+
+        for (track_id, clip_id, pool_index) in targets {
+            if let Some(buffer) = self.activate_streaming_for(clip_id, pool_index) {
+                if let Some(TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id as u64 == clip_id) {
+                        clip.read_ahead = Some(buffer);
+                    }
+                }
+            }
+        }
+    }
+
     fn refresh_clip_snapshot(&self) {
         let mut snap = self.clip_snapshot.write().unwrap();
         snap.audio.clear();
@@ -914,7 +1010,7 @@ impl Engine {
                 let start_secs = self.tempo_map.beats_to_seconds(start_beats);
                 let end_secs = self.tempo_map.beats_to_seconds(end_beats);
                 let content_dur_secs = (end_secs - start_secs).seconds_to_f64();
-                let clip = AudioClipInstance::new(
+                let mut clip = AudioClipInstance::new(
                     clip_id,
                     pool_index,
                     Seconds(offset),
@@ -922,6 +1018,13 @@ impl Engine {
                     start_beats,
                     Beats(duration),
                 );
+
+                // If the source is streamed (a compressed audio file, or a video's
+                // audio track), set up disk streaming instead of an in-memory decode.
+                // Each clip instance gets its own read-ahead buffer keyed by clip_id.
+                if let Some(buffer) = self.activate_streaming_for(clip_id as u64, pool_index) {
+                    clip.read_ahead = Some(buffer);
+                }
 
                 // Add clip to track
                 if let Some(crate::audio::track::TrackNode::Audio(track)) = self.project.get_track_mut(track_id) {
@@ -2313,6 +2416,34 @@ impl Engine {
         }
     }
 
+    /// Add a video file's audio track as a streaming pool entry (FFmpeg, decoded
+    /// on demand — no extraction). Probes the audio track for channels/rate/frames
+    /// without decoding, and returns the pool index. Playback activation
+    /// (per-clip read-ahead) is wired separately when a clip references it.
+    fn do_add_video_audio(&mut self, path: &std::path::Path) -> Result<usize, String> {
+        use crate::audio::disk_reader::VideoAudioReader;
+
+        let reader = VideoAudioReader::open(path)?;
+        let channels = reader.channels();
+        let sample_rate = reader.sample_rate();
+        let total_frames = reader.total_frames();
+        drop(reader);
+
+        let audio_file = crate::audio::pool::AudioFile::from_video_audio(
+            path.to_path_buf(),
+            channels,
+            sample_rate,
+            total_frames,
+        );
+        let pool_index = self.audio_pool.add_file(audio_file);
+
+        eprintln!(
+            "[ENGINE] AddVideoAudio: ch={}, sr={}, total_frames={}, pool_index={}, path={:?}",
+            channels, sample_rate, total_frames, pool_index, path
+        );
+        Ok(pool_index)
+    }
+
     /// Import an audio file into the pool: mmap for PCM, streaming for compressed.
     /// Returns the pool index on success. Emits AudioFileReady event.
     fn do_import_audio(&mut self, path: &std::path::Path) -> Result<usize, String> {
@@ -2738,9 +2869,13 @@ impl Engine {
             Query::GetPoolAudioSamples(pool_index) => {
                 match self.audio_pool.get_file(pool_index) {
                     Some(file) => {
-                        // For Compressed storage, return decoded_for_waveform if available
+                        // For streamed (Compressed/VideoAudio) storage, return the
+                        // progressively-decoded waveform overview if available.
                         let samples = match &file.storage {
                             crate::audio::pool::AudioStorage::Compressed {
+                                decoded_for_waveform, decoded_frames, ..
+                            }
+                            | crate::audio::pool::AudioStorage::VideoAudio {
                                 decoded_for_waveform, decoded_frames, ..
                             } if *decoded_frames > 0 => {
                                 decoded_for_waveform.clone()
@@ -2794,76 +2929,11 @@ impl Engine {
                 self.refresh_clip_snapshot();
                 result
             }
-            Query::AddAudioFileSync(path, data, channels, sample_rate) => {
-                // Add audio file to pool and return the pool index
-                // Detect original format from file extension
-                let path_buf = std::path::PathBuf::from(&path);
-                let original_format = path_buf.extension()
-                    .and_then(|ext| ext.to_str())
-                    .map(|s| s.to_lowercase());
-
-                // Create AudioFile and add to pool
-                let audio_file = crate::audio::pool::AudioFile::with_format(
-                    path_buf.clone(),
-                    data.clone(),  // Clone data for background thread
-                    channels,
-                    sample_rate,
-                    original_format,
-                );
-                let pool_index = self.audio_pool.add_file(audio_file);
-
-                // Generate Level 0 (overview) waveform chunks asynchronously in background thread
-                let chunk_tx = self.chunk_generation_tx.clone();
-                let duration = data.len() as f64 / (sample_rate as f64 * channels as f64);
-                println!("🔄 [ENGINE] Spawning background thread to generate Level 0 chunks for pool {}", pool_index);
-                std::thread::spawn(move || {
-                    // Create temporary AudioFile for chunk generation
-                    let temp_audio_file = crate::audio::pool::AudioFile::with_format(
-                        path_buf,
-                        data,
-                        channels,
-                        sample_rate,
-                        None,
-                    );
-
-                    // Generate Level 0 chunks
-                    let chunk_count = crate::audio::waveform_cache::WaveformCache::calculate_chunk_count(duration, 0);
-                    println!("🔄 [BACKGROUND] Generating {} Level 0 chunks for pool {}", chunk_count, pool_index);
-                    let chunks = crate::audio::waveform_cache::WaveformCache::generate_chunks(
-                        &temp_audio_file,
-                        pool_index,
-                        0,  // Level 0 (overview)
-                        &(0..chunk_count).collect::<Vec<_>>(),
-                    );
-
-                    // Send chunks via MPSC channel (will be forwarded by audio thread)
-                    if !chunks.is_empty() {
-                        println!("📤 [BACKGROUND] Generated {} chunks, sending to audio thread (pool {})", chunks.len(), pool_index);
-                        let event_chunks: Vec<(u32, (f64, f64), Vec<crate::io::WaveformPeak>)> = chunks
-                            .into_iter()
-                            .map(|chunk| (chunk.chunk_index, chunk.time_range, chunk.peaks))
-                            .collect();
-
-                        match chunk_tx.send(AudioEvent::WaveformChunksReady {
-                            pool_index,
-                            detail_level: 0,
-                            chunks: event_chunks,
-                        }) {
-                            Ok(_) => println!("✅ [BACKGROUND] Chunks sent successfully for pool {}", pool_index),
-                            Err(e) => eprintln!("❌ [BACKGROUND] Failed to send chunks: {}", e),
-                        }
-                    } else {
-                        eprintln!("⚠️  [BACKGROUND] No chunks generated for pool {}", pool_index);
-                    }
-                });
-
-                // Notify UI about the new audio file (for event listeners)
-                let _ = self.event_tx.push(AudioEvent::AudioFileAdded(pool_index, path));
-
-                QueryResponse::AudioFileAddedSync(Ok(pool_index))
-            }
             Query::ImportAudioSync(path) => {
                 QueryResponse::AudioImportedSync(self.do_import_audio(&path))
+            }
+            Query::AddVideoAudioSync(path) => {
+                QueryResponse::AudioImportedSync(self.do_add_video_audio(&path))
             }
             Query::GetProject => {
                 // Save graph presets before cloning — AudioTrack::clone() creates
@@ -2879,10 +2949,18 @@ impl Engine {
                 match project.rebuild_audio_graphs(self.buffer_pool.buffer_size()) {
                     Ok(()) => {
                         self.project = project;
+                        // Loaded clips bypass AddAudioClip, so their disk streaming was
+                        // never activated — do it now for every streaming-backed clip.
+                        self.activate_all_streaming_clips();
+                        self.refresh_clip_snapshot();
                         QueryResponse::ProjectSet(Ok(()))
                     }
                     Err(e) => QueryResponse::ProjectSet(Err(format!("Failed to rebuild audio graphs: {}", e))),
                 }
+            }
+            Query::SetBlobSourceFactory(factory) => {
+                self.blob_source_factory = Some(factory);
+                QueryResponse::BlobSourceFactorySet(Ok(()))
             }
             Query::DuplicateMidiClipSync(clip_id) => {
                 match self.project.midi_clip_pool.duplicate_clip(clip_id) {
@@ -3395,16 +3473,6 @@ impl EngineController {
         }
     }
 
-    /// Add an audio file to the pool synchronously and get the pool index
-    /// Returns the pool index where the audio file was added
-    pub fn add_audio_file_sync(&mut self, path: String, data: Vec<f32>, channels: u32, sample_rate: u32) -> Result<usize, String> {
-        let query = Query::AddAudioFileSync(path, data, channels, sample_rate);
-        match self.send_query(query)? {
-            QueryResponse::AudioFileAddedSync(result) => result,
-            _ => Err("Unexpected query response".to_string()),
-        }
-    }
-
     /// Import an audio file asynchronously. The engine will memory-map WAV/AIFF
     /// files for instant availability, or set up stream decoding for compressed
     /// formats. Listen for `AudioEvent::AudioFileReady` to get the pool index.
@@ -3423,6 +3491,30 @@ impl EngineController {
         let query = Query::ImportAudioSync(path);
         match self.send_query(query)? {
             QueryResponse::AudioImportedSync(result) => result,
+            _ => Err("Unexpected query response".to_string()),
+        }
+    }
+
+    /// Add a video file's audio track as a streaming pool entry (decoded on
+    /// demand via FFmpeg — no extraction to disk or RAM). Probes the audio track
+    /// and returns the pool index. Use this for a video clip's embedded audio.
+    pub fn add_video_audio_sync(&mut self, path: std::path::PathBuf) -> Result<usize, String> {
+        let query = Query::AddVideoAudioSync(path);
+        match self.send_query(query)? {
+            QueryResponse::AudioImportedSync(result) => result,
+            _ => Err("Unexpected query response".to_string()),
+        }
+    }
+
+    /// Install the host's packed-media byte-source factory. Must be called before
+    /// loading a project so its container-packed audio can be streamed (the disk
+    /// reader opens packed entries through this factory).
+    pub fn set_blob_source_factory(
+        &mut self,
+        factory: std::sync::Arc<dyn crate::audio::disk_reader::AudioBlobSourceFactory>,
+    ) -> Result<(), String> {
+        match self.send_query(Query::SetBlobSourceFactory(factory))? {
+            QueryResponse::BlobSourceFactorySet(result) => result,
             _ => Err("Unexpected query response".to_string()),
         }
     }

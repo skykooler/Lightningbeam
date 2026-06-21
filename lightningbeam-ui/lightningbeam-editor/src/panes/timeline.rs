@@ -99,6 +99,94 @@ fn clip_instance_y_bounds(row: usize, total_rows: usize) -> (f32, f32) {
     }
 }
 
+/// Draw the strip of video thumbnails across a clip.
+///
+/// Thumbnails are tiled from the clip's **true** (unclamped) screen origin
+/// `clip_origin_x` over its full width `clip_true_width_px`, and only the tiles
+/// intersecting `visible_rect` are drawn. This makes the strip scroll naturally
+/// with the timeline and show the correct content when the clip is partly off the
+/// left edge (a tile's content time is derived from its offset from the true
+/// origin, not from the clamped visible edge).
+///
+/// Each tile's GPU texture is cached by the **actual** thumbnail timestamp (from
+/// [`VideoManager::get_thumbnail_at`]), so as closer thumbnails finish generating
+/// the strip refreshes instead of freezing on whatever loaded first.
+#[allow(clippy::too_many_arguments)]
+fn draw_video_thumbnail_strip(
+    painter: &egui::Painter,
+    ui: &egui::Ui,
+    video_mgr: &lightningbeam_core::video::VideoManager,
+    textures: &mut std::collections::HashMap<(uuid::Uuid, i64), egui::TextureHandle>,
+    clip_id: uuid::Uuid,
+    trim_start: f64,
+    clip_origin_x: f32,
+    clip_true_width_px: f32,
+    visible_rect: egui::Rect,
+    thumb_top_y: f32,
+    thumb_height: f32,
+    pixels_per_second: f64,
+) {
+    if clip_true_width_px <= 0.0 || thumb_height <= 0.0 {
+        return;
+    }
+    // Aspect ratio from any available thumbnail; sets the per-tile width.
+    let aspect = match video_mgr.get_thumbnail_at(&clip_id, 0.0) {
+        Some((_, tw, th, _)) if th > 0 => tw as f32 / th as f32,
+        _ => return,
+    };
+    let step = (thumb_height * aspect).max(1.0);
+    let num_thumbs = ((clip_true_width_px / step).ceil() as usize).max(1);
+
+    // Iterate only the tiles that intersect the visible rect.
+    let first = (((visible_rect.min.x - clip_origin_x) / step).floor() as i64).max(0) as usize;
+    let last = (((visible_rect.max.x - clip_origin_x) / step).ceil() as i64).max(0) as usize;
+    let last = last.min(num_thumbs);
+
+    for i in first..last {
+        let thumb_x = clip_origin_x + i as f32 * step;
+        // Content time at the tile centre, measured from the TRUE clip origin so
+        // it's stable as the clip scrolls.
+        let content_time =
+            trim_start + (i as f64 * step as f64 + step as f64 * 0.5) / pixels_per_second;
+
+        let Some((actual_ts, tw, th, rgba_data)) = video_mgr.get_thumbnail_at(&clip_id, content_time)
+        else {
+            continue;
+        };
+        let ts_key = (actual_ts * 1000.0) as i64;
+        let texture = textures.entry((clip_id, ts_key)).or_insert_with(|| {
+            let image = egui::ColorImage::from_rgba_unmultiplied([tw as usize, th as usize], &rgba_data);
+            ui.ctx().load_texture(
+                format!("vthumb_{}_{}", clip_id, ts_key),
+                image,
+                egui::TextureOptions::LINEAR,
+            )
+        });
+
+        let full_rect = egui::Rect::from_min_size(
+            egui::pos2(thumb_x, thumb_top_y),
+            egui::vec2(step, thumb_height),
+        );
+        let thumb_rect = full_rect.intersect(visible_rect);
+        if thumb_rect.width() > 2.0 && thumb_rect.height() > 2.0 {
+            let uv_min = egui::pos2(
+                (thumb_rect.min.x - full_rect.min.x) / full_rect.width(),
+                (thumb_rect.min.y - full_rect.min.y) / full_rect.height(),
+            );
+            let uv_max = egui::pos2(
+                (thumb_rect.max.x - full_rect.min.x) / full_rect.width(),
+                (thumb_rect.max.y - full_rect.min.y) / full_rect.height(),
+            );
+            painter.image(
+                texture.id(),
+                thumb_rect,
+                egui::Rect::from_min_max(uv_min, uv_max),
+                egui::Color32::WHITE,
+            );
+        }
+    }
+}
+
 /// Get the effective clip duration for a clip instance on a given layer.
 /// For groups on vector layers, the duration spans all consecutive keyframes
 /// where the group is present. For regular clips, returns the clip's internal duration.
@@ -162,6 +250,11 @@ pub struct TimelinePane {
 
     /// Vertical scroll offset (in pixels)
     viewport_scroll_y: f32,
+
+    /// Clickable keyframe-diamond hit targets `(screen_rect, keyframe_time)` collected
+    /// during the last `render_layers`. Used by `handle_input` (next frame) to snap the
+    /// playhead exactly to a keyframe when its diamond is clicked.
+    keyframe_diamond_hits: Vec<(egui::Rect, f64)>,
 
     /// Total duration of the animation
     duration: f64,
@@ -685,6 +778,7 @@ impl TimelinePane {
             pixels_per_second: 100.0,
             viewport_start_time: 0.0,
             viewport_scroll_y: 0.0,
+            keyframe_diamond_hits: Vec::new(),
             duration: 10.0,  // Default 10 seconds
             is_scrubbing: false,
             is_panning: false,
@@ -2632,18 +2726,21 @@ impl TimelinePane {
         midi_event_cache: &std::collections::HashMap<u32, Vec<daw_backend::audio::midi::MidiEvent>>,
         raw_audio_cache: &std::collections::HashMap<usize, (std::sync::Arc<Vec<f32>>, u32, u32)>,
         waveform_gpu_dirty: &mut std::collections::HashSet<usize>,
+        waveform_minmax_pools: &std::collections::HashMap<usize, u32>,
         target_format: wgpu::TextureFormat,
         waveform_stereo: bool,
         context_layers: &[&lightningbeam_core::layer::AnyLayer],
         video_manager: &std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>,
         audio_cache: &HashMap<uuid::Uuid, Vec<ClipInstance>>,
         playback_time: f64,
-    ) -> (Vec<(egui::Rect, uuid::Uuid, f64, f64)>, Vec<AutomationLaneRender>) {
+    ) -> (Vec<(egui::Rect, uuid::Uuid, f64, f32)>, Vec<AutomationLaneRender>) {
         let painter = ui.painter().clone();
         let mut pending_lane_renders: Vec<AutomationLaneRender> = Vec::new();
+        // Rebuilt each frame; consumed by handle_input (next frame) for click-to-seek.
+        self.keyframe_diamond_hits.clear();
 
         // Collect video clip rects for hover detection (to avoid borrow conflicts)
-        let mut video_clip_hovers: Vec<(egui::Rect, uuid::Uuid, f64, f64)> = Vec::new();
+        let mut video_clip_hovers: Vec<(egui::Rect, uuid::Uuid, f64, f32)> = Vec::new();
 
         // Track visible video clip IDs for texture cache cleanup
         let mut visible_video_clip_ids: std::collections::HashSet<uuid::Uuid> = std::collections::HashSet::new();
@@ -2899,8 +2996,9 @@ impl TimelinePane {
                     theme.text_color(&["#timeline", ".group-bar"], ui.ctx(), egui::Color32::from_rgb(100, 220, 220))
                 };
                 for (s, e) in &merged {
-                    let sx = self.time_to_x(*s);
-                    let ex = self.time_to_x(*e).max(sx + MIN_CLIP_WIDTH_PX);
+                    // `merged` ranges are in beats; convert to seconds for time_to_x.
+                    let sx = self.time_to_x(document.tempo_map().transform(*s));
+                    let ex = self.time_to_x(document.tempo_map().transform(*e)).max(sx + MIN_CLIP_WIDTH_PX);
                     if ex >= 0.0 && sx <= rect.width() {
                         let vsx = sx.max(0.0);
                         let vex = ex.min(rect.width());
@@ -2940,8 +3038,9 @@ impl TimelinePane {
                                 let ci_duration = ci.total_duration(clip_dur, document.tempo_map());
                                 let ci_end = ci_start + ci_duration;
 
-                                let sx = self.time_to_x(ci_start);
-                                let ex = self.time_to_x(ci_end);
+                                // ci_start/ci_end are in beats; convert to seconds for time_to_x.
+                                let sx = self.time_to_x(document.tempo_map().transform(ci_start));
+                                let ex = self.time_to_x(document.tempo_map().transform(ci_end));
                                 if ex < 0.0 || sx > rect.width() { continue; }
 
                                 let ci_rect = egui::Rect::from_min_max(
@@ -2956,69 +3055,29 @@ impl TimelinePane {
                                     egui::pos2(ci_rect.min.x, span_y_min),
                                     egui::pos2(ci_rect.max.x, span_y_max),
                                 );
-                                video_clip_hovers.push((hover_rect, ci.clip_id, ci.trim_start, ci_start));
+                                // 4th elem = clip's TRUE (unclamped) origin x, for correct
+                                // hover content time when scrolled partly off the left.
+                                video_clip_hovers.push((hover_rect, ci.clip_id, ci.trim_start, rect.min.x + sx));
 
                                 let thumb_display_height = (thumb_y_max - span_y_min) - 4.0;
                                 if thumb_display_height > 8.0 {
                                     let video_mgr = video_manager.lock().unwrap();
-                                    if let Some((tw, th, _)) = video_mgr.get_thumbnail_at(&ci.clip_id, 0.0) {
-                                        let aspect = tw as f32 / th as f32;
-                                        let thumb_display_width = thumb_display_height * aspect;
-                                        let ci_width = ci_rect.width();
-                                        let num_thumbs = ((ci_width / thumb_display_width).ceil() as usize).max(1);
-
-                                        for ti in 0..num_thumbs {
-                                            let x_offset = ti as f32 * thumb_display_width;
-                                            if x_offset >= ci_width { break; }
-
-                                            let time_offset = (x_offset as f64 + thumb_display_width as f64 * 0.5)
-                                                / self.pixels_per_second as f64;
-                                            let content_time = ci.trim_start + time_offset;
-
-                                            if let Some((tw, th, rgba_data)) = video_mgr.get_thumbnail_at(&ci.clip_id, content_time) {
-                                                let ts_key = (content_time * 1000.0) as i64;
-                                                let cache_key = (ci.clip_id, ts_key);
-
-                                                let texture = self.video_thumbnail_textures
-                                                    .entry(cache_key)
-                                                    .or_insert_with(|| {
-                                                        let image = egui::ColorImage::from_rgba_unmultiplied(
-                                                            [tw as usize, th as usize],
-                                                            &rgba_data,
-                                                        );
-                                                        ui.ctx().load_texture(
-                                                            format!("vthumb_{}_{}", ci.clip_id, ts_key),
-                                                            image,
-                                                            egui::TextureOptions::LINEAR,
-                                                        )
-                                                    });
-
-                                                let full_rect = egui::Rect::from_min_size(
-                                                    egui::pos2(ci_rect.min.x + x_offset, ci_rect.min.y + 2.0),
-                                                    egui::vec2(thumb_display_width, thumb_display_height),
-                                                );
-                                                let thumb_rect = full_rect.intersect(ci_rect);
-
-                                                if thumb_rect.width() > 2.0 && thumb_rect.height() > 2.0 {
-                                                    let uv_min = egui::pos2(
-                                                        (thumb_rect.min.x - full_rect.min.x) / full_rect.width(),
-                                                        (thumb_rect.min.y - full_rect.min.y) / full_rect.height(),
-                                                    );
-                                                    let uv_max = egui::pos2(
-                                                        (thumb_rect.max.x - full_rect.min.x) / full_rect.width(),
-                                                        (thumb_rect.max.y - full_rect.min.y) / full_rect.height(),
-                                                    );
-
-                                                    painter.image(
-                                                        texture.id(),
-                                                        thumb_rect,
-                                                        egui::Rect::from_min_max(uv_min, uv_max),
-                                                        egui::Color32::WHITE,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
+                                    // Tile from the clip's true origin (sx unclamped; ci_rect is
+                                    // the clamped visible rect) — scrolls correctly off-screen.
+                                    draw_video_thumbnail_strip(
+                                        &painter,
+                                        ui,
+                                        &video_mgr,
+                                        &mut self.video_thumbnail_textures,
+                                        ci.clip_id,
+                                        ci.trim_start,
+                                        rect.min.x + sx,
+                                        ex - sx,
+                                        ci_rect,
+                                        ci_rect.min.y + 2.0,
+                                        thumb_display_height,
+                                        self.pixels_per_second as f64,
+                                );
                                 }
                             }
                         }
@@ -3048,8 +3107,17 @@ impl TimelinePane {
                                     None => continue,
                                 };
 
-                                let total_frames = samples.len() / (*ch).max(1) as usize;
-                                let audio_file_duration = total_frames as f64 / *sr as f64;
+                                // Min/max overview pools store 4 f32 per texel at the
+                                // floor rate sr/B; raw pools store interleaved samples.
+                                let minmax_b = waveform_minmax_pools.get(&audio_pool_index).copied();
+                                let is_minmax = minmax_b.is_some();
+                                let frame_stride = if is_minmax { 4 } else { (*ch).max(1) as usize };
+                                let total_frames = samples.len() / frame_stride;
+                                let eff_sr: f32 = match minmax_b {
+                                    Some(b) => *sr as f32 / b.max(1) as f32,
+                                    None => *sr as f32,
+                                };
+                                let audio_file_duration = total_frames as f64 / eff_sr as f64;
 
                                 let clip_dur = audio_clip.duration;
                                 let mut ci_start = ci.effective_start();
@@ -3058,8 +3126,9 @@ impl TimelinePane {
                                 }
                                 let ci_duration = ci.total_duration(clip_dur, document.tempo_map());
 
-                                let ci_screen_start = rect.min.x + self.time_to_x(ci_start);
-                                let ci_screen_end = ci_screen_start + (ci_duration * self.pixels_per_second as f64) as f32;
+                                // ci_start/ci_duration are in beats; convert to seconds for time_to_x.
+                                let ci_screen_start = rect.min.x + self.time_to_x(document.tempo_map().transform(ci_start));
+                                let ci_screen_end = rect.min.x + self.time_to_x(document.tempo_map().transform(ci_start + ci_duration));
 
                                 let waveform_rect = egui::Rect::from_min_max(
                                     egui::pos2(ci_screen_start.max(rect.min.x), wave_y_min),
@@ -3081,9 +3150,10 @@ impl TimelinePane {
                                         }
                                         Some(crate::waveform_gpu::PendingUpload {
                                             samples: samples.clone(),
-                                            sample_rate: *sr,
+                                            sample_rate: if is_minmax { eff_sr.round().max(1.0) as u32 } else { *sr },
                                             channels: *ch,
                                             frame_limit,
+                                            minmax: is_minmax,
                                         })
                                     } else {
                                         None
@@ -3098,7 +3168,7 @@ impl TimelinePane {
                                             viewport_start_time: self.viewport_start_time as f32,
                                             pixels_per_second: self.pixels_per_second as f32,
                                             audio_duration: audio_file_duration as f32,
-                                            sample_rate: *sr as f32,
+                                            sample_rate: eff_sr,
                                             clip_start_time: ci_screen_start,
                                             trim_start: ci.trim_start as f32,
                                             tex_width: crate::waveform_gpu::tex_width() as f32,
@@ -3597,8 +3667,16 @@ impl TimelinePane {
                                     // Sampled Audio: Draw waveform via GPU
                                     lightningbeam_core::clip::AudioClipType::Sampled { audio_pool_index } => {
                                         if let Some((samples, sr, ch)) = raw_audio_cache.get(audio_pool_index) {
-                                            let total_frames = samples.len() / (*ch).max(1) as usize;
-                                            let audio_file_duration = total_frames as f64 / *sr as f64;
+                                            // Min/max overview pools: 4 f32/texel at rate sr/B.
+                                            let minmax_b = waveform_minmax_pools.get(audio_pool_index).copied();
+                                            let is_minmax = minmax_b.is_some();
+                                            let frame_stride = if is_minmax { 4 } else { (*ch).max(1) as usize };
+                                            let total_frames = samples.len() / frame_stride;
+                                            let eff_sr: f32 = match minmax_b {
+                                                Some(b) => *sr as f32 / b.max(1) as f32,
+                                                None => *sr as f32,
+                                            };
+                                            let audio_file_duration = total_frames as f64 / eff_sr as f64;
                                             let screen_size = ui.ctx().content_rect().size();
 
                                             let pending_upload = if waveform_gpu_dirty.contains(audio_pool_index) {
@@ -3620,9 +3698,10 @@ impl TimelinePane {
 
                                                 Some(crate::waveform_gpu::PendingUpload {
                                                     samples: samples.clone(),
-                                                    sample_rate: *sr,
+                                                    sample_rate: if is_minmax { eff_sr.round().max(1.0) as u32 } else { *sr },
                                                     channels: *ch,
                                                     frame_limit,
+                                                    minmax: is_minmax,
                                                 })
                                             } else {
                                                 None
@@ -3684,7 +3763,7 @@ impl TimelinePane {
                                                             viewport_start_time: self.viewport_start_time as f32,
                                                             pixels_per_second: self.pixels_per_second as f32,
                                                             audio_duration: audio_file_duration as f32,
-                                                            sample_rate: *sr as f32,
+                                                            sample_rate: eff_sr,
                                                             clip_start_time: iter_screen_start,
                                                             trim_start: preview_trim_start as f32,
                                                             tex_width: crate::waveform_gpu::tex_width() as f32,
@@ -3730,6 +3809,7 @@ impl TimelinePane {
                                                         sample_rate: *sr,
                                                         channels: *ch,
                                                         frame_limit: None, // recording uses incremental path
+                                                        minmax: false,
                                                     })
                                                 } else {
                                                     None
@@ -3794,75 +3874,31 @@ impl TimelinePane {
                             let thumb_display_height = clip_rect.height() - 4.0;
                             if thumb_display_height > 8.0 {
                                 let video_mgr = video_manager.lock().unwrap();
-                                if let Some((tw, th, _)) = video_mgr.get_thumbnail_at(&clip_instance.clip_id, 0.0) {
-                                    let aspect = tw as f32 / th as f32;
-                                    let thumb_display_width = thumb_display_height * aspect;
-                                    let thumb_step_px = thumb_display_width;
-
-                                    let clip_width = clip_rect.width();
-                                    let num_thumbs = ((clip_width / thumb_step_px).ceil() as usize).max(1);
-
-                                    for i in 0..num_thumbs {
-                                        let x_offset = i as f32 * thumb_step_px;
-                                        if x_offset >= clip_width { break; }
-
-                                        // Map pixel position to content time
-                                        let time_offset = (x_offset as f64 + thumb_display_width as f64 * 0.5)
-                                            / self.pixels_per_second as f64;
-                                        let content_time = clip_instance.trim_start + time_offset;
-
-                                        if let Some((tw, th, rgba_data)) = video_mgr.get_thumbnail_at(
-                                            &clip_instance.clip_id, content_time
-                                        ) {
-                                            let ts_key = (content_time * 1000.0) as i64;
-                                            let cache_key = (clip_instance.clip_id, ts_key);
-
-                                            let texture = self.video_thumbnail_textures
-                                                .entry(cache_key)
-                                                .or_insert_with(|| {
-                                                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                                                        [tw as usize, th as usize],
-                                                        &rgba_data,
-                                                    );
-                                                    ui.ctx().load_texture(
-                                                        format!("vthumb_{}_{}", clip_instance.clip_id, ts_key),
-                                                        image,
-                                                        egui::TextureOptions::LINEAR,
-                                                    )
-                                                });
-
-                                            let full_rect = egui::Rect::from_min_size(
-                                                egui::pos2(clip_rect.min.x + x_offset, clip_rect.min.y + 2.0),
-                                                egui::vec2(thumb_display_width, thumb_display_height),
-                                            );
-                                            let thumb_rect = full_rect.intersect(clip_rect);
-
-                                            if thumb_rect.width() > 2.0 && thumb_rect.height() > 2.0 {
-                                                let uv_min = egui::pos2(
-                                                    (thumb_rect.min.x - full_rect.min.x) / full_rect.width(),
-                                                    (thumb_rect.min.y - full_rect.min.y) / full_rect.height(),
-                                                );
-                                                let uv_max = egui::pos2(
-                                                    (thumb_rect.max.x - full_rect.min.x) / full_rect.width(),
-                                                    (thumb_rect.max.y - full_rect.min.y) / full_rect.height(),
-                                                );
-
-                                                painter.image(
-                                                    texture.id(),
-                                                    thumb_rect,
-                                                    egui::Rect::from_min_max(uv_min, uv_max),
-                                                    egui::Color32::WHITE,
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                                // Tile from the clip's true origin (start_x is unclamped;
+                                // clip_rect is the clamped visible rect) so the strip scrolls
+                                // correctly and shows the right content when partly off-screen.
+                                draw_video_thumbnail_strip(
+                                    &painter,
+                                    ui,
+                                    &video_mgr,
+                                    &mut self.video_thumbnail_textures,
+                                    clip_instance.clip_id,
+                                    clip_instance.trim_start,
+                                    rect.min.x + start_x,
+                                    end_x - start_x,
+                                    clip_rect,
+                                    clip_rect.min.y + 2.0,
+                                    thumb_display_height,
+                                    self.pixels_per_second as f64,
+                                );
                             }
                         }
 
-                        // VIDEO PREVIEW: Collect clip rect for hover detection
+                        // VIDEO PREVIEW: Collect clip rect for hover detection. Store the
+                        // clip's TRUE (unclamped) origin x so the hover content time is
+                        // correct even when the clip is scrolled partly off the left.
                         if let lightningbeam_core::layer::AnyLayer::Video(_) = layer {
-                            video_clip_hovers.push((clip_rect, clip_instance.clip_id, clip_instance.trim_start, instance_start));
+                            video_clip_hovers.push((clip_rect, clip_instance.clip_id, clip_instance.trim_start, rect.min.x + start_x));
                         }
 
                         // Draw border per segment (per loop iteration for looping clips)
@@ -3943,6 +3979,40 @@ impl TimelinePane {
                             diamond.to_vec(),
                             color,
                             egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".keyframe-diamond"], ui.ctx(), egui::Color32::from_rgb(180, 150, 50))),
+                        ));
+                        // Record a (slightly enlarged) clickable area for click-to-seek.
+                        self.keyframe_diamond_hits.push((
+                            egui::Rect::from_center_size(egui::pos2(cx, cy), egui::vec2(13.0, 13.0)),
+                            kf.time,
+                        ));
+                    }
+                }
+            }
+
+            // Draw keyframe markers for raster layers (same diamond as vector).
+            if let lightningbeam_core::layer::AnyLayer::Raster(rl) = layer {
+                for kf in &rl.keyframes {
+                    let x = self.time_to_x(kf.time);
+                    if x >= 0.0 && x <= rect.width() {
+                        let cx = rect.min.x + x;
+                        let cy = y + LAYER_HEIGHT - 8.0;
+                        let size = 5.0;
+                        let diamond = [
+                            egui::pos2(cx, cy - size),
+                            egui::pos2(cx + size, cy),
+                            egui::pos2(cx, cy + size),
+                            egui::pos2(cx - size, cy),
+                        ];
+                        let color = theme.bg_color(&["#timeline", ".keyframe-diamond"], ui.ctx(), egui::Color32::from_rgb(255, 220, 100));
+                        painter.add(egui::Shape::convex_polygon(
+                            diamond.to_vec(),
+                            color,
+                            egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".keyframe-diamond"], ui.ctx(), egui::Color32::from_rgb(180, 150, 50))),
+                        ));
+                        // Record a (slightly enlarged) clickable area for click-to-seek.
+                        self.keyframe_diamond_hits.push((
+                            egui::Rect::from_center_size(egui::pos2(cx, cy), egui::vec2(13.0, 13.0)),
+                            kf.time,
                         ));
                     }
                 }
@@ -4797,6 +4867,30 @@ impl TimelinePane {
             }
         }
 
+        // Pointing-hand cursor when hovering a clickable keyframe diamond.
+        if let Some(hover) = response.hover_pos() {
+            if self.keyframe_diamond_hits.iter().any(|(r, _)| r.contains(hover)) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+        }
+
+        // Click a keyframe diamond → snap the playhead exactly to that keyframe.
+        // (Hit targets come from the previous frame's render_layers; diamonds don't
+        // move between frames, so a click lands on the right one.)
+        if response.clicked() && !alt_held {
+            if let Some(pos) = response.interact_pointer_pos() {
+                if let Some(&(_, kf_time)) =
+                    self.keyframe_diamond_hits.iter().find(|(r, _)| r.contains(pos))
+                {
+                    *playback_time = kf_time;
+                    if let Some(controller_arc) = audio_controller {
+                        let mut controller = controller_arc.lock().unwrap();
+                        controller.seek(kf_time);
+                    }
+                }
+            }
+        }
+
         // Get mouse position relative to content area
         let mouse_pos = response.hover_pos().unwrap_or(content_rect.center());
         let mouse_x = (mouse_pos.x - content_rect.min.x).max(0.0);
@@ -5418,7 +5512,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        let (video_clip_hovers, pending_lane_renders) = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager, &audio_cache, *shared.playback_time);
+        let (video_clip_hovers, pending_lane_renders) = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.waveform_minmax_pools, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager, &audio_cache, *shared.playback_time);
 
         // Render playhead on top (clip to timeline area)
         ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));
@@ -5894,26 +5988,24 @@ impl PaneRenderer for TimelinePane {
 
         // VIDEO HOVER DETECTION: Handle video clip hover tooltips AFTER input handling
         // This ensures hover events aren't consumed by the main input handler
-        for (clip_rect, clip_id, trim_start, instance_start) in video_clip_hovers {
+        for (clip_rect, clip_id, trim_start, clip_origin_x) in video_clip_hovers {
             let hover_response = ui.allocate_rect(clip_rect, egui::Sense::hover());
 
             if hover_response.hovered() {
                 if let Some(hover_pos) = hover_response.hover_pos() {
-                    // Calculate timestamp at hover position
-                    let hover_offset_pixels = hover_pos.x - clip_rect.min.x;
-                    let hover_offset_time = (hover_offset_pixels as f64) / (self.pixels_per_second as f64);
-                    let hover_timestamp = instance_start + hover_offset_time;
-
-                    // Remap to clip content time accounting for trim
-                    let clip_content_time = trim_start + (hover_timestamp - instance_start);
+                    // Content time from the clip's TRUE origin. `clip_rect` is clamped
+                    // to the viewport, so using its left edge mislabels the frame when
+                    // the clip is scrolled partly off the left (same bug the strip had).
+                    let hover_offset_pixels = hover_pos.x - clip_origin_x;
+                    let clip_content_time = trim_start + (hover_offset_pixels as f64) / (self.pixels_per_second as f64);
 
                     // Try to get thumbnail from video manager
-                    let thumbnail_data: Option<(u32, u32, std::sync::Arc<Vec<u8>>)> = {
+                    let thumbnail_data: Option<(f64, u32, u32, std::sync::Arc<Vec<u8>>)> = {
                         let video_mgr = shared.video_manager.lock().unwrap();
                         video_mgr.get_thumbnail_at(&clip_id, clip_content_time)
                     };
 
-                    if let Some((thumb_width, thumb_height, ref thumb_data)) = thumbnail_data {
+                    if let Some((_, thumb_width, thumb_height, ref thumb_data)) = thumbnail_data {
                         // Create texture from thumbnail
                         let color_image = egui::ColorImage::from_rgba_unmultiplied(
                             [thumb_width as usize, thumb_height as usize],

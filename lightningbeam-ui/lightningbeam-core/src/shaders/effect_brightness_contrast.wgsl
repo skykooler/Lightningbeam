@@ -31,14 +31,23 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
+// The HDR pipeline feeds these shaders LINEAR light, but brightness/contrast
+// (additive brightness, contrast pivoting around 0.5 perceptual mid-gray) are
+// defined in gamma/display space. Convert to sRGB, adjust there, then convert
+// back to linear so the controls behave like standard editors.
+// sRGB helpers (linear_to_srgb / srgb_to_linear) come from the prepended
+// COLOR_WGSL prelude.
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let src = textureSample(source_tex, source_sampler, in.uv);
     let brightness = uniforms.params0.x; // -1 to 1
     let contrast = uniforms.params0.y;   // 0 to 3
 
+    let src_srgb = linear_to_srgb(src.rgb);
+
     // Apply brightness (additive)
-    var color = src.rgb + vec3<f32>(brightness);
+    var color = src_srgb + vec3<f32>(brightness);
 
     // Apply contrast (multiply around midpoint 0.5)
     color = (color - vec3<f32>(0.5)) * contrast + vec3<f32>(0.5);
@@ -46,6 +55,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Clamp to valid range
     color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
 
-    let result = mix(src.rgb, color, uniforms.mix);
-    return vec4<f32>(result, src.a);
+    let result_srgb = mix(src_srgb, color, uniforms.mix);
+    return vec4<f32>(srgb_to_linear(result_srgb), src.a);
 }

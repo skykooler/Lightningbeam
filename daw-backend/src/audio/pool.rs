@@ -4,6 +4,46 @@ use std::f32::consts::PI;
 use serde::{Deserialize, Serialize};
 use crate::time::Seconds;
 
+/// Per-output-channel mix coefficients to fold a multichannel source down to
+/// stereo, indexed `[out_channel(0=L,1=R)][src_channel]`.
+///
+/// Assumes the conventional interleave order for each channel count (FL, FR, FC,
+/// LFE, BL, BR, SL, SR …). Uses standard ITU/AC-3-style coefficients: full level
+/// for the matching front channel, `1/√2` (≈ −3 dB) for centre and each surround,
+/// LFE dropped. Each row is then normalized so its absolute-coefficient sum ≤ 1,
+/// which prevents clipping (matching FFmpeg's default `normalize` behaviour).
+///
+/// Returns `None` for layouts we don't special-case (caller falls back to taking
+/// the front L/R pair).
+fn stereo_downmix_matrix(src_channels: usize) -> Option<[Vec<f32>; 2]> {
+    const C: f32 = std::f32::consts::FRAC_1_SQRT_2; // ≈ 0.7071
+    // (L row, R row); each entry is the gain applied to that source channel.
+    let (l, r): (Vec<f32>, Vec<f32>) = match src_channels {
+        3 => (vec![1.0, 0.0, C], vec![0.0, 1.0, C]), // FL FR FC
+        4 => (vec![1.0, 0.0, C, 0.0], vec![0.0, 1.0, 0.0, C]), // quad: FL FR BL BR
+        5 => (vec![1.0, 0.0, C, C, 0.0], vec![0.0, 1.0, C, 0.0, C]), // FL FR FC BL BR
+        // 5.1: FL FR FC LFE BL BR (LFE dropped)
+        6 => (vec![1.0, 0.0, C, 0.0, C, 0.0], vec![0.0, 1.0, C, 0.0, 0.0, C]),
+        // 6.1: FL FR FC LFE BC SL SR (BC → both)
+        7 => (vec![1.0, 0.0, C, 0.0, C, C, 0.0], vec![0.0, 1.0, C, 0.0, C, 0.0, C]),
+        // 7.1: FL FR FC LFE BL BR SL SR
+        8 => (
+            vec![1.0, 0.0, C, 0.0, C, 0.0, C, 0.0],
+            vec![0.0, 1.0, C, 0.0, 0.0, C, 0.0, C],
+        ),
+        _ => return None,
+    };
+    let normalize = |row: Vec<f32>| -> Vec<f32> {
+        let sum: f32 = row.iter().map(|c| c.abs()).sum();
+        if sum > 1.0 {
+            row.into_iter().map(|c| c / sum).collect()
+        } else {
+            row
+        }
+    };
+    Some([normalize(l), normalize(r)])
+}
+
 /// Windowed sinc interpolation for high-quality time stretching
 /// This is stateless and can handle arbitrary fractional positions
 #[inline]
@@ -83,6 +123,16 @@ pub enum AudioStorage {
         decoded_frames: u64,
         total_frames: u64,
     },
+
+    /// Audio track of a video container, decoded on demand via FFmpeg
+    /// (`VideoAudioReader`). The source video file is `AudioFile::path`. Like
+    /// `Compressed`, playback is streamed through the disk reader and
+    /// `decoded_for_waveform` is filled progressively for the overview.
+    VideoAudio {
+        decoded_for_waveform: Vec<f32>,
+        decoded_frames: u64,
+        total_frames: u64,
+    },
 }
 
 /// Audio file stored in the pool
@@ -98,6 +148,10 @@ pub struct AudioFile {
     pub original_format: Option<String>,
     /// Original compressed file bytes (preserved across save/load to avoid re-encoding)
     pub original_bytes: Option<Vec<u8>>,
+    /// When `Some`, this entry's bytes are packed in the project container (not on
+    /// disk at `path`); the disk reader opens them via the host's
+    /// `AudioBlobSourceFactory` using this media id. `None` ⇒ stream from `path`.
+    pub packed_media_id: Option<String>,
 }
 
 impl AudioFile {
@@ -112,6 +166,7 @@ impl AudioFile {
             frames,
             original_format: None,
             original_bytes: None,
+            packed_media_id: None,
         }
     }
 
@@ -126,6 +181,7 @@ impl AudioFile {
             frames,
             original_format,
             original_bytes: None,
+            packed_media_id: None,
         }
     }
 
@@ -158,6 +214,7 @@ impl AudioFile {
             frames: total_frames,
             original_format: Some("wav".to_string()),
             original_bytes: None,
+            packed_media_id: None,
         }
     }
 
@@ -181,6 +238,32 @@ impl AudioFile {
             frames: total_frames,
             original_format,
             original_bytes: None,
+            packed_media_id: None,
+        }
+    }
+
+    /// Create a placeholder AudioFile for a video's audio track. `path` is the
+    /// source video file; the audio is streamed on demand by the disk reader's
+    /// FFmpeg-backed `VideoAudioReader`.
+    pub fn from_video_audio(
+        path: PathBuf,
+        channels: u32,
+        sample_rate: u32,
+        total_frames: u64,
+    ) -> Self {
+        Self {
+            path,
+            storage: AudioStorage::VideoAudio {
+                decoded_for_waveform: Vec::new(),
+                decoded_frames: 0,
+                total_frames,
+            },
+            channels,
+            sample_rate,
+            frames: total_frames,
+            original_format: None,
+            original_bytes: None,
+            packed_media_id: None,
         }
     }
 
@@ -274,8 +357,8 @@ impl AudioFile {
                 }
                 written
             }
-            AudioStorage::Compressed { .. } => {
-                // Compressed files are read through the disk reader
+            AudioStorage::Compressed { .. } | AudioStorage::VideoAudio { .. } => {
+                // Streamed through the disk reader, not via read_samples().
                 0
             }
         }
@@ -537,6 +620,15 @@ impl AudioClipPool {
         let dst_channels = engine_channels as usize;
         let output_frames = output.len() / dst_channels;
 
+        // Fold a multichannel source (5.1, 7.1, …) down to stereo with proper
+        // coefficients (centre + surrounds mixed in, LFE dropped) instead of just
+        // taking the front L/R pair. `None` ⇒ no downmix needed / unknown layout.
+        let downmix = if dst_channels == 2 && src_channels > 2 {
+            stereo_downmix_matrix(src_channels)
+        } else {
+            None
+        };
+
         let src_start_position = start_time_seconds * audio_file.sample_rate as f64;
 
         // Tell the disk reader where we're reading so it buffers the right region.
@@ -582,6 +674,15 @@ impl AudioClipPool {
                             sum += get_sample!(sf, src_ch);
                         }
                         sum / src_channels as f32
+                    } else if let Some(ref mat) = downmix {
+                        // Surround → stereo with proper coefficients.
+                        let mut s = 0.0f32;
+                        for (src_ch, &c) in mat[dst_ch].iter().enumerate() {
+                            if c != 0.0 {
+                                s += c * get_sample!(sf, src_ch);
+                            }
+                        }
+                        s
                     } else {
                         get_sample!(sf, dst_ch % src_channels)
                     };
@@ -606,39 +707,45 @@ impl AudioClipPool {
                     break;
                 }
 
-                for dst_ch in 0..dst_channels {
-                    let src_ch = if src_channels == dst_channels {
-                        dst_ch
-                    } else if src_channels == 1 {
-                        0
-                    } else if dst_channels == 1 {
-                        usize::MAX // sentinel: average all channels below
-                    } else {
-                        dst_ch % src_channels
-                    };
-
-                    let sample = if src_ch == usize::MAX {
-                        let mut sum = 0.0;
-                        for ch in 0..src_channels {
-                            let mut channel_samples = [0.0f32; KERNEL_SIZE];
-                            for (j, i) in (-(HALF_KERNEL as i32)..(HALF_KERNEL as i32)).enumerate() {
-                                let idx = src_frame + i;
-                                if idx >= 0 && (idx as usize) < audio_file.frames as usize {
-                                    channel_samples[j] = get_sample!(idx as usize, ch);
-                                }
-                            }
-                            sum += windowed_sinc_interpolate(&channel_samples, frac);
-                        }
-                        sum / src_channels as f32
-                    } else {
+                // Sinc-interpolate a single source channel at the current position.
+                macro_rules! sinc_ch {
+                    ($ch:expr) => {{
                         let mut channel_samples = [0.0f32; KERNEL_SIZE];
                         for (j, i) in (-(HALF_KERNEL as i32)..(HALF_KERNEL as i32)).enumerate() {
                             let idx = src_frame + i;
                             if idx >= 0 && (idx as usize) < audio_file.frames as usize {
-                                channel_samples[j] = get_sample!(idx as usize, src_ch);
+                                channel_samples[j] = get_sample!(idx as usize, $ch);
                             }
                         }
                         windowed_sinc_interpolate(&channel_samples, frac)
+                    }};
+                }
+
+                for dst_ch in 0..dst_channels {
+                    let sample = if let Some(ref mat) = downmix {
+                        // Surround → stereo: interpolate each contributing channel.
+                        let mut s = 0.0f32;
+                        for (ch, &c) in mat[dst_ch].iter().enumerate() {
+                            if c != 0.0 {
+                                s += c * sinc_ch!(ch);
+                            }
+                        }
+                        s
+                    } else if dst_channels == 1 {
+                        let mut sum = 0.0;
+                        for ch in 0..src_channels {
+                            sum += sinc_ch!(ch);
+                        }
+                        sum / src_channels as f32
+                    } else {
+                        let src_ch = if src_channels == dst_channels {
+                            dst_ch
+                        } else if src_channels == 1 {
+                            0
+                        } else {
+                            dst_ch % src_channels
+                        };
+                        sinc_ch!(src_ch)
                     };
 
                     output[output_frame * dst_channels + dst_ch] += sample * gain;
@@ -786,6 +893,25 @@ pub struct AudioPoolEntry {
     pub channels: u32,
     /// Embedded audio data (for files < 10MB)
     pub embedded_data: Option<EmbeddedAudioData>,
+    /// Stable media id (UUID string) for the SQLite `.beam` container. When set,
+    /// the audio bytes live in the container's `media` table keyed by this id
+    /// (packed storage). `None` for referenced entries (use `relative_path`) or
+    /// legacy ZIP-loaded entries. Populated by the file_io save/load layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_id: Option<String>,
+    /// Transient carrier for this entry's serialized waveform-pyramid blob (LBWF
+    /// bytes). Never serialized into project.json — the bytes live in the
+    /// container's `media` table (kind `Waveform`). Set by the file_io save layer
+    /// (in) and load layer (out); `None` everywhere else.
+    #[serde(skip)]
+    pub waveform_blob: Option<Vec<u8>>,
+    /// This entry is a video container's audio track (`relative_path` points at the
+    /// video file). It is always stored as a path reference (never packed/embedded
+    /// — the `VideoClip` already references the file) and reloaded by re-probing
+    /// the video via FFmpeg, so multichannel (5.1/7.1) audio survives the round-trip
+    /// (Symphonia reconstitution would otherwise collapse it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_video_audio: bool,
 }
 
 impl AudioClipPool {
@@ -800,6 +926,66 @@ impl AudioClipPool {
         let mut entries = Vec::new();
 
         for (index, file) in self.files.iter().enumerate() {
+            // Skip placeholder pool slots: `load_from_serialized` resizes the pool to
+            // `max_index + 1` filled with empty `AudioFile::new(PathBuf::new(), …)` to
+            // cover index gaps (and creates one even when there are no entries at all).
+            // Such a slot has an empty path and no packed media — there's nothing to
+            // persist, and emitting it yields an entry whose empty `relative_path`
+            // resolves to the project directory itself (unreadable on the next save).
+            if file.path.as_os_str().is_empty() && file.packed_media_id.is_none() {
+                continue;
+            }
+
+            // Video's audio track: reference the video file (it's also referenced
+            // by the VideoClip) and re-probe it via FFmpeg on load. Never pack or
+            // embed it as audio media — that both wastes space and loses the 5.1+
+            // layout when Symphonia later decodes it.
+            if matches!(file.storage, AudioStorage::VideoAudio { .. }) {
+                let relative_path = pathdiff::diff_paths(&file.path, project_dir)
+                    .map(|r| r.to_string_lossy().to_string())
+                    .or_else(|| Some(file.path.to_string_lossy().to_string()));
+                entries.push(AudioPoolEntry {
+                    pool_index: index,
+                    is_video_audio: true,
+                    waveform_blob: None,
+                    name: file
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| format!("file_{}", index)),
+                    relative_path,
+                    duration: file.duration_seconds(),
+                    sample_rate: file.sample_rate,
+                    channels: file.channels,
+                    embedded_data: None,
+                    media_id: None,
+                });
+                continue;
+            }
+
+            // Packed-in-container streaming entry: its bytes already live in the
+            // `.beam` media table (kept in place across re-saves). Emit just the
+            // media id — no path, no embedded bytes, nothing to decode.
+            if let Some(media_id) = &file.packed_media_id {
+                entries.push(AudioPoolEntry {
+                    pool_index: index,
+                    is_video_audio: false,
+                    waveform_blob: None,
+                    name: file
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| format!("file_{}", index)),
+                    relative_path: None,
+                    duration: file.duration_seconds(),
+                    sample_rate: file.sample_rate,
+                    channels: file.channels,
+                    embedded_data: None,
+                    media_id: Some(media_id.clone()),
+                });
+                continue;
+            }
+
             let file_path = &file.path;
             let file_path_str = file_path.to_string_lossy();
 
@@ -830,6 +1016,8 @@ impl AudioClipPool {
 
             let entry = AudioPoolEntry {
                 pool_index: index,
+                is_video_audio: false,
+                waveform_blob: None,
                 name: file_path
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
@@ -839,6 +1027,7 @@ impl AudioClipPool {
                 sample_rate: file.sample_rate,
                 channels: file.channels,
                 embedded_data,
+                media_id: None,
             };
 
             entries.push(entry);
@@ -962,22 +1151,86 @@ impl AudioClipPool {
         self.files.clear();
         eprintln!("📊 [LOAD_SERIALIZED] Clear pool took {:.2}ms", clear_start.elapsed().as_secs_f64() * 1000.0);
 
-        // Find the maximum pool index to determine required size
-        let max_index = entries.iter()
-            .map(|e| e.pool_index)
+        // Size the pool to hold the highest pool_index (slots are addressed by index,
+        // so gaps are filled with placeholders). No entries → length 0, NOT 1: the old
+        // `max().unwrap_or(0) + 1` produced a spurious placeholder for an empty pool.
+        let pool_size = entries.iter()
+            .map(|e| e.pool_index + 1)
             .max()
             .unwrap_or(0);
 
         // Ensure we have space for all entries
         let resize_start = std::time::Instant::now();
-        self.files.resize(max_index + 1, AudioFile::new(PathBuf::new(), Vec::new(), 2, 44100));
-        eprintln!("📊 [LOAD_SERIALIZED] Resize pool to {} took {:.2}ms", max_index + 1, resize_start.elapsed().as_secs_f64() * 1000.0);
+        self.files.resize(pool_size, AudioFile::new(PathBuf::new(), Vec::new(), 2, 44100));
+        eprintln!("📊 [LOAD_SERIALIZED] Resize pool to {} took {:.2}ms", pool_size, resize_start.elapsed().as_secs_f64() * 1000.0);
 
         for (i, entry) in entries.iter().enumerate() {
             let entry_start = std::time::Instant::now();
             eprintln!("📊 [LOAD_SERIALIZED] Processing entry {}/{}: '{}'", i + 1, entries.len(), entry.name);
 
-            let success = if let Some(ref embedded) = entry.embedded_data {
+            let success = if entry.is_video_audio {
+                // Re-probe the video's audio track via FFmpeg → a streaming
+                // VideoAudio entry (keeps full 5.1/7.1; no decode-to-RAM).
+                match entry.relative_path.as_ref() {
+                    Some(rel) => {
+                        let full = if std::path::Path::new(rel).is_absolute() {
+                            PathBuf::from(rel)
+                        } else {
+                            project_dir.join(rel)
+                        };
+                        if full.exists() {
+                            match crate::audio::disk_reader::VideoAudioReader::open(&full) {
+                                Ok(reader) => {
+                                    let file = AudioFile::from_video_audio(
+                                        full,
+                                        reader.channels(),
+                                        reader.sample_rate(),
+                                        reader.total_frames(),
+                                    );
+                                    if entry.pool_index < self.files.len() {
+                                        self.files[entry.pool_index] = file;
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("[AudioPool] Failed to reopen video audio {:?}: {}", full, e);
+                                    false
+                                }
+                            }
+                        } else {
+                            eprintln!("[AudioPool] Video file not found for audio: {:?}", full);
+                            false
+                        }
+                    }
+                    None => false,
+                }
+            } else if entry.media_id.is_some() && entry.embedded_data.is_none() {
+                // Packed-in-container streaming entry: build a Compressed placeholder
+                // backed by the host blob factory (opened at clip-activation time).
+                // No decode here — playback streams through the disk reader.
+                let media_id = entry.media_id.clone().unwrap();
+                let ext = std::path::Path::new(&entry.name)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|s| s.to_lowercase());
+                let total_frames = (entry.duration * entry.sample_rate as f64).ceil() as u64;
+                let mut file = AudioFile::from_compressed(
+                    PathBuf::from(&entry.name),
+                    entry.channels,
+                    entry.sample_rate,
+                    total_frames,
+                    ext,
+                );
+                file.packed_media_id = Some(media_id);
+                if entry.pool_index < self.files.len() {
+                    self.files[entry.pool_index] = file;
+                    true
+                } else {
+                    false
+                }
+            } else if let Some(ref embedded) = entry.embedded_data {
                 // Load from embedded data
                 eprintln!("📊 [LOAD_SERIALIZED]   Entry has embedded data (format: {})", embedded.format);
                 match Self::load_from_embedded_into_pool(self, entry.pool_index, embedded.clone(), &entry.name) {

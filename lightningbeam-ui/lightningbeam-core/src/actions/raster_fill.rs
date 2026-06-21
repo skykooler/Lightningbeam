@@ -1,6 +1,7 @@
 //! Raster flood-fill action — records and undoes a paint bucket fill on a RasterLayer.
 
 use crate::action::Action;
+use crate::actions::raster_diff::RasterDiff;
 use crate::document::Document;
 use crate::layer::AnyLayer;
 use uuid::Uuid;
@@ -8,11 +9,13 @@ use uuid::Uuid;
 pub struct RasterFillAction {
     layer_id: Uuid,
     time: f64,
-    buffer_before: Vec<u8>,
-    buffer_after: Vec<u8>,
     width: u32,
     height: u32,
     name: String,
+    diff: RasterDiff,
+    /// Full post-fill buffer, kept only for the first `execute` (commit); see
+    /// `RasterStrokeAction::full_after`.
+    full_after: Option<Vec<u8>>,
 }
 
 impl RasterFillAction {
@@ -24,7 +27,9 @@ impl RasterFillAction {
         width: u32,
         height: u32,
     ) -> Self {
-        Self { layer_id, time, buffer_before, buffer_after, width, height, name: "Flood fill".to_string() }
+        let diff = RasterDiff::compute(&buffer_before, &buffer_after, width, height);
+        Self { layer_id, time, width, height, name: "Flood fill".to_string(),
+               diff, full_after: Some(buffer_after) }
     }
 
     pub fn with_description(mut self, name: &str) -> Self {
@@ -41,9 +46,17 @@ impl Action for RasterFillAction {
             AnyLayer::Raster(rl) => rl,
             _ => return Err("Not a raster layer".to_string()),
         };
-        let kf = raster.ensure_keyframe_at(self.time, self.width, self.height);
-        kf.raw_pixels = self.buffer_after.clone();
+        let _ = (self.width, self.height);
+        let kf = raster
+            .keyframe_at_mut(self.time)
+            .ok_or_else(|| format!("No raster keyframe at/before t={}", self.time))?;
+        if let Some(full) = self.full_after.take() {
+            kf.raw_pixels = full;
+        } else {
+            self.diff.apply_after(&mut kf.raw_pixels);
+        }
         kf.texture_dirty = true;
+        kf.dirty = true;
         Ok(())
     }
 
@@ -54,13 +67,21 @@ impl Action for RasterFillAction {
             AnyLayer::Raster(rl) => rl,
             _ => return Err("Not a raster layer".to_string()),
         };
-        let kf = raster.ensure_keyframe_at(self.time, self.width, self.height);
-        kf.raw_pixels = self.buffer_before.clone();
+        let _ = (self.width, self.height);
+        let kf = raster
+            .keyframe_at_mut(self.time)
+            .ok_or_else(|| format!("No raster keyframe at/before t={}", self.time))?;
+        self.diff.apply_before(&mut kf.raw_pixels);
         kf.texture_dirty = true;
+        kf.dirty = true;
         Ok(())
     }
 
     fn description(&self) -> String {
         self.name.clone()
+    }
+
+    fn raster_resident_hint(&self) -> Option<(Uuid, f64)> {
+        Some((self.layer_id, self.time))
     }
 }

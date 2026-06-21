@@ -235,11 +235,22 @@ impl Action for AddClipInstanceAction {
                 }
             }
             AudioClipType::Sampled { audio_pool_index } => {
+                // `trim_*` / `clip.duration` are in SECONDS (audio content time),
+                // while `timeline_*` and the backend's `duration` are in BEATS.
                 let internal_start = self.clip_instance.trim_start;
                 let internal_end = self.clip_instance.trim_end.unwrap_or(clip.duration);
-                let effective_duration = self.clip_instance.timeline_duration
-                    .unwrap_or(internal_end - internal_start);
                 let start_time = self.clip_instance.timeline_start;
+                // `effective_duration` is in BEATS. When `timeline_duration` is set
+                // it already is; otherwise the clip occupies its natural content
+                // length, so convert that seconds-span to beats at the clip's start
+                // (NOT `internal_end - internal_start`, which is seconds — that was
+                // the seconds-as-beats bug that made clips stop early off 60 BPM).
+                let effective_duration = self.clip_instance.timeline_duration.unwrap_or_else(|| {
+                    let tempo_map = document.tempo_map();
+                    let content_secs = internal_end - internal_start;
+                    tempo_map.inverse_transform(tempo_map.transform(start_time) + content_secs)
+                        - start_time
+                });
 
                 let instance_id = controller.add_audio_clip(
                     *backend_track_id,
@@ -305,8 +316,11 @@ mod tests {
         let layer_id = layer.layer.id;
         document.root_mut().add_child(AnyLayer::Vector(layer));
 
-        // Create a clip instance (using a fake clip_id since we're just testing the action)
+        // Register a vector clip so get_clip_duration succeeds
         let clip_id = Uuid::new_v4();
+        let clip = crate::clip::VectorClip::with_id(clip_id, "Test Clip", 100.0, 100.0, 5.0);
+        document.vector_clips.insert(clip_id, clip);
+
         let clip_instance = ClipInstance::new(clip_id);
         let instance_id = clip_instance.id;
 

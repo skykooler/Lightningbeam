@@ -105,6 +105,9 @@ pub struct CompositorLayer {
     pub opacity: f32,
     /// Blend mode for this layer
     pub blend_mode: BlendMode,
+    /// Screen-blend RGB tint; `[0,0,0,0]` (the default) is a no-op. Used by
+    /// onion-skin ghosts (warm = past, cool = future).
+    pub tint: [f32; 4],
 }
 
 impl CompositorLayer {
@@ -113,11 +116,18 @@ impl CompositorLayer {
             buffer,
             opacity: opacity.clamp(0.0, 1.0),
             blend_mode,
+            tint: [0.0; 4],
         }
     }
 
     pub fn normal(buffer: BufferHandle, opacity: f32) -> Self {
         Self::new(buffer, opacity, BlendMode::Normal)
+    }
+
+    /// Screen-blend the layer toward an RGB tint (for onion-skin ghosts).
+    pub fn with_tint(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.tint = [r, g, b, 0.0];
+        self
     }
 }
 
@@ -129,8 +139,10 @@ pub struct CompositeUniforms {
     pub opacity: f32,
     /// Blend mode index
     pub blend_mode: u32,
-    /// Padding for alignment
+    /// Padding to 16 bytes before the vec4 tint
     pub _padding: [u32; 2],
+    /// Screen-blend tint ((0,0,0) = none); `.w` unused.
+    pub tint: [f32; 4],
 }
 
 /// Compositor for blending layers
@@ -323,6 +335,7 @@ impl Compositor {
                 opacity: layer.opacity,
                 blend_mode: layer.blend_mode.to_index(),
                 _padding: [0, 0],
+                tint: layer.tint,
             };
             queue.write_buffer(&uniforms_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -382,6 +395,8 @@ struct Uniforms {
     opacity: f32,
     blend_mode: u32,
     _padding: vec2<u32>,
+    // Screen-blend tint ((0,0,0) = no tint). Used by onion-skin ghosts.
+    tint: vec4<f32>,
 }
 
 @group(0) @binding(0) var source_tex: texture_2d<f32>;
@@ -526,7 +541,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Apply opacity
     let src_alpha = src.a * uniforms.opacity;
 
+    // Screen-blend tint (recolors blacks toward the tint; no-op at tint=0).
+    let t = uniforms.tint.rgb;
+    let tinted = src.rgb + t - src.rgb * t;
+
     // Output premultiplied alpha in linear color space
-    return vec4<f32>(src.rgb * src_alpha, src_alpha);
+    return vec4<f32>(tinted * src_alpha, src_alpha);
 }
 "#;

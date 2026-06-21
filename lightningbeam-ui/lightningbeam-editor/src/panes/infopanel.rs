@@ -12,7 +12,7 @@
 
 use eframe::egui::{self, DragValue, Ui};
 use lightningbeam_core::brush_settings::{bundled_brushes, BrushSettings};
-use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction, SetFillPaintAction};
+use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction, SetFillPaintAction, SetImageFillAction};
 use lightningbeam_core::gradient::ShapeGradient;
 use lightningbeam_core::layer::{AnyLayer, LayerTrait};
 use lightningbeam_core::selection::FocusSelection;
@@ -785,6 +785,26 @@ impl InfopanelPane {
         let edge_ids: Vec<lightningbeam_core::vector_graph::EdgeId> = shared.selection.selected_edges()
             .iter().map(|eid| lightningbeam_core::vector_graph::EdgeId(eid.0)).collect();
 
+        // Image-fill state for the selected fills + the document's image assets, for
+        // the picker below. Gathered now (immutable read) before `shared` is borrowed mut.
+        let image_assets: Vec<(Uuid, String)> = {
+            let doc = shared.action_executor.document();
+            let mut v: Vec<(Uuid, String)> = doc.image_assets.iter()
+                .map(|(id, a)| (*id, a.name.clone())).collect();
+            v.sort_by(|a, b| a.1.cmp(&b.1));
+            v
+        };
+        let current_image_fill: Option<Uuid> = {
+            let doc = shared.action_executor.document();
+            match doc.get_layer(&layer_id) {
+                Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => vl
+                    .graph_at_time(time)
+                    .and_then(|g| face_ids.first().map(|&fid| g.fill(fid).image_fill))
+                    .flatten(),
+                _ => None,
+            }
+        };
+
         egui::CollapsingHeader::new("Shape")
             .id_salt(("shape", path))
             .default_open(self.shape_section_open)
@@ -792,47 +812,67 @@ impl InfopanelPane {
                 self.shape_section_open = true;
                 ui.add_space(4.0);
 
-                // Fill — determine current fill type
+                // Fill — determine current fill type. `image_fill` takes render priority,
+                // so when set it's the active type (overriding colour/gradient underneath);
+                // switching to None/Solid/Gradient clears it.
+                let has_image = current_image_fill.is_some();
                 let has_gradient = matches!(&info.fill_gradient, Some(Some(_)));
                 let has_solid = matches!(&info.fill_color, Some(Some(_)));
                 let fill_is_none = matches!(&info.fill_color, Some(None))
                     && matches!(&info.fill_gradient, Some(None));
                 let fill_mixed = info.fill_color.is_none() && info.fill_gradient.is_none();
 
-                // Fill type toggle row
+                // Fill type toggle row: None | Solid | Gradient | Image
                 ui.horizontal(|ui| {
                     ui.label("Fill:");
                     if fill_mixed {
                         ui.label("--");
                     } else {
-                        if ui.selectable_label(fill_is_none, "None").clicked() && !fill_is_none {
-                            let action = SetFillPaintAction::solid(
-                                layer_id, time, face_ids.clone(), None,
-                            );
-                            shared.pending_actions.push(Box::new(action));
+                        if ui.selectable_label(fill_is_none && !has_image, "None").clicked() {
+                            if has_image {
+                                shared.pending_actions.push(Box::new(
+                                    SetImageFillAction::new(layer_id, time, face_ids.clone(), None)));
+                            }
+                            shared.pending_actions.push(Box::new(
+                                SetFillPaintAction::solid(layer_id, time, face_ids.clone(), None)));
                         }
-                        if ui.selectable_label(has_solid || (!has_gradient && !fill_is_none), "Solid").clicked() && !has_solid {
-                            // Switch to solid: use existing color or default to black
-                            let color = info.fill_color.flatten()
-                                .unwrap_or(ShapeColor::rgba(0, 0, 0, 255));
-                            let action = SetFillPaintAction::solid(
-                                layer_id, time, face_ids.clone(), Some(color),
-                            );
-                            shared.pending_actions.push(Box::new(action));
+                        if ui.selectable_label(has_solid && !has_image, "Solid").clicked() {
+                            if has_image {
+                                shared.pending_actions.push(Box::new(
+                                    SetImageFillAction::new(layer_id, time, face_ids.clone(), None)));
+                            }
+                            if !has_solid {
+                                let color = info.fill_color.flatten()
+                                    .unwrap_or(ShapeColor::rgba(0, 0, 0, 255));
+                                shared.pending_actions.push(Box::new(
+                                    SetFillPaintAction::solid(layer_id, time, face_ids.clone(), Some(color))));
+                            }
                         }
-                        if ui.selectable_label(has_gradient, "Gradient").clicked() && !has_gradient {
-                            let grad = info.fill_gradient.clone().flatten()
-                                .unwrap_or_default();
-                            let action = SetFillPaintAction::gradient(
-                                layer_id, time, face_ids.clone(), Some(grad),
-                            );
-                            shared.pending_actions.push(Box::new(action));
+                        if ui.selectable_label(has_gradient && !has_image, "Gradient").clicked() {
+                            if has_image {
+                                shared.pending_actions.push(Box::new(
+                                    SetImageFillAction::new(layer_id, time, face_ids.clone(), None)));
+                            }
+                            if !has_gradient {
+                                let grad = info.fill_gradient.clone().flatten().unwrap_or_default();
+                                shared.pending_actions.push(Box::new(
+                                    SetFillPaintAction::gradient(layer_id, time, face_ids.clone(), Some(grad))));
+                            }
+                        }
+                        // Image tab — only offered if there are imported image assets.
+                        if !image_assets.is_empty() || has_image {
+                            if ui.selectable_label(has_image, "Image").clicked() && !has_image {
+                                if let Some((aid, _)) = image_assets.first() {
+                                    shared.pending_actions.push(Box::new(
+                                        SetImageFillAction::new(layer_id, time, face_ids.clone(), Some(*aid))));
+                                }
+                            }
                         }
                     }
                 });
 
                 // Solid fill color editor
-                if !fill_mixed && has_solid {
+                if !fill_mixed && has_solid && !has_image {
                     if let Some(Some(color)) = info.fill_color {
                         ui.horizontal(|ui| {
                             let mut rgba = [color.r, color.g, color.b, color.a];
@@ -848,7 +888,7 @@ impl InfopanelPane {
                 }
 
                 // Gradient fill editor
-                if !fill_mixed && has_gradient {
+                if !fill_mixed && has_gradient && !has_image {
                     if let Some(Some(mut grad)) = info.fill_gradient.clone() {
                         if gradient_stop_editor(ui, &mut grad, &mut self.selected_shape_gradient_stop) {
                             let action = SetFillPaintAction::gradient(
@@ -857,6 +897,28 @@ impl InfopanelPane {
                             shared.pending_actions.push(Box::new(action));
                         }
                     }
+                }
+
+                // Image fill editor — pick which asset (active Image type).
+                if has_image {
+                    ui.horizontal(|ui| {
+                        ui.label("Image:");
+                        let selected_text = current_image_fill
+                            .and_then(|id| image_assets.iter().find(|(aid, _)| *aid == id))
+                            .map(|(_, n)| n.clone())
+                            .unwrap_or_else(|| "(missing)".to_string());
+                        egui::ComboBox::from_id_salt(("image_fill", path))
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                for (aid, name) in &image_assets {
+                                    if ui.selectable_label(current_image_fill == Some(*aid), name).clicked() {
+                                        shared.pending_actions.push(Box::new(
+                                            SetImageFillAction::new(layer_id, time, face_ids.clone(), Some(*aid)),
+                                        ));
+                                    }
+                                }
+                            });
+                    });
                 }
 
                 // Stroke color
@@ -1031,6 +1093,29 @@ impl InfopanelPane {
                     ui.label(format!("{}", layer_count));
                 });
 
+                ui.add_space(4.0);
+            });
+    }
+
+    /// Render the onion-skinning view settings (global; not tied to selection).
+    fn render_onion_section(&mut self, ui: &mut Ui, path: &NodePath, shared: &mut SharedPaneState) {
+        egui::CollapsingHeader::new("Onion Skin")
+            .id_salt(("onion", path))
+            .default_open(shared.onion_skin.enabled)
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.checkbox(&mut shared.onion_skin.enabled, "Enabled");
+                ui.add_enabled_ui(shared.onion_skin.enabled, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Frames before:");
+                        ui.add(DragValue::new(&mut shared.onion_skin.frames_before).range(0..=5));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Frames after:");
+                        ui.add(DragValue::new(&mut shared.onion_skin.frames_after).range(0..=5));
+                    });
+                    ui.add(egui::Slider::new(&mut shared.onion_skin.opacity, 0.0..=1.0).text("Opacity"));
+                });
                 ui.add_space(4.0);
             });
     }
@@ -1478,6 +1563,12 @@ impl PaneRenderer for InfopanelPane {
                         }
                     }
                 }
+
+                // Onion-skinning view settings — always available, regardless of selection.
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                self.render_onion_section(ui, path, shared);
             });
     }
 
