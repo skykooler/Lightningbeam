@@ -170,6 +170,7 @@ jobs:
           echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
 
       - name: Build release binary
+        if: matrix.platform != 'windows-latest'
         shell: bash
         env:
           FFMPEG_STATIC: "1"
@@ -180,6 +181,19 @@ jobs:
             TARGET_FLAG="--target ${{ matrix.target }}"
           fi
           cargo build --release --bin lightningbeam-editor $TARGET_FLAG
+
+      # Windows must build under pwsh, not Git Bash: Git for Windows puts its
+      # usr\bin on PATH ahead of the MSVC tools, so its coreutils `link.exe`
+      # shadows MSVC's linker and rustc fails with "extra operand". pwsh keeps
+      # the MSVC environment (set by msvc-dev-cmd) at the front of PATH.
+      - name: Build release binary (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          FFMPEG_STATIC: "1"
+        run: |
+          cd lightningbeam-ui
+          cargo build --release --bin lightningbeam-editor
 
       - name: Copy cross-compiled binary to release dir
         if: matrix.target != ''
