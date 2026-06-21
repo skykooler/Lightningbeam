@@ -43,8 +43,6 @@ pub enum CurveEditAction {
 #[derive(Clone, Debug)]
 pub struct CurveDragState {
     pub keyframe_index: usize,
-    pub original_time: f64,
-    pub original_value: f32,
     pub current_time: f64,
     pub current_value: f32,
 }
@@ -263,8 +261,6 @@ pub fn render_curve_lane(
             let kf = &keyframes[idx];
             *drag_state = Some(CurveDragState {
                 keyframe_index: idx,
-                original_time: kf.time,
-                original_value: kf.value,
                 current_time: kf.time,
                 current_value: kf.value,
             });

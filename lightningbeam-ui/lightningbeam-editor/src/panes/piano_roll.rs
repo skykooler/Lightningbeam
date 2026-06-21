@@ -240,12 +240,6 @@ impl PianoRollPane {
         matches!(note % 12, 1 | 3 | 6 | 8 | 10)
     }
 
-    fn note_name(note: u8) -> String {
-        let names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-        let octave = (note / 12) as i32 - 1;
-        format!("{}{}", names[note as usize % 12], octave)
-    }
-
     // ── Note resolution ──────────────────────────────────────────────────
 
     fn resolve_notes(events: &[daw_backend::audio::midi::MidiEvent]) -> Vec<ResolvedNote> {
@@ -734,45 +728,6 @@ impl PianoRollPane {
         } else {
             PitchBendZone::End
         }
-    }
-
-    /// Generate pitch bend MIDI events for a note based on the zone and target semitones.
-    fn generate_pitch_bend_events(
-        note_start: f64,
-        note_duration: f64,
-        zone: PitchBendZone,
-        semitones: f32,
-        channel: u8,
-        pitch_bend_range: f32,
-    ) -> Vec<daw_backend::audio::midi::MidiEvent> {
-        use daw_backend::audio::midi::MidiEvent;
-        let num_steps: usize = 128;
-        let mut events = Vec::new();
-        let encode_bend = |normalized: f32| -> (u8, u8) {
-            let value_14 = (normalized * 8191.0 + 8192.0).clamp(0.0, 16383.0) as i16;
-            ((value_14 & 0x7F) as u8, ((value_14 >> 7) & 0x7F) as u8)
-        };
-        // Use t directly (0..=1 across the full note) — same formula as the visual ghost.
-        // Start:  peak → 0  (ramps down over full note)
-        // Middle: 0 → peak → 0  (sine arch, peaks at center)
-        // End:    0 → peak  (ramps up over full note)
-        for i in 0..=num_steps {
-            let t = i as f64 / num_steps as f64;
-            let t_f32 = t as f32;
-            // Cosine ease curves: Start+End at equal value = perfectly flat (partition of unity).
-            // Start: (1+cos(πt))/2  — peaks at t=0, smooth decay to 0 at t=1
-            // End:   (1-cos(πt))/2  — 0 at t=0, smooth rise to peak at t=1
-            // Middle: sin(πt)       — arch peaking at t=0.5
-            let normalized = match zone {
-                PitchBendZone::Start  => semitones / pitch_bend_range * (1.0 + (std::f32::consts::PI * t_f32).cos()) * 0.5,
-                PitchBendZone::Middle => semitones / pitch_bend_range * (std::f32::consts::PI * t_f32).sin(),
-                PitchBendZone::End    => semitones / pitch_bend_range * (1.0 - (std::f32::consts::PI * t_f32).cos()) * 0.5,
-            };
-            let timestamp = note_start + t * note_duration;
-            let (lsb, msb) = encode_bend(normalized);
-            events.push(MidiEvent::new(daw_backend::Beats(timestamp), 0xE0 | channel, lsb, msb));
-        }
-        events
     }
 
     /// Find the lowest available MIDI channel (1–15) not already used by any note
@@ -2408,7 +2363,7 @@ impl PaneRenderer for PianoRollPane {
             let doc = shared.action_executor.document();
             let is_measures = doc.timeline_mode == lightningbeam_core::document::TimelineMode::Measures;
             let tempo_map = doc.tempo_map();
-            drop(doc);
+            let _ = doc;
 
             if is_measures {
                 // Auto-detect grid when selection changes

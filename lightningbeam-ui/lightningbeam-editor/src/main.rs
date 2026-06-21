@@ -2234,40 +2234,6 @@ impl EditorApp {
         }
     }
 
-    /// Porter-Duff "over" composite of `src` onto `dst` at canvas offset `(ox, oy)`.
-    /// Both buffers are sRGB-encoded premultiplied RGBA.
-    fn composite_over(
-        dst: &mut [u8], dst_w: u32, dst_h: u32,
-        src: &[u8],     src_w: u32, src_h: u32,
-        ox: i32, oy: i32,
-    ) {
-        for row in 0..src_h {
-            let dy = oy + row as i32;
-            if dy < 0 || dy >= dst_h as i32 { continue; }
-            for col in 0..src_w {
-                let dx = ox + col as i32;
-                if dx < 0 || dx >= dst_w as i32 { continue; }
-                let si = ((row * src_w + col) * 4) as usize;
-                let di = ((dy as u32 * dst_w + dx as u32) * 4) as usize;
-                let sa = src[si + 3] as u32;
-                if sa == 0 { continue; }
-                let da = dst[di + 3] as u32;
-                // out_a = src_a + dst_a * (255 - src_a) / 255
-                let out_a = sa + da * (255 - sa) / 255;
-                dst[di + 3] = out_a as u8;
-                if out_a > 0 {
-                    for c in 0..3 {
-                        // premul over: out = src + dst*(1-src_a/255)
-                        // v is in [0, 255²], so one /255 brings it back to [0, 255]
-                        let v = src[si + c] as u32 * 255
-                            + dst[di + c] as u32 * (255 - sa);
-                        dst[di + c] = (v / 255).min(255) as u8;
-                    }
-                }
-            }
-        }
-    }
-
     /// Commit a floating raster selection: composite it into the keyframe's
     /// `raw_pixels` and record a `RasterStrokeAction` for undo.
     /// Clears `selection.raster_floating` and `selection.raster_selection`.
@@ -2824,7 +2790,7 @@ impl EditorApp {
                 let canvas_before = kf.raw_pixels.clone();
                 let canvas_w = kf.width;
                 let canvas_h = kf.height;
-                drop(kf); // release immutable borrow before taking mutable
+                let _ = kf; // release immutable borrow before taking mutable
 
                 use lightningbeam_core::selection::{RasterFloatingSelection, RasterSelection};
                 self.selection.raster_floating = Some(RasterFloatingSelection {
@@ -3276,8 +3242,6 @@ impl EditorApp {
                         has_raster:   false,
                         has_vector:   false,
                         current_time: doc.current_time,
-                        doc_width:    doc.width  as u32,
-                        doc_height:   doc.height as u32,
                     };
                     scan(&doc.root.children, &mut h);
                     h
@@ -3636,7 +3600,7 @@ impl EditorApp {
 
                 let doc = self.action_executor.document();
                 let (doc_w, doc_h) = (doc.width as u32, doc.height as u32);
-                drop(doc);
+                let _ = doc;
                 let mut layer = RasterLayer::new(layer_name);
                 layer.ensure_keyframe_at(self.playback_time, doc_w, doc_h);
                 let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Raster(layer))
@@ -5775,7 +5739,7 @@ impl eframe::App for EditorApp {
                                 .map(|(&lid, _)| lid);
                             if let Some(layer_id) = recording_layer {
                                 // First, find the clip instance and clip id
-                                let (clip_id, instance_id, timeline_start, trim_start) = {
+                                let (clip_id, instance_id, _timeline_start, _trim_start) = {
                                     let document = self.action_executor.document();
                                     document.get_layer(&layer_id)
                                         .and_then(|layer| {
@@ -6551,7 +6515,6 @@ impl eframe::App for EditorApp {
                     pending_graph_loads: &self.pending_graph_loads,
                     clipboard_consumed: &mut clipboard_consumed,
                     keymap: &self.keymap,
-                    commit_raster_floating_if_any: &mut self.commit_raster_floating_if_any,
                     pending_node_group: &mut self.pending_node_group,
                     pending_node_ungroup: &mut self.pending_node_ungroup,
                     #[cfg(debug_assertions)]
@@ -7512,7 +7475,7 @@ fn render_pane(
             // Active tab highlight with per-corner rounding
             if is_active {
                 let cr = corner_r as u8;
-                let rounding = egui::Rounding {
+                let rounding = egui::CornerRadius {
                     nw: if i == 0 { cr } else { 0 },
                     sw: if i == 0 { cr } else { 0 },
                     ne: if i == n - 1 { cr } else { 0 },
@@ -7557,7 +7520,7 @@ fn render_pane(
             if tab_response.hovered() && !is_active {
                 ui.painter().rect_filled(
                     tab_rect,
-                    egui::Rounding {
+                    egui::CornerRadius {
                         nw: if i == 0 { corner_r as u8 } else { 0 },
                         sw: if i == 0 { corner_r as u8 } else { 0 },
                         ne: if i == n - 1 { corner_r as u8 } else { 0 },

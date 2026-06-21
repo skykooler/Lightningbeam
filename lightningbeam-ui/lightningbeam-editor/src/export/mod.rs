@@ -567,7 +567,7 @@ impl ExportOrchestrator {
             let gpu = state.gpu_resources.as_mut().unwrap();
             let output_view = state.output_texture_view.as_ref().unwrap();
 
-            let mut encoder = video_exporter::render_frame_to_gpu_rgba(
+            let encoder = video_exporter::render_frame_to_gpu_rgba(
                 document,
                 state.settings.time,
                 w, h,

@@ -42,6 +42,7 @@ impl ThemeMode {
 
 /// Background type for CSS backgrounds
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Background {
     Solid(egui::Color32),
     LinearGradient {
@@ -456,6 +457,7 @@ impl Theme {
     }
 
     /// Invalidate the cache (call on stylesheet reload or mode change)
+    #[allow(dead_code)]
     pub fn invalidate_cache(&self) {
         self.cache.borrow_mut().clear();
     }
@@ -518,6 +520,7 @@ impl Theme {
     }
 
     /// Convenience: resolve and extract a dimension with fallback
+    #[allow(dead_code)]
     pub fn dimension(&self, context: &[&str], ctx: &egui::Context, property: &str, fallback: f32) -> f32 {
         let style = self.resolve(context, ctx);
         match property {
@@ -534,6 +537,7 @@ impl Theme {
     }
 
     /// Paint background for a region (handles solid/gradient/image)
+    #[allow(dead_code)]
     pub fn paint_bg(
         &self,
         context: &[&str],

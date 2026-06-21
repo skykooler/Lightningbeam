@@ -232,15 +232,6 @@ impl TestModeState {
         }
     }
 
-    /// Store geometry context for panic capture.
-    /// Called before risky operations (e.g. region select) so the panic hook
-    /// can include it in the crash file for easier reproduction.
-    pub fn set_pending_geometry(&self, context: serde_json::Value) {
-        if let Ok(mut guard) = self.pending_geometry.try_lock() {
-            *guard = Some(context);
-        }
-    }
-
     /// Clear the pending geometry context (call after the operation succeeds).
     pub fn clear_pending_geometry(&self) {
         if let Ok(mut guard) = self.pending_geometry.try_lock() {

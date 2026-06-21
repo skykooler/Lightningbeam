@@ -1586,11 +1586,6 @@ impl GpuBrushEngine {
         crate::debug_overlay::update_gpu_memory(count, total);
     }
 
-    /// Get the cached display texture for a raster layer keyframe.
-    pub fn get_layer_texture(&self, kf_id: &Uuid) -> Option<&CanvasPair> {
-        self.raster_layer_cache.get(kf_id)
-    }
-
     /// Ensure a low-res proxy texture exists for `kf_id` (uploaded once; proxies are
     /// immutable). Bumps recency and evicts the least-recently-used past the budget.
     /// `pixels` is sRGB-premultiplied RGBA of length `w * h * 4`.
@@ -1776,18 +1771,6 @@ impl GpuBrushEngine {
             mapped_at_creation: false,
         });
         self.displacement_bufs.insert(id, DisplacementBuffer { buf, width, height });
-    }
-
-    /// Overwrite the displacement buffer contents with the provided data.
-    pub fn upload_displacement_buf(
-        &self,
-        queue:    &wgpu::Queue,
-        id:       &Uuid,
-        data:     &[[f32; 2]],
-    ) {
-        if let Some(db) = self.displacement_bufs.get(id) {
-            queue.write_buffer(&db.buf, 0, bytemuck::cast_slice(data));
-        }
     }
 
     /// Zero out a displacement buffer (reset all displacements to (0,0)).

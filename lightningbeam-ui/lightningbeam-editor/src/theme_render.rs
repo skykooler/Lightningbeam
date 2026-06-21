@@ -7,6 +7,7 @@ use eframe::egui;
 use crate::theme::Background;
 
 /// Paint a background into the given rect
+#[allow(dead_code)]
 pub fn paint_background(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -35,6 +36,7 @@ pub fn paint_background(
 /// - 90deg = left to right
 /// - 180deg = top to bottom (default)
 /// - 270deg = right to left
+#[allow(dead_code)]
 pub fn paint_linear_gradient(
     painter: &egui::Painter,
     rect: egui::Rect,

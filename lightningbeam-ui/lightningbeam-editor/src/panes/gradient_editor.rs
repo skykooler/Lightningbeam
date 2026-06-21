@@ -238,7 +238,7 @@ pub fn gradient_stop_editor(
     // ── Paint handles ─────────────────────────────────────────────────────
     // handle_rects was built before any deletions this frame; guard against OOB.
     for (i, h_rect) in handle_rects.iter().enumerate().take(gradient.stops.len()) {
-        let col = ShapeColor_to_Color32(gradient.stops[i].color);
+        let col = shape_color_to_color32(gradient.stops[i].color);
         let is_selected = *selected_stop == Some(i);
         let stroke = Stroke::new(
             if is_selected { 2.0 } else { 1.0 },
@@ -308,7 +308,7 @@ pub fn gradient_stop_editor(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn ShapeColor_to_Color32(c: ShapeColor) -> Color32 {
+fn shape_color_to_color32(c: ShapeColor) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r, c.g, c.b, c.a)
 }
 

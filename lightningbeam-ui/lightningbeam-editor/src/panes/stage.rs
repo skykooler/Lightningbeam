@@ -682,17 +682,13 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             if let Some(b_id) = self.ctx.pending_tool_readback_b {
                 if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
                     let dims = gpu_brush.canvases.get(&b_id).map(|c| (c.width, c.height));
-                    if let Some((w, h)) = dims {
+                    if let Some((_w, _h)) = dims {
                         if let Some(pixels) = gpu_brush.readback_canvas(device, queue, b_id) {
                             let results = RASTER_READBACK_RESULTS.get_or_init(|| {
                                 Arc::new(Mutex::new(std::collections::HashMap::new()))
                             });
                             if let Ok(mut map) = results.lock() {
                                 map.insert(self.ctx.instance_id_for_readback, RasterReadbackResult {
-                                    layer_id: uuid::Uuid::nil(), // unused; routing via pending_undo_before
-                                    time: 0.0,
-                                    canvas_width: w,
-                                    canvas_height: h,
                                     pixels,
                                 });
                             }
@@ -763,10 +759,6 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             });
                             if let Ok(mut map) = results.lock() {
                                 map.insert(self.ctx.instance_id_for_readback, RasterReadbackResult {
-                                    layer_id:      pending.layer_id,
-                                    time:          pending.time,
-                                    canvas_width:  pending.canvas_width,
-                                    canvas_height: pending.canvas_height,
                                     pixels,
                                 });
                             }
@@ -3173,7 +3165,6 @@ enum PendingWarpOp {
         disp_data: Option<Vec<[f32; 2]>>,
         grid_cols: u32,
         grid_rows: u32,
-        w: u32, h: u32,
         final_commit: bool,
         layer_id: uuid::Uuid,
         time: f64,
@@ -3190,7 +3181,6 @@ enum PendingWarpOp {
         anchor_canvas_id: uuid::Uuid,
         disp_buf_id: uuid::Uuid,
         display_canvas_id: uuid::Uuid,
-        w: u32, h: u32,
         final_commit: bool,
         layer_id: uuid::Uuid,
         time: f64,
@@ -3251,10 +3241,6 @@ static EYEDROPPER_RESULTS: OnceLock<Arc<Mutex<std::collections::HashMap<u64, (eg
 struct PendingRasterDabs {
     /// Keyframe UUID — indexes the canvas texture pair in `GpuBrushEngine`.
     keyframe_id: uuid::Uuid,
-    /// Layer UUID — used for the undo readback result.
-    layer_id: uuid::Uuid,
-    /// Playback time of the keyframe.
-    time: f64,
     /// Canvas dimensions (pixels).
     canvas_width: u32,
     canvas_height: u32,
@@ -3379,10 +3365,6 @@ static TRANSFORM_READBACK_RESULTS: OnceLock<Arc<Mutex<std::collections::HashMap<
 
 /// Result stored by `prepare()` after a stroke-end readback.
 struct RasterReadbackResult {
-    layer_id: uuid::Uuid,
-    time: f64,
-    canvas_width: u32,
-    canvas_height: u32,
     /// Raw RGBA pixels from the completed stroke.
     pixels: Vec<u8>,
 }
@@ -4201,7 +4183,7 @@ impl StagePane {
 
                 // Update connected edges: shift the adjacent control point by the same delta
                 for &edge_id in &connected_edges {
-                    let [v0, v1] = graph.edge(edge_id).vertices;
+                    let [v0, _v1] = graph.edge(edge_id).vertices;
                     let mut curve = graph.edge(edge_id).curve;
 
                     if v0 == vertex_id {
@@ -5609,58 +5591,6 @@ impl StagePane {
         }
     }
 
-    /// Lift the pixels enclosed by the current `raster_selection` into a
-    /// `RasterFloatingSelection`, punching a transparent hole in `raw_pixels`.
-    ///
-    /// Call this immediately after a marquee / lasso selection is finalized so
-    /// that all downstream operations (drag-move, copy, cut, stroke-masking)
-    /// see a consistent `raster_floating` whenever a selection is active.
-    /// Build an R8 mask buffer (0 = outside, 255 = inside) from a selection.
-    fn build_selection_mask(
-        sel: &lightningbeam_core::selection::RasterSelection,
-        width: u32,
-        height: u32,
-    ) -> Vec<u8> {
-        let mut mask = vec![0u8; (width * height) as usize];
-        let (x0, y0, x1, y1) = sel.bounding_rect();
-        let bx0 = x0.max(0) as u32;
-        let by0 = y0.max(0) as u32;
-        let bx1 = (x1 as u32).min(width);
-        let by1 = (y1 as u32).min(height);
-        for y in by0..by1 {
-            for x in bx0..bx1 {
-                if sel.contains_pixel(x as i32, y as i32) {
-                    mask[(y * width + x) as usize] = 255;
-                }
-            }
-        }
-        mask
-    }
-
-    /// Build an R8 mask buffer for the float canvas (0 = outside selection, 255 = inside).
-    /// Coordinates are in float-local space: pixel (fx, fy) corresponds to document pixel
-    /// (float_x+fx, float_y+fy).
-    fn build_float_mask(
-        sel: &lightningbeam_core::selection::RasterSelection,
-        float_x: i32, float_y: i32,
-        float_w: u32, float_h: u32,
-    ) -> Vec<u8> {
-        let mut mask = vec![0u8; (float_w * float_h) as usize];
-        let (x0, y0, x1, y1) = sel.bounding_rect();
-        let bx0 = (x0 - float_x).max(0) as u32;
-        let by0 = (y0 - float_y).max(0) as u32;
-        let bx1 = ((x1 - float_x) as u32).min(float_w);
-        let by1 = ((y1 - float_y) as u32).min(float_h);
-        for fy in by0..by1 {
-            for fx in bx0..bx1 {
-                if sel.contains_pixel(float_x + fx as i32, float_y + fy as i32) {
-                    mask[(fy * float_w + fx) as usize] = 255;
-                }
-            }
-        }
-        mask
-    }
-
     /// Allocate the three A/B/C GPU canvases and build a [`crate::raster_tool::RasterWorkspace`]
     /// for a new raster tool operation.
     ///
@@ -5699,7 +5629,6 @@ impl StagePane {
                 a_canvas_id: a_id,
                 b_canvas_id: b_id,
                 c_canvas_id: c_id,
-                mask_texture: None,
                 width: w,
                 height: h,
                 x,
@@ -5724,7 +5653,7 @@ impl StagePane {
             let layer_id = (*shared.active_layer_id)?;
             let time = *shared.playback_time;
 
-            let (doc_w, doc_h) = {
+            let (_doc_w, _doc_h) = {
                 let doc = shared.action_executor.document();
                 (doc.width as u32, doc.height as u32)
             };
@@ -5733,7 +5662,7 @@ impl StagePane {
             // returns None (no workspace) if there's no active keyframe to lift from.
 
             // Read keyframe id and pixels.
-            let (kf_id, w, h, pixels) = {
+            let (_kf_id, w, h, pixels) = {
                 let doc = shared.action_executor.document();
                 let AnyLayer::Raster(rl) = doc.get_layer(&layer_id)? else { return None };
                 let kf = rl.keyframe_at(time)?;
@@ -5753,7 +5682,6 @@ impl StagePane {
                 a_canvas_id: a_id,
                 b_canvas_id: b_id,
                 c_canvas_id: c_id,
-                mask_texture: None,
                 width: w,
                 height: h,
                 x: 0,
@@ -5761,9 +5689,6 @@ impl StagePane {
                 source: WorkspaceSource::Layer {
                     layer_id,
                     time,
-                    kf_id,
-                    canvas_w: doc_w,
-                    canvas_h: doc_h,
                 },
                 before_pixels: pixels.clone(),
             };
@@ -6135,8 +6060,6 @@ impl StagePane {
                 ));
                 self.pending_raster_dabs = Some(PendingRasterDabs {
                     keyframe_id: canvas_id,
-                    layer_id,
-                    time,
                     canvas_width,
                     canvas_height,
                     initial_pixels: None,  // canvas already initialized via lazy GPU init
@@ -6220,8 +6143,6 @@ impl StagePane {
                 ));
                 self.pending_raster_dabs = Some(PendingRasterDabs {
                     keyframe_id,
-                    layer_id: active_layer_id,
-                    time: kf_time,
                     canvas_width,
                     canvas_height,
                     initial_pixels: Some(initial_pixels),
@@ -6299,8 +6220,6 @@ impl StagePane {
                         let (dabs, dab_bbox) = BrushEngine::compute_dabs(&seg, stroke_state, dt);
                         self.pending_raster_dabs = Some(PendingRasterDabs {
                             keyframe_id: canvas_id,
-                            layer_id,
-                            time,
                             canvas_width: cw,
                             canvas_height: ch,
                             initial_pixels: None,
@@ -6363,8 +6282,6 @@ impl StagePane {
                         if !dabs.is_empty() {
                             self.pending_raster_dabs = Some(PendingRasterDabs {
                                 keyframe_id: canvas_id,
-                                layer_id,
-                                time,
                                 canvas_width: cw,
                                 canvas_height: ch,
                                 initial_pixels: None,
@@ -6424,8 +6341,6 @@ impl StagePane {
                 if let Some(kf_id) = kf_id {
                     self.pending_raster_dabs = Some(PendingRasterDabs {
                         keyframe_id: kf_id,
-                        layer_id: ub_layer,
-                        time: ub_time,
                         canvas_width: ub_cw,
                         canvas_height: ub_ch,
                         initial_pixels: None,
@@ -6941,7 +6856,7 @@ impl StagePane {
 
     fn handle_quick_select_tool(
         &mut self,
-        ui: &mut egui::Ui,
+        _ui: &mut egui::Ui,
         response: &egui::Response,
         world_pos: egui::Vec2,
         shared: &mut SharedPaneState,
@@ -8431,7 +8346,6 @@ impl StagePane {
         world_pos: egui::Vec2,
         shared: &mut SharedPaneState,
     ) {
-        use lightningbeam_core::tool::Tool;
         use uuid::Uuid;
 
         // Ensure we're on a raster layer.
@@ -8469,7 +8383,6 @@ impl StagePane {
                         disp_data:         Some(disp_data),
                         grid_cols:         ws.grid_cols,
                         grid_rows:         ws.grid_rows,
-                        w: ws.anchor_w, h: ws.anchor_h,
                         final_commit: true,
                         layer_id:     ws.layer_id,
                         time:         ws.time,
@@ -8695,7 +8608,6 @@ impl StagePane {
                 disp_data:         Some(disp_data),
                 grid_cols:         ws.grid_cols,
                 grid_rows:         ws.grid_rows,
-                w: ws.anchor_w, h: ws.anchor_h,
                 final_commit: false,
                 layer_id:     ws.layer_id,
                 time:         ws.time,
@@ -8705,7 +8617,7 @@ impl StagePane {
             None
         };
         let (ws_layer_id, ws_display_id, ws_float_offset) = (ws.layer_id, ws.display_canvas_id, ws.float_offset);
-        drop(ws);  // release borrow of warp_state
+        let _ = ws;  // release borrow of warp_state
 
         // Display canvas is initialised by Init (zero-displacement apply), so it always
         // has valid content. For full-layer warp, override the layer blit unconditionally.
@@ -8778,7 +8690,6 @@ impl StagePane {
                         anchor_canvas_id:  ls.anchor_canvas_id,
                         disp_buf_id:       ls.disp_buf_id,
                         display_canvas_id: ls.display_canvas_id,
-                        w: ls.anchor_w, h: ls.anchor_h,
                         final_commit: true,
                         layer_id:     ls.layer_id,
                         time:         ls.time,
@@ -8950,7 +8861,6 @@ impl StagePane {
                 anchor_canvas_id:  anchor_id,
                 disp_buf_id:       disp_buf,
                 display_canvas_id: display_id,
-                w, h,
                 final_commit: false,
                 layer_id: ls_layer_id,
                 time,
@@ -9013,7 +8923,7 @@ impl StagePane {
                         } else { None }
                     } else { None }
                 } else { None };
-                drop(doc);
+                let _ = doc;
                 r
             } else { None };
 
@@ -10706,7 +10616,6 @@ impl StagePane {
 
         // Alt+click: set source point for clone/healing tools.
         {
-            use lightningbeam_core::tool::Tool;
             let tool_uses_alt = crate::tools::raster_tool_def(shared.selected_tool)
                 .map_or(false, |d| d.uses_alt_click());
             if tool_uses_alt
@@ -11602,7 +11511,6 @@ impl PaneRenderer for StagePane {
                             disp_data: Some(disp_data),
                             grid_cols: ws.grid_cols,
                             grid_rows: ws.grid_rows,
-                            w: ws.anchor_w, h: ws.anchor_h,
                             final_commit: true,
                             layer_id: ws.layer_id,
                             time: ws.time,
@@ -11623,7 +11531,6 @@ impl PaneRenderer for StagePane {
                             anchor_canvas_id: ls.anchor_canvas_id,
                             disp_buf_id: ls.disp_buf_id,
                             display_canvas_id: ls.display_canvas_id,
-                            w: ls.anchor_w, h: ls.anchor_h,
                             final_commit: true,
                             layer_id: ls.layer_id,
                             time: ls.time,

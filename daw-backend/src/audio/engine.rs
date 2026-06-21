@@ -116,7 +116,6 @@ pub struct Engine {
 
     // Current tempo map — kept in sync with SetTempo/SetTempoMap commands.
     tempo_map: crate::TempoMap,
-    current_fps: f64,
     // Current time signature — updated by SetTempo, used when SetTempoMap fires.
     time_sig: (u32, u32),
 }
@@ -197,7 +196,6 @@ impl Engine {
             timing_sum_total_us: 0,
             timing_overrun_count: 0,
             tempo_map: crate::TempoMap::constant(120.0),
-            current_fps: 30.0,
             time_sig: (4, 4),
         }
     }
