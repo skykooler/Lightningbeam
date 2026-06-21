@@ -816,13 +816,12 @@ viewports of fine tiles; persist pyramid in `.beam`.
       packet per stream (O(1) memory vs O(duration)). Same tie-break (`v_us <= a_us`) and drain-on-EOF
       behavior; output is byte-identical. Editor compiles clean. *(Not yet runtime-verified — needs an
       in-app export to confirm A/V sync.)*
-- [ ] Phase 3a — lazy raster fault-in from blob store
-- [ ] Phase 3b — raster residency window + eviction
-- [ ] Phase 3c — bound raster GPU/CPU caches
-- [ ] Phase 3d — spill undo snapshots
-- [ ] Phase 4a — frame→asset enumeration (recursive)
-- [ ] Phase 4b — usage bookkeeping + LRU residency
-- [ ] Phase 4c — bound decoded image tier
+- [x] Phase 3a — lazy + async raster fault-in (`RasterStore` + background thread + image proxy)
+- [x] Phase 3b — raster residency LRU + eviction (dirty-flag data-loss safety)
+- [x] Phase 3c — bound raster GPU texture cache (recency LRU + F3 VRAM readout)
+- [x] Phase 3d — raster undo dirty-rect diffs (+ fault-in-before-undo)
+- [x] Phase 3.5 — image textures in vector scenes (fixed DCEL-broken image import; image-fill tab + picker; container-persisted)
+- [x] Phase 4 — image asset paging: Tier 2 decoded-cache byte-LRU, Tier 1 lazy container bytes, playback prefetch
 - [x] Phase 5 — fixed the broken `#[cfg(test)]` unit tests; **`cargo test --lib` green again**
       (daw-backend 17 passed, lightningbeam-core 264 passed). Wrapped stale raw-`f64` time literals
       in `Beats(...)` / passed `&TempoMap` to changed signatures (automation.rs, clip.rs,

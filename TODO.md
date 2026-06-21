@@ -1,6 +1,13 @@
 # Lightningbeam TODO
 
-## Animation System Refactoring
+> ⚠️ **Stale entries:** Lightningbeam was rewritten from JavaScript to Rust. Any entry below
+> that cites `src/*.js` / `main.js` / `animation.js` predates that migration — the *issue* may
+> or may not still exist in the Rust codebase, but the file/line references are obsolete.
+> **Re-verify against the current Rust code before acting** (this covers the "Animation System
+> Refactoring" section and the JS-referencing "Known Issues" entries — node editor, default
+> interpolation, etc.). Items with no `.js` references are current.
+
+## Animation System Refactoring  *(STALE — JS-era migration notes; superseded by the Rust DCEL/keyframe system)*
 
 ### Completed
 - ✅ Implement AnimationData curve-based system (Keyframe, AnimationCurve, AnimationData classes)
