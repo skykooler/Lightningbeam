@@ -433,6 +433,25 @@ impl VectorLayer {
         time + frame_duration
     }
 
+    /// Start time of the group clip instance's visibility region that contains `time`:
+    /// the time of the earliest keyframe reachable by walking back through consecutive
+    /// keyframes that all contain the clip instance. Returns `None` if the clip instance
+    /// isn't a keyframe-gated group visible at `time` (e.g. a movie clip).
+    pub fn group_visibility_start(&self, clip_instance_id: &Uuid, time: f64) -> Option<f64> {
+        let after = self.keyframes.partition_point(|kf| kf.time <= time);
+        if after == 0 {
+            return None;
+        }
+        let mut idx = after - 1; // keyframe at-or-before `time`
+        if !self.keyframes[idx].clip_instance_ids.contains(clip_instance_id) {
+            return None;
+        }
+        while idx > 0 && self.keyframes[idx - 1].clip_instance_ids.contains(clip_instance_id) {
+            idx -= 1;
+        }
+        Some(self.keyframes[idx].time)
+    }
+
     // Shape-based methods removed — use DCEL methods instead.
     // - shapes_at_time_mut → graph_at_time_mut
     // - get_shape_in_keyframe → use DCEL vertex/edge/face accessors
