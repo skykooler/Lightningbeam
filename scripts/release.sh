@@ -34,4 +34,6 @@ vim "$CHANGELOG"
 # Commit and push
 git add "$CARGO_TOML" "$CHANGELOG"
 git commit -m "Release v${new_version}"
-git push --force origin "$(git branch --show-current):release"
+# Push to the 'all' remote so the release branch lands on both GitHub and Gitea.
+# CI (GitHub Actions) still triggers via the GitHub pushurl.
+git push --force all "$(git branch --show-current):release"

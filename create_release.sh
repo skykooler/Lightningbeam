@@ -26,7 +26,9 @@ echo "Merging $MAIN_BRANCH into $RELEASE_BRANCH..."
 git merge $MAIN_BRANCH --no-ff -m "Release $VERSION"
 
 echo "Pushing $RELEASE_BRANCH..."
-git push origin $RELEASE_BRANCH
+# Push to the 'all' remote so the release branch lands on both GitHub and Gitea.
+# CI (GitHub Actions) still triggers via the GitHub pushurl.
+git push all $RELEASE_BRANCH
 
 git checkout $MAIN_BRANCH
 
