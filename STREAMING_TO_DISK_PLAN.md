@@ -466,13 +466,16 @@ the heavy one).
   `get_or_decode`/`_cpu` bumps the asset's recency; inserts past budget evict the least-recently-used
   (a miss re-decodes from `asset.data`). Achieves usage-based eviction via render-access recency
   (simpler than the frame→asset enumeration below; that enumeration is only needed for *prefetch*).
-- **[TODO] Tier 1 — lazy/droppable compressed bytes.** Currently `asset.data` is **eager-read** from
-  the container on load (Phase 3.5b). Make it lazy: give `ImageCache` the container path, load bytes
-  on a decode miss via `read_packed_media_readonly(path, asset_id)` (don't eager-read on open → instant
-  load; don't accumulate compressed bytes). Wiring wrinkle: the `ImageCache` lives in the stage, not the
-  App that holds the container path → thread the path through `SharedPaneState`.
-- **[TODO, optional] Prefetch via frame→asset enumeration** (4a below) — only if Tier-2 misses during
-  scrub/playback prove visible; the access-recency LRU already keeps rendered images resident.
+- **[DONE] Tier 1 — lazy compressed bytes.** `ImageCache` holds the container path (threaded
+  App.current_file_path → SharedPaneState → VelloRenderContext) and pages bytes on a decode miss via
+  `read_packed_media_readonly`; `load_beam_sqlite` no longer eager-reads → instant load, compressed
+  bytes don't accumulate. `asset.data` is still used when resident (fresh import / old base64 project).
+  *(Refinement: persistent read connection vs open-per-miss.)*
+- **[DONE] Prefetch.** `assets_needed_at(document, time)` enumerates image ids in the visible vector
+  layers' active keyframes; during playback the stage decodes the ~0.5s-ahead set into the cache.
+  *(Refinements: nested clip-instance recursion; background-thread decode.)*
+
+**Phase 4 = DONE** (image asset paging by usage + LRU).
 
 ### 4a. Frame→asset enumeration (incl. nested clips — see note below)
 A function `assets_needed_at(time) -> HashSet<Uuid>`: walk each visible vector layer's active
