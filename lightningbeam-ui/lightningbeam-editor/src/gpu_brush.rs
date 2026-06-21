@@ -1054,6 +1054,12 @@ pub struct GpuBrushEngine {
     /// timeline would otherwise grow this map without bound (~w·h·16 bytes of VRAM per
     /// entry); we evict the oldest once it exceeds `RASTER_LAYER_CACHE_MAX`.
     raster_layer_lru: Vec<Uuid>,
+    /// Low-res proxy textures (one small `CanvasPair` per keyframe), shown while the
+    /// full-res pixels page in. Keyed by keyframe id; separate from
+    /// `raster_layer_cache` so a proxy and its full frame never collide. Bounded by
+    /// its own (generous, since each is tiny) recency LRU.
+    proxy_layer_cache: HashMap<Uuid, CanvasPair>,
+    proxy_layer_lru: Vec<Uuid>,
 }
 
 /// CPU-side parameters uniform for the compute shader.
@@ -1076,6 +1082,10 @@ impl GpuBrushEngine {
     /// without bound; the least-recently-used are evicted past this (re-uploaded on
     /// revisit from the faulted-in pixels).
     const RASTER_LAYER_CACHE_MAX: usize = 12;
+
+    /// Proxies are ~1/100th the VRAM of a full frame, so we can keep many resident
+    /// for instant cold-scrub display before evicting the least-recently-used.
+    const RASTER_PROXY_CACHE_MAX: usize = 64;
 
     /// Create the pipeline.  Returns `Err` if the device lacks the required
     /// storage-texture capability for `Rgba16Float`.
@@ -1172,6 +1182,8 @@ impl GpuBrushEngine {
             displacement_bufs:  HashMap::new(),
             raster_layer_cache: HashMap::new(),
             raster_layer_lru:   Vec::new(),
+            proxy_layer_cache:  HashMap::new(),
+            proxy_layer_lru:    Vec::new(),
         }
     }
 
@@ -1566,15 +1578,58 @@ impl GpuBrushEngine {
     /// Estimated VRAM footprint of `raster_layer_cache` (two `Rgba16Float` textures =
     /// `w·h·16` bytes per entry), published to the F3 debug overlay.
     fn report_raster_cache_vram(&self) {
-        let bytes: usize = self.raster_layer_cache.values()
-            .map(|c| (c.width as usize) * (c.height as usize) * 16)
-            .sum();
-        crate::debug_overlay::update_gpu_memory(self.raster_layer_cache.len(), bytes);
+        let bytes = |cache: &HashMap<Uuid, CanvasPair>| -> usize {
+            cache.values().map(|c| (c.width as usize) * (c.height as usize) * 16).sum()
+        };
+        let total = bytes(&self.raster_layer_cache) + bytes(&self.proxy_layer_cache);
+        let count = self.raster_layer_cache.len() + self.proxy_layer_cache.len();
+        crate::debug_overlay::update_gpu_memory(count, total);
     }
 
     /// Get the cached display texture for a raster layer keyframe.
     pub fn get_layer_texture(&self, kf_id: &Uuid) -> Option<&CanvasPair> {
         self.raster_layer_cache.get(kf_id)
+    }
+
+    /// Ensure a low-res proxy texture exists for `kf_id` (uploaded once; proxies are
+    /// immutable). Bumps recency and evicts the least-recently-used past the budget.
+    /// `pixels` is sRGB-premultiplied RGBA of length `w * h * 4`.
+    pub fn ensure_proxy_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue:  &wgpu::Queue,
+        kf_id:  Uuid,
+        pixels: &[u8],
+        w:      u32,
+        h:      u32,
+    ) {
+        if pixels.len() != (w * h * 4) as usize {
+            return; // malformed proxy — skip rather than panic in the render loop
+        }
+        let mut changed = false;
+        if !self.proxy_layer_cache.contains_key(&kf_id) {
+            let canvas = CanvasPair::new(device, w, h);
+            canvas.upload(queue, pixels);
+            self.proxy_layer_cache.insert(kf_id, canvas);
+            changed = true;
+        }
+        if let Some(pos) = self.proxy_layer_lru.iter().position(|id| *id == kf_id) {
+            self.proxy_layer_lru.remove(pos);
+        }
+        self.proxy_layer_lru.push(kf_id);
+        while self.proxy_layer_lru.len() > Self::RASTER_PROXY_CACHE_MAX {
+            let old = self.proxy_layer_lru.remove(0);
+            self.proxy_layer_cache.remove(&old);
+            changed = true;
+        }
+        if changed {
+            self.report_raster_cache_vram();
+        }
+    }
+
+    /// Get the cached low-res proxy texture for a raster keyframe.
+    pub fn get_proxy_texture(&self, kf_id: &Uuid) -> Option<&CanvasPair> {
+        self.proxy_layer_cache.get(kf_id)
     }
 
     /// Remove the cached texture for a raster layer keyframe (e.g. when deleted).

@@ -254,6 +254,14 @@ fn thumbnail_media_id(clip_id: Uuid) -> Uuid {
     Uuid::from_u128(clip_id.as_u128() ^ SENTINEL)
 }
 
+/// Derived id for a raster keyframe's low-res proxy row (distinct from the keyframe's
+/// own full-res `Raster` row, which is keyed by the raw keyframe id).
+fn raster_proxy_media_id(kf_id: Uuid) -> Uuid {
+    // "LBPX" repeated — distinct id region from the full raster + thumbnail rows.
+    const SENTINEL: u128 = 0x4C42_5058_4C42_5058_4C42_5058_4C42_5058;
+    Uuid::from_u128(kf_id.as_u128() ^ SENTINEL)
+}
+
 pub fn save_beam(
     path: &Path,
     document: &Document,
@@ -418,9 +426,24 @@ pub fn save_beam(
                         }
                         Err(e) => eprintln!("⚠️ [SAVE_BEAM] Failed to encode raster {}: {}", kf.id, e),
                     }
+                    // Low-res proxy alongside the full PNG (shown while the full pages
+                    // in on a later load). Regenerated from the resident pixels.
+                    let proxy_id = raster_proxy_media_id(kf.id);
+                    if let Some(proxy_png) =
+                        crate::brush_engine::encode_raster_proxy_png(&kf.raw_pixels, kf.width, kf.height)
+                    {
+                        txn.put_media_packed(
+                            proxy_id, MediaKind::RasterProxy, "png", &proxy_png, MediaMeta::default(),
+                        )?;
+                        live_media.insert(proxy_id);
+                    }
                 } else if txn.media_exists(kf.id)? {
-                    // Pixels not resident but already stored — keep the row.
+                    // Pixels not resident but already stored — keep both rows.
                     live_media.insert(kf.id);
+                    let proxy_id = raster_proxy_media_id(kf.id);
+                    if txn.media_exists(proxy_id)? {
+                        live_media.insert(proxy_id);
+                    }
                 }
             }
         }
@@ -574,15 +597,33 @@ fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
     // instant and only the resident window lives in RAM. Mark every keyframe
     // `needs_fault_in` (recursively, incl. nested layers) so the renderer requests a
     // page-in; a freshly-created keyframe stays `false` (blank-resident, nothing to load).
+    // Proxies (low-res, ~tens of KB each) ARE decoded eagerly so a cold scrub onto a
+    // not-yet-paged frame shows the proxy instantly instead of flashing blank.
     let mut raster_load_count = 0usize;
+    let mut proxy_load_count = 0usize;
     for layer in document.all_layers_mut() {
         if let crate::layer::AnyLayer::Raster(rl) = layer {
             for kf in &mut rl.keyframes {
                 kf.needs_fault_in = true;
                 raster_load_count += 1;
+                let proxy_id = raster_proxy_media_id(kf.id);
+                if let Ok(Some(_)) = archive.media_info(proxy_id) {
+                    if let Ok(bytes) = archive.read_media_full(proxy_id) {
+                        if let Ok(img) = crate::brush_engine::decode_png(&bytes) {
+                            let (w, h) = (img.width(), img.height());
+                            kf.proxy = Some(crate::raster_layer::RasterProxy {
+                                width: w,
+                                height: h,
+                                pixels: img.into_raw(),
+                            });
+                            proxy_load_count += 1;
+                        }
+                    }
+                }
             }
         }
     }
+    let _ = proxy_load_count;
 
     // Missing external files (referenced entries whose file no longer exists).
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));

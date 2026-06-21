@@ -92,6 +92,16 @@ impl Default for TweenType {
     }
 }
 
+/// A low-res decoded RGBA proxy of a keyframe's pixels, shown while the full-res
+/// buffer pages in from the container so cold scrubs don't flash blank.
+#[derive(Clone, Debug)]
+pub struct RasterProxy {
+    pub width: u32,
+    pub height: u32,
+    /// RGBA, `width * height * 4` bytes.
+    pub pixels: Vec<u8>,
+}
+
 /// A single keyframe of a raster layer
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RasterKeyframe {
@@ -130,6 +140,11 @@ pub struct RasterKeyframe {
     /// unsaved edit). Cleared on a successful save. Never serialized.
     #[serde(skip)]
     pub dirty: bool,
+    /// Phase 3a-3: low-res proxy decoded from the container on load, rendered while
+    /// the full pixels page in (removes the cold-scrub blank flash). `None` if the
+    /// keyframe has no persisted proxy yet (new/unsaved, or pre-proxy project).
+    #[serde(skip)]
+    pub proxy: Option<RasterProxy>,
 }
 
 fn default_true() -> bool { true }
@@ -155,6 +170,7 @@ impl RasterKeyframe {
             texture_dirty: true,
             needs_fault_in: false,
             dirty: false,
+            proxy: None,
         }
     }
 }

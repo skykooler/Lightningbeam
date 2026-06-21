@@ -575,6 +575,27 @@ pub fn encode_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
     Ok(buf.into_inner())
 }
 
+/// Long-edge cap (pixels) for raster keyframe proxies — low-res page-in placeholders.
+pub const RASTER_PROXY_MAX_EDGE: u32 = 192;
+
+/// Downscale a full RGBA buffer to a low-res proxy PNG (long edge ≤
+/// `RASTER_PROXY_MAX_EDGE`). Returns `None` on invalid dims/length or encode failure.
+pub fn encode_raster_proxy_png(raw: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 || raw.len() != (width as usize * height as usize * 4) {
+        return None;
+    }
+    let long = width.max(height);
+    let (pw, ph) = if long <= RASTER_PROXY_MAX_EDGE {
+        (width, height)
+    } else {
+        let s = RASTER_PROXY_MAX_EDGE as f32 / long as f32;
+        (((width as f32 * s).round() as u32).max(1), ((height as f32 * s).round() as u32).max(1))
+    };
+    let img = RgbaImage::from_raw(width, height, raw.to_vec())?;
+    let resized = image::imageops::resize(&img, pw, ph, image::imageops::FilterType::Triangle);
+    encode_png(&resized).ok()
+}
+
 /// Decode PNG bytes into an `RgbaImage`
 pub fn decode_png(data: &[u8]) -> Result<RgbaImage, String> {
     image::load_from_memory(data)

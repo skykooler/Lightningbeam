@@ -1175,6 +1175,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                 // 4. Raster layer texture cache: for idle raster layers (no active tool canvas).
                 // Upload raw_pixels to the cache if texture_dirty; then use the cache entry.
+                // If the full pixels aren't resident, fall back to the low-res proxy:
+                // (kf_id, logical_w, logical_h) so the blit upscales it to full size.
+                let mut raster_proxy_blit: Option<(uuid::Uuid, u32, u32)> = None;
                 let raster_cache_kf: Option<uuid::Uuid> = if gpu_canvas_kf.is_none() {
                     // Find the active keyframe for this raster layer.
                     let doc = &self.ctx.document;
@@ -1221,6 +1224,15 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                             reqs.insert(kf_id);
                                         }
                                     }
+                                    // Show the low-res proxy (if decoded) while the full
+                                    // pages in, so the cold scrub doesn't flash blank.
+                                    if let Some(proxy) = &kf.proxy {
+                                        gpu_brush.ensure_proxy_texture(
+                                            device, queue, kf_id,
+                                            &proxy.pixels, proxy.width, proxy.height,
+                                        );
+                                        raster_proxy_blit = Some((kf_id, kf.width, kf.height));
+                                    }
                                     None
                                 }
                             } else {
@@ -1236,7 +1248,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     None
                 };
 
-                if !rendered_layer.has_content && gpu_canvas_kf.is_none() && raster_cache_kf.is_none() {
+                if !rendered_layer.has_content && gpu_canvas_kf.is_none() && raster_cache_kf.is_none()
+                    && raster_proxy_blit.is_none()
+                {
                     continue;
                 }
 
@@ -1283,20 +1297,32 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     }
                     RenderedLayerType::Raster { transform: layer_transform, .. } => {
                         // Raster layer — GPU canvas blit directly to HDR (bypasses Vello).
-                        // Tool override canvas (gpu_canvas_kf) takes priority over cached texture.
-                        if let Some(use_kf_id) = gpu_canvas_kf.or(raster_cache_kf) {
+                        // Tool override canvas (gpu_canvas_kf) takes priority over cached
+                        // texture; if neither full-res source is present, the low-res proxy.
+                        let full_kf = gpu_canvas_kf.or(raster_cache_kf);
+                        if full_kf.is_some() || raster_proxy_blit.is_some() {
                             let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
                             if let (Some(hdr_layer_view), Some(hdr_view)) = (
                                 buffer_pool.get_view(hdr_layer_handle),
                                 &instance_resources.hdr_texture_view,
                             ) {
                                 if let Ok(gpu_brush) = shared.gpu_brush.lock() {
-                                    let canvas = gpu_brush.canvases.get(&use_kf_id)
-                                        .or_else(|| gpu_brush.raster_layer_cache.get(&use_kf_id));
-                                    if let Some(canvas) = canvas {
+                                    // Pick the source texture and the LOGICAL dims the blit
+                                    // should map it to. A full texture uses its own dims; a
+                                    // proxy uses the keyframe's full dims so it upscales.
+                                    let blit = if let Some(use_kf_id) = full_kf {
+                                        gpu_brush.canvases.get(&use_kf_id)
+                                            .or_else(|| gpu_brush.raster_layer_cache.get(&use_kf_id))
+                                            .map(|c| (c, c.width, c.height))
+                                    } else if let Some((pkf, lw, lh)) = raster_proxy_blit {
+                                        gpu_brush.get_proxy_texture(&pkf).map(|c| (c, lw, lh))
+                                    } else {
+                                        None
+                                    };
+                                    if let Some((canvas, logical_w, logical_h)) = blit {
                                         let bt = crate::gpu_brush::BlitTransform::new(
                                             *layer_transform,
-                                            canvas.width, canvas.height,
+                                            logical_w, logical_h,
                                             width, height,
                                         );
                                         shared.canvas_blit.blit(

@@ -58,6 +58,10 @@ pub enum MediaKind {
     /// A pack of precomputed video thumbnails for a video clip (keyed by a
     /// sentinel-derived id from the clip id). Opaque blob; format owned by the editor.
     Thumbnail = 5,
+    /// A low-res PNG proxy of a raster keyframe (keyed by a sentinel-derived id from
+    /// the keyframe id). Decoded eagerly on load and shown while the full-res pixels
+    /// page in, so cold scrubs don't flash blank. See `raster_proxy_media_id`.
+    RasterProxy = 6,
 }
 
 impl MediaKind {
@@ -69,6 +73,7 @@ impl MediaKind {
             3 => Some(Self::ImageAsset),
             4 => Some(Self::Waveform),
             5 => Some(Self::Thumbnail),
+            6 => Some(Self::RasterProxy),
             _ => None,
         }
     }
