@@ -53,11 +53,18 @@ are both fixed.
     RGBA→YUV420p `scaling::Context` + frames in `new()` instead of per call.
   - **[TODO] #2b — decode swscale + stride-repack** per frame in `video.rs:294-320` (shared with
     scrubbing; cache the YUV→RGBA scaler on the decoder). Small win, modest risk.
-  - **[TODO] #3 — GPU color conversion.** Move YUV→RGB (decode) and RGB→YUV420p (pre-readback, read
-    back YUV planes ~1.5 B/px vs 4) onto the GPU (`gpu/yuv_converter.rs` exists) — removes the two
-    heaviest CPU swscale passes + ~half the readback bytes. Biggest remaining win after #1.
-  - **[TODO] #5 — pacing.** Export is gated to one `render_next_video_frame` per egui repaint; a
-    tighter/threaded loop would lift the throughput ceiling.
+  - **Result of #1+#2a (measured):** ~7.4x → **~1.74x realtime** (130.7 s for 4488 frames @ 60 fps;
+    34 fps). Per-stage avg: Render(CPU build) 15 ms, **Readback(GPU latency) 42 ms**, Extract 1.3 ms,
+    Convert 5.7 ms.
+  - **Now GPU-bound.** Per ~87 ms poll cycle the CPU does ~66 ms (3× build 45 + convert 17 + extract 4)
+    but the GPU does ~87 ms (3 × ~29 ms composite) → GPU saturated at ~29 ms/frame; "Readback 42 ms" is
+    queue latency, not transfer (8 MB is sub-ms).
+  - **[SKIP] #3 GPU YUV / #5 pacing** — both only trim the CPU side, which is already *under* the GPU.
+    Won't move a GPU-bound throughput.
+  - **[TODO, big] Reduce the GPU composite (~29 ms/frame).** The per-layer HDR pipeline (Vello render →
+    linear → composite, ×layers) is the wall, shared with live rendering. Options: batch composite
+    passes; a fast-path skipping HDR compositing for simple single-layer/no-blend docs; cache unchanged
+    layers' scenes (CPU-side, only helps if it later becomes CPU-bound). Render-architecture project.
   - Non-issues: per-frame seek, blocking readback, audio. (`video.rs:237` container-reopen-on-seek is
     a latent cost but doesn't fire on forward export.)
 - **AAC export NaN guard (done):** `convert_chunk_to_planar_f32` now sanitizes non-finite samples
