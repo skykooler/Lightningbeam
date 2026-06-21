@@ -88,7 +88,11 @@ jobs:
       - name: Install dependencies (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
-        run: choco install cmake llvm --installargs 'ADD_CMAKE_TO_PATH=System' -y
+        run: |
+          choco install cmake llvm --installargs 'ADD_CMAKE_TO_PATH=System' -y
+          # Ninja: build NeuralAudio with it instead of a Visual Studio generator,
+          # so the cmake crate doesn't need to recognize the runner's VS version.
+          choco install ninja -y
 
       # Activate the MSVC developer environment (runs vcvars) so the cmake crate
       # building nam-ffi/NeuralAudio can determine the Visual Studio generator.
@@ -191,6 +195,10 @@ jobs:
         shell: pwsh
         env:
           FFMPEG_STATIC: "1"
+          # Force Ninja for the cmake crate (nam-ffi/NeuralAudio): cmake-rs 0.1.54
+          # panics on "unknown VisualStudio version: 18.0" when it auto-detects the
+          # runner's VS generator. Ninja sidesteps that lookup entirely.
+          CMAKE_GENERATOR: Ninja
         run: |
           cd lightningbeam-ui
           cargo build --release --bin lightningbeam-editor
