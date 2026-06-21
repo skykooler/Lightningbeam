@@ -22,43 +22,86 @@ use vello::peniko::{Blob, Fill, ImageAlphaType, ImageBrush, ImageData, ImageForm
 use vello::Scene;
 
 /// Cache for decoded image data to avoid re-decoding every frame
+/// Decoded-image cache, bounded by a byte budget with usage-LRU eviction (Phase 4
+/// asset paging). The decoded RGBA (~`w·h·4` per image) is the heavy, evictable cost;
+/// a miss re-decodes from `asset.data`. Recency is bumped on every access, so images
+/// actually rendered each frame stay resident and unused ones age out under pressure.
 pub struct ImageCache {
     cache: HashMap<Uuid, Arc<ImageBrush>>,
     /// CPU path: tiny-skia pixmaps decoded from the same assets (premultiplied RGBA8)
     cpu_cache: HashMap<Uuid, Arc<tiny_skia::Pixmap>>,
+    /// Recency order (least-recent first) of resident asset ids.
+    lru: Vec<Uuid>,
+    /// Decoded bytes per resident asset (counted once; GPU/CPU are ~equal and a render
+    /// session uses one path) and the running total.
+    sizes: HashMap<Uuid, usize>,
+    bytes: usize,
 }
 
 impl ImageCache {
+    /// Max decoded-image bytes kept resident before LRU eviction.
+    const BUDGET: usize = 256 * 1024 * 1024;
+
     /// Create a new empty image cache
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
             cpu_cache: HashMap::new(),
+            lru: Vec::new(),
+            sizes: HashMap::new(),
+            bytes: 0,
+        }
+    }
+
+    /// Mark `id` (size `size` bytes) as most-recently-used; evict LRU entries over budget.
+    fn touch(&mut self, id: Uuid, size: usize) {
+        if !self.sizes.contains_key(&id) {
+            self.sizes.insert(id, size);
+            self.bytes += size;
+        }
+        if let Some(pos) = self.lru.iter().position(|x| *x == id) {
+            self.lru.remove(pos);
+        }
+        self.lru.push(id);
+        // Keep at least the just-touched entry resident.
+        while self.bytes > Self::BUDGET && self.lru.len() > 1 {
+            let old = self.lru.remove(0);
+            self.cache.remove(&old);
+            self.cpu_cache.remove(&old);
+            if let Some(sz) = self.sizes.remove(&old) {
+                self.bytes -= sz;
+            }
         }
     }
 
     /// Get or decode an image, caching the result
     pub fn get_or_decode(&mut self, asset: &ImageAsset) -> Option<Arc<ImageBrush>> {
-        if let Some(cached) = self.cache.get(&asset.id) {
-            return Some(Arc::clone(cached));
+        let size = (asset.width as usize) * (asset.height as usize) * 4;
+        if let Some(cached) = self.cache.get(&asset.id).map(Arc::clone) {
+            self.touch(asset.id, size);
+            return Some(cached);
         }
 
         // Decode and cache
         let image = decode_image_asset(asset)?;
         let arc_image = Arc::new(image);
         self.cache.insert(asset.id, Arc::clone(&arc_image));
+        self.touch(asset.id, size);
         Some(arc_image)
     }
 
     /// Get or decode an image as a premultiplied tiny-skia Pixmap (CPU render path).
     pub fn get_or_decode_cpu(&mut self, asset: &ImageAsset) -> Option<Arc<tiny_skia::Pixmap>> {
-        if let Some(cached) = self.cpu_cache.get(&asset.id) {
-            return Some(Arc::clone(cached));
+        let size = (asset.width as usize) * (asset.height as usize) * 4;
+        if let Some(cached) = self.cpu_cache.get(&asset.id).map(Arc::clone) {
+            self.touch(asset.id, size);
+            return Some(cached);
         }
 
         let pixmap = decode_image_to_pixmap(asset)?;
         let arc = Arc::new(pixmap);
         self.cpu_cache.insert(asset.id, Arc::clone(&arc));
+        self.touch(asset.id, size);
         Some(arc)
     }
 
@@ -66,12 +109,21 @@ impl ImageCache {
     pub fn invalidate(&mut self, id: &Uuid) {
         self.cache.remove(id);
         self.cpu_cache.remove(id);
+        if let Some(pos) = self.lru.iter().position(|x| x == id) {
+            self.lru.remove(pos);
+        }
+        if let Some(sz) = self.sizes.remove(id) {
+            self.bytes -= sz;
+        }
     }
 
     /// Clear all cached images
     pub fn clear(&mut self) {
         self.cache.clear();
         self.cpu_cache.clear();
+        self.lru.clear();
+        self.sizes.clear();
+        self.bytes = 0;
     }
 }
 
