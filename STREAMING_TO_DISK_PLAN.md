@@ -370,7 +370,15 @@ correct because a clean evicted frame's container bytes == its logical state. No
 skip (no corruption). Unit-tested round-trip. *(Refinement: compress full-canvas-fill diffs, whose
 bbox is the whole frame.)*
 
-### 3e. Prefetch frames  *(future, after 3d — pure latency win, no correctness need)*
+### 3e. Prefetch frames  **[DONE for playback]**
+Implemented for playback: each update during playback, page in the next `PREFETCH_AHEAD=4`
+upcoming keyframes per raster layer (reusing the async worker + `raster_loads_inflight` dedup), so
+full frames are resident before the playhead arrives — fixes "proxy on every frame"/flicker during
+playback. *(Caveat: with many simultaneous raster layers the 12-frame resident budget may evict a
+prefetched frame before it's shown — raise budget or scale prefetch if that surfaces. Scrub-direction
+prefetch still TODO.)*
+
+Original note: *(future, after 3d — pure latency win, no correctness need)*
 Fault-in is reactive (page in only on a render miss), so a never-visited frame still shows the
 proxy for a beat before the full lands. **Prefetch the full pixels for frames about to be shown**:
 on scrub/playback, dispatch background page-ins for the active keyframe ±N in the direction of
