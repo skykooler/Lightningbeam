@@ -1970,6 +1970,9 @@ pub struct CanvasBlitPipeline {
     pub pipeline: wgpu::RenderPipeline,
     pub bg_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
+    /// Bilinear sampler for smooth upscaling (used by `blit_smooth`, e.g. low-res
+    /// proxies). The default `sampler` stays nearest to keep the real canvas crisp.
+    pub linear_sampler: wgpu::Sampler,
     /// Nearest-neighbour sampler used for the selection mask texture.
     pub mask_sampler: wgpu::Sampler,
 }
@@ -2145,6 +2148,17 @@ impl CanvasBlitPipeline {
             ..Default::default()
         });
 
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label:          Some("canvas_blit_linear_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter:     wgpu::FilterMode::Linear,
+            min_filter:     wgpu::FilterMode::Linear,
+            mipmap_filter:  wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         let mask_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label:          Some("canvas_mask_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -2156,7 +2170,7 @@ impl CanvasBlitPipeline {
             ..Default::default()
         });
 
-        Self { pipeline, bg_layout, sampler, mask_sampler }
+        Self { pipeline, bg_layout, sampler, linear_sampler, mask_sampler }
     }
 
     /// Render the canvas texture into `target_view` (Rgba16Float) with the given camera.
@@ -2164,6 +2178,7 @@ impl CanvasBlitPipeline {
     /// `target_view` is cleared to transparent before writing.
     /// `mask_view` is an R8Unorm texture in canvas-pixel space: 255 = keep, 0 = discard.
     /// Pass `None` to use the built-in 1×1 all-white default (no masking).
+    /// Blit with the default nearest-neighbour sampler (crisp; for real canvas pixels).
     pub fn blit(
         &self,
         device:      &wgpu::Device,
@@ -2172,6 +2187,32 @@ impl CanvasBlitPipeline {
         target_view: &wgpu::TextureView,
         transform:   &BlitTransform,
         mask_view:   Option<&wgpu::TextureView>,
+    ) {
+        self.blit_with(device, queue, canvas_view, target_view, transform, mask_view, &self.sampler);
+    }
+
+    /// Blit with a bilinear sampler — smooth upscaling for low-res sources (proxies).
+    pub fn blit_smooth(
+        &self,
+        device:      &wgpu::Device,
+        queue:       &wgpu::Queue,
+        canvas_view: &wgpu::TextureView,
+        target_view: &wgpu::TextureView,
+        transform:   &BlitTransform,
+        mask_view:   Option<&wgpu::TextureView>,
+    ) {
+        self.blit_with(device, queue, canvas_view, target_view, transform, mask_view, &self.linear_sampler);
+    }
+
+    fn blit_with(
+        &self,
+        device:      &wgpu::Device,
+        queue:       &wgpu::Queue,
+        canvas_view: &wgpu::TextureView,
+        target_view: &wgpu::TextureView,
+        transform:   &BlitTransform,
+        mask_view:   Option<&wgpu::TextureView>,
+        canvas_sampler: &wgpu::Sampler,
     ) {
         // When no mask is provided, create a temporary 1×1 all-white texture.
         // (queue is already available here, unlike in new())
@@ -2224,7 +2265,7 @@ impl CanvasBlitPipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding:  1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(canvas_sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding:  2,

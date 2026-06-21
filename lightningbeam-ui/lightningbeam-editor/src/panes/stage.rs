@@ -1313,21 +1313,29 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     let blit = if let Some(use_kf_id) = full_kf {
                                         gpu_brush.canvases.get(&use_kf_id)
                                             .or_else(|| gpu_brush.raster_layer_cache.get(&use_kf_id))
-                                            .map(|c| (c, c.width, c.height))
+                                            .map(|c| (c, c.width, c.height, false))
                                     } else if let Some((pkf, lw, lh)) = raster_proxy_blit {
-                                        gpu_brush.get_proxy_texture(&pkf).map(|c| (c, lw, lh))
+                                        gpu_brush.get_proxy_texture(&pkf).map(|c| (c, lw, lh, true))
                                     } else {
                                         None
                                     };
-                                    if let Some((canvas, logical_w, logical_h)) = blit {
+                                    if let Some((canvas, logical_w, logical_h, is_proxy)) = blit {
                                         let bt = crate::gpu_brush::BlitTransform::new(
                                             *layer_transform,
                                             logical_w, logical_h,
                                             width, height,
                                         );
-                                        shared.canvas_blit.blit(
-                                            device, queue, canvas.src_view(), hdr_layer_view, &bt, None,
-                                        );
+                                        // Proxies are upscaled, so sample them bilinearly;
+                                        // the real canvas stays nearest (crisp pixels).
+                                        if is_proxy {
+                                            shared.canvas_blit.blit_smooth(
+                                                device, queue, canvas.src_view(), hdr_layer_view, &bt, None,
+                                            );
+                                        } else {
+                                            shared.canvas_blit.blit(
+                                                device, queue, canvas.src_view(), hdr_layer_view, &bt, None,
+                                            );
+                                        }
                                     }
                                 }
                                 let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
