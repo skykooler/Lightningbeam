@@ -1458,11 +1458,14 @@ impl VectorGraph {
 
     // ── Region selection: extract / merge subgraph ──────────────────────
 
-    /// Extract a subgraph containing `inside_edges` and `inside_fills`.
+    /// Extract a subgraph containing `inside_edges` and `inside_fills` (typically a
+    /// geometry selection — `select_fill` already includes each fill's boundary edges).
     ///
-    /// Boundary edges (`boundary_edge_ids`) are **duplicated** — they exist in
-    /// both the returned graph and `self`, so both sides have closed fill
-    /// boundaries when the selection is moved.
+    /// **Boundary edges** are *duplicated* (copied into the returned graph but kept in
+    /// `self`, so remaining shapes keep closed boundaries). They are `explicit_boundary`
+    /// (a cut the caller knows about, e.g. a lasso region — pass an empty set if none)
+    /// UNION any inside edge still shared with a non-extracted fill (derived here, so a
+    /// plain geometry selection needs no boundary analysis from the caller).
     ///
     /// Returns `(new_graph, vertex_map, edge_map)` where the maps go from
     /// old (self) IDs to new (returned graph) IDs.
@@ -1470,17 +1473,32 @@ impl VectorGraph {
         &mut self,
         inside_edges: &HashSet<EdgeId>,
         inside_fills: &HashSet<FillId>,
-        boundary_edge_ids: &HashSet<EdgeId>,
+        explicit_boundary: &HashSet<EdgeId>,
     ) -> (VectorGraph, HashMap<VertexId, VertexId>, HashMap<EdgeId, EdgeId>) {
         let mut new_graph = VectorGraph::new();
         let mut vtx_map: HashMap<VertexId, VertexId> = HashMap::new();
         let mut edge_map: HashMap<EdgeId, EdgeId> = HashMap::new();
 
-        // Collect all edge IDs we need to copy into the new graph
-        let edges_to_copy: HashSet<EdgeId> = inside_edges
-            .union(boundary_edge_ids)
-            .copied()
-            .collect();
+        // Boundary = `explicit_boundary` (e.g. a region/lasso cut the caller knows about)
+        // UNION any inside edge still referenced by a fill we're NOT extracting (a shared
+        // DCEL edge — must be duplicated, not moved, or that fill dangles). Deriving the
+        // latter here means a plain geometry selection needs no boundary analysis.
+        let mut boundary_edge_ids: HashSet<EdgeId> = explicit_boundary.clone();
+        for (i, fill) in self.fills.iter().enumerate() {
+            if fill.deleted || inside_fills.contains(&FillId(i as u32)) {
+                continue;
+            }
+            for &(eid, _) in &fill.boundary {
+                if !eid.is_none() && inside_edges.contains(&eid) {
+                    boundary_edge_ids.insert(eid);
+                }
+            }
+        }
+        let boundary_edge_ids = &boundary_edge_ids;
+
+        // Copy all inside edges + any boundary edges (the explicit ones may not be in
+        // inside_edges); boundary edges are kept in self below.
+        let edges_to_copy: HashSet<EdgeId> = inside_edges.union(boundary_edge_ids).copied().collect();
 
         // Collect all vertices referenced by edges we're copying
         let mut referenced_vids: HashSet<VertexId> = HashSet::new();
@@ -1566,9 +1584,10 @@ impl VectorGraph {
             new_graph.fills[new_fid.idx()].image_fill = fill.image_fill;
         }
 
-        // Remove inside_edges from self (but NOT boundary edges — those are duplicated)
+        // Remove inside_edges from self, EXCEPT boundary edges (those are duplicated —
+        // a non-extracted fill still needs them).
         for &eid in inside_edges {
-            if !eid.is_none() && !self.edges[eid.idx()].deleted {
+            if !eid.is_none() && !boundary_edge_ids.contains(&eid) && !self.edges[eid.idx()].deleted {
                 self.free_edge(eid);
             }
         }

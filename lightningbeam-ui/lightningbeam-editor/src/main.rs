@@ -3471,26 +3471,24 @@ impl EditorApp {
                         self.pending_node_group = true;
                     }
                     _ => {
-                        // Existing clip instance grouping fallback (stub)
+                        // Group selected geometry into a group clip + clip instance.
                         if let Some(layer_id) = self.active_layer_id {
                             if self.selection.has_geometry_selection() {
-                                // TODO: DCEL group deferred to Phase 2
-                            } else {
-                                let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
-                                if clip_ids.len() >= 2 {
-                                    let instance_id = uuid::Uuid::new_v4();
-                                    let action = lightningbeam_core::actions::GroupAction::new(
-                                        layer_id, self.playback_time, Vec::new(), clip_ids, instance_id,
-                                    );
-                                    if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                                        eprintln!("Failed to group: {}", e);
-                                    } else {
-                                        self.selection.clear();
-                                        self.selection.add_clip_instance(instance_id);
-                                    }
+                                let fills: Vec<_> = self.selection.selected_fills().iter().copied().collect();
+                                let edges: Vec<_> = self.selection.selected_edges().iter().copied().collect();
+                                let clip_id = uuid::Uuid::new_v4();
+                                let instance_id = uuid::Uuid::new_v4();
+                                let action = lightningbeam_core::actions::GroupAction::new(
+                                    layer_id, self.playback_time, fills, edges, clip_id, instance_id,
+                                );
+                                if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                                    eprintln!("Failed to group: {}", e);
+                                } else {
+                                    self.selection.clear();
+                                    self.selection.add_clip_instance(instance_id);
                                 }
                             }
-                            let _ = layer_id;
+                            // (Grouping existing clip instances is a separate op, not wired.)
                         }
                     }
                 }
@@ -3498,24 +3496,18 @@ impl EditorApp {
             MenuAction::ConvertToMovieClip => {
                 if let Some(layer_id) = self.active_layer_id {
                     if self.selection.has_geometry_selection() {
-                        // TODO: DCEL convert-to-movie-clip deferred to Phase 2
-                    } else {
-                        let clip_ids: Vec<uuid::Uuid> = self.selection.clip_instances().to_vec();
-                        if clip_ids.len() >= 1 {
-                            let instance_id = uuid::Uuid::new_v4();
-                            let action = lightningbeam_core::actions::ConvertToMovieClipAction::new(
-                                layer_id,
-                                self.playback_time,
-                                Vec::new(),
-                                clip_ids,
-                                instance_id,
-                            );
-                            if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                                eprintln!("Failed to convert to movie clip: {}", e);
-                            } else {
-                                self.selection.clear();
-                                self.selection.add_clip_instance(instance_id);
-                            }
+                        let fills: Vec<_> = self.selection.selected_fills().iter().copied().collect();
+                        let edges: Vec<_> = self.selection.selected_edges().iter().copied().collect();
+                        let clip_id = uuid::Uuid::new_v4();
+                        let instance_id = uuid::Uuid::new_v4();
+                        let action = lightningbeam_core::actions::ConvertToMovieClipAction::new(
+                            layer_id, self.playback_time, fills, edges, clip_id, instance_id,
+                        );
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Failed to convert to movie clip: {}", e);
+                        } else {
+                            self.selection.clear();
+                            self.selection.add_clip_instance(instance_id);
                         }
                     }
                 }
