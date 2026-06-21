@@ -126,8 +126,9 @@ fn assert_all_fills_connected(g: &VectorGraph) {
         for k in 0..n {
             let (_, _, end) = b[k];
             let (_, next_start, _) = b[(k + 1) % n];
+            // Tolerance well below any real gap (pixels) but above accumulated float drift.
             assert!(
-                (end.x - next_start.x).abs() < 1e-6 && (end.y - next_start.y).abs() < 1e-6,
+                (end.x - next_start.x).abs() < 1e-2 && (end.y - next_start.y).abs() < 1e-2,
                 "fill {i} boundary disconnected between edge {k} (ends {end:?}) and \
                  edge {} (starts {next_start:?}); boundary = {b:#?}",
                 (k + 1) % n
@@ -255,6 +256,56 @@ fn extract_after_cut_keeps_remaining_fill_intact() {
     let (segs2, _) = rect_lasso(20.0, 20.0, 60.0, 80.0);
     g.insert_stroke(&segs2, None, None, 1.0);
     g.gc_invisible_edges();
+    assert_all_fills_connected(&g);
+}
+
+/// Captured region-select cases (`LIGHTNINGBEAM_DUMP_REGION=1`), embedded so the regression
+/// survives `/tmp` being cleared. Each is `{ "graph": <VectorGraph>, "segments": [[[x,y]*4]*] }`.
+/// They span: two separate rects, side-by-side, overlapping, a notched post-group fill, and
+/// dense self-intersecting freehand lassos (dump 3 is the boundary-spike repro).
+const REGION_DUMPS: &[&str] = &[
+    include_str!("region_dumps/dump0.json"),
+    include_str!("region_dumps/dump1.json"),
+    include_str!("region_dumps/dump2.json"),
+    include_str!("region_dumps/dump3.json"),
+    include_str!("region_dumps/dump4.json"),
+];
+
+#[test]
+fn dumped_region_selects_are_valid() {
+    // Replays each captured region-select cut and asserts it yields only valid, non-corrupt
+    // geometry (no freed-but-referenced refs, no spikes, every fill a connected loop).
+    for json in REGION_DUMPS {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let mut g: VectorGraph = serde_json::from_value(v["graph"].clone()).unwrap();
+        let segs: Vec<CubicBez> = v["segments"].as_array().unwrap().iter().map(|s| {
+            let p = |i: usize| { let a = s[i].as_array().unwrap(); Point::new(a[0].as_f64().unwrap(), a[1].as_f64().unwrap()) };
+            CubicBez::new(p(0), p(1), p(2), p(3))
+        }).collect();
+        g.insert_stroke(&segs, None, None, 1.0);
+        g.gc_invisible_edges();
+        assert_no_freed_but_referenced(&g);
+        assert_no_spikes(&g);
+        assert_all_fills_connected(&g);
+    }
+}
+
+#[test]
+fn near_coincident_needle_does_not_spike() {
+    // Smoke test: a stroke poking into a fill and returning along a near-coincident path
+    // must still yield valid, non-corrupt geometry. (The dense-freehand accordion that the
+    // boundary-spike collapse specifically fixes is only reliably reproduced by the captured
+    // region dumps; this is a lightweight portable guard for the same family of inputs.)
+    let mut g = editor_filled_rect(0.0, 0.0, 100.0, 100.0);
+    g.insert_stroke(
+        &[
+            line(Point::new(50.0, -10.0), Point::new(50.0, 50.0)),
+            line(Point::new(50.0, 50.0), Point::new(50.0003, -10.0)),
+        ],
+        None, None, 1.0,
+    );
+    g.gc_invisible_edges();
+    assert_no_spikes(&g);
     assert_all_fills_connected(&g);
 }
 

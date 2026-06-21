@@ -1215,7 +1215,13 @@ impl VectorGraph {
             self.fills[f.idx()].deleted = true;
             self.free_fills.push(f.0);
         }
-        for face in faces {
+        for mut face in faces {
+            // Collapse degenerate "spikes" — a sequence that runs out to a point and back
+            // (e.g. across near-coincident duplicate tiny edges from a dense freehand path).
+            self.collapse_boundary_spikes(&mut face);
+            if face.len() < 3 {
+                continue;
+            }
             // Only bounded (counter-clockwise, positive-area) faces are real regions; the
             // outer face is clockwise/negative.
             if self.face_signed_area(&face) <= 1e-6 {
@@ -1226,6 +1232,51 @@ impl VectorGraph {
                 originals.iter().find(|(p, _, _)| p.winding(sample) != 0)
             {
                 self.alloc_fill(face, *color, *rule);
+            }
+        }
+    }
+
+    /// Remove out-and-back "spikes" from a face boundary: consecutive entries where the
+    /// second exactly reverses the first (the boundary returns to where it started, e.g.
+    /// bouncing across near-coincident duplicate edges). These are zero-area and would make
+    /// `boundary_to_bezpath` render a stray hair; collapsing them yields a simple loop.
+    fn collapse_boundary_spikes(&self, face: &mut Vec<(EdgeId, Direction)>) {
+        let dstart = |entry: &(EdgeId, Direction)| -> Point {
+            let c = self.edges[entry.0.idx()].curve;
+            match entry.1 {
+                Direction::Forward => c.p0,
+                Direction::Backward => c.p3,
+            }
+        };
+        let dend = |entry: &(EdgeId, Direction)| -> Point {
+            let c = self.edges[entry.0.idx()].curve;
+            match entry.1 {
+                Direction::Forward => c.p3,
+                Direction::Backward => c.p0,
+            }
+        };
+        const EPS: f64 = 0.5;
+        loop {
+            let n = face.len();
+            if n < 2 {
+                break;
+            }
+            let mut collapsed = false;
+            for i in 0..n {
+                let j = (i + 1) % n;
+                // entries i and j cancel when j ends back at i's start.
+                let si = dstart(&face[i]);
+                let ej = dend(&face[j]);
+                if (si.x - ej.x).hypot(si.y - ej.y) < EPS {
+                    let (hi, lo) = if i > j { (i, j) } else { (j, i) };
+                    face.remove(hi);
+                    face.remove(lo);
+                    collapsed = true;
+                    break;
+                }
+            }
+            if !collapsed {
+                break;
             }
         }
     }
