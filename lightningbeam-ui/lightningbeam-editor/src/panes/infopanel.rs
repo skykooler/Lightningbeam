@@ -12,7 +12,7 @@
 
 use eframe::egui::{self, DragValue, Ui};
 use lightningbeam_core::brush_settings::{bundled_brushes, BrushSettings};
-use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction, SetFillPaintAction};
+use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction, SetFillPaintAction, SetImageFillAction};
 use lightningbeam_core::gradient::ShapeGradient;
 use lightningbeam_core::layer::{AnyLayer, LayerTrait};
 use lightningbeam_core::selection::FocusSelection;
@@ -785,6 +785,26 @@ impl InfopanelPane {
         let edge_ids: Vec<lightningbeam_core::vector_graph::EdgeId> = shared.selection.selected_edges()
             .iter().map(|eid| lightningbeam_core::vector_graph::EdgeId(eid.0)).collect();
 
+        // Image-fill state for the selected fills + the document's image assets, for
+        // the picker below. Gathered now (immutable read) before `shared` is borrowed mut.
+        let image_assets: Vec<(Uuid, String)> = {
+            let doc = shared.action_executor.document();
+            let mut v: Vec<(Uuid, String)> = doc.image_assets.iter()
+                .map(|(id, a)| (*id, a.name.clone())).collect();
+            v.sort_by(|a, b| a.1.cmp(&b.1));
+            v
+        };
+        let current_image_fill: Option<Uuid> = {
+            let doc = shared.action_executor.document();
+            match doc.get_layer(&layer_id) {
+                Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => vl
+                    .graph_at_time(time)
+                    .and_then(|g| face_ids.first().map(|&fid| g.fill(fid).image_fill))
+                    .flatten(),
+                _ => None,
+            }
+        };
+
         egui::CollapsingHeader::new("Shape")
             .id_salt(("shape", path))
             .default_open(self.shape_section_open)
@@ -857,6 +877,33 @@ impl InfopanelPane {
                             shared.pending_actions.push(Box::new(action));
                         }
                     }
+                }
+
+                // Image fill picker (assign/clear an imported image asset on the fill).
+                if !face_ids.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label("Image:");
+                        let selected_text = current_image_fill
+                            .and_then(|id| image_assets.iter().find(|(aid, _)| *aid == id))
+                            .map(|(_, n)| n.clone())
+                            .unwrap_or_else(|| "None".to_string());
+                        egui::ComboBox::from_id_salt(("image_fill", path))
+                            .selected_text(selected_text)
+                            .show_ui(ui, |ui| {
+                                if ui.selectable_label(current_image_fill.is_none(), "None").clicked() {
+                                    shared.pending_actions.push(Box::new(
+                                        SetImageFillAction::new(layer_id, time, face_ids.clone(), None),
+                                    ));
+                                }
+                                for (aid, name) in &image_assets {
+                                    if ui.selectable_label(current_image_fill == Some(*aid), name).clicked() {
+                                        shared.pending_actions.push(Box::new(
+                                            SetImageFillAction::new(layer_id, time, face_ids.clone(), Some(*aid)),
+                                        ));
+                                    }
+                                }
+                            });
+                    });
                 }
 
                 // Stroke color

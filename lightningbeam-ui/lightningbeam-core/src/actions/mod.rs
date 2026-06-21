@@ -40,6 +40,7 @@ pub mod raster_fill;
 pub mod add_raster_keyframe;
 pub mod move_layer;
 pub mod set_fill_paint;
+pub mod set_image_fill;
 
 pub use add_clip_instance::AddClipInstanceAction;
 pub use add_effect::AddEffectAction;
@@ -75,5 +76,6 @@ pub use raster_fill::RasterFillAction;
 pub use add_raster_keyframe::AddRasterKeyframeAction;
 pub use move_layer::MoveLayerAction;
 pub use set_fill_paint::SetFillPaintAction;
+pub use set_image_fill::SetImageFillAction;
 pub use change_bpm::ChangeBpmAction;
 pub use change_fps::ChangeFpsAction;
