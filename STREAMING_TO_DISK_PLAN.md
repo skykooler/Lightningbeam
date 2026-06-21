@@ -366,6 +366,16 @@ if >12 raster layers are visible at once. Export `raster_cache` lives one export
 (`raster_stroke.rs:20`). Switch to **dirty-rect diffs** (store only the changed bbox before/after;
 full-canvas fills compressed). Independent of 3a–3c.
 
+### 3e. Prefetch frames  *(future, after 3d — pure latency win, no correctness need)*
+Fault-in is reactive (page in only on a render miss), so a never-visited frame still shows the
+proxy for a beat before the full lands. **Prefetch the full pixels for frames about to be shown**:
+on scrub/playback, dispatch background page-ins for the active keyframe ±N in the direction of
+playhead motion (and during playback, the next K keyframes), reusing the 3a-2 async worker +
+`raster_loads_inflight` dedup. Keep prefetched frames in the 3b LRU so they're still bounded; cap
+concurrent prefetch loads so scrubbing fast doesn't thrash the disk. Optional: also prewarm the GPU
+texture (3c cache) for the immediate next frame. Net effect: cold scrubbing/playback shows full-res
+frames with no proxy flicker. Proxy stays as the instant fallback when prefetch can't keep up.
+
 ### Build order & tests
 1. Arc drive-by — COW make_mut test. 2. 3a fault-in + store + proxy — load→empty-until-faulted,
 PNG round-trip, proxy-then-swap. 3. 3b window/evict/dirty — residency ≤ window while scrubbing,
