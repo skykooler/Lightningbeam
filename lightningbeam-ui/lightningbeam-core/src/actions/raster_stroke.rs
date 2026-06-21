@@ -99,5 +99,10 @@ fn get_keyframe_mut<'a>(
         AnyLayer::Raster(rl) => rl,
         _ => return Err("Not a raster layer".to_string()),
     };
-    Ok(raster.ensure_keyframe_at(time, width, height))
+    let _ = (width, height);
+    // Edit the ACTIVE keyframe (at-or-before `time`); never create one — keyframes
+    // are made explicitly via "New Keyframe".
+    raster
+        .keyframe_at_mut(time)
+        .ok_or_else(|| format!("No raster keyframe at/before t={time}"))
 }

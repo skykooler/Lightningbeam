@@ -46,7 +46,10 @@ impl Action for RasterFillAction {
             AnyLayer::Raster(rl) => rl,
             _ => return Err("Not a raster layer".to_string()),
         };
-        let kf = raster.ensure_keyframe_at(self.time, self.width, self.height);
+        let _ = (self.width, self.height);
+        let kf = raster
+            .keyframe_at_mut(self.time)
+            .ok_or_else(|| format!("No raster keyframe at/before t={}", self.time))?;
         if let Some(full) = self.full_after.take() {
             kf.raw_pixels = full;
         } else {
@@ -64,7 +67,10 @@ impl Action for RasterFillAction {
             AnyLayer::Raster(rl) => rl,
             _ => return Err("Not a raster layer".to_string()),
         };
-        let kf = raster.ensure_keyframe_at(self.time, self.width, self.height);
+        let _ = (self.width, self.height);
+        let kf = raster
+            .keyframe_at_mut(self.time)
+            .ok_or_else(|| format!("No raster keyframe at/before t={}", self.time))?;
         self.diff.apply_before(&mut kf.raw_pixels);
         kf.texture_dirty = true;
         kf.dirty = true;

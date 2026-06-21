@@ -5624,15 +5624,8 @@ impl StagePane {
                 (doc.width as u32, doc.height as u32)
             };
 
-            // Ensure the keyframe exists before reading its ID.
-            {
-                let doc = shared.action_executor.document_mut();
-                if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
-                    rl.ensure_keyframe_at(time, doc_w, doc_h);
-                } else {
-                    return None; // not a raster layer
-                }
-            }
+            // Don't create a keyframe — explicit "New Keyframe" only. The read below
+            // returns None (no workspace) if there's no active keyframe to lift from.
 
             // Read keyframe id and pixels.
             let (kf_id, w, h, pixels) = {
@@ -6066,21 +6059,12 @@ impl StagePane {
                     (doc.width as u32, doc.height as u32)
                 };
 
-                // Ensure the keyframe exists BEFORE reading its ID, so we always get
-                // the real UUID.  Previously we read the ID first and fell back to a
-                // randomly-generated UUID when no keyframe existed; that fake UUID was
-                // stored in painting_canvas but subsequent drag frames used the real UUID
-                // from keyframe_at(), causing the GPU canvas to be a different object from
-                // the one being composited.
-                {
-                    let doc = shared.action_executor.document_mut();
-                    if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&active_layer_id) {
-                        rl.ensure_keyframe_at(*shared.playback_time, doc_width, doc_height);
-                    }
-                }
-
-                // Now read the guaranteed-to-exist keyframe to get the real UUID.
-                let (keyframe_id, canvas_width, canvas_height, buffer_before, initial_pixels) = {
+                // Paint into the ACTIVE keyframe (the one at-or-before the playhead) —
+                // do NOT create one. Keyframes are made explicitly via "New Keyframe"
+                // (a new layer already seeds one). If none exists at-or-before the
+                // playhead, there's nothing to paint into; bail.
+                let _ = (doc_width, doc_height);
+                let (keyframe_id, kf_time, canvas_width, canvas_height, buffer_before, initial_pixels) = {
                     let doc = shared.action_executor.document();
                     if let Some(AnyLayer::Raster(rl)) = doc.get_layer(&active_layer_id) {
                         if let Some(kf) = rl.keyframe_at(*shared.playback_time) {
@@ -6090,9 +6074,9 @@ impl StagePane {
                             } else {
                                 raw.clone()
                             };
-                            (kf.id, kf.width, kf.height, raw, init)
+                            (kf.id, kf.time, kf.width, kf.height, raw, init)
                         } else {
-                            return; // shouldn't happen after ensure_keyframe_at
+                            return; // no keyframe at/before the playhead — nothing to paint
                         }
                     } else {
                         return;
@@ -6124,7 +6108,7 @@ impl StagePane {
                 self.painting_canvas = Some((active_layer_id, keyframe_id));
                 self.pending_undo_before = Some((
                     active_layer_id,
-                    *shared.playback_time,
+                    kf_time,
                     canvas_width,
                     canvas_height,
                     buffer_before,
@@ -6132,7 +6116,7 @@ impl StagePane {
                 self.pending_raster_dabs = Some(PendingRasterDabs {
                     keyframe_id,
                     layer_id: active_layer_id,
-                    time: *shared.playback_time,
+                    time: kf_time,
                     canvas_width,
                     canvas_height,
                     initial_pixels: Some(initial_pixels),
@@ -6142,7 +6126,7 @@ impl StagePane {
                 });
                 self.raster_stroke_state = Some((
                     active_layer_id,
-                    *shared.playback_time,
+                    kf_time,
                     stroke_state,
                     Vec::new(), // buffer_before now lives in pending_undo_before
                 ));
@@ -6368,17 +6352,13 @@ impl StagePane {
 
         let time = *shared.playback_time;
         // Canvas dimensions (to create keyframe if needed).
-        let (doc_w, doc_h) = {
+        let (_doc_w, _doc_h) = {
             let doc = shared.action_executor.document();
             (doc.width as u32, doc.height as u32)
         };
         // Ensure a keyframe exists at the current time.
-        {
-            let doc = shared.action_executor.document_mut();
-            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
-                rl.ensure_keyframe_at(time, doc_w, doc_h);
-            }
-        }
+        // Don't create a keyframe — keyframes are made explicitly via "New Keyframe".
+        // The snapshot below edits the active keyframe and bails if none exists.
         // Snapshot the pixel buffer before drawing.
         let (buffer_before, w, h) = {
             let doc = shared.action_executor.document();
@@ -6721,16 +6701,12 @@ impl StagePane {
         let time = *shared.playback_time;
 
         // Ensure a keyframe exists at the current time.
-        let (doc_w, doc_h) = {
+        let (_doc_w, _doc_h) = {
             let doc = shared.action_executor.document();
             (doc.width as u32, doc.height as u32)
         };
-        {
-            let doc = shared.action_executor.document_mut();
-            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
-                rl.ensure_keyframe_at(time, doc_w, doc_h);
-            }
-        }
+        // Don't create a keyframe — keyframes are made explicitly via "New Keyframe".
+        // The snapshot below edits the active keyframe and bails if none exists.
 
         // Snapshot current pixels.
         let (buffer_before, width, height) = {
@@ -6802,16 +6778,12 @@ impl StagePane {
         let time = *shared.playback_time;
 
         // Ensure keyframe exists.
-        let (doc_w, doc_h) = {
+        let (_doc_w, _doc_h) = {
             let doc = shared.action_executor.document();
             (doc.width as u32, doc.height as u32)
         };
-        {
-            let doc = shared.action_executor.document_mut();
-            if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
-                rl.ensure_keyframe_at(time, doc_w, doc_h);
-            }
-        }
+        // Don't create a keyframe — keyframes are made explicitly via "New Keyframe".
+        // The snapshot below edits the active keyframe and bails if none exists.
 
         let (pixels, width, height) = {
             let doc = shared.action_executor.document();
@@ -6888,16 +6860,11 @@ impl StagePane {
             Self::commit_raster_floating_now(shared);
 
             // Ensure the keyframe exists.
-            let (doc_w, doc_h) = {
+            let (_doc_w, _doc_h) = {
                 let doc = shared.action_executor.document();
                 (doc.width as u32, doc.height as u32)
             };
-            {
-                let doc = shared.action_executor.document_mut();
-                if let Some(AnyLayer::Raster(rl)) = doc.get_layer_mut(&layer_id) {
-                    rl.ensure_keyframe_at(time, doc_w, doc_h);
-                }
-            }
+            // Don't create a keyframe — explicit "New Keyframe" only; bail below if none.
 
             // Snapshot canvas pixels.
             let (pixels, width, height) = {

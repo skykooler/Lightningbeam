@@ -3976,6 +3976,30 @@ impl TimelinePane {
                 }
             }
 
+            // Draw keyframe markers for raster layers (same diamond as vector).
+            if let lightningbeam_core::layer::AnyLayer::Raster(rl) = layer {
+                for kf in &rl.keyframes {
+                    let x = self.time_to_x(kf.time);
+                    if x >= 0.0 && x <= rect.width() {
+                        let cx = rect.min.x + x;
+                        let cy = y + LAYER_HEIGHT - 8.0;
+                        let size = 5.0;
+                        let diamond = [
+                            egui::pos2(cx, cy - size),
+                            egui::pos2(cx + size, cy),
+                            egui::pos2(cx, cy + size),
+                            egui::pos2(cx - size, cy),
+                        ];
+                        let color = theme.bg_color(&["#timeline", ".keyframe-diamond"], ui.ctx(), egui::Color32::from_rgb(255, 220, 100));
+                        painter.add(egui::Shape::convex_polygon(
+                            diamond.to_vec(),
+                            color,
+                            egui::Stroke::new(1.0, theme.border_color(&["#timeline", ".keyframe-diamond"], ui.ctx(), egui::Color32::from_rgb(180, 150, 50))),
+                        ));
+                    }
+                }
+            }
+
             // Separator line at bottom
             painter.line_segment(
                 [

@@ -235,6 +235,35 @@ impl RasterLayer {
         &mut self.keyframes[insert_idx]
     }
 
+    /// Insert a blank keyframe at `time` if none exists there (within tolerance).
+    /// Returns the new keyframe's id if one was created, `None` if a keyframe already
+    /// existed. Used by the explicit "New Keyframe" command (blank cel).
+    pub fn insert_blank_keyframe_at(&mut self, time: f64, width: u32, height: u32) -> Option<Uuid> {
+        if self.keyframe_index_at_exact(time, 0.001).is_some() {
+            return None;
+        }
+        let (w, h) = if width == 0 || height == 0 {
+            self.keyframe_at(time)
+                .map(|kf| (kf.width, kf.height))
+                .unwrap_or((1920, 1080))
+        } else {
+            (width, height)
+        };
+        let insert_idx = self.keyframes.partition_point(|kf| kf.time < time);
+        let kf = RasterKeyframe::new(time, w, h);
+        let id = kf.id;
+        self.keyframes.insert(insert_idx, kf);
+        Some(id)
+    }
+
+    /// Remove the keyframe with the given id, returning it if found.
+    pub fn remove_keyframe(&mut self, id: Uuid) -> Option<RasterKeyframe> {
+        self.keyframes
+            .iter()
+            .position(|kf| kf.id == id)
+            .map(|pos| self.keyframes.remove(pos))
+    }
+
     /// Return the ZIP-relative PNG path for the active keyframe at `time`, or `None`.
     pub fn buffer_path_at_time(&self, time: f64) -> Option<&str> {
         self.keyframe_at(time).map(|kf| kf.media_path.as_str())

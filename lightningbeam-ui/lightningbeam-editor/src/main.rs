@@ -3730,27 +3730,39 @@ impl EditorApp {
             MenuAction::NewKeyframe | MenuAction::AddKeyframeAtPlayhead => {
                 if let Some(layer_id) = self.active_layer_id {
                     let document = self.action_executor.document();
-                    // Determine which selected objects are shape instances vs clip instances
-                    let _shape_ids: Vec<uuid::Uuid> = Vec::new();
-                    let mut clip_ids = Vec::new();
-                    if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
-                        // TODO: DCEL - shape instance lookup disabled during migration
-                        // (was: get_shape_in_keyframe to check which selected objects are shapes)
-                        for &id in self.selection.clip_instances() {
-                            if vl.clip_instances.iter().any(|ci| ci.id == id) {
-                                clip_ids.push(id);
-                            }
-                        }
-                    }
-                    // For vector layers, always create a shape keyframe (even without clip selection)
-                    if document.get_layer(&layer_id).map_or(false, |l| matches!(l, AnyLayer::Vector(_))) || !clip_ids.is_empty() {
-                        let action = lightningbeam_core::actions::SetKeyframeAction::new(
-                            layer_id,
-                            self.playback_time,
-                            clip_ids,
+                    let is_raster = matches!(document.get_layer(&layer_id), Some(AnyLayer::Raster(_)));
+                    if is_raster {
+                        // Raster layers: insert a blank cel at the playhead.
+                        let (doc_w, doc_h) = (document.width as u32, document.height as u32);
+                        let action = lightningbeam_core::actions::AddRasterKeyframeAction::new(
+                            layer_id, self.playback_time, doc_w, doc_h,
                         );
                         if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                            eprintln!("Failed to set keyframe: {}", e);
+                            eprintln!("Failed to add raster keyframe: {}", e);
+                        }
+                    } else {
+                        // Determine which selected objects are shape instances vs clip instances
+                        let _shape_ids: Vec<uuid::Uuid> = Vec::new();
+                        let mut clip_ids = Vec::new();
+                        if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+                            // TODO: DCEL - shape instance lookup disabled during migration
+                            // (was: get_shape_in_keyframe to check which selected objects are shapes)
+                            for &id in self.selection.clip_instances() {
+                                if vl.clip_instances.iter().any(|ci| ci.id == id) {
+                                    clip_ids.push(id);
+                                }
+                            }
+                        }
+                        // For vector layers, always create a shape keyframe (even without clip selection)
+                        if document.get_layer(&layer_id).map_or(false, |l| matches!(l, AnyLayer::Vector(_))) || !clip_ids.is_empty() {
+                            let action = lightningbeam_core::actions::SetKeyframeAction::new(
+                                layer_id,
+                                self.playback_time,
+                                clip_ids,
+                            );
+                            if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                                eprintln!("Failed to set keyframe: {}", e);
+                            }
                         }
                     }
                 }
