@@ -1026,6 +1026,8 @@ struct EditorApp {
     recording_mirror_rx: Option<rtrb::Consumer<f32>>,
     /// Current file path (None if not yet saved)
     current_file_path: Option<std::path::PathBuf>,
+    /// Onion-skinning view settings (toggle + frame counts + opacity).
+    onion_skin: crate::panes::OnionSkinSettings,
     /// On-demand loader for raster keyframe pixels from the project `.beam` container.
     raster_store: lightningbeam_core::raster_store::RasterStore,
     /// Miss-sink: raster keyframe ids the canvas wanted but whose pixels weren't
@@ -1313,6 +1315,7 @@ impl EditorApp {
             waveform_result_tx,
             recording_mirror_rx,
             current_file_path: None, // No file loaded initially
+            onion_skin: crate::panes::OnionSkinSettings::default(),
             raster_store: lightningbeam_core::raster_store::RasterStore::new(None),
             raster_fault_requests: Default::default(),
             raster_load_result_tx,
@@ -3815,6 +3818,9 @@ impl EditorApp {
             }
             MenuAction::RecenterView => {
                 self.pending_view_action = Some(MenuAction::RecenterView);
+            }
+            MenuAction::ToggleOnionSkin => {
+                self.onion_skin.enabled = !self.onion_skin.enabled;
             }
             MenuAction::NextLayout => {
                 println!("Menu: Next Layout");
@@ -6459,6 +6465,12 @@ impl eframe::App for EditorApp {
             // Create render context
             let mut ctx = RenderContext {
                 shared: panes::SharedPaneState {
+                    onion: {
+                        // Onion skinning is disabled during playback.
+                        let mut o = self.onion_skin;
+                        o.enabled = o.enabled && !self.is_playing;
+                        o
+                    },
                     tool_icon_cache: &mut self.tool_icon_cache,
                     icon_cache: &mut self.icon_cache,
                     selected_tool: &mut self.selected_tool,

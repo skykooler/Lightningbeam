@@ -2029,11 +2029,22 @@ impl BlitTransform {
         //   y' = b*x + d*y + f
         // Column-major 3×3: col0=(a,b,0), col1=(c,d,0), col2=(e,f,1)
         let [a, b, c, d, e, f] = combined.as_coeffs();
+        // The .w slots are unused by the 3×3 matrix; the shader reads them as an RGB
+        // tint (1,1,1 = no tint — the default for all normal blits).
         Self {
-            col0: [a as f32, b as f32, 0.0, 0.0],
-            col1: [c as f32, d as f32, 0.0, 0.0],
-            col2: [e as f32, f as f32, 1.0, 0.0],
+            col0: [a as f32, b as f32, 0.0, 1.0],
+            col1: [c as f32, d as f32, 0.0, 1.0],
+            col2: [e as f32, f as f32, 1.0, 1.0],
         }
+    }
+
+    /// Multiply the sampled color by an RGB tint (for onion-skin ghosts). Packed into
+    /// the matrix uniform's `.w` slots, so no extra binding is needed.
+    pub fn with_tint(mut self, r: f32, g: f32, b: f32) -> Self {
+        self.col0[3] = r;
+        self.col1[3] = g;
+        self.col2[3] = b;
+        self
     }
 }
 

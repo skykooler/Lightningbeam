@@ -435,6 +435,8 @@ struct VelloRenderContext {
     document: std::sync::Arc<lightningbeam_core::document::Document>,
     /// Current tool interaction state
     tool_state: lightningbeam_core::tool::ToolState,
+    /// Onion-skinning settings (already gated off during playback).
+    onion: crate::panes::OnionSkinSettings,
     /// Active layer for tool operations
     active_layer_id: Option<uuid::Uuid>,
     /// Delta for drag preview (world space)
@@ -1296,6 +1298,96 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         buffer_pool.release(hdr_layer_handle);
                     }
                     RenderedLayerType::Raster { transform: layer_transform, .. } => {
+                        // --- Onion-skin ghosts: the active layer's neighbouring keyframes,
+                        // warm-tinted for past / cool for future, faint and behind the
+                        // current frame. `ctx.onion.enabled` is already gated off during
+                        // playback. Ghosts use the full texture if resident, else the proxy.
+                        if self.ctx.onion.enabled
+                            && Some(rendered_layer.layer_id) == self.ctx.active_layer_id
+                        {
+                            let onion = self.ctx.onion;
+                            let ghosts: Vec<(uuid::Uuid, u32, u32, [f32; 3], f32)> = {
+                                let doc = &self.ctx.document;
+                                match doc.get_layer(&rendered_layer.layer_id) {
+                                    Some(lightningbeam_core::layer::AnyLayer::Raster(rl)) => {
+                                        let after = rl.keyframes.partition_point(|kf| kf.time <= self.ctx.playback_time);
+                                        let mut v = Vec::new();
+                                        if after > 0 {
+                                            let cur = after - 1;
+                                            for d in 1..=onion.frames_before {
+                                                if cur >= d {
+                                                    let kf = &rl.keyframes[cur - d];
+                                                    v.push((kf.id, kf.width, kf.height,
+                                                        crate::panes::OnionSkinSettings::PAST_TINT,
+                                                        onion.ghost_opacity(d, onion.frames_before)));
+                                                }
+                                            }
+                                            for d in 1..=onion.frames_after {
+                                                if cur + d < rl.keyframes.len() {
+                                                    let kf = &rl.keyframes[cur + d];
+                                                    v.push((kf.id, kf.width, kf.height,
+                                                        crate::panes::OnionSkinSettings::FUTURE_TINT,
+                                                        onion.ghost_opacity(d, onion.frames_after)));
+                                                }
+                                            }
+                                        }
+                                        v
+                                    }
+                                    _ => Vec::new(),
+                                }
+                            };
+                            for (kf_id, lw, lh, tint, opacity) in ghosts {
+                                let gh = buffer_pool.acquire(device, hdr_spec);
+                                if let (Some(gv), Some(hdr_view)) = (
+                                    buffer_pool.get_view(gh),
+                                    &instance_resources.hdr_texture_view,
+                                ) {
+                                    let mut drew = false;
+                                    if let Ok(mut gpu_brush) = shared.gpu_brush.lock() {
+                                        let has_full = gpu_brush.raster_layer_cache.contains_key(&kf_id);
+                                        if !has_full {
+                                            // Upload the proxy on demand from the keyframe's pixels.
+                                            if let Some(lightningbeam_core::layer::AnyLayer::Raster(rl)) =
+                                                self.ctx.document.get_layer(&rendered_layer.layer_id)
+                                            {
+                                                if let Some(p) = rl.keyframes.iter().find(|k| k.id == kf_id)
+                                                    .and_then(|k| k.proxy.as_ref())
+                                                {
+                                                    gpu_brush.ensure_proxy_texture(device, queue, kf_id, &p.pixels, p.width, p.height);
+                                                }
+                                            }
+                                        }
+                                        let src = if has_full {
+                                            gpu_brush.raster_layer_cache.get(&kf_id).map(|c| (c, c.width, c.height, false))
+                                        } else {
+                                            gpu_brush.get_proxy_texture(&kf_id).map(|c| (c, lw, lh, true))
+                                        };
+                                        if let Some((canvas, sw, sh, is_proxy)) = src {
+                                            let bt = crate::gpu_brush::BlitTransform::new(*layer_transform, sw, sh, width, height)
+                                                .with_tint(tint[0], tint[1], tint[2]);
+                                            if is_proxy {
+                                                shared.canvas_blit.blit_smooth(device, queue, canvas.src_view(), gv, &bt, None);
+                                            } else {
+                                                shared.canvas_blit.blit(device, queue, canvas.src_view(), gv, &bt, None);
+                                            }
+                                            drew = true;
+                                        }
+                                    }
+                                    if drew {
+                                        let cl = lightningbeam_core::gpu::CompositorLayer::new(
+                                            gh, rendered_layer.opacity * opacity, rendered_layer.blend_mode,
+                                        );
+                                        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                            label: Some("onion_ghost_encoder"),
+                                        });
+                                        shared.compositor.composite(device, queue, &mut enc, &[cl], &buffer_pool, hdr_view, None);
+                                        queue.submit(Some(enc.finish()));
+                                    }
+                                }
+                                buffer_pool.release(gh);
+                            }
+                        }
+
                         // Raster layer — GPU canvas blit directly to HDR (bypasses Vello).
                         // Tool override canvas (gpu_canvas_kf) takes priority over cached
                         // texture; if neither full-res source is present, the low-res proxy.
@@ -11875,6 +11967,7 @@ impl PaneRenderer for StagePane {
             instance_id: self.instance_id,
             document: shared.action_executor.document_arc(),
             tool_state: shared.tool_state.clone(),
+            onion: shared.onion,
             active_layer_id: *shared.active_layer_id,
             drag_delta,
             selection: shared.selection.clone(),

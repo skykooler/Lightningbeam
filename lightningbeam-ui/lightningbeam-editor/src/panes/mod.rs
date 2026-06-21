@@ -143,7 +143,40 @@ pub fn find_sampled_audio_track(document: &lightningbeam_core::document::Documen
 }
 
 /// Shared state that all panes can access
+/// Onion-skinning view settings (editor-only; not saved with the document). Ghosts the
+/// active layer's neighbouring keyframes, warm-tinted for past and cool for future.
+#[derive(Clone, Copy, Debug)]
+pub struct OnionSkinSettings {
+    pub enabled: bool,
+    pub frames_before: usize,
+    pub frames_after: usize,
+    /// Opacity of the nearest ghost; further ghosts fall off linearly.
+    pub opacity: f32,
+}
+
+impl Default for OnionSkinSettings {
+    fn default() -> Self {
+        Self { enabled: false, frames_before: 2, frames_after: 2, opacity: 0.35 }
+    }
+}
+
+impl OnionSkinSettings {
+    /// RGB tint multipliers for past (warm) and future (cool) ghosts.
+    pub const PAST_TINT: [f32; 3] = [1.0, 0.45, 0.45];
+    pub const FUTURE_TINT: [f32; 3] = [0.45, 0.6, 1.0];
+
+    /// Opacity for the `n`-th ghost away from the current frame (n = 1 is nearest),
+    /// linearly falling off so the furthest ghost is faintest.
+    pub fn ghost_opacity(&self, n: usize, total: usize) -> f32 {
+        if total == 0 { return self.opacity; }
+        let falloff = 1.0 - (n.saturating_sub(1) as f32) / (total as f32);
+        self.opacity * falloff.clamp(0.15, 1.0)
+    }
+}
+
 pub struct SharedPaneState<'a> {
+    /// Effective onion-skin settings (already gated to off during playback by main.rs).
+    pub onion: OnionSkinSettings,
     pub tool_icon_cache: &'a mut crate::ToolIconCache,
     #[allow(dead_code)] // Used by pane chrome rendering in main.rs
     pub icon_cache: &'a mut crate::IconCache,

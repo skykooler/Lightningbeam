@@ -103,6 +103,7 @@ pub enum AppAction {
     TogglePlayPause,
     CancelAction,
     ToggleDebugOverlay,
+    ToggleOnionSkin,
     #[cfg(debug_assertions)]
     ToggleTestMode,
 
@@ -150,7 +151,7 @@ impl AppAction {
             Self::ToolErase | Self::ToolSmudge | Self::ToolSelectLasso | Self::ToolSplit => "Tools",
 
             Self::TogglePlayPause | Self::CancelAction |
-            Self::ToggleDebugOverlay => "Global",
+            Self::ToggleDebugOverlay | Self::ToggleOnionSkin => "Global",
             #[cfg(debug_assertions)]
             Self::ToggleTestMode => "Global",
 
@@ -246,6 +247,7 @@ impl AppAction {
             Self::TogglePlayPause => "Toggle Play/Pause",
             Self::CancelAction => "Cancel / Escape",
             Self::ToggleDebugOverlay => "Toggle Debug Overlay",
+            Self::ToggleOnionSkin => "Toggle Onion Skinning",
             #[cfg(debug_assertions)]
             Self::ToggleTestMode => "Toggle Test Mode",
             Self::PianoRollDelete => "Piano Roll: Delete",
@@ -281,7 +283,7 @@ impl AppAction {
             Self::ToolEyedropper, Self::ToolLine, Self::ToolPolygon,
             Self::ToolBezierEdit, Self::ToolText, Self::ToolRegionSelect,
             Self::ToolErase, Self::ToolSmudge, Self::ToolSelectLasso, Self::ToolSplit,
-            Self::TogglePlayPause, Self::CancelAction, Self::ToggleDebugOverlay,
+            Self::TogglePlayPause, Self::CancelAction, Self::ToggleDebugOverlay, Self::ToggleOnionSkin,
             #[cfg(debug_assertions)]
             Self::ToggleTestMode,
             Self::PianoRollDelete, Self::StageDelete,
@@ -330,6 +332,7 @@ impl From<MenuAction> for AppAction {
             MenuAction::AddTestClip => Self::AddTestClip,
             MenuAction::DeleteLayer => Self::DeleteLayer,
             MenuAction::ToggleLayerVisibility => Self::ToggleLayerVisibility,
+            MenuAction::ToggleOnionSkin => Self::ToggleOnionSkin,
             MenuAction::ShowMasterTrack => Self::ToggleLayerVisibility, // not directly mappable
             MenuAction::NewKeyframe => Self::NewKeyframe,
             MenuAction::NewBlankKeyframe => Self::NewBlankKeyframe,
@@ -392,6 +395,7 @@ impl TryFrom<AppAction> for MenuAction {
             AppAction::AddTestClip => MenuAction::AddTestClip,
             AppAction::DeleteLayer => MenuAction::DeleteLayer,
             AppAction::ToggleLayerVisibility => MenuAction::ToggleLayerVisibility,
+            AppAction::ToggleOnionSkin => MenuAction::ToggleOnionSkin,
             AppAction::NewKeyframe => MenuAction::NewKeyframe,
             AppAction::NewBlankKeyframe => MenuAction::NewBlankKeyframe,
             AppAction::DeleteFrame => MenuAction::DeleteFrame,
@@ -507,6 +511,7 @@ pub fn all_defaults() -> HashMap<AppAction, Option<Shortcut>> {
     defaults.insert(AppAction::TogglePlayPause,    Some(Shortcut::new(ShortcutKey::Space, nc, ns, na)));
     defaults.insert(AppAction::CancelAction,       Some(Shortcut::new(ShortcutKey::Escape, nc, ns, na)));
     defaults.insert(AppAction::ToggleDebugOverlay, Some(Shortcut::new(ShortcutKey::F3, nc, ns, na)));
+    defaults.insert(AppAction::ToggleOnionSkin,    Some(Shortcut::new(ShortcutKey::O, nc, ns, na)));
     #[cfg(debug_assertions)]
     defaults.insert(AppAction::ToggleTestMode,     Some(Shortcut::new(ShortcutKey::F5, nc, ns, na)));
 
