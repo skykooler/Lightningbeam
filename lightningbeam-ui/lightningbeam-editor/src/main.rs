@@ -1072,6 +1072,11 @@ struct EditorApp {
     preferences_dialog: preferences::dialog::PreferencesDialog,
     /// Export orchestrator for background exports
     export_orchestrator: Option<export::ExportOrchestrator>,
+    /// Vello renderer + image cache reused across all frames of an in-progress export
+    /// (built once on the first export pump, dropped when export ends) — building a new
+    /// renderer per frame was the dominant export cost.
+    export_renderer: Option<vello::Renderer>,
+    export_image_cache: Option<lightningbeam_core::renderer::ImageCache>,
     /// GPU-rendered effect thumbnail generator
     effect_thumbnail_generator: Option<EffectThumbnailGenerator>,
 
@@ -1333,6 +1338,8 @@ impl EditorApp {
             large_media_prompt: None,
             preferences_dialog: preferences::dialog::PreferencesDialog::default(),
             export_orchestrator: None,
+            export_renderer: None,
+            export_image_cache: None,
             effect_thumbnail_generator: None, // Initialized when GPU available
 
             // Debug test mode (F5)
@@ -6208,17 +6215,17 @@ impl eframe::App for EditorApp {
         self.render_large_media_prompt(ctx);
 
         // Render video frames incrementally (if video export in progress)
-        if let Some(orchestrator) = &mut self.export_orchestrator {
-            if orchestrator.is_exporting() {
-                // Get GPU resources from eframe's wgpu render state
-                if let Some(render_state) = frame.wgpu_render_state() {
-                    let device = &render_state.device;
-                    let queue = &render_state.queue;
+        let exporting = self.export_orchestrator.as_ref().map_or(false, |o| o.is_exporting());
+        if exporting {
+            if let Some(render_state) = frame.wgpu_render_state() {
+                let device = &render_state.device;
+                let queue = &render_state.queue;
 
-                    // Create temporary renderer and image cache for export
-                    // Note: Creating a new renderer per frame is inefficient but simple
-                    // TODO: Reuse renderer across frames by storing it in EditorApp
-                    let mut temp_renderer = vello::Renderer::new(
+                // Build the renderer + image cache ONCE per export (reused every frame).
+                // The image cache is given the container path so lazily-paged image assets
+                // (Phase 4 Tier 1) decode during export.
+                if self.export_renderer.is_none() {
+                    self.export_renderer = vello::Renderer::new(
                         device,
                         vello::RendererOptions {
                             use_cpu: false,
@@ -6227,43 +6234,52 @@ impl eframe::App for EditorApp {
                             pipeline_cache: None,
                         },
                     ).ok();
+                    let mut ic = lightningbeam_core::renderer::ImageCache::new();
+                    ic.set_container_path(self.current_file_path.clone());
+                    self.export_image_cache = Some(ic);
+                }
 
-                    let mut temp_image_cache = lightningbeam_core::renderer::ImageCache::new();
-
-                    if let Some(renderer) = &mut temp_renderer {
-                        // Drive incremental video export.
-                        if let Ok(has_more) = orchestrator.render_next_video_frame(
-                            self.action_executor.document_mut(),
-                            device,
-                            queue,
-                            renderer,
-                            &mut temp_image_cache,
-                            &self.video_manager,
-                            Some(&self.raster_store),
-                        ) {
-                            if has_more {
-                                ctx.request_repaint();
-                            }
+                if let (Some(renderer), Some(image_cache), Some(orchestrator)) = (
+                    self.export_renderer.as_mut(),
+                    self.export_image_cache.as_mut(),
+                    self.export_orchestrator.as_mut(),
+                ) {
+                    // Drive incremental video export.
+                    if let Ok(has_more) = orchestrator.render_next_video_frame(
+                        self.action_executor.document_mut(),
+                        device,
+                        queue,
+                        renderer,
+                        image_cache,
+                        &self.video_manager,
+                        Some(&self.raster_store),
+                    ) {
+                        if has_more {
+                            ctx.request_repaint();
                         }
+                    }
 
-                        // Drive single-frame image export (two-frame async: render then readback).
-                        match orchestrator.render_image_frame(
-                            self.action_executor.document_mut(),
-                            device,
-                            queue,
-                            renderer,
-                            &mut temp_image_cache,
-                            &self.video_manager,
-                            self.selection.raster_floating.as_ref(),
-                            Some(&self.raster_store),
-                        ) {
-                            Ok(false) => { ctx.request_repaint(); } // readback pending
-                            Ok(true)  => {}                          // done or cancelled
-                            Err(e)    => { eprintln!("Image export failed: {e}"); }
-                        }
+                    // Drive single-frame image export (two-frame async: render then readback).
+                    match orchestrator.render_image_frame(
+                        self.action_executor.document_mut(),
+                        device,
+                        queue,
+                        renderer,
+                        image_cache,
+                        &self.video_manager,
+                        self.selection.raster_floating.as_ref(),
+                        Some(&self.raster_store),
+                    ) {
+                        Ok(false) => { ctx.request_repaint(); } // readback pending
+                        Ok(true)  => {}                          // done or cancelled
+                        Err(e)    => { eprintln!("Image export failed: {e}"); }
                     }
                 }
             }
+        } else if self.export_renderer.is_some() {
+            // Export finished — free the renderer + cache.
+            self.export_renderer = None;
+            self.export_image_cache = None;
         }
 
         // Poll export orchestrator for progress
