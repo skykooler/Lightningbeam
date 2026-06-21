@@ -1,3 +1,29 @@
+# 1.0.5-alpha:
+Changes:
+- Add shape tweens (morph vector geometry between keyframes)
+- Add motion tweens for groups and movie clips
+- Group geometry and Convert to Movie Clip now work on DCEL vector shapes
+- Region/lasso select now cuts the shape and feeds the normal selection, so Group, Convert, Delete and Properties all work from a lasso (hold shift to add to the selection)
+- Clip instances now draw on top of a layer's loose shapes
+- Add onion skinning for raster and vector layers, with tinted ghosts and settings in the Info Panel
+- Images can now fill vector shapes (None / Solid / Gradient / Image fill types)
+- Imported images can be placed on the canvas
+- Add a raster keyframe timeline UI with explicit keyframe creation; click a keyframe diamond to snap the playhead to it
+- Stream audio, video and images to and from the project file instead of holding them in memory, supporting arbitrarily long media
+- Persist (and resume) waveforms and video thumbnails in the project file
+- Use low-res proxies for fast cold scrubbing of raster frames
+- Bound memory use for raster pixels, GPU textures, video frames and decoded images on large projects
+- Video export is roughly 4x faster
+- Downmix surround video audio to stereo
+
+Bugfixes:
+- Fix video export resolution scaling and a post-export UI hang
+- Fix gamma handling and improve brush canvas performance
+- Fix a save crash on projects with zero or sparse audio
+- Fix raster strokes vanishing when committed
+- Fix image fill mapping (anchor to the fill's bounding box)
+- Fix video thumbnail strip bugs
+
 # 1.0.4-alpha:
 Changes:
 - Beats are now the canonical time representation (replacing seconds)
