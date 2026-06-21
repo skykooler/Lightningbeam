@@ -462,6 +462,32 @@ pub fn save_beam(
         }
     }
 
+    // --- image assets -> media rows (original file bytes), keyed by asset id ---
+    let mut image_count = 0usize;
+    for (id, asset) in &document.image_assets {
+        if let Some(ref data) = asset.data {
+            let ext = asset
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("img")
+                .to_lowercase();
+            txn.put_media_packed(
+                *id,
+                MediaKind::ImageAsset,
+                &ext,
+                data,
+                MediaMeta { width: Some(asset.width), height: Some(asset.height), ..Default::default() },
+            )?;
+            live_media.insert(*id);
+            image_count += 1;
+        } else if txn.media_exists(*id)? {
+            // Bytes not resident (paged out) but already stored — keep the row.
+            live_media.insert(*id);
+        }
+    }
+    let _ = image_count;
+
     // --- orphan cleanup: drop media for removed clips/keyframes ---
     let removed = txn.retain_media(&live_media)?;
 
@@ -624,6 +650,19 @@ fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
         }
     }
     let _ = proxy_load_count;
+
+    // Eager-read image-asset bytes from the container into `data` (Phase 4 will make
+    // this lazy + LRU). Old projects keep their base64-deserialized `data` and have no
+    // container row — those are skipped (`data` already Some).
+    for (id, asset) in document.image_assets.iter_mut() {
+        if asset.data.is_none() {
+            if let Ok(Some(_)) = archive.media_info(*id) {
+                if let Ok(bytes) = archive.read_media_full(*id) {
+                    asset.data = Some(bytes);
+                }
+            }
+        }
+    }
 
     // Missing external files (referenced entries whose file no longer exists).
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));

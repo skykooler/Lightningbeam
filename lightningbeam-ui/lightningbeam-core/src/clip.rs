@@ -263,9 +263,11 @@ pub struct ImageAsset {
     /// Image height in pixels
     pub height: u32,
 
-    /// Embedded image data (for project portability)
-    /// If None, the image will be loaded from path when needed
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Raw image file bytes. NOT serialized to project JSON — persisted as a
+    /// `MediaKind::ImageAsset` row in the `.beam` container (chunked, pageable) and
+    /// read back on load. `default` so new projects (bytes in the container, not JSON)
+    /// deserialize; old projects with base64-embedded `data` still load via deserialize.
+    #[serde(default, skip_serializing)]
     pub data: Option<Vec<u8>>,
 
     /// Folder this asset belongs to (None = root of category)
