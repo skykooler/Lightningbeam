@@ -392,6 +392,18 @@ dirty never evicted. 4. 3c GPU bound. 5. 3d undo diffs reproduce pre-stroke buff
 
 ---
 
+## Phase 3.5 — Image textures in vector scenes  **[DONE 2026-06-21]**  *(prereq for Phase 4; fixed DCEL-broken image import)*
+
+**Done:** 3.5a — import/drop places an image as a borderless image-filled rectangle
+(`AddShapeAction::image_rect`), centered (direct import) or at the drop point (library drag);
+renderer now maps the image brush onto the fill's bounding box (was anchored at world origin →
+only a corner showed); `SetImageFillAction` + an **Image** fill-type tab (None|Solid|Gradient|Image)
+with an asset picker in the Info Panel. 3.5b — image bytes persist as `MediaKind::ImageAsset` rows in
+the `.beam` (kept-in-place; `ImageAsset.data` is `skip_serializing` + container-backed; old base64
+projects migrate on re-save); eager-read on load. *(ImageCache still unbounded — Phase 4 adds the
+usage-based LRU/lazy paging.)*
+
+### (original plan below)
 ## Phase 3.5 — Image textures in vector scenes  *(prereq for testing Phase 4; fixes DCEL-broken image import)*
 
 **Why:** Phase 4 pages *image assets*, but there's currently no way to get an image asset into a
