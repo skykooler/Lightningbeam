@@ -651,18 +651,10 @@ fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
     }
     let _ = proxy_load_count;
 
-    // Eager-read image-asset bytes from the container into `data` (Phase 4 will make
-    // this lazy + LRU). Old projects keep their base64-deserialized `data` and have no
-    // container row — those are skipped (`data` already Some).
-    for (id, asset) in document.image_assets.iter_mut() {
-        if asset.data.is_none() {
-            if let Ok(Some(_)) = archive.media_info(*id) {
-                if let Ok(bytes) = archive.read_media_full(*id) {
-                    asset.data = Some(bytes);
-                }
-            }
-        }
-    }
+    // Image-asset bytes are NOT eagerly read (Phase 4 Tier 1 paging): `ImageAsset.data`
+    // stays empty and the renderer's ImageCache pages bytes from the container on a
+    // decode miss (keyed by asset id). Old base64 projects keep their deserialized
+    // `data` (no container row). Loading is instant; only rendered images touch disk.
 
     // Missing external files (referenced entries whose file no longer exists).
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));

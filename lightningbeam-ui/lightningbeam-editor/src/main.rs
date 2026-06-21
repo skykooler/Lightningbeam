@@ -6472,6 +6472,7 @@ impl eframe::App for EditorApp {
             // Create render context
             let mut ctx = RenderContext {
                 shared: panes::SharedPaneState {
+                    container_path: self.current_file_path.clone(),
                     onion: {
                         // Onion skinning is disabled during playback.
                         let mut o = self.onion_skin;

@@ -36,6 +36,9 @@ pub struct ImageCache {
     /// session uses one path) and the running total.
     sizes: HashMap<Uuid, usize>,
     bytes: usize,
+    /// `.beam` container path for lazily loading compressed `ImageAsset` bytes on a
+    /// decode miss (Tier 1 paging) when `asset.data` isn't resident.
+    container_path: Option<std::path::PathBuf>,
 }
 
 impl ImageCache {
@@ -50,7 +53,27 @@ impl ImageCache {
             lru: Vec::new(),
             sizes: HashMap::new(),
             bytes: 0,
+            container_path: None,
         }
+    }
+
+    /// Set the `.beam` container path used to lazily load image bytes that aren't
+    /// resident in `asset.data` (Tier 1 paging). Cheap to call each frame.
+    pub fn set_container_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.container_path = path;
+    }
+
+    /// Resolve an asset's compressed bytes: prefer the resident `asset.data` (imported
+    /// this session, or an old base64 project), else page from the container.
+    fn resolve_bytes<'a>(&self, asset: &'a ImageAsset) -> Option<std::borrow::Cow<'a, [u8]>> {
+        if let Some(d) = &asset.data {
+            return Some(std::borrow::Cow::Borrowed(d.as_slice()));
+        }
+        let path = self.container_path.as_ref()?;
+        crate::beam_archive::read_packed_media_readonly(path, asset.id)
+            .ok()
+            .flatten()
+            .map(std::borrow::Cow::Owned)
     }
 
     /// Mark `id` (size `size` bytes) as most-recently-used; evict LRU entries over budget.
@@ -82,8 +105,9 @@ impl ImageCache {
             return Some(cached);
         }
 
-        // Decode and cache
-        let image = decode_image_asset(asset)?;
+        // Decode and cache (bytes from asset.data or paged from the container).
+        let bytes = self.resolve_bytes(asset)?;
+        let image = decode_image_brush(&bytes)?;
         let arc_image = Arc::new(image);
         self.cache.insert(asset.id, Arc::clone(&arc_image));
         self.touch(asset.id, size);
@@ -98,7 +122,8 @@ impl ImageCache {
             return Some(cached);
         }
 
-        let pixmap = decode_image_to_pixmap(asset)?;
+        let bytes = self.resolve_bytes(asset)?;
+        let pixmap = decode_image_to_pixmap(&bytes)?;
         let arc = Arc::new(pixmap);
         self.cpu_cache.insert(asset.id, Arc::clone(&arc));
         self.touch(asset.id, size);
@@ -133,12 +158,12 @@ impl Default for ImageCache {
     }
 }
 
-/// Decode an image asset to a premultiplied tiny-skia Pixmap (CPU render path).
-fn decode_image_to_pixmap(asset: &ImageAsset) -> Option<tiny_skia::Pixmap> {
-    let data = asset.data.as_ref()?;
+/// Decode image bytes to a premultiplied tiny-skia Pixmap (CPU render path).
+fn decode_image_to_pixmap(data: &[u8]) -> Option<tiny_skia::Pixmap> {
     let img = image::load_from_memory(data).ok()?;
     let rgba = img.to_rgba8();
-    let mut pixmap = tiny_skia::Pixmap::new(asset.width, asset.height)?;
+    let (iw, ih) = rgba.dimensions();
+    let mut pixmap = tiny_skia::Pixmap::new(iw, ih)?;
     for (dst, src) in pixmap.pixels_mut().iter_mut().zip(rgba.pixels()) {
         let [r, g, b, a] = src.0;
         // Convert straight alpha (image crate output) to premultiplied (tiny-skia internal format)
@@ -152,21 +177,17 @@ fn decode_image_to_pixmap(asset: &ImageAsset) -> Option<tiny_skia::Pixmap> {
     Some(pixmap)
 }
 
-/// Decode an image asset to peniko ImageBrush
-fn decode_image_asset(asset: &ImageAsset) -> Option<ImageBrush> {
-    // Get the raw file data
-    let data = asset.data.as_ref()?;
-
-    // Decode using the image crate
+/// Decode image bytes to a peniko ImageBrush (GPU render path).
+fn decode_image_brush(data: &[u8]) -> Option<ImageBrush> {
     let img = image::load_from_memory(data).ok()?;
     let rgba = img.to_rgba8();
+    let (iw, ih) = rgba.dimensions();
 
-    // Create peniko ImageData then ImageBrush
     let image_data = ImageData {
         data: Blob::from(rgba.into_raw()),
         format: ImageFormat::Rgba8,
-        width: asset.width,
-        height: asset.height,
+        width: iw,
+        height: ih,
         alpha_type: ImageAlphaType::Alpha,
     };
     Some(ImageBrush::new(image_data))

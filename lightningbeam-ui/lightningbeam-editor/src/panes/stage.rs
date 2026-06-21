@@ -437,6 +437,8 @@ struct VelloRenderContext {
     tool_state: lightningbeam_core::tool::ToolState,
     /// Onion-skinning settings (already gated off during playback).
     onion: crate::panes::OnionSkinSettings,
+    /// `.beam` container path for lazily paging image-asset bytes in the ImageCache.
+    container_path: Option<std::path::PathBuf>,
     /// Active layer for tool operations
     active_layer_id: Option<uuid::Uuid>,
     /// Delta for drag preview (world space)
@@ -975,6 +977,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             let _t_after_gpu_dispatches = std::time::Instant::now();
 
             let mut image_cache = shared.image_cache.lock().unwrap();
+            // Let the cache page image bytes from the project container on a decode miss.
+            image_cache.set_container_path(self.ctx.container_path.clone());
 
             let composite_result = if shared.is_cpu_renderer {
                 lightningbeam_core::renderer::render_document_for_compositing_cpu(
@@ -12073,6 +12077,7 @@ impl PaneRenderer for StagePane {
             document: shared.action_executor.document_arc(),
             tool_state: shared.tool_state.clone(),
             onion: shared.onion,
+            container_path: shared.container_path.clone(),
             active_layer_id: *shared.active_layer_id,
             drag_delta,
             selection: shared.selection.clone(),

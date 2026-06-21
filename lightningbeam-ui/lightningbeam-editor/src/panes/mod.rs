@@ -175,6 +175,9 @@ impl OnionSkinSettings {
 }
 
 pub struct SharedPaneState<'a> {
+    /// Current `.beam` container path (for lazily paging image-asset bytes in the
+    /// renderer's ImageCache). `None` before the project is first saved/loaded.
+    pub container_path: Option<std::path::PathBuf>,
     /// Effective onion-skin settings (already gated to off during playback by main.rs).
     pub onion: OnionSkinSettings,
     /// The raw onion-skin settings, mutable — edited by the Info Panel's controls.
