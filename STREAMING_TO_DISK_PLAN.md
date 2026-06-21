@@ -22,16 +22,13 @@ is now part of this plan.
       timestamp, and the cache keys on that — so a tile picks up a new texture when a closer thumbnail
       finishes generating. Existing `retain`-by-visible-clip cleanup keeps it bounded. *(Needs in-app check.)*
 
-## Deferred raster-keyframe-UI bugs (pre-existing; found during Phase 3 testing)
-Both stem from the **timeline having no model for raster keyframes** — it renders *clip
-instances* (`layer_clips`/`collect_clip_instances` return `&[ClipInstance]`), but raster layers use
-`keyframes: Vec<RasterKeyframe>`; every raster arm in timeline.rs is a stub (`Raster => &[]`/`{}`).
-- **(a) `Timeline > New Keyframe` doesn't refresh the canvas** until you draw. The menu action
-  creates a blank raster keyframe but doesn't trigger a canvas repaint / GPU-cache invalidation for
-  the new (different) `kf.id`, so the stale previous-frame texture stays until a stroke dirties it.
-- **(b) Raster keyframes never render on the timeline** — no code walks `RasterLayer::keyframes` to
-  draw markers. Needs a raster-keyframe strip (display + click-to-navigate + insert).
-Confirmed not paging regressions (same before 3a-1). A focused "raster keyframe timeline UI" task.
+## Raster-keyframe-UI bugs — **[DONE]** (built the raster keyframe timeline UI, 2026-06-20)
+Both resolved by the raster-keyframe-timeline-UI work: timeline now draws a diamond per
+`RasterKeyframe` (mirrors vector), `K`/New Keyframe inserts a blank cel via `AddRasterKeyframeAction`
+(canvas refreshes), paint tools edit the active keyframe instead of lazily creating, diamonds are
+click-to-seek (pointing-hand cursor), playback prefetches frames, and onion skinning (raster+vector,
+tinted, Info-Panel settings) is in. (a) canvas-refresh-on-new-keyframe and (b) keyframes-on-timeline
+are both fixed.
 
 ## Noted enhancements (later, after the phases)
 - [x] **Surround → stereo downmix (DONE).** Done uniformly in `render_from_file` (`pool.rs`) so it
