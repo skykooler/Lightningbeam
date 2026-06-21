@@ -6471,6 +6471,7 @@ impl eframe::App for EditorApp {
                         o.enabled = o.enabled && !self.is_playing;
                         o
                     },
+                    onion_skin: &mut self.onion_skin,
                     tool_icon_cache: &mut self.tool_icon_cache,
                     icon_cache: &mut self.icon_cache,
                     selected_tool: &mut self.selected_tool,
@@ -7030,26 +7031,6 @@ impl eframe::App for EditorApp {
             );
             debug_overlay::render_debug_overlay(ctx, &stats);
 
-        }
-
-        // Onion skin settings window (shown only when onion skinning is enabled)
-        if self.onion_skin.enabled {
-            egui::Window::new("Onion Skin")
-                .resizable(false)
-                .collapsible(true)
-                .anchor(egui::Align2::RIGHT_TOP, [-10.0, 40.0])
-                .show(ctx, |ui| {
-                    ui.label("Onion skin settings");
-                    ui.horizontal(|ui| {
-                        ui.label("Frames before:");
-                        ui.add(egui::DragValue::new(&mut self.onion_skin.frames_before).range(0..=5));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Frames after:");
-                        ui.add(egui::DragValue::new(&mut self.onion_skin.frames_after).range(0..=5));
-                    });
-                    ui.add(egui::Slider::new(&mut self.onion_skin.opacity, 0.0..=1.0).text("Opacity"));
-                });
         }
 
         // Render custom cursor overlay (on top of everything including debug overlay)

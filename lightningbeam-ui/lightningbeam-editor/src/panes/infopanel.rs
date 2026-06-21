@@ -1035,6 +1035,29 @@ impl InfopanelPane {
             });
     }
 
+    /// Render the onion-skinning view settings (global; not tied to selection).
+    fn render_onion_section(&mut self, ui: &mut Ui, path: &NodePath, shared: &mut SharedPaneState) {
+        egui::CollapsingHeader::new("Onion Skin")
+            .id_salt(("onion", path))
+            .default_open(shared.onion_skin.enabled)
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.checkbox(&mut shared.onion_skin.enabled, "Enabled");
+                ui.add_enabled_ui(shared.onion_skin.enabled, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Frames before:");
+                        ui.add(DragValue::new(&mut shared.onion_skin.frames_before).range(0..=5));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Frames after:");
+                        ui.add(DragValue::new(&mut shared.onion_skin.frames_after).range(0..=5));
+                    });
+                    ui.add(egui::Slider::new(&mut shared.onion_skin.opacity, 0.0..=1.0).text("Opacity"));
+                });
+                ui.add_space(4.0);
+            });
+    }
+
     /// Render layer info section
     fn render_layer_section(&self, ui: &mut Ui, path: &NodePath, shared: &SharedPaneState, layer_ids: &[Uuid]) {
         let document = shared.action_executor.document();
@@ -1478,6 +1501,12 @@ impl PaneRenderer for InfopanelPane {
                         }
                     }
                 }
+
+                // Onion-skinning view settings — always available, regardless of selection.
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                self.render_onion_section(ui, path, shared);
             });
     }
 

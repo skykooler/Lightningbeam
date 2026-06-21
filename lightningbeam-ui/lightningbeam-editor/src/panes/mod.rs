@@ -177,6 +177,8 @@ impl OnionSkinSettings {
 pub struct SharedPaneState<'a> {
     /// Effective onion-skin settings (already gated to off during playback by main.rs).
     pub onion: OnionSkinSettings,
+    /// The raw onion-skin settings, mutable — edited by the Info Panel's controls.
+    pub onion_skin: &'a mut OnionSkinSettings,
     pub tool_icon_cache: &'a mut crate::ToolIconCache,
     #[allow(dead_code)] // Used by pane chrome rendering in main.rs
     pub icon_cache: &'a mut crate::IconCache,
