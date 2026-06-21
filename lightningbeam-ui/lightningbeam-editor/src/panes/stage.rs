@@ -3671,6 +3671,11 @@ impl StagePane {
 
         let point = Point::new(world_pos.x as f64, world_pos.y as f64);
 
+        // On a shape-tween in-between frame the displayed geometry is interpolated, not a
+        // real keyframe — editing it would silently mutate the left keyframe. Lock out
+        // geometry selection/editing there; clip-instance interaction stays available.
+        let inbetween = vector_layer.is_tween_inbetween(*shared.playback_time);
+
         // Double-click: enter/exit movie clip editing
         if response.double_clicked() {
             // Hit test clip instances at the click position
@@ -3710,16 +3715,21 @@ impl StagePane {
         // Scope this section to drop vector_layer borrow before drag handling
         let mouse_pressed = self.rsp_primary_pressed(ui);
         if mouse_pressed {
-            // VECTOR EDITING: Check for vertex/curve editing first (higher priority than selection)
+            // VECTOR EDITING: Check for vertex/curve editing first (higher priority than
+            // selection). Skipped on tween in-between frames — geometry isn't editable there.
             let tolerance = EditingHitTolerance::scaled_by_zoom(self.zoom as f64);
-            let vector_hit = hit_test_vector_editing(
-                vector_layer,
-                *shared.playback_time,
-                point,
-                &tolerance,
-                Affine::IDENTITY,
-                false, // Select tool doesn't show control points
-            );
+            let vector_hit = if inbetween {
+                None
+            } else {
+                hit_test_vector_editing(
+                    vector_layer,
+                    *shared.playback_time,
+                    point,
+                    &tolerance,
+                    Affine::IDENTITY,
+                    false, // Select tool doesn't show control points
+                )
+            };
             // Priority 1: Vector editing (vertices immediately, curves deferred)
             if let Some(hit) = vector_hit {
                 match hit {
@@ -3756,6 +3766,9 @@ impl StagePane {
 
             let hit_result = if let Some(clip_id) = clip_hit {
                 Some(hit_test::HitResult::ClipInstance(clip_id))
+            } else if inbetween {
+                // Geometry not selectable on an in-between frame.
+                None
             } else {
                 // No clip hit, test DCEL edges and faces
                 hit_test::hit_test_layer(vector_layer, *shared.playback_time, point, 5.0, Affine::IDENTITY)
@@ -3806,8 +3819,16 @@ impl StagePane {
                         }
                         *shared.focus = lightningbeam_core::selection::FocusSelection::ClipInstances(shared.selection.clip_instances().to_vec());
 
-                        // If clip instance is now selected, prepare for dragging
-                        if shared.selection.contains_clip_instance(&clip_id) {
+                        // A clip mid motion-tween shows an interpolated position; moving it
+                        // there would silently insert a keyframe and disturb the tween. Allow
+                        // selecting it, but don't start a drag.
+                        let clip_motion_locked = vector_layer
+                            .layer
+                            .animation_data
+                            .is_object_tweened_at(clip_id, *shared.playback_time);
+
+                        // If clip instance is now selected (and editable), prepare for dragging
+                        if !clip_motion_locked && shared.selection.contains_clip_instance(&clip_id) {
                             // Store original positions of all selected clip instances
                             let mut original_positions = std::collections::HashMap::new();
                             for &clip_inst_id in shared.selection.clip_instances() {
@@ -9430,6 +9451,20 @@ impl StagePane {
             return;
         }
 
+        // Block transforming a clip instance that's mid motion-tween (on an in-between
+        // frame) — it would silently insert a keyframe and disturb the tween.
+        if is_vector_layer {
+            let locked = match shared.action_executor.document().get_layer(&active_layer_id) {
+                Some(AnyLayer::Vector(vl)) => shared.selection.clip_instances().iter().any(|id| {
+                    vl.layer.animation_data.is_object_tweened_at(*id, *shared.playback_time)
+                }),
+                _ => false,
+            };
+            if locked {
+                return;
+            }
+        }
+
         let point = Point::new(world_pos.x as f64, world_pos.y as f64);
 
         // For video layers, transform the visible clip at playback time (no selection needed)
@@ -10688,6 +10723,17 @@ impl StagePane {
         if !alt_held {
             use lightningbeam_core::tool::Tool;
 
+            // On a shape-tween in-between frame the active vector layer's geometry is an
+            // interpolated preview, not a real keyframe — lock out the editing tools.
+            let vector_inbetween = shared.active_layer_id.and_then(|id| {
+                match shared.action_executor.document().get_layer(&id) {
+                    Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => {
+                        Some(vl.is_tween_inbetween(*shared.playback_time))
+                    }
+                    _ => None,
+                }
+            }).unwrap_or(false);
+
             match *shared.selected_tool {
                 Tool::Select => {
                     let is_raster = shared.active_layer_id.and_then(|id| {
@@ -10699,13 +10745,13 @@ impl StagePane {
                         self.handle_select_tool(ui, &response, world_pos, shift_held, shared);
                     }
                 }
-                Tool::BezierEdit => {
+                Tool::BezierEdit if !vector_inbetween => {
                     self.handle_bezier_edit_tool(ui, &response, world_pos, shift_held, shared);
                 }
-                Tool::Rectangle => {
+                Tool::Rectangle if !vector_inbetween => {
                     self.handle_rectangle_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
-                Tool::Ellipse => {
+                Tool::Ellipse if !vector_inbetween => {
                     self.handle_ellipse_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
                 Tool::Draw => {
@@ -10715,7 +10761,7 @@ impl StagePane {
                     }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
                     if is_raster {
                         self.handle_unified_raster_stroke_tool(ui, &response, world_pos, &crate::tools::paint::PAINT, shared);
-                    } else {
+                    } else if !vector_inbetween {
                         self.handle_draw_tool(ui, &response, world_pos, shared);
                     }
                 }
@@ -10735,19 +10781,19 @@ impl StagePane {
                 Tool::Transform => {
                     self.handle_transform_tool(ui, &response, world_pos, shared);
                 }
-                Tool::PaintBucket => {
+                Tool::PaintBucket if !vector_inbetween => {
                     self.handle_paint_bucket_tool(&response, world_pos, shared);
                 }
-                Tool::Line => {
+                Tool::Line if !vector_inbetween => {
                     self.handle_line_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
-                Tool::Polygon => {
+                Tool::Polygon if !vector_inbetween => {
                     self.handle_polygon_tool(ui, &response, world_pos, shift_held, ctrl_held, shared);
                 }
                 Tool::Eyedropper => {
                     self.handle_eyedropper_tool(ui, &response, mouse_pos, shared);
                 }
-                Tool::RegionSelect => {
+                Tool::RegionSelect if !vector_inbetween => {
                     self.handle_region_select_tool(ui, &response, world_pos, shift_held, shared);
                 }
                 Tool::Warp => {
