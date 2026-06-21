@@ -12,3 +12,5 @@ mod gap_close;
 mod region;
 #[cfg(test)]
 mod region_cut_select;
+#[cfg(test)]
+mod tween;

@@ -3761,8 +3761,16 @@ impl EditorApp {
                 // TODO: Implement add motion tween
             }
             MenuAction::AddShapeTween => {
-                println!("Menu: Add Shape Tween");
-                // TODO: Implement add shape tween
+                if let Some(layer_id) = self.active_layer_id {
+                    let action = lightningbeam_core::actions::SetTweenAction::new(
+                        layer_id,
+                        self.playback_time,
+                        lightningbeam_core::layer::TweenType::Shape,
+                    );
+                    if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                        eprintln!("Failed to add shape tween: {}", e);
+                    }
+                }
             }
             MenuAction::ReturnToStart => {
                 println!("Menu: Return to Start");

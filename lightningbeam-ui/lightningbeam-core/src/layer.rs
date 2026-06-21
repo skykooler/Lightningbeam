@@ -382,6 +382,29 @@ impl VectorLayer {
         self.keyframe_at(time).map(|kf| &kf.graph)
     }
 
+    /// The VectorGraph to *render* at `time`. When the keyframe at-or-before `time` has
+    /// `tween_after == Shape` and the next keyframe shares its topology, returns an owned
+    /// graph morphed between them; otherwise borrows the held keyframe's graph. Editing
+    /// should keep using `graph_at_time`/`graph_at_time_mut` (the held keyframe).
+    pub fn tweened_graph_at(&self, time: f64) -> Option<std::borrow::Cow<'_, VectorGraph>> {
+        use std::borrow::Cow;
+        let idx = self.keyframes.partition_point(|kf| kf.time <= time);
+        if idx == 0 {
+            return None;
+        }
+        let a = &self.keyframes[idx - 1];
+        if a.tween_after == TweenType::Shape && idx < self.keyframes.len() {
+            let b = &self.keyframes[idx];
+            if b.time > a.time {
+                let t = ((time - a.time) / (b.time - a.time)).clamp(0.0, 1.0);
+                if let Some(g) = a.graph.interpolated(&b.graph, t) {
+                    return Some(Cow::Owned(g));
+                }
+            }
+        }
+        Some(Cow::Borrowed(&a.graph))
+    }
+
     /// Get a mutable VectorGraph at a given time
     pub fn graph_at_time_mut(&mut self, time: f64) -> Option<&mut VectorGraph> {
         self.keyframe_at_mut(time).map(|kf| &mut kf.graph)
@@ -1068,6 +1091,50 @@ impl AnyLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tweened_graph_at_morphs_between_shape_keyframes() {
+        use crate::vector_graph::{Direction, FillRule, ShapeColor};
+        use kurbo::{CubicBez, Point};
+
+        // Build a single-vertex-ish graph at a given x via one degenerate fill is overkill;
+        // use one vertex + one edge (a loop) is also odd. Use two vertices + one edge and
+        // just check the vertex lerp through the layer's tween path.
+        let mk = |x: f64| {
+            let mut g = VectorGraph::new();
+            let v0 = g.alloc_vertex(Point::new(x, 0.0));
+            let v1 = g.alloc_vertex(Point::new(x + 10.0, 0.0));
+            let c = CubicBez::new(
+                Point::new(x, 0.0),
+                Point::new(x + 3.0, 0.0),
+                Point::new(x + 7.0, 0.0),
+                Point::new(x + 10.0, 0.0),
+            );
+            g.alloc_edge(c, v0, v1, None, Some(ShapeColor::rgb(0, 0, 0)));
+            g.alloc_fill(vec![(crate::vector_graph::EdgeId(0), Direction::Forward)],
+                ShapeColor::rgb(255, 0, 0), FillRule::NonZero);
+            g
+        };
+
+        let mut layer = VectorLayer::new("L");
+        layer.keyframes.clear();
+        let mut kf0 = ShapeKeyframe::new(0.0);
+        kf0.graph = mk(0.0);
+        kf0.tween_after = TweenType::Shape;
+        let mut kf10 = ShapeKeyframe::new(10.0);
+        kf10.graph = mk(100.0);
+        layer.keyframes.push(kf0);
+        layer.keyframes.push(kf10);
+
+        // Midway through the tween, vertex 0 is halfway (x=50).
+        let g = layer.tweened_graph_at(5.0).unwrap();
+        assert!((g.vertices[0].position.x - 50.0).abs() < 1e-6);
+
+        // Without the tween flag, it holds the left keyframe (x=0).
+        layer.keyframes[0].tween_after = TweenType::None;
+        let g = layer.tweened_graph_at(5.0).unwrap();
+        assert!((g.vertices[0].position.x - 0.0).abs() < 1e-6);
+    }
 
     #[test]
     fn test_layer_creation() {

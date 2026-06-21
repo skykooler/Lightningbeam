@@ -1357,9 +1357,9 @@ fn render_vector_layer(
     let layer_opacity = parent_opacity * layer.layer.opacity;
 
     // Render the layer's own VectorGraph (loose shapes) first, then clip instances
-    // (groups / movie clips) on top.
-    if let Some(graph) = layer.graph_at_time(time) {
-        render_vector_graph(graph, scene, base_transform, layer_opacity, document, image_cache);
+    // (groups / movie clips) on top. Shape tweens are applied here.
+    if let Some(graph) = layer.tweened_graph_at(time) {
+        render_vector_graph(&graph, scene, base_transform, layer_opacity, document, image_cache);
     }
 
     for clip_instance in &layer.clip_instances {
@@ -1668,8 +1668,8 @@ fn render_vector_layer_cpu(
     let layer_opacity = parent_opacity * layer.layer.opacity;
 
     // Loose shapes first, then clip instances (groups / movie clips) on top.
-    if let Some(graph) = layer.graph_at_time(time) {
-        render_vector_graph_cpu(graph, pixmap, affine_to_ts(base_transform), layer_opacity as f32, document, image_cache);
+    if let Some(graph) = layer.tweened_graph_at(time) {
+        render_vector_graph_cpu(&graph, pixmap, affine_to_ts(base_transform), layer_opacity as f32, document, image_cache);
     }
 
     for clip_instance in &layer.clip_instances {

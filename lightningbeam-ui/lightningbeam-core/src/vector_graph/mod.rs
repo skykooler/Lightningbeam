@@ -417,6 +417,67 @@ impl VectorGraph {
         self.boundary_to_bezpath(&fill.boundary)
     }
 
+    /// Interpolate toward `other` by `t` ∈ [0,1] for a same-topology shape tween.
+    ///
+    /// Returns `None` if the two graphs don't share identical topology — same vertex,
+    /// edge and fill structure (counts, deleted flags, edge endpoints, fill boundaries).
+    /// In that case the caller should hold the source keyframe instead of morphing.
+    /// Vertex positions, edge curves, stroke widths and stroke/fill colours are lerped.
+    pub fn interpolated(&self, other: &VectorGraph, t: f64) -> Option<VectorGraph> {
+        if self.vertices.len() != other.vertices.len()
+            || self.edges.len() != other.edges.len()
+            || self.fills.len() != other.fills.len()
+        {
+            return None;
+        }
+        for (a, b) in self.vertices.iter().zip(&other.vertices) {
+            if a.deleted != b.deleted {
+                return None;
+            }
+        }
+        for (a, b) in self.edges.iter().zip(&other.edges) {
+            if a.deleted != b.deleted || a.vertices != b.vertices {
+                return None;
+            }
+        }
+        for (a, b) in self.fills.iter().zip(&other.fills) {
+            if a.deleted != b.deleted || a.boundary != b.boundary {
+                return None;
+            }
+        }
+
+        let lf = |x: f64, y: f64| x + (y - x) * t;
+        let lp = |p: Point, q: Point| Point::new(lf(p.x, q.x), lf(p.y, q.y));
+        let lc = |a: Option<ShapeColor>, b: Option<ShapeColor>| match (a, b) {
+            (Some(a), Some(b)) => {
+                let c = |x: u8, y: u8| (lf(x as f64, y as f64)).round().clamp(0.0, 255.0) as u8;
+                Some(ShapeColor::new(c(a.r, b.r), c(a.g, b.g), c(a.b, b.b), c(a.a, b.a)))
+            }
+            (a, _) => a,
+        };
+
+        let mut g = self.clone();
+        for (i, v) in g.vertices.iter_mut().enumerate() {
+            v.position = lp(self.vertices[i].position, other.vertices[i].position);
+        }
+        for (i, e) in g.edges.iter_mut().enumerate() {
+            let (a, b) = (self.edges[i].curve, other.edges[i].curve);
+            e.curve = CubicBez::new(lp(a.p0, b.p0), lp(a.p1, b.p1), lp(a.p2, b.p2), lp(a.p3, b.p3));
+            if let (Some(s), Some(sa), Some(sb)) = (
+                e.stroke_style.as_mut(),
+                self.edges[i].stroke_style.as_ref(),
+                other.edges[i].stroke_style.as_ref(),
+            ) {
+                s.width = lf(sa.width, sb.width);
+            }
+            e.stroke_color = lc(self.edges[i].stroke_color, other.edges[i].stroke_color);
+        }
+        for (i, f) in g.fills.iter_mut().enumerate() {
+            f.color = lc(self.fills[i].color, other.fills[i].color);
+        }
+        Some(g)
+    }
+
     /// A point guaranteed to lie inside the fill — for point-in-region classification
     /// (e.g. deciding whether a fill is inside a lasso). Prefers the polygon area-centroid,
     /// but for a non-convex fill (e.g. an L-shape, where the area-centroid can fall in the
