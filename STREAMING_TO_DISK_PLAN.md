@@ -361,10 +361,14 @@ now shows tracked VRAM (raster cache MB + count). *(Refinements: count→byte bu
 if >12 raster layers are visible at once. Export `raster_cache` lives one export — fine. Vello
 `ImageCache` is image *assets* → Phase 4.)*
 
-### 3d. Undo memory
-`RasterStrokeAction`/`RasterFillAction` hold `buffer_before`+`buffer_after` full frames
-(`raster_stroke.rs:20`). Switch to **dirty-rect diffs** (store only the changed bbox before/after;
-full-canvas fills compressed). Independent of 3a–3c.
+### 3d. Undo memory  **[DONE]**
+`RasterStrokeAction`/`RasterFillAction` stored `buffer_before`+`buffer_after` full frames.
+Now store a `RasterDiff` (`actions/raster_diff.rs`) — changed bbox before/after only, computed in
+`new()`, full buffers dropped. Undo/redo apply onto the keyframe's resident pixels; the editor
+faults the target frame in first (`Action::raster_resident_hint` + `peek_undo/redo_raster_hint`),
+correct because a clean evicted frame's container bytes == its logical state. Non-resident base ⇒
+skip (no corruption). Unit-tested round-trip. *(Refinement: compress full-canvas-fill diffs, whose
+bbox is the whole frame.)*
 
 ### 3e. Prefetch frames  *(future, after 3d — pure latency win, no correctness need)*
 Fault-in is reactive (page in only on a render miss), so a never-visited frame still shows the
