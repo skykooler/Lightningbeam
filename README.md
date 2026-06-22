@@ -48,7 +48,7 @@ A free and open-source 2D multimedia editor combining vector animation, audio pr
 
 ## Project Status
 
-Lightningbeam is developed on the `master` branch. The project has been rewritten from a Tauri/JavaScript prototype to a pure Rust application to eliminate IPC bottlenecks and achieve better performance for real-time video and audio processing.
+Lightningbeam is developed on the `main` branch. The project has been rewritten from a Tauri/JavaScript prototype to a pure Rust application to eliminate IPC bottlenecks and achieve better performance for real-time video and audio processing.
 
 **Current Status:**
 - ✅ Core UI panes (Stage, Timeline, Asset Library, Info Panel, Toolbar)

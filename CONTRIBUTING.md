@@ -129,16 +129,16 @@ lightningbeam-2/
 
 ### Branching Strategy
 
-- `master` - Main development branch
-- Feature branches - Create from `master` for new features
+- `main` - Main development branch
+- Feature branches - Create from `main` for new features
 
 ### Before You Start
 
 1. Check existing issues or create a new one to discuss your change
-2. Make sure you're on the latest `master` branch:
+2. Make sure you're on the latest `main` branch:
    ```bash
-   git checkout master
-   git pull origin master
+   git checkout main
+   git pull origin main
    ```
 3. Create a feature branch:
    ```bash
@@ -239,7 +239,7 @@ this solution.
 ### Pull Request Process
 
 1. Push your branch to GitHub or Gitea
-2. Open a pull request against `master` branch
+2. Open a pull request against `main` branch
    - GitHub: https://github.com/skykooler/lightningbeam
    - Gitea: https://git.skyler.io/skyler/lightningbeam
 3. Provide a clear description of:
