@@ -41,6 +41,11 @@ impl Project {
         }
     }
 
+    /// The project's system sample rate in Hz.
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
     /// Generate a new unique track ID
     fn next_id(&mut self) -> TrackId {
         let id = self.next_track_id;

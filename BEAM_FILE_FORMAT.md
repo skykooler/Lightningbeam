@@ -255,15 +255,15 @@ Collections that carry media linkage are **bold**:
 
 `RasterKeyframe` (within the layer tree) has `id: Uuid` (= its full-res `Raster`
 media id and the seed for its `RasterProxy` id), `time`, `width`, `height`,
-`tween_after`, `stroke_log`, and a `media_path` string that is **vestigial** in
-SQLite files (it names the legacy ZIP entry path; the SQLite path keys on `id` and
-ignores it). Pixel buffers are `#[serde(skip)]` and faulted in from media rows.
+`tween_after`, and `stroke_log`. Pixel buffers are `#[serde(skip)]` and faulted in
+from media rows. (The legacy ZIP entry path `media/raster/<id>.png` is derived from
+`id`; older files may also carry a now-ignored `media_path` field.)
 
 ### 8.3 `SerializedAudioBackend`
 
 | Field                | Type                | Notes |
 |----------------------|---------------------|-------|
-| `sample_rate`        | `u32`               | **Unreliable:** the current writer hardcodes `48000` here; authoritative rates are on `AudioProject.sample_rate` and each `AudioPoolEntry.sample_rate`. |
+| `sample_rate`        | `u32`               | The project's system sample rate (mirrors `AudioProject.sample_rate`). Per-file rates are on each `AudioPoolEntry.sample_rate`. |
 | `project`            | `AudioProject`      | Tracks + MIDI clip pool (§8.4). |
 | `audio_pool_entries` | `[AudioPoolEntry]`  | Audio source registry (§8.5). |
 | `layer_to_track_map` | `map<Uuid, u32>`    | UI layer UUID → engine track id. `#[serde(default)]`. |
@@ -388,8 +388,8 @@ internal layout:
   extension. **FLAC entries are decoded to PCM `f32` and re-encoded in memory as
   IEEE-float WAV (WAV format tag 3)** before being base64-embedded; other formats are
   embedded as-is. The entry's `relative_path` is cleared after extraction.
-- `media/raster/<uuid>.png` — raster keyframe pixels, named by
-  `RasterKeyframe.media_path`.
+- `media/raster/<uuid>.png` — raster keyframe pixels, named `media/raster/<id>.png`
+  after the keyframe's `id`.
 
 A reader MUST NOT modify a legacy ZIP on open; it loads into memory only. **The next
 save migrates the project to SQLite** (the save sees a non-SQLite target, so it takes
@@ -451,17 +451,14 @@ A conforming **writer** MUST:
 These reflect the current reference implementation and are flagged for implementers
 and future spec revisions:
 
-- `SerializedAudioBackend.sample_rate` is hardcoded to `48000` on save and SHOULD be
-  ignored in favour of `AudioProject.sample_rate` / `AudioPoolEntry.sample_rate`.
 - `MediaKind::Video` (`1`) is defined but never written; video media is always an
   external file via `VideoClip.file_path`.
-- `RasterKeyframe.media_path` is serialized but unused by the SQLite path (vestigial
-  legacy-ZIP linkage).
-- The reference writer's `SaveSettings` fields `auto_embed_threshold_bytes`,
-  `force_embed_all`, and `force_link_all` are not consulted by the current save path;
-  only the large-media mode is.
 - The project `version` check is exact-match with no compatibility window; a future
   revision should define semantic-version tolerance before bumping it.
+
+(Earlier revisions of this section flagged a hardcoded save sample rate, a vestigial
+`RasterKeyframe.media_path` field, and unused `SaveSettings` fields; these have since
+been fixed/removed.)
 
 ## 16. Inspecting a `.beam` file
 

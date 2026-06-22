@@ -731,7 +731,6 @@ impl FileOperationsWorker {
 
         let settings = SaveSettings {
             large_media_mode,
-            ..SaveSettings::default()
         };
         match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, &thumbnail_blobs, &settings) {
             Ok(()) => {

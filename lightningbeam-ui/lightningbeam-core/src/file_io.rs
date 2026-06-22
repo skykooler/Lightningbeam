@@ -88,15 +88,6 @@ impl Default for LargeMediaMode {
 /// Settings for saving a project
 #[derive(Debug, Clone)]
 pub struct SaveSettings {
-    /// Automatically embed files smaller than this size (in bytes)
-    pub auto_embed_threshold_bytes: u64,
-
-    /// Force embedding all media files
-    pub force_embed_all: bool,
-
-    /// Force linking all media files (don't embed any)
-    pub force_link_all: bool,
-
     /// How to store files at/above [`LARGE_MEDIA_THRESHOLD`] (pack vs reference).
     /// `Ask` behaves as `Reference` here (safe default: don't bloat the DB).
     pub large_media_mode: LargeMediaMode,
@@ -105,9 +96,6 @@ pub struct SaveSettings {
 impl Default for SaveSettings {
     fn default() -> Self {
         Self {
-            auto_embed_threshold_bytes: 10_000_000, // 10 MB
-            force_embed_all: false,
-            force_link_all: false,
             large_media_mode: LargeMediaMode::Ask,
         }
     }
@@ -269,7 +257,7 @@ pub fn save_beam(
     audio_pool_entries: Vec<AudioPoolEntry>,
     layer_to_track_map: &std::collections::HashMap<uuid::Uuid, u32>,
     thumbnail_blobs: &std::collections::HashMap<uuid::Uuid, Vec<u8>>,
-    _settings: &SaveSettings,
+    settings: &SaveSettings,
 ) -> Result<(), String> {
     let fn_start = std::time::Instant::now();
     eprintln!("📊 [SAVE_BEAM] Starting save_beam() (SQLite container)...");
@@ -349,7 +337,7 @@ pub fn save_beam(
                 // (`Ask` == reference); smaller files are always packed.
                 let reference_it = entry.is_video_audio
                     || (size >= LARGE_MEDIA_THRESHOLD
-                        && _settings.large_media_mode != LargeMediaMode::Pack);
+                        && settings.large_media_mode != LargeMediaMode::Pack);
                 if reference_it {
                     referenced = Some(rel.clone());
                 } else {
@@ -498,7 +486,7 @@ pub fn save_beam(
         modified: now.clone(),
         ui_state: document.clone(),
         audio_backend: SerializedAudioBackend {
-            sample_rate: 48000, // TODO: Get from audio engine
+            sample_rate: audio_project.sample_rate(),
             project: audio_project.clone(),
             audio_pool_entries: modified_entries,
             layer_to_track_map: layer_to_track_map.clone(),
@@ -879,8 +867,11 @@ fn load_beam_zip_legacy(path: &Path) -> Result<LoadedProject, String> {
     for layer in document.root.children.iter_mut() {
         if let crate::layer::AnyLayer::Raster(rl) = layer {
             for kf in &mut rl.keyframes {
-                if !kf.media_path.is_empty() {
-                    match zip.by_name(&kf.media_path) {
+                // Legacy ZIP raster entries are named "media/raster/<uuid>.png",
+                // derivable from the keyframe id (the old `media_path` field).
+                let entry_path = format!("media/raster/{}.png", kf.id);
+                {
+                    match zip.by_name(&entry_path) {
                         Ok(mut png_file) => {
                             let mut png_bytes = Vec::new();
                             let _ = png_file.read_to_end(&mut png_bytes);
@@ -890,7 +881,7 @@ fn load_beam_zip_legacy(path: &Path) -> Result<LoadedProject, String> {
                                     kf.raw_pixels = rgba.into_raw();
                                     raster_load_count += 1;
                                 }
-                                Err(e) => eprintln!("⚠️ [LOAD_BEAM] Failed to decode raster PNG {}: {}", kf.media_path, e),
+                                Err(e) => eprintln!("⚠️ [LOAD_BEAM] Failed to decode raster PNG {}: {}", entry_path, e),
                             }
                         }
                         Err(_) => {
