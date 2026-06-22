@@ -686,11 +686,17 @@ Phase 1a and Phase 2 can ship now; everything else waits on Phase 0 (the contain
         `load_file_into_pool`'s full decode with the `do_import_audio` branching (PCM → mmap, compressed
         → `from_compressed` placeholder). Higher risk (touches the working referenced path); packed
         covers the common <2GB case first.
-  - [ ] **Deferred (follow-up): packed video streaming.** Let small videos be packed into the `.beam`
-        (a `MediaKind::Video` blob, `VideoClip` referencing it by id) and stream **both frames and audio**
-        from the DB blob via FFmpeg. ffmpeg-next has no custom-I/O wrapper, so this needs an
-        `AVIOContext`-over-`BlobReader` shim via raw FFI. **Decision (user):** that FFI wrapper lives in
-        its **own crate, version-pinned to the ffmpeg version**, isolating the unsafe + the ABI coupling.
+  - [x] **DONE: packed video streaming.** Small videos pack into the `.beam`
+        (a `MediaKind::Video` blob at the clip id, `VideoClip.media_id` referencing it) and stream **both
+        frames and audio** from the DB blob via FFmpeg. The `AVIOContext`-over-`Read+Seek` shim lives in
+        the new `ffmpeg-blob-io` crate (`BlobInput`, version-pinned `=8.0.0`/`=8.0.1`), isolating the
+        unsafe + ABI coupling. Frames: `video.rs` `VideoSource{Path,Packed}` opens a fresh `BlobReader`
+        per decoder/seek/scan. Audio: `VideoAudioReader::open_source` over the same blob (the
+        `disk_reader.rs` `StreamSource` blocker is removed); save points the linked video-audio pool
+        entry's `media_id` at the video row so it streams from the same blob. Tests: ffmpeg-blob-io AVIO
+        unit tests (WAV via Cursor + seek + open/drop loop), core `packed_video_stream` (blob→AVIO→Input),
+        `beam_archive` packed-video round-trip, daw-backend `open_source` (compiles; can't link in the
+        container — user runtime-verifies actual A/V playback).
 - [~] Phase 1c — video embedded-audio track  ← **stopgap shipped; proper design next**
   - [x] Stopgap: `extract_audio_from_video_to_wav` streams to a temp WAV → `import_audio_sync`
         (mmap). Fixed the ~2.8GB-`Vec<f32>` OOM. But writes the whole WAV to `/tmp` (fills

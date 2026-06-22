@@ -9,7 +9,7 @@
 //! too (via [`load_beam_zip_legacy`]). Saving always writes the SQLite form, so
 //! opening a legacy file and saving migrates it.
 
-use crate::beam_archive::{BeamArchive, MediaKind, MediaMeta, LARGE_MEDIA_THRESHOLD};
+use crate::beam_archive::{BeamArchive, MediaKind, MediaMeta, MediaStorage, LARGE_MEDIA_THRESHOLD};
 use crate::document::Document;
 use daw_backend::audio::pool::AudioPoolEntry;
 use daw_backend::audio::project::Project as AudioProject;
@@ -450,6 +450,65 @@ pub fn save_beam(
         }
     }
 
+    // --- video clips -> media rows (Video bytes), keyed by the clip id ---
+    // Mirror the audio pack/reference decision: pack unless the file is
+    // >= LARGE_MEDIA_THRESHOLD and the user didn't choose Pack. Packed video is
+    // decoded by streaming from the blob (see video.rs `VideoSource` + ffmpeg-blob-io).
+    for (clip_id, clip) in &document.video_clips {
+        // In-place re-save: an unchanged packed video keeps its row, never re-streamed.
+        if clip.media_id == Some(*clip_id) && txn.media_exists(*clip_id)? {
+            live_media.insert(*clip_id);
+            continue;
+        }
+        if clip.file_path.is_empty() {
+            continue;
+        }
+        let full = if Path::new(&clip.file_path).is_absolute() {
+            PathBuf::from(&clip.file_path)
+        } else {
+            project_dir.join(&clip.file_path)
+        };
+        if !full.is_file() {
+            continue; // source gone — reported missing on load
+        }
+        let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+        let codec = full
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or("mp4")
+            .to_lowercase();
+        let meta = MediaMeta {
+            width: Some(clip.width as u32),
+            height: Some(clip.height as u32),
+            ..Default::default()
+        };
+        let reference_it =
+            size >= LARGE_MEDIA_THRESHOLD && settings.large_media_mode != LargeMediaMode::Pack;
+        if reference_it {
+            txn.put_media_referenced(*clip_id, MediaKind::Video, &codec, &clip.file_path, meta)?;
+        } else {
+            txn.put_media_packed_from_path(*clip_id, MediaKind::Video, &codec, &full, meta)?;
+            // The video's audio track lives in this same blob. Point the linked
+            // video-audio pool entry at the video's media row so its audio streams
+            // from the blob too (instead of re-probing the external file on load).
+            if let Some(aid) = clip.linked_audio_clip_id {
+                if let Some(crate::clip::AudioClipType::Sampled { audio_pool_index }) =
+                    document.audio_clips.get(&aid).map(|c| &c.clip_type)
+                {
+                    if let Some(e) = modified_entries
+                        .iter_mut()
+                        .find(|e| e.pool_index == *audio_pool_index)
+                    {
+                        e.media_id = Some(clip_id.to_string());
+                        e.relative_path = None;
+                        e.embedded_data = None;
+                    }
+                }
+            }
+        }
+        live_media.insert(*clip_id);
+    }
+
     // --- image assets -> media rows (original file bytes), keyed by asset id ---
     let mut image_count = 0usize;
     for (id, asset) in &document.image_assets {
@@ -646,7 +705,7 @@ fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
 
     // Missing external files (referenced entries whose file no longer exists).
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let missing_files: Vec<MissingFileInfo> = restored_entries
+    let mut missing_files: Vec<MissingFileInfo> = restored_entries
         .iter()
         .enumerate()
         .filter_map(|(idx, entry)| {
@@ -669,6 +728,42 @@ fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
             None
         })
         .collect();
+
+    // Resolve packed/referenced video bytes per clip (mirrors audio resolution).
+    // A `MediaKind::Video` row keyed by the clip id means the bytes are in the
+    // container; the decoder streams from the blob. Referenced rows update the
+    // external path and report a missing source. Old projects (no Video row) stay
+    // referenced via their existing `file_path`.
+    for (clip_id, clip) in document.video_clips.iter_mut() {
+        match archive.media_info(*clip_id) {
+            Ok(Some(info)) if info.kind == MediaKind::Video => match info.storage {
+                MediaStorage::Packed => {
+                    clip.media_id = Some(*clip_id);
+                }
+                MediaStorage::Referenced => {
+                    clip.media_id = None;
+                    if let Some(p) = info.ext_path.clone() {
+                        clip.file_path = p;
+                    }
+                    let full = if Path::new(&clip.file_path).is_absolute() {
+                        PathBuf::from(&clip.file_path)
+                    } else {
+                        project_dir.join(&clip.file_path)
+                    };
+                    if !clip.file_path.is_empty() && !full.exists() {
+                        missing_files.push(MissingFileInfo {
+                            pool_index: 0,
+                            original_path: full,
+                            file_type: MediaFileType::Video,
+                        });
+                    }
+                }
+            },
+            _ => {
+                clip.media_id = None;
+            }
+        }
+    }
 
     // Persisted video thumbnail packs (opaque LBTN blobs), keyed by clip id. The
     // editor decodes + inserts them and skips regeneration for these clips.

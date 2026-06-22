@@ -244,12 +244,15 @@ impl AudioFile {
 
     /// Create a placeholder AudioFile for a video's audio track. `path` is the
     /// source video file; the audio is streamed on demand by the disk reader's
-    /// FFmpeg-backed `VideoAudioReader`.
+    /// FFmpeg-backed `VideoAudioReader`. `packed_media_id` is `Some` when the video
+    /// bytes are packed in the `.beam` container (audio streams from the same blob
+    /// via the host factory); `None` when the audio comes from an external video file.
     pub fn from_video_audio(
         path: PathBuf,
         channels: u32,
         sample_rate: u32,
         total_frames: u64,
+        packed_media_id: Option<String>,
     ) -> Self {
         Self {
             path,
@@ -263,7 +266,7 @@ impl AudioFile {
             frames: total_frames,
             original_format: None,
             original_bytes: None,
-            packed_media_id: None,
+            packed_media_id,
         }
     }
 
@@ -1168,7 +1171,27 @@ impl AudioClipPool {
             let entry_start = std::time::Instant::now();
             eprintln!("📊 [LOAD_SERIALIZED] Processing entry {}/{}: '{}'", i + 1, entries.len(), entry.name);
 
-            let success = if entry.is_video_audio {
+            let success = if entry.is_video_audio && entry.media_id.is_some() {
+                // Packed video: the audio track lives in the same container blob as
+                // the video. Build a streaming VideoAudio entry from the saved
+                // metadata (no probe needed); playback opens the blob via the host
+                // factory at clip-activation time → VideoAudioReader::open_source.
+                let media_id = entry.media_id.clone().unwrap();
+                let total_frames = (entry.duration * entry.sample_rate as f64).ceil() as u64;
+                let file = AudioFile::from_video_audio(
+                    PathBuf::new(),
+                    entry.channels,
+                    entry.sample_rate,
+                    total_frames,
+                    Some(media_id),
+                );
+                if entry.pool_index < self.files.len() {
+                    self.files[entry.pool_index] = file;
+                    true
+                } else {
+                    false
+                }
+            } else if entry.is_video_audio {
                 // Re-probe the video's audio track via FFmpeg → a streaming
                 // VideoAudio entry (keeps full 5.1/7.1; no decode-to-RAM).
                 match entry.relative_path.as_ref() {
@@ -1186,6 +1209,7 @@ impl AudioClipPool {
                                         reader.channels(),
                                         reader.sample_rate(),
                                         reader.total_frames(),
+                                        None,
                                     );
                                     if entry.pool_index < self.files.len() {
                                         self.files[entry.pool_index] = file;

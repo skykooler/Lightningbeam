@@ -4225,6 +4225,12 @@ impl EditorApp {
             });
         }
 
+        // Set the loaded container path BEFORE registering videos: a packed video
+        // clip resolves to `VideoSource::Packed { db_path: current_file_path, .. }`,
+        // so this must be in place or the clip falls back to its (possibly missing)
+        // external file and renders black.
+        self.current_file_path = Some(path.clone());
+
         // Re-register video clips with the VideoManager (decoder + keyframe index +
         // thumbnails). Restored video_clips carry only metadata + file_path; without
         // this they render black with no thumbnails.
@@ -4235,7 +4241,6 @@ impl EditorApp {
         // Reset playback state
         self.playback_time = 0.0;
         self.is_playing = false;
-        self.current_file_path = Some(path.clone());
         // Point the raster paging store at the loaded container so faulting works.
         self.raster_store.set_path(self.current_file_path.clone());
 
@@ -4260,26 +4265,37 @@ impl EditorApp {
         let doc_width = self.action_executor.document().width as u32;
         let doc_height = self.action_executor.document().height as u32;
 
-        // Snapshot (id, path) so we don't hold the document borrow while locking
-        // the VideoManager / spawning threads.
+        // Snapshot (id, media_id, path) so we don't hold the document borrow while
+        // locking the VideoManager / spawning threads.
+        let db_path = self.current_file_path.clone();
         let videos: Vec<_> = self
             .action_executor
             .document()
             .video_clips
             .values()
-            .map(|c| (c.id, c.file_path.clone()))
+            .map(|c| (c.id, c.media_id, c.file_path.clone()))
             .collect();
 
-        for (clip_id, file_path) in videos {
-            if !std::path::Path::new(&file_path).exists() {
-                eprintln!("⚠️ [APPLY] Video file not found, skipping: {}", file_path);
-                continue;
-            }
+        for (clip_id, media_id, file_path) in videos {
+            // Packed video streams from the container blob; referenced video opens
+            // its external file (skip if it's gone).
+            let source = match (media_id, &db_path) {
+                (Some(mid), Some(db)) => {
+                    lightningbeam_core::video::VideoSource::Packed { db_path: db.clone(), media_id: mid }
+                }
+                _ => {
+                    if !std::path::Path::new(&file_path).exists() {
+                        eprintln!("⚠️ [APPLY] Video file not found, skipping: {}", file_path);
+                        continue;
+                    }
+                    lightningbeam_core::video::VideoSource::Path(file_path.clone())
+                }
+            };
 
             {
                 let mut video_mgr = self.video_manager.lock().unwrap();
-                if let Err(e) = video_mgr.load_video(clip_id, file_path.clone(), doc_width, doc_height) {
-                    eprintln!("⚠️ [APPLY] Failed to load video {}: {}", file_path, e);
+                if let Err(e) = video_mgr.load_video(clip_id, source, doc_width, doc_height) {
+                    eprintln!("⚠️ [APPLY] Failed to load video {}: {}", clip_id, e);
                     continue;
                 }
             }
@@ -4308,13 +4324,13 @@ impl EditorApp {
             };
             let Some(decoder_arc) = decoder_arc else { return; };
 
-            let (path, stream_index) = {
+            let (source, stream_index) = {
                 let decoder = decoder_arc.lock().unwrap();
                 decoder.keyframe_scan_params()
             };
 
             // Slow scan, no locks held.
-            match lightningbeam_core::video::VideoDecoder::scan_keyframes(&path, stream_index) {
+            match lightningbeam_core::video::VideoDecoder::scan_keyframes(&source, stream_index) {
                 Ok(positions) => {
                     let count = positions.len();
                     decoder_arc.lock().unwrap().set_keyframe_index(positions);
@@ -4333,22 +4349,22 @@ impl EditorApp {
     fn spawn_thumbnail_generation(&self, clip_id: uuid::Uuid) {
         let video_manager = Arc::clone(&self.video_manager);
         std::thread::spawn(move || {
-            // Grab the source path from the playback decoder (brief lock), then do
-            // all decoding on an independent decoder.
-            let path = {
+            // Grab the source from the playback decoder (brief lock), then do all
+            // decoding on an independent decoder (a fresh BlobReader for packed video).
+            let source = {
                 let decoder_arc = {
                     let vm = video_manager.lock().unwrap();
                     vm.get_decoder(&clip_id)
                 };
                 let Some(decoder_arc) = decoder_arc else { return; };
                 let decoder = decoder_arc.lock().unwrap();
-                decoder.path().to_string()
+                decoder.source()
             };
 
             let vm_insert = Arc::clone(&video_manager);
             let vm_skip = Arc::clone(&video_manager);
             let result = lightningbeam_core::video::generate_keyframe_thumbnails(
-                &path,
+                source,
                 5.0,
                 128,
                 // Resume: skip keyframes already covered (e.g. restored from a
@@ -4624,8 +4640,9 @@ impl EditorApp {
 
         let path_str = path.to_string_lossy().to_string();
 
-        // Probe video for metadata
-        let metadata = match probe_video(&path_str) {
+        // Probe video for metadata (freshly imported video is referenced until the
+        // first save packs it).
+        let metadata = match probe_video(&lightningbeam_core::video::VideoSource::Path(path_str.clone())) {
             Ok(meta) => meta,
             Err(e) => {
                 eprintln!("Failed to probe video '{}': {}", name, e);
@@ -4650,7 +4667,12 @@ impl EditorApp {
         let doc_height = self.action_executor.document().height as u32;
 
         let mut video_mgr = self.video_manager.lock().unwrap();
-        if let Err(e) = video_mgr.load_video(clip_id, path_str.clone(), doc_width, doc_height) {
+        if let Err(e) = video_mgr.load_video(
+            clip_id,
+            lightningbeam_core::video::VideoSource::Path(path_str.clone()),
+            doc_width,
+            doc_height,
+        ) {
             eprintln!("Failed to load video '{}': {}", name, e);
             return None;
         }
@@ -6670,7 +6692,7 @@ impl eframe::App for EditorApp {
                                     eprintln!("[WEBCAM] Recording saved to: {} (recorder duration={:.4}s)", file_path_str, result.duration);
                                     // Create VideoClip + ClipInstance from recorded file
                                     if let Some(layer_id) = webcam_layer_id {
-                                        match lightningbeam_core::video::probe_video(&file_path_str) {
+                                        match lightningbeam_core::video::probe_video(&lightningbeam_core::video::VideoSource::Path(file_path_str.clone())) {
                                             Ok(info) => {
                                                 use lightningbeam_core::clip::{VideoClip, ClipInstance};
                                                 let clip = VideoClip {
@@ -6685,6 +6707,7 @@ impl eframe::App for EditorApp {
                                                     duration: info.duration,
                                                     frame_rate: info.fps,
                                                     linked_audio_clip_id: None,
+                                                    media_id: None,
                                                     folder_id: None,
                                                 };
                                                 let clip_id = clip.id;
@@ -6723,7 +6746,7 @@ impl eframe::App for EditorApp {
                                                 // for the display rect.
                                                 {
                                                     let mut vm = self.video_manager.lock().unwrap();
-                                                    if let Err(e) = vm.load_video(clip_id, file_path_str, info.width, info.height) {
+                                                    if let Err(e) = vm.load_video(clip_id, lightningbeam_core::video::VideoSource::Path(file_path_str.clone()), info.width, info.height) {
                                                         eprintln!("[WEBCAM] Failed to load recorded video: {}", e);
                                                     }
                                                 }

@@ -2432,6 +2432,7 @@ impl Engine {
             channels,
             sample_rate,
             total_frames,
+            None, // imported from an external video file; packing happens on save
         );
         let pool_index = self.audio_pool.add_file(audio_file);
 

@@ -144,7 +144,7 @@ re-saves.
 | Value | Kind          | `codec` examples | Notes |
 |-------|---------------|------------------|-------|
 | `0`   | `Audio`       | `flac`, `mp3`, `wav`, `ogg`, `opus`, `aac`, `m4a`, `alac`, `caf`, `aiff` | Source audio for a pool entry. |
-| `1`   | `Video`       | —                | **Reserved/unused.** The current writer never emits video rows; video bytes live in an external file referenced by `VideoClip.file_path`. |
+| `1`   | `Video`       | `mp4`, `mov`, …  | A video clip's container bytes, keyed by the clip id. Packed under the large-media policy (referenced above 2 GiB unless `Pack`). Frames **and** the embedded audio stream are decoded directly from this blob. |
 | `2`   | `Raster`      | `png`            | Full-resolution pixels of a raster keyframe (PNG-encoded RGBA). |
 | `3`   | `ImageAsset`  | `png`, `jpg`, …  | An imported image asset's original bytes. |
 | `4`   | `Waveform`    | `lbwf`           | Precomputed waveform LOD pyramid for an audio item. Opaque blob owned by `daw_backend::audio::waveform_pyramid`. |
@@ -245,8 +245,9 @@ Collections that carry media linkage are **bold**:
 - `root: GraphicsObject` — the layer tree; raster keyframes live here and inside
   nested group/clip layers
 - **`image_assets: map<Uuid, ImageAsset>`** — keyed by asset UUID (= the media id)
-- **`video_clips: map<Uuid, VideoClip>`** — `VideoClip.file_path` is the external
-  video file; thumbnails are derived media (§7)
+- **`video_clips: map<Uuid, VideoClip>`** — when `VideoClip.media_id` is set the
+  video is packed (a `Video` media row at the clip id); otherwise `file_path` points
+  at the external video file. Thumbnails are derived media (§7)
 - `vector_clips`, `audio_clips`, `instance_groups`, `effect_definitions`,
   `script_definitions`, the various `*_folders` asset trees — structural, no direct
   media-row linkage
@@ -286,7 +287,7 @@ not serialized; they are rebuilt on load.
 | `sample_rate`   | `u32`                      | Authoritative sample rate. |
 | `channels`      | `u32`                      | Channel count. |
 | `duration`      | `f64`                      | Seconds. |
-| `is_video_audio`| `bool`                     | If set, the entry is the audio track of a video; always stored **referenced**. `#[serde(default, skip_if=false)]`. |
+| `is_video_audio`| `bool`                     | If set, the entry is the audio track of a video. Referenced when the video is external; when the video is **packed**, `media_id` points at the video's `Video` row and the audio streams from that same blob. `#[serde(default, skip_if=false)]`. |
 | `waveform_blob` | (transient)                | `#[serde(skip)]`; carries waveform bytes in memory only. |
 
 ### 8.6 Media linkage summary
@@ -299,7 +300,8 @@ not serialized; they are rebuilt on load.
 | Raster (full)      | `RasterKeyframe.id`               | that UUID |
 | Raster proxy       | derived from `RasterKeyframe.id`  | §7 |
 | Image asset        | `Document.image_assets` key / `ImageAsset.id` | that UUID |
-| Video bytes        | `VideoClip.file_path`             | — (always external) |
+| Video (packed)     | `VideoClip.media_id` (= clip id)  | that UUID |
+| Video (referenced) | `VideoClip.file_path`             | — (external) |
 | Video thumbnails   | derived from `video_clips` key    | §7 |
 | Waveform           | derived from `AudioPoolEntry.pool_index` | §7 |
 
@@ -323,11 +325,14 @@ save inside **one** SQLite transaction.
 1. Audio pool entries → `Audio` (+ `Waveform`) media rows.
 2. Raster keyframes → `Raster` (+ `RasterProxy`) media rows.
 3. Video thumbnail packs → `Thumbnail` media rows.
-4. Image assets → `ImageAsset` media rows.
-5. **Garbage-collect**: delete every `media` row (and its chunks) whose id is **not**
-   in the set of live ids accumulated in steps 1–4.
-6. Write `project.json` and the `meta` keys (`version`, `created`, `modified`).
-7. Commit; then (create path only) rename the temp file over the target.
+4. Video clips → `Video` media rows (packed/referenced per the large-media policy);
+   when a clip is packed, its linked video-audio pool entry's `media_id` is set to
+   the clip's `Video` row so the audio streams from the same blob.
+5. Image assets → `ImageAsset` media rows.
+6. **Garbage-collect**: delete every `media` row (and its chunks) whose id is **not**
+   in the set of live ids accumulated in steps 1–5.
+7. Write `project.json` and the `meta` keys (`version`, `created`, `modified`).
+8. Commit; then (create path only) rename the temp file over the target.
 
 ### 9.3 Packed vs. referenced decision (audio)
 
@@ -451,8 +456,6 @@ A conforming **writer** MUST:
 These reflect the current reference implementation and are flagged for implementers
 and future spec revisions:
 
-- `MediaKind::Video` (`1`) is defined but never written; video media is always an
-  external file via `VideoClip.file_path`.
 - The project `version` check is exact-match with no compatibility window; a future
   revision should define semantic-version tolerance before bumping it.
 

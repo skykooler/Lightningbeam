@@ -1,0 +1,22 @@
+# Standalone crate (own workspace root) — depended on by daw-backend and
+# lightningbeam-core via relative path, like daw-backend itself.
+[workspace]
+
+[package]
+name = "ffmpeg-blob-io"
+version = "0.1.0"
+edition = "2021"
+description = "Custom AVIOContext-over-Read+Seek shim for ffmpeg-next: lets a demuxer stream from an arbitrary byte source (e.g. a SQLite blob) instead of a file path. Isolates the unsafe FFI + ffmpeg ABI coupling."
+
+# ABI-PINNED. This crate dereferences raw AVFormatContext / AVIOContext fields
+# (`pb`, `flags`, `buffer`, `opaque`) and wraps the result back into ffmpeg-next's
+# `Input`, so it MUST link the exact same libavformat ABI as the rest of the
+# workspace. The `=` pins match what lightningbeam-core / daw-backend resolve;
+# bump all three together when upgrading ffmpeg.
+[dependencies]
+ffmpeg-next = "=8.0.0"
+ffmpeg-sys-next = "=8.0.1"
+libc = "0.2"
+
+[dev-dependencies]
+ffmpeg-next = "=8.0.0"

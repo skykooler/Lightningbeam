@@ -6,9 +6,70 @@
 use std::sync::{Arc, Mutex};
 use std::num::NonZeroUsize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use ffmpeg_next as ffmpeg;
+use ffmpeg_blob_io::BlobInput;
 use lru::LruCache;
 use uuid::Uuid;
+
+use crate::beam_archive::BeamArchive;
+
+/// Where a video clip's bytes live.
+///
+/// `Path` is an external file (referenced video, webcam capture, fresh import).
+/// `Packed` streams from a `MediaKind::Video` blob inside the `.beam` container.
+#[derive(Clone, Debug)]
+pub enum VideoSource {
+    /// External file path.
+    Path(String),
+    /// Packed in the container: open a fresh `BlobReader` over `media_id` in `db_path`.
+    Packed { db_path: PathBuf, media_id: Uuid },
+}
+
+impl VideoSource {
+    /// Open a fresh demuxer input for this source. A new `BlobReader` (own SQLite
+    /// connection) is created per call, so this is safe to call on any thread and
+    /// on every seek-reopen.
+    fn open(&self) -> Result<OwnedInput, String> {
+        match self {
+            VideoSource::Path(p) => ffmpeg::format::input(p)
+                .map(OwnedInput::Path)
+                .map_err(|e| format!("Failed to open video: {}", e)),
+            VideoSource::Packed { db_path, media_id } => {
+                let archive = BeamArchive::open(db_path)?;
+                let hint = archive.media_info(*media_id)?.map(|i| i.codec);
+                let reader = archive.open_blob_reader(db_path, *media_id)?;
+                BlobInput::open(Box::new(reader), hint.as_deref())
+                    .map(OwnedInput::Blob)
+                    .map_err(|e| format!("Failed to open packed video: {}", e))
+            }
+        }
+    }
+
+    /// Short label for logging.
+    fn label(&self) -> String {
+        match self {
+            VideoSource::Path(p) => p.clone(),
+            VideoSource::Packed { media_id, .. } => format!("packed:{}", media_id),
+        }
+    }
+}
+
+/// An open demuxer input, either file-backed or streaming from a container blob.
+/// Both expose the same `ffmpeg` `Input` for decoding.
+enum OwnedInput {
+    Path(ffmpeg::format::context::Input),
+    Blob(BlobInput),
+}
+
+impl OwnedInput {
+    fn get(&mut self) -> &mut ffmpeg::format::context::Input {
+        match self {
+            OwnedInput::Path(i) => i,
+            OwnedInput::Blob(b) => b.input_mut(),
+        }
+    }
+}
 
 /// Metadata about a video file
 #[derive(Debug, Clone)]
@@ -22,7 +83,7 @@ pub struct VideoMetadata {
 
 /// Video decoder with LRU frame caching
 pub struct VideoDecoder {
-    path: String,
+    source: VideoSource,
     _width: u32,          // Original video width
     _height: u32,         // Original video height
     output_width: u32,   // Scaled output width
@@ -32,7 +93,7 @@ pub struct VideoDecoder {
     time_base: f64,
     stream_index: usize,
     frame_cache: LruCache<i64, Vec<u8>>, // timestamp -> RGBA data
-    input: Option<ffmpeg::format::context::Input>,
+    input: Option<OwnedInput>,
     decoder: Option<ffmpeg::decoder::Video>,
     last_decoded_ts: i64, // Track the last decoded frame timestamp
     keyframe_positions: Vec<i64>, // Index of keyframe timestamps for fast seeking
@@ -45,11 +106,11 @@ impl VideoDecoder {
     /// Video will be scaled down if larger, preserving aspect ratio.
     /// `build_keyframes` controls whether to build the keyframe index immediately (slow)
     /// or defer it for async building later.
-    fn new(path: String, cache_size: usize, max_width: Option<u32>, max_height: Option<u32>, build_keyframes: bool) -> Result<Self, String> {
+    fn new(source: VideoSource, cache_size: usize, max_width: Option<u32>, max_height: Option<u32>, build_keyframes: bool) -> Result<Self, String> {
         ffmpeg::init().map_err(|e| e.to_string())?;
 
-        let input = ffmpeg::format::input(&path)
-            .map_err(|e| format!("Failed to open video: {}", e))?;
+        let mut owned = source.open()?;
+        let input = owned.get();
 
         let video_stream = input.streams()
             .best(ffmpeg::media::Type::Video)
@@ -96,17 +157,17 @@ impl VideoDecoder {
 
         // Optionally build keyframe index for fast seeking
         let keyframe_positions = if build_keyframes {
-            eprintln!("[Video Decoder] Building keyframe index for {}", path);
-            let positions = Self::scan_keyframes(&path, stream_index)?;
+            eprintln!("[Video Decoder] Building keyframe index for {}", source.label());
+            let positions = Self::scan_keyframes(&source, stream_index)?;
             eprintln!("[Video Decoder] Found {} keyframes", positions.len());
             positions
         } else {
-            eprintln!("[Video Decoder] Deferring keyframe index building for {}", path);
+            eprintln!("[Video Decoder] Deferring keyframe index building for {}", source.label());
             Vec::new()
         };
 
         Ok(Self {
-            path,
+            source,
             _width: width,
             _height: height,
             output_width,
@@ -125,14 +186,14 @@ impl VideoDecoder {
         })
     }
 
-    /// Source file path this decoder reads from.
-    pub fn path(&self) -> &str {
-        &self.path
+    /// The source this decoder reads from (file path or packed container blob).
+    pub fn source(&self) -> VideoSource {
+        self.source.clone()
     }
 
-    /// Parameters needed to scan keyframes off-thread (path + video stream index).
-    pub fn keyframe_scan_params(&self) -> (String, usize) {
-        (self.path.clone(), self.stream_index)
+    /// Parameters needed to scan keyframes off-thread (source + video stream index).
+    pub fn keyframe_scan_params(&self) -> (VideoSource, usize) {
+        (self.source.clone(), self.stream_index)
     }
 
     /// Replace the keyframe index (built off-thread via [`VideoDecoder::scan_keyframes`]).
@@ -158,9 +219,10 @@ impl VideoDecoder {
     /// Build an index of all keyframe positions in the video by scanning packets
     /// from a fresh input. Does not touch `self` — call it off-thread (it is slow
     /// on long videos) and hand the result to [`VideoDecoder::set_keyframe_index`].
-    pub fn scan_keyframes(path: &str, stream_index: usize) -> Result<Vec<i64>, String> {
-        let mut input = ffmpeg::format::input(path)
+    pub fn scan_keyframes(source: &VideoSource, stream_index: usize) -> Result<Vec<i64>, String> {
+        let mut owned = source.open()
             .map_err(|e| format!("Failed to open video for indexing: {}", e))?;
+        let input = owned.get();
 
         let mut keyframes = Vec::new();
 
@@ -233,32 +295,34 @@ impl VideoDecoder {
             eprintln!("[Video Seek] Target: {} | Keyframe(stream): {} | Keyframe(AV): {} | Index size: {}",
                 frame_ts, keyframe_ts_stream, keyframe_ts_av, self.keyframe_positions.len());
 
-            // Reopen input
-            let mut input = ffmpeg::format::input(&self.path)
+            // Reopen input (a fresh BlobReader for packed sources).
+            let mut owned = self.source.open()
                 .map_err(|e| format!("Failed to reopen video: {}", e))?;
 
-            // Seek directly to the keyframe with a 1-unit window
-            // Can't use keyframe_ts..keyframe_ts (empty) or ..= (not supported)
-            input.seek(keyframe_ts_av, keyframe_ts_av..(keyframe_ts_av + 1))
-                .map_err(|e| format!("Seek failed: {}", e))?;
+            {
+                let input = owned.get();
+                // Seek directly to the keyframe with a 1-unit window
+                // Can't use keyframe_ts..keyframe_ts (empty) or ..= (not supported)
+                input.seek(keyframe_ts_av, keyframe_ts_av..(keyframe_ts_av + 1))
+                    .map_err(|e| format!("Seek failed: {}", e))?;
 
-            eprintln!("[Video Timing] Seek call took {}ms", t_seek_start.elapsed().as_millis());
+                eprintln!("[Video Timing] Seek call took {}ms", t_seek_start.elapsed().as_millis());
 
-            let context_decoder = ffmpeg::codec::context::Context::from_parameters(
-                input.streams().best(ffmpeg::media::Type::Video).unwrap().parameters()
-            ).map_err(|e| e.to_string())?;
+                let context_decoder = ffmpeg::codec::context::Context::from_parameters(
+                    input.streams().best(ffmpeg::media::Type::Video).unwrap().parameters()
+                ).map_err(|e| e.to_string())?;
 
-            let decoder = context_decoder.decoder().video()
-                .map_err(|e| e.to_string())?;
-
-            self.input = Some(input);
-            self.decoder = Some(decoder);
+                let decoder = context_decoder.decoder().video()
+                    .map_err(|e| e.to_string())?;
+                self.decoder = Some(decoder);
+            }
+            self.input = Some(owned);
             // Set last_decoded_ts to just before the seek target so forward playback works
             // Without this, every frame would trigger a new seek
             self.last_decoded_ts = frame_ts - 1;
         }
 
-        let input = self.input.as_mut().unwrap();
+        let input = self.input.as_mut().unwrap().get();
         let decoder = self.decoder.as_mut().unwrap();
 
         // Decode frames until we find the one closest to our target timestamp
@@ -356,7 +420,7 @@ impl VideoDecoder {
 /// `get_thumbnail_at`'s 128-wide assumption holds) and tightly packed RGBA is
 /// handed to `on_thumb` as `(timestamp_secs, data)`.
 pub fn generate_keyframe_thumbnails(
-    path: &str,
+    source: VideoSource,
     interval_secs: f64,
     thumb_width: u32,
     mut should_skip: impl FnMut(f64) -> bool,
@@ -366,7 +430,7 @@ pub fn generate_keyframe_thumbnails(
     // large max-height lets width be the constraining dimension, so output width
     // is exactly `thumb_width`.
     let mut decoder = VideoDecoder::new(
-        path.to_string(),
+        source,
         4,
         Some(thumb_width),
         Some(100_000),
@@ -399,11 +463,11 @@ pub fn generate_keyframe_thumbnails(
 }
 
 /// Probe video file for metadata without creating a full decoder
-pub fn probe_video(path: &str) -> Result<VideoMetadata, String> {
+pub fn probe_video(source: &VideoSource) -> Result<VideoMetadata, String> {
     ffmpeg::init().map_err(|e| e.to_string())?;
 
-    let input = ffmpeg::format::input(path)
-        .map_err(|e| format!("Failed to open video: {}", e))?;
+    let mut owned = source.open()?;
+    let input = owned.get();
 
     let video_stream = input.streams()
         .best(ffmpeg::media::Type::Video)
@@ -521,16 +585,16 @@ impl VideoManager {
     pub fn load_video(
         &mut self,
         clip_id: Uuid,
-        path: String,
+        source: VideoSource,
         target_width: u32,
         target_height: u32,
     ) -> Result<VideoMetadata, String> {
         // First probe the video for metadata
-        let metadata = probe_video(&path)?;
+        let metadata = probe_video(&source)?;
 
         // Create decoder with target dimensions, without building keyframe index
         let decoder = VideoDecoder::new(
-            path,
+            source,
             self.cache_size,
             Some(target_width),
             Some(target_height),

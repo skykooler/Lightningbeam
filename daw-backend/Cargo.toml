@@ -23,6 +23,8 @@ memmap2 = "0.9"
 # Audio export
 hound = "3.5"
 ffmpeg-next = "8.0"  # For MP3/AAC encoding
+# AVIO-over-Read+Seek shim: stream a packed video's audio track from the SQLite blob.
+ffmpeg-blob-io = { path = "../ffmpeg-blob-io" }
 
 # Node-based audio graph dependencies
 dasp_graph = "0.11"
