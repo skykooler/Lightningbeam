@@ -830,22 +830,13 @@ fn composite_document_to_hdr(
                     if inst.rgba_data.is_empty() { continue; }
                     let hdr_layer_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
                     if let Some(hdr_layer_view) = gpu_resources.buffer_pool.get_view(hdr_layer_handle) {
-                        // sRGB straight-alpha → linear premultiplied
-                        let linear: Vec<u8> = inst.rgba_data.chunks_exact(4).flat_map(|p| {
-                            let a = p[3] as f32 / 255.0;
-                            let lin = |c: u8| -> f32 {
-                                let f = c as f32 / 255.0;
-                                if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
-                            };
-                            let r = (lin(p[0]) * a * 255.0 + 0.5) as u8;
-                            let g = (lin(p[1]) * a * 255.0 + 0.5) as u8;
-                            let b = (lin(p[2]) * a * 255.0 + 0.5) as u8;
-                            [r, g, b, p[3]]
-                        }).collect();
-                        let tex = upload_transient_texture(device, queue, &linear, inst.width, inst.height, Some("export_video_frame_tex"));
+                        // Upload raw sRGB straight-alpha bytes into an sRGB texture; the GPU
+                        // decodes to linear on sample (no per-pixel CPU conversion). Blit with
+                        // blit_straight so the shader doesn't unpremultiply.
+                        let tex = upload_transient_texture(device, queue, &inst.rgba_data, inst.width, inst.height, wgpu::TextureFormat::Rgba8UnormSrgb, Some("export_video_frame_tex"));
                         let tex_view = tex.create_view(&Default::default());
                         let bt = crate::gpu_brush::BlitTransform::new(inst.transform, inst.width, inst.height, width, height);
-                        gpu_resources.canvas_blit.blit(device, queue, &tex_view, hdr_layer_view, &bt, None);
+                        gpu_resources.canvas_blit.blit_straight(device, queue, &tex_view, hdr_layer_view, &bt, None);
                         let compositor_layer = CompositorLayer::new(hdr_layer_handle, inst.opacity, lightningbeam_core::gpu::BlendMode::Normal);
                         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_video_composite") });
                         gpu_resources.compositor.composite(device, queue, &mut enc, &[compositor_layer], &gpu_resources.buffer_pool, &gpu_resources.hdr_texture_view, None);
@@ -865,7 +856,7 @@ fn composite_document_to_hdr(
                         };
                         [lin(p[0]), lin(p[1]), lin(p[2]), p[3]]
                     }).collect();
-                    let tex = upload_transient_texture(device, queue, &linear, *fw, *fh, Some("export_float_tex"));
+                    let tex = upload_transient_texture(device, queue, &linear, *fw, *fh, wgpu::TextureFormat::Rgba8Unorm, Some("export_float_tex"));
                     let tex_view = tex.create_view(&Default::default());
                     let hdr_layer_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
                     if let Some(hdr_layer_view) = gpu_resources.buffer_pool.get_view(hdr_layer_handle) {
@@ -919,13 +910,16 @@ fn composite_document_to_hdr(
     Ok(())
 }
 
-/// Upload `pixels` to a transient `Rgba8Unorm` GPU texture (TEXTURE_BINDING | COPY_DST).
+/// Upload `pixels` to a transient GPU texture (TEXTURE_BINDING | COPY_DST) in the
+/// given format. Use `Rgba8UnormSrgb` to upload raw sRGB bytes and let the GPU
+/// decode to linear on sample (no CPU conversion).
 fn upload_transient_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     pixels: &[u8],
     width: u32,
     height: u32,
+    format: wgpu::TextureFormat,
     label: Option<&'static str>,
 ) -> wgpu::Texture {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -933,7 +927,7 @@ fn upload_transient_texture(
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         mip_level_count: 1, sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });

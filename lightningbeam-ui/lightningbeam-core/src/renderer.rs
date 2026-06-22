@@ -232,6 +232,21 @@ pub struct VideoRenderInstance {
     pub opacity: f32,
 }
 
+/// Sink for pulling video frames out of a container layer's scene recursion, so
+/// they composite via the fast GPU Video path instead of baking into Vello.
+///
+/// Threaded as `Option<&mut VideoExtract>` through the isolated-render scene
+/// functions. When present, [`render_video_layer`] pushes a [`VideoRenderInstance`]
+/// instead of drawing into the Vello scene. `drew_other` is set whenever any
+/// non-video primitive (vector graph, image asset, raster) is emitted; that forces
+/// the safe Vello fallback because the container mixes video with other content
+/// and we can't preserve z-order by extraction alone.
+#[derive(Default)]
+struct VideoExtract {
+    instances: Vec<VideoRenderInstance>,
+    drew_other: bool,
+}
+
 /// Type of rendered layer for compositor handling
 pub enum RenderedLayerType {
     /// Vector / group layer — Vello scene in `RenderedLayer::scene` is used.
@@ -428,6 +443,30 @@ pub fn render_document_for_compositing(
         }
     }
 
+    // One-shot diagnostic: dump what the compositor actually receives. Set
+    // LB_LAYER_DEBUG=1 to print a single snapshot of each layer's resolved type.
+    if std::env::var("LB_LAYER_DEBUG").is_ok() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            eprintln!("[LB_LAYER_DEBUG] composite layers = {}", rendered_layers.len());
+            for (i, l) in rendered_layers.iter().enumerate() {
+                let desc = match &l.layer_type {
+                    RenderedLayerType::Vector =>
+                        format!("Vector (has_content={}, scene_empty={})", l.has_content, l.cpu_pixmap.is_none()),
+                    RenderedLayerType::Raster { width, height, dirty, .. } =>
+                        format!("Raster {width}x{height} dirty={dirty}"),
+                    RenderedLayerType::Video { instances } =>
+                        format!("Video ({} instance(s))", instances.len()),
+                    RenderedLayerType::Float { width, height, .. } =>
+                        format!("Float {width}x{height}"),
+                    RenderedLayerType::Effect { effect_instances } =>
+                        format!("Effect ({} instance(s))", effect_instances.len()),
+                };
+                eprintln!("[LB_LAYER_DEBUG]   layer[{i}] id={} type={desc}", l.layer_id);
+            }
+        });
+    }
+
     CompositeRenderResult {
         background,
         background_cpu: None,
@@ -462,6 +501,9 @@ pub fn render_layer_isolated(
     // Render layer content with full opacity (1.0) - opacity applied during compositing
     match layer {
         AnyLayer::Vector(vector_layer) => {
+            // Render into the scene with an extraction sink so a clip that is purely
+            // video (no vector geometry) composites via the fast GPU Video path.
+            let mut ex = VideoExtract::default();
             render_vector_layer_to_scene(
                 document,
                 time,
@@ -471,10 +513,28 @@ pub fn render_layer_isolated(
                 1.0, // Full opacity - layer opacity handled in compositing
                 image_cache,
                 video_manager,
+                Some(&mut ex),
             );
-            rendered.has_content = vector_layer.graph_at_time(time)
-                .map_or(false, |graph| !graph.edges.iter().all(|e| e.deleted) || !graph.fills.iter().all(|f| f.deleted))
-                || !vector_layer.clip_instances.is_empty();
+            if !ex.instances.is_empty() && !ex.drew_other {
+                // Pure video: discard the (now-empty) scene and emit GPU instances.
+                rendered.scene = Scene::new();
+                rendered.has_content = true;
+                rendered.layer_type = RenderedLayerType::Video { instances: ex.instances };
+            } else {
+                if !ex.instances.is_empty() {
+                    // Mixed video + vector: the first pass diverted the video out of
+                    // the scene, so re-render with no sink to bake it back in (correct
+                    // z-order; Vello path). Rare — fast-splitting is deferred.
+                    rendered.scene = Scene::new();
+                    render_vector_layer_to_scene(
+                        document, time, vector_layer, &mut rendered.scene,
+                        base_transform, 1.0, image_cache, video_manager, None,
+                    );
+                }
+                rendered.has_content = vector_layer.graph_at_time(time)
+                    .map_or(false, |graph| !graph.edges.iter().all(|e| e.deleted) || !graph.fills.iter().all(|f| f.deleted))
+                    || !vector_layer.clip_instances.is_empty();
+            }
         }
         AnyLayer::Audio(_) => {
             // Audio layers don't render visually
@@ -577,15 +637,34 @@ pub fn render_layer_isolated(
             return RenderedLayer::effect_layer(layer_id, opacity, active_effects);
         }
         AnyLayer::Group(group_layer) => {
-            // Render each child layer's content into the group's scene
+            // Render each child into the group's scene with an extraction sink. The
+            // common imported-video case is a Group[Video, Audio] — audio draws
+            // nothing, so it's pure video and composites via the GPU Video path.
+            let mut ex = VideoExtract::default();
             for child in &group_layer.children {
                 render_layer(
                     document, time, child, &mut rendered.scene, base_transform,
                     1.0, // Full opacity - layer opacity handled in compositing
-                    image_cache, video_manager, camera_frame,
+                    image_cache, video_manager, camera_frame, Some(&mut ex),
                 );
             }
-            rendered.has_content = !group_layer.children.is_empty();
+            if !ex.instances.is_empty() && !ex.drew_other {
+                rendered.scene = Scene::new();
+                rendered.has_content = true;
+                rendered.layer_type = RenderedLayerType::Video { instances: ex.instances };
+            } else {
+                if !ex.instances.is_empty() {
+                    // Mixed: re-render with no sink to bake the video back into the scene.
+                    rendered.scene = Scene::new();
+                    for child in &group_layer.children {
+                        render_layer(
+                            document, time, child, &mut rendered.scene, base_transform,
+                            1.0, image_cache, video_manager, camera_frame, None,
+                        );
+                    }
+                }
+                rendered.has_content = !group_layer.children.is_empty();
+            }
         }
         AnyLayer::Raster(raster_layer) => {
             if let Some(kf) = raster_layer.keyframe_at(time) {
@@ -614,6 +693,7 @@ fn render_vector_layer_to_scene(
     parent_opacity: f64,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    extract: Option<&mut VideoExtract>,
 ) {
     render_vector_layer(
         document,
@@ -624,6 +704,7 @@ fn render_vector_layer_to_scene(
         parent_opacity,
         image_cache,
         video_manager,
+        extract,
     );
 }
 
@@ -691,10 +772,10 @@ pub fn render_document_with_transform(
     for layer in document.visible_layers() {
         if any_soloed {
             if layer.soloed() {
-                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, None);
+                render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, None, None);
             }
         } else {
-            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, None);
+            render_layer(document, time, layer, scene, base_transform, 1.0, image_cache, video_manager, None, None);
         }
     }
 }
@@ -755,10 +836,11 @@ fn render_layer(
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
     camera_frame: Option<&crate::webcam::CaptureFrame>,
+    mut extract: Option<&mut VideoExtract>,
 ) {
     match layer {
         AnyLayer::Vector(vector_layer) => {
-            render_vector_layer(document, time, vector_layer, scene, base_transform, parent_opacity, image_cache, video_manager)
+            render_vector_layer(document, time, vector_layer, scene, base_transform, parent_opacity, image_cache, video_manager, extract)
         }
         AnyLayer::Audio(_) => {
             // Audio layers don't render visually
@@ -766,18 +848,20 @@ fn render_layer(
         AnyLayer::Video(video_layer) => {
             let mut video_mgr = video_manager.lock().unwrap();
             let layer_camera_frame = if video_layer.camera_enabled { camera_frame } else { None };
-            render_video_layer(document, time, video_layer, scene, base_transform, parent_opacity, &mut video_mgr, layer_camera_frame);
+            render_video_layer(document, time, video_layer, scene, base_transform, parent_opacity, &mut video_mgr, layer_camera_frame, extract);
         }
         AnyLayer::Effect(_) => {
             // Effect layers are processed during GPU compositing, not rendered to scene
         }
         AnyLayer::Group(group_layer) => {
-            // Render each child layer in the group
+            // Render each child layer in the group, passing the extract sink down.
             for child in &group_layer.children {
-                render_layer(document, time, child, scene, base_transform, parent_opacity, image_cache, video_manager, camera_frame);
+                render_layer(document, time, child, scene, base_transform, parent_opacity, image_cache, video_manager, camera_frame, extract.as_deref_mut());
             }
         }
         AnyLayer::Raster(raster_layer) => {
+            // Raster is non-video content — force the Vello fallback if extracting.
+            if let Some(ex) = extract.as_deref_mut() { ex.drew_other = true; }
             render_raster_layer_to_scene(raster_layer, time, scene, base_transform);
         }
     }
@@ -816,6 +900,7 @@ pub fn render_single_clip_instance(
     render_clip_instance(
         document, time, clip_instance, layer_opacity, scene, base_transform,
         &vector_layer.layer.animation_data, image_cache, video_manager, group_end_time,
+        None, // edit-inside-clip overlay keeps the Vello path
     );
 }
 
@@ -831,6 +916,7 @@ fn render_clip_instance(
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
     group_end_time: Option<f64>,
+    mut extract: Option<&mut VideoExtract>,
 ) {
     // Try to find the clip in the document's clip libraries
     // For now, only handle VectorClips (VideoClip and AudioClip rendering not yet implemented)
@@ -972,7 +1058,7 @@ fn render_clip_instance(
         if !layer_node.data.visible() {
             continue;
         }
-        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity, image_cache, video_manager, None);
+        render_layer(document, clip_time, &layer_node.data, scene, instance_transform, clip_opacity, image_cache, video_manager, None, extract.as_deref_mut());
     }
 }
 
@@ -986,6 +1072,7 @@ fn render_video_layer(
     parent_opacity: f64,
     video_manager: &mut crate::video::VideoManager,
     camera_frame: Option<&crate::webcam::CaptureFrame>,
+    mut extract: Option<&mut VideoExtract>,
 ) {
     use crate::animation::TransformProperty;
 
@@ -1151,14 +1238,26 @@ fn render_video_layer(
             Affine::IDENTITY
         };
 
-        // Render video frame as image fill
-        scene.fill(
-            Fill::NonZero,
-            instance_transform,
-            &image_with_alpha,
-            Some(brush_transform),
-            &video_rect,
-        );
+        // Extract to the GPU Video path when a sink is present; otherwise bake into
+        // the Vello scene. The combined frame-pixel → document transform is
+        // instance_transform * brush_transform (matching the top-level Video path).
+        if let Some(ex) = extract.as_deref_mut() {
+            ex.instances.push(VideoRenderInstance {
+                rgba_data: frame.rgba_data.clone(),
+                width: frame.width,
+                height: frame.height,
+                transform: instance_transform * brush_transform,
+                opacity: final_opacity,
+            });
+        } else {
+            scene.fill(
+                Fill::NonZero,
+                instance_transform,
+                &image_with_alpha,
+                Some(brush_transform),
+                &video_rect,
+            );
+        }
         clip_rendered = true;
     }
 
@@ -1194,13 +1293,25 @@ fn render_video_layer(
                 * Affine::translate((offset_x, offset_y))
                 * Affine::scale(uniform_scale);
 
-            scene.fill(
-                Fill::NonZero,
-                preview_transform,
-                &image_with_alpha,
-                None,
-                &frame_rect,
-            );
+            // preview_transform maps frame-pixel space → document directly, so it
+            // is exactly the instance transform for the GPU path.
+            if let Some(ex) = extract.as_deref_mut() {
+                ex.instances.push(VideoRenderInstance {
+                    rgba_data: frame.rgba_data.clone(),
+                    width: frame.width,
+                    height: frame.height,
+                    transform: preview_transform,
+                    opacity: final_opacity,
+                });
+            } else {
+                scene.fill(
+                    Fill::NonZero,
+                    preview_transform,
+                    &image_with_alpha,
+                    None,
+                    &frame_rect,
+                );
+            }
         }
     }
 }
@@ -1352,6 +1463,7 @@ fn render_vector_layer(
     parent_opacity: f64,
     image_cache: &mut ImageCache,
     video_manager: &std::sync::Arc<std::sync::Mutex<crate::video::VideoManager>>,
+    mut extract: Option<&mut VideoExtract>,
 ) {
     // Cascade opacity: parent_opacity × layer.opacity
     let layer_opacity = parent_opacity * layer.layer.opacity;
@@ -1359,6 +1471,10 @@ fn render_vector_layer(
     // Render the layer's own VectorGraph (loose shapes) first, then clip instances
     // (groups / movie clips) on top. Shape tweens are applied here.
     if let Some(graph) = layer.tweened_graph_at(time) {
+        // Loose vector geometry (and any image-asset fills) is non-video content —
+        // force the Vello fallback. Conservative: a present-but-empty graph still
+        // trips this, which only costs the fallback, never correctness.
+        if let Some(ex) = extract.as_deref_mut() { ex.drew_other = true; }
         render_vector_graph(&graph, scene, base_transform, layer_opacity, document, image_cache);
     }
 
@@ -1370,7 +1486,7 @@ fn render_vector_layer(
                 let frame_duration = 1.0 / document.framerate;
                 layer.group_visibility_end(&clip_instance.id, clip_instance.timeline_start, frame_duration)
             });
-        render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data, image_cache, video_manager, group_end_time);
+        render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data, image_cache, video_manager, group_end_time, extract.as_deref_mut());
     }
 }
 

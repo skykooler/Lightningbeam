@@ -75,3 +75,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let tinted = base + tint - base * tint;
     return vec4<f32>(tinted, masked_a);
 }
+
+// Variant for sources that are ALREADY straight-alpha linear — notably a video
+// frame uploaded to an `Rgba8UnormSrgb` texture, where the hardware decodes
+// sRGB→linear on sample and leaves alpha untouched. No unpremultiply (the source
+// was never premultiplied), so we skip the divide entirely. The compositor wants
+// straight-alpha linear, which is exactly what the sample already is.
+@fragment
+fn fs_main_straight(in: VertexOutput) -> @location(0) vec4<f32> {
+    let m = mat3x3<f32>(transform.col0.xyz, transform.col1.xyz, transform.col2.xyz);
+    let canvas_uv = (m * vec3<f32>(in.uv.x, in.uv.y, 1.0)).xy;
+
+    if canvas_uv.x < 0.0 || canvas_uv.x > 1.0
+    || canvas_uv.y < 0.0 || canvas_uv.y > 1.0 {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
+    let c = textureSample(canvas_tex, canvas_sampler, canvas_uv);
+    let mask = textureSample(mask_tex, mask_sampler, canvas_uv).r;
+    let tint = vec3<f32>(transform.col0.w, transform.col1.w, transform.col2.w);
+    let tinted = c.rgb + tint - c.rgb * tint;
+    return vec4<f32>(tinted, c.a * mask);
+}

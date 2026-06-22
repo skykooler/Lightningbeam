@@ -50,6 +50,7 @@ use effect_thumbnails::EffectThumbnailGenerator;
 mod custom_cursor;
 mod tablet;
 mod debug_overlay;
+mod gpu_timer;
 
 #[cfg(debug_assertions)]
 mod test_mode;
@@ -174,8 +175,12 @@ fn main() -> eframe::Result {
                 device_descriptor: std::sync::Arc::new(|adapter| {
                     let features = adapter.features();
                     // Request SHADER_F16 if available — needed on Mesa/llvmpipe for vello's
-                    // unpack2x16float (enables the SHADER_F16_IN_F32 downlevel capability)
-                    let optional_features = wgpu::Features::SHADER_F16;
+                    // unpack2x16float (enables the SHADER_F16_IN_F32 downlevel capability).
+                    // TIMESTAMP_QUERY(+INSIDE_ENCODERS) drives the F3 GPU composite timer
+                    // (gpu_timer.rs); both are optional and no-op when unsupported.
+                    let optional_features = wgpu::Features::SHADER_F16
+                        | wgpu::Features::TIMESTAMP_QUERY
+                        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
 
                     let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
                         wgpu::Limits::downlevel_webgl2_defaults()
