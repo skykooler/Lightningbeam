@@ -11,6 +11,9 @@
 
 pub mod nv12;
 
+/// Fragment-shader RGBA→NV12 conversion that renders into plane textures.
+pub mod render_nv12;
+
 /// VAAPI hardware encode (Linux-only; libva).
 #[cfg(target_os = "linux")]
 pub mod vaapi;
@@ -22,6 +25,10 @@ pub mod vk_device;
 /// Import a VAAPI NV12 DMA-BUF as wgpu textures (Linux).
 #[cfg(target_os = "linux")]
 pub mod dmabuf;
+
+/// End-to-end zero-copy `h264_vaapi` encoder (Linux).
+#[cfg(target_os = "linux")]
+pub mod encoder;
 
 #[cfg(test)]
 mod probe_tests {
