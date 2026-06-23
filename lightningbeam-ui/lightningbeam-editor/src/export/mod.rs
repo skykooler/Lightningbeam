@@ -10,6 +10,7 @@ pub mod video_exporter;
 pub mod readback_pipeline;
 pub mod perf_metrics;
 pub mod cpu_yuv_converter;
+pub mod gpu_yuv;
 
 use lightningbeam_core::export::{AudioExportSettings, ImageExportSettings, VideoExportSettings, ExportProgress};
 use lightningbeam_core::document::Document;
@@ -1038,6 +1039,18 @@ impl ExportOrchestrator {
         let state = self.video_state.as_mut()
             .ok_or("No video export in progress")?;
 
+        // Already completed (Done sent, all frames done): don't re-initialize and
+        // re-run. The completion path nulls gpu_resources but leaves video_state set
+        // (cleared only when the parallel export finishes); without this guard the
+        // function would re-create the GPU pipeline and re-emit "Complete" every frame
+        // while the encoder/mux drains.
+        if state.frame_tx.is_none()
+            && state.current_frame >= state.total_frames
+            && state.frames_in_flight == 0
+        {
+            return Ok(false);
+        }
+
         let width = state.width;
         let height = state.height;
 
@@ -1045,7 +1058,19 @@ impl ExportOrchestrator {
         if state.gpu_resources.is_none() {
             println!("🎬 [VIDEO EXPORT] Initializing HDR GPU + async pipeline {}x{}", width, height);
             state.gpu_resources = Some(video_exporter::ExportGpuResources::new(device, width, height));
-            state.readback_pipeline = Some(readback_pipeline::ReadbackPipeline::new(device, queue, width, height));
+            // Enable GPU YUV only when the encoder's YUV420P planes are tight (no linesize
+            // padding) — then the packed GPU planes copy in without row misalignment.
+            // Otherwise fall back to RGBA readback + CPU swscale.
+            let gpu_yuv_tight = std::env::var("LB_DISABLE_GPU_YUV").is_err() && {
+                let probe = ffmpeg_next::frame::Video::new(
+                    ffmpeg_next::format::Pixel::YUV420P, width, height,
+                );
+                probe.stride(0) == width as usize && probe.stride(1) == (width / 2) as usize
+            };
+            if !gpu_yuv_tight {
+                println!("🎬 [VIDEO EXPORT] YUV planes are padded at {width}x{height}; using CPU YUV path");
+            }
+            state.readback_pipeline = Some(readback_pipeline::ReadbackPipeline::new(device, queue, width, height, gpu_yuv_tight));
             state.cpu_yuv_converter = Some(cpu_yuv_converter::CpuYuvConverter::new(width, height)?);
             println!("🚀 [ASYNC PIPELINE] Triple-buffered pipeline initialized");
             println!("🚀 [CPU YUV] swscale converter initialized");
@@ -1075,14 +1100,18 @@ impl ExportOrchestrator {
                     }
                 }
 
-                // Extract RGBA data (timed)
+                // Extract readback data (timed)
                 let extraction_start = Instant::now();
-                let rgba_data = pipeline.extract_rgba_data(result.buffer_id);
+                let data = pipeline.extract_rgba_data(result.buffer_id);
                 let extraction_end = Instant::now();
 
-                // CPU YUV conversion (timed)
+                // YUV planes: GPU-converted (just slice) or CPU swscale fallback (timed).
                 let conversion_start = Instant::now();
-                let (y, u, v) = cpu_converter.convert(&rgba_data)?;
+                let (y, u, v) = if pipeline.is_yuv_mode() {
+                    pipeline.split_yuv(&data)
+                } else {
+                    cpu_converter.convert(&data)?
+                };
                 let conversion_end = Instant::now();
 
                 if let Some(m) = metrics.as_mut() {

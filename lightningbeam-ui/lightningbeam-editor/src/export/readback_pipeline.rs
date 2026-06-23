@@ -41,7 +41,10 @@ struct PipelineBuffer {
     /// RGBA texture for GPU rendering output (Rgba8Unorm)
     rgba_texture: wgpu::Texture,
     rgba_texture_view: wgpu::TextureView,
-    /// Staging buffer for GPU→CPU transfer (MAP_READ)
+    /// In YUV mode: packed planar YUV420p the compute shader writes (STORAGE | COPY_SRC).
+    /// `None` in RGBA fallback mode.
+    yuv_buffer: Option<wgpu::Buffer>,
+    /// Staging buffer for GPU→CPU transfer (MAP_READ). Holds YUV in YUV mode, RGBA otherwise.
     staging_buffer: wgpu::Buffer,
     /// Current state in the pipeline
     state: BufferState,
@@ -71,6 +74,10 @@ pub struct ReadbackPipeline {
     /// Buffer dimensions
     width: u32,
     height: u32,
+    /// `Some` when converting RGBA→YUV420p on the GPU (skips the CPU swscale pass and
+    /// reads back ~3 MB of planar YUV instead of 8 MB RGBA). `None` falls back to RGBA
+    /// readback + CPU conversion for dimensions the packed shader can't handle.
+    gpu_yuv: Option<super::gpu_yuv::GpuYuv>,
 }
 
 impl ReadbackPipeline {
@@ -81,13 +88,31 @@ impl ReadbackPipeline {
     /// * `queue` - GPU queue (will be cloned for async operations)
     /// * `width` - Frame width in pixels
     /// * `height` - Frame height in pixels
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) -> Self {
+    /// `enable_gpu_yuv` should be `true` only when the caller has verified the encoder's
+    /// `YUV420P` plane strides are tight (== width / width-2), so the packed GPU planes
+    /// drop straight into the `AVFrame` without row misalignment.
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, enable_gpu_yuv: bool) -> Self {
         let (readback_tx, readback_rx) = channel();
+
+        // GPU YUV conversion when enabled AND the dimensions fit the packed shader; else RGBA + CPU.
+        let gpu_yuv = if enable_gpu_yuv && super::gpu_yuv::supports(width, height) {
+            Some(super::gpu_yuv::GpuYuv::new(device))
+        } else {
+            None
+        };
+        let yuv_mode = gpu_yuv.is_some();
+
+        // Staging size: planar YUV420p (W*H*3/2) in YUV mode, else RGBA (W*H*4).
+        let staging_size = if yuv_mode {
+            super::gpu_yuv::yuv420p_len(width, height) as u64
+        } else {
+            (width * height * 4) as u64
+        };
 
         // Create 3 buffers for triple buffering
         let mut buffers = Vec::new();
         for id in 0..3 {
-            // RGBA texture (Rgba8Unorm)
+            // RGBA texture (Rgba8Unorm). TEXTURE_BINDING lets the YUV compute shader read it.
             let rgba_texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(&format!("readback_rgba_texture_{}", id)),
                 size: wgpu::Extent3d {
@@ -99,17 +124,29 @@ impl ReadbackPipeline {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
 
             let rgba_texture_view = rgba_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+            let yuv_buffer = if yuv_mode {
+                Some(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some(&format!("readback_yuv_buffer_{}", id)),
+                    size: staging_size,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }))
+            } else {
+                None
+            };
+
             // Staging buffer for GPU→CPU readback
-            let rgba_buffer_size = (width * height * 4) as u64; // Rgba8Unorm = 4 bytes/pixel
             let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(&format!("readback_staging_buffer_{}", id)),
-                size: rgba_buffer_size,
+                size: staging_size,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
@@ -118,6 +155,7 @@ impl ReadbackPipeline {
                 id,
                 rgba_texture,
                 rgba_texture_view,
+                yuv_buffer,
                 staging_buffer,
                 state: BufferState::Free,
                 frame_num: None,
@@ -133,7 +171,21 @@ impl ReadbackPipeline {
             queue: queue.clone(),
             width,
             height,
+            gpu_yuv,
         }
+    }
+
+    /// `true` when frames are read back as planar YUV420p (GPU-converted) — the caller
+    /// should slice planes with [`Self::split_yuv`] instead of running the CPU converter.
+    pub fn is_yuv_mode(&self) -> bool {
+        self.gpu_yuv.is_some()
+    }
+
+    /// Split a YUV-mode readback buffer into tight (Y, U, V) planes.
+    pub fn split_yuv(&self, data: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let y = (self.width * self.height) as usize;
+        let c = ((self.width / 2) * (self.height / 2)) as usize;
+        (data[..y].to_vec(), data[y..y + c].to_vec(), data[y + c..y + 2 * c].to_vec())
     }
 
     /// Acquire a free buffer for rendering (non-blocking)
@@ -166,28 +218,34 @@ impl ReadbackPipeline {
         let buffer = &mut self.buffers[buffer_id];
         assert_eq!(buffer.state, BufferState::Rendering, "Buffer not in Rendering state");
 
-        // Copy RGBA texture to staging buffer
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &buffer.rgba_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer.staging_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.width * 4), // Rgba8Unorm
-                    rows_per_image: Some(self.height),
+        if let (Some(gpu_yuv), Some(yuv_buffer)) = (self.gpu_yuv.as_ref(), buffer.yuv_buffer.as_ref()) {
+            // GPU RGBA→YUV420p, then copy the packed YUV buffer to staging (~3 MB).
+            gpu_yuv.convert(&self.device, &mut encoder, &buffer.rgba_texture_view, yuv_buffer, self.width, self.height);
+            encoder.copy_buffer_to_buffer(yuv_buffer, 0, &buffer.staging_buffer, 0, buffer.staging_buffer.size());
+        } else {
+            // Fallback: copy the RGBA texture to staging (8 MB), CPU converts later.
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &buffer.rgba_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
                 },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer.staging_buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(self.width * 4), // Rgba8Unorm
+                        rows_per_image: Some(self.height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
 
         // Submit GPU commands (non-blocking)
         self.queue.submit(Some(encoder.finish()));
