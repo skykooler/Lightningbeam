@@ -471,7 +471,10 @@ fn auto_key_ranges(notes: &[u8]) -> Vec<(u8, u8)> {
         let min = if i == 0 {
             0
         } else {
-            ((notes[i - 1] as u16 + notes[i] as u16 + 1) / 2) as u8
+            // One past the previous note's midpoint boundary, so adjacent ranges
+            // don't both claim the midpoint key. The previous note's max is
+            // floor((notes[i-1] + notes[i]) / 2); start here at that + 1.
+            (((notes[i - 1] as u16 + notes[i] as u16) / 2) + 1) as u8
         };
         let max = if i == notes.len() - 1 {
             127

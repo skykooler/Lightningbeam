@@ -62,22 +62,22 @@ fn test_selection_of_shape_instances() {
     let mut selection = Selection::new();
 
     // Select first shape instance
-    selection.add_shape_instance(shape_ids[0]);
-    assert!(selection.contains_shape_instance(&shape_ids[0]));
-    assert!(!selection.contains_shape_instance(&shape_ids[1]));
-    assert_eq!(selection.shape_instances().len(), 1);
+    selection.add_clip_instance(shape_ids[0]);
+    assert!(selection.contains_clip_instance(&shape_ids[0]));
+    assert!(!selection.contains_clip_instance(&shape_ids[1]));
+    assert_eq!(selection.clip_instances().len(), 1);
 
     // Add second shape instance
-    selection.add_shape_instance(shape_ids[1]);
-    assert!(selection.contains_shape_instance(&shape_ids[0]));
-    assert!(selection.contains_shape_instance(&shape_ids[1]));
-    assert_eq!(selection.shape_instances().len(), 2);
+    selection.add_clip_instance(shape_ids[1]);
+    assert!(selection.contains_clip_instance(&shape_ids[0]));
+    assert!(selection.contains_clip_instance(&shape_ids[1]));
+    assert_eq!(selection.clip_instances().len(), 2);
 
     // Toggle first shape instance (deselect)
-    selection.toggle_shape_instance(shape_ids[0]);
-    assert!(!selection.contains_shape_instance(&shape_ids[0]));
-    assert!(selection.contains_shape_instance(&shape_ids[1]));
-    assert_eq!(selection.shape_instances().len(), 1);
+    selection.toggle_clip_instance(shape_ids[0]);
+    assert!(!selection.contains_clip_instance(&shape_ids[0]));
+    assert!(selection.contains_clip_instance(&shape_ids[1]));
+    assert_eq!(selection.clip_instances().len(), 1);
 }
 
 #[test]
@@ -108,49 +108,23 @@ fn test_mixed_selection() {
 
     let mut selection = Selection::new();
 
-    // Select both shapes and clips
-    selection.add_shape_instance(shape_ids[0]);
-    selection.add_shape_instance(shape_ids[1]);
+    // Selection is unified: shapes and clips are both clip instances.
+    selection.add_clip_instance(shape_ids[0]);
+    selection.add_clip_instance(shape_ids[1]);
     selection.add_clip_instance(clip_ids[0]);
     selection.add_clip_instance(clip_ids[1]);
 
-    assert_eq!(selection.shape_instances().len(), 2);
-    assert_eq!(selection.clip_instances().len(), 2);
+    assert_eq!(selection.clip_instances().len(), 4);
 
-    // Clear only clip instances
+    // Clearing clip instances clears them all.
     selection.clear_clip_instances();
-
-    assert_eq!(selection.shape_instances().len(), 2);
     assert_eq!(selection.clip_instances().len(), 0);
 
-    // Re-add clip
+    // Re-add one, then full clear.
     selection.add_clip_instance(clip_ids[0]);
-
-    // Full clear
+    assert_eq!(selection.clip_instances().len(), 1);
     selection.clear();
-
-    assert_eq!(selection.shape_instances().len(), 0);
     assert_eq!(selection.clip_instances().len(), 0);
-}
-
-#[test]
-fn test_select_only_shape_instance() {
-    let (_document, _layer_id, shape_ids, clip_ids) = setup_mixed_content_document();
-
-    let mut selection = Selection::new();
-
-    // Select multiple items
-    selection.add_shape_instance(shape_ids[0]);
-    selection.add_shape_instance(shape_ids[1]);
-    selection.add_clip_instance(clip_ids[0]);
-
-    // Select only shape_ids[0] - this clears ALL selections first
-    selection.select_only_shape_instance(shape_ids[0]);
-
-    assert!(selection.contains_shape_instance(&shape_ids[0]));
-    assert!(!selection.contains_shape_instance(&shape_ids[1]));
-    // select_only_shape_instance calls clear() so clip instances are also cleared
-    assert!(!selection.contains_clip_instance(&clip_ids[0]));
 }
 
 #[test]
@@ -160,7 +134,27 @@ fn test_select_only_clip_instance() {
     let mut selection = Selection::new();
 
     // Select multiple items
-    selection.add_shape_instance(shape_ids[0]);
+    selection.add_clip_instance(shape_ids[0]);
+    selection.add_clip_instance(shape_ids[1]);
+    selection.add_clip_instance(clip_ids[0]);
+
+    // Select only shape_ids[0] - this clears ALL selections first
+    selection.select_only_clip_instance(shape_ids[0]);
+
+    assert!(selection.contains_clip_instance(&shape_ids[0]));
+    assert!(!selection.contains_clip_instance(&shape_ids[1]));
+    // select_only_shape_instance calls clear() so clip instances are also cleared
+    assert!(!selection.contains_clip_instance(&clip_ids[0]));
+}
+
+#[test]
+fn test_select_only_clip_instance_clears_others() {
+    let (_document, _layer_id, shape_ids, clip_ids) = setup_mixed_content_document();
+
+    let mut selection = Selection::new();
+
+    // Select multiple items
+    selection.add_clip_instance(shape_ids[0]);
     selection.add_clip_instance(clip_ids[0]);
     selection.add_clip_instance(clip_ids[1]);
 
@@ -170,7 +164,7 @@ fn test_select_only_clip_instance() {
     assert!(selection.contains_clip_instance(&clip_ids[0]));
     assert!(!selection.contains_clip_instance(&clip_ids[1]));
     // select_only_clip_instance calls clear() so shape instances are also cleared
-    assert!(!selection.contains_shape_instance(&shape_ids[0]));
+    assert!(!selection.contains_clip_instance(&shape_ids[0]));
 }
 
 #[test]
@@ -223,7 +217,7 @@ fn test_selection_is_empty() {
     assert!(selection.is_empty());
 
     let mut selection2 = Selection::new();
-    selection2.add_shape_instance(Uuid::new_v4());
+    selection2.add_clip_instance(Uuid::new_v4());
     assert!(!selection2.is_empty());
 
     let mut selection3 = Selection::new();
@@ -239,20 +233,18 @@ fn test_selection_count() {
     let id2 = Uuid::new_v4();
     let clip_id = Uuid::new_v4();
 
-    selection.add_shape_instance(id1);
-    selection.add_shape_instance(id2);
+    selection.add_clip_instance(id1);
+    selection.add_clip_instance(id2);
     selection.add_clip_instance(clip_id);
 
-    assert_eq!(selection.shape_instances().len(), 2);
-    assert_eq!(selection.clip_instances().len(), 1);
+    assert_eq!(selection.clip_instances().len(), 3);
 
-    // Remove one
-    selection.remove_shape_instance(&id1);
-    assert_eq!(selection.shape_instances().len(), 1);
+    // Remove one at a time.
+    selection.remove_clip_instance(&id1);
+    assert_eq!(selection.clip_instances().len(), 2);
 
-    // Remove clip
     selection.remove_clip_instance(&clip_id);
-    assert_eq!(selection.clip_instances().len(), 0);
+    assert_eq!(selection.clip_instances().len(), 1);
 }
 
 #[test]
@@ -261,17 +253,17 @@ fn test_duplicate_selection_handling() {
     let id = Uuid::new_v4();
 
     // Add same ID multiple times
-    selection.add_shape_instance(id);
-    selection.add_shape_instance(id);
-    selection.add_shape_instance(id);
+    selection.add_clip_instance(id);
+    selection.add_clip_instance(id);
+    selection.add_clip_instance(id);
 
     // Should only contain one instance (dedup behavior)
-    assert_eq!(selection.shape_instances().len(), 1);
+    assert_eq!(selection.clip_instances().len(), 1);
 
-    // Same for clip instances
+    // A second distinct ID, also added twice, dedups to one more (total 2).
     let clip_id = Uuid::new_v4();
     selection.add_clip_instance(clip_id);
     selection.add_clip_instance(clip_id);
 
-    assert_eq!(selection.clip_instances().len(), 1);
+    assert_eq!(selection.clip_instances().len(), 2);
 }

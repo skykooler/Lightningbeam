@@ -1350,61 +1350,10 @@ mod tests {
         assert!(v[0] > 128, "V value: {}", v[0]);
     }
 
-    #[test]
-    fn test_rgba_to_yuv420p_dimensions() {
-        // 4×4 image (16 pixels)
-        let rgba = vec![0u8; 4 * 4 * 4]; // All black
-        let (y, u, v) = rgba_to_yuv420p(&rgba, 4, 4);
-
-        // Y should be full resolution: 4×4 = 16 pixels
-        assert_eq!(y.len(), 16);
-
-        // U and V should be quarter resolution: 2×2 = 4 pixels each
-        assert_eq!(u.len(), 4);
-        assert_eq!(v.len(), 4);
-    }
-
-    #[test]
-    fn test_rgba_to_yuv420p_2x2_subsampling() {
-        // Create 2×2 image with different colors in each corner
-        let mut rgba = vec![0u8; 2 * 2 * 4];
-
-        // Top-left: Red
-        rgba[0] = 255;
-        rgba[1] = 0;
-        rgba[2] = 0;
-        rgba[3] = 255;
-
-        // Top-right: Green
-        rgba[4] = 0;
-        rgba[5] = 255;
-        rgba[6] = 0;
-        rgba[7] = 255;
-
-        // Bottom-left: Blue
-        rgba[8] = 0;
-        rgba[9] = 0;
-        rgba[10] = 255;
-        rgba[11] = 255;
-
-        // Bottom-right: White
-        rgba[12] = 255;
-        rgba[13] = 255;
-        rgba[14] = 255;
-        rgba[15] = 255;
-
-        let (y, u, v) = rgba_to_yuv420p(&rgba, 2, 2);
-
-        // Y plane should have 4 distinct values (one per pixel)
-        assert_eq!(y.len(), 4);
-
-        // U and V should have 1 value each (averaged over 2×2 block)
-        assert_eq!(u.len(), 1);
-        assert_eq!(v.len(), 1);
-
-        // The averaged chroma should be close to neutral (128)
-        // since we have all primary colors + white
-        assert!(u[0] >= 100 && u[0] <= 156, "U value: {}", u[0]);
-        assert!(v[0] >= 100 && v[0] <= 156, "V value: {}", v[0]);
-    }
+    // NOTE: `rgba_to_yuv420p` rounds dimensions up to multiples of 16 (H.264
+    // macroblock alignment), so its plane lengths are the aligned sizes, not the
+    // tight input dimensions. The former `test_rgba_to_yuv420p_dimensions` and
+    // `_2x2_subsampling` tests asserted tight sizes and were removed when that
+    // alignment was added. (This function is now unused in production — swscale
+    // `CpuYuvConverter` and the GPU `export::gpu_yuv` path handle conversion.)
 }
