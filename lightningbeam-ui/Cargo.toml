@@ -4,6 +4,7 @@ members = [
     "lightningbeam-editor",
     "lightningbeam-core",
     "beamdsp",
+    "gpu-video-encoder",
 ]
 
 [workspace.dependencies]

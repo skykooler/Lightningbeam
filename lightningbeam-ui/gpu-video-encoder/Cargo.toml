@@ -1,0 +1,20 @@
+[package]
+name = "gpu-video-encoder"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-copy GPU video encoding (RGBA->NV12 compute + hardware encoder interop). Unsafe FFI isolated here."
+
+[dependencies]
+wgpu = { workspace = true }
+# Raw Vulkan access for the DMA-BUF import. Versions MUST match what wgpu links
+# (wgpu-hal 27.0.4 / ash 0.38) so the hal/ash types unify across the boundary.
+wgpu-hal = { version = "27", features = ["vulkan"] }
+wgpu-types = "27"
+ash = "0.38"
+# Raw FFmpeg FFI for VAAPI hwcontext + hardware encode. Matches the editor's
+# ffmpeg-next 8.0 / static link so cargo unifies to one libav* across the build.
+ffmpeg-sys-next = { version = "8.0", features = ["static"] }
+libc = "0.2"
+
+[dev-dependencies]
+pollster = "0.4"

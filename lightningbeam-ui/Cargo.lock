@@ -2850,6 +2850,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpu-video-encoder"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "ffmpeg-sys-next",
+ "libc",
+ "pollster 0.4.0",
+ "wgpu",
+ "wgpu-hal",
+ "wgpu-types",
+]
+
+[[package]]
 name = "gtk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
