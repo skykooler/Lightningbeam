@@ -77,6 +77,12 @@ pub struct ReadAheadBuffer {
     /// When true, `render_from_file` will block-wait for frames instead of
     /// returning silence on buffer miss. Used during offline export.
     export_mode: AtomicBool,
+    /// Set by the disk reader when the source reaches EOF (no more frames will
+    /// ever be decoded past the current valid range). Lets export-mode block-waits
+    /// give up immediately for frames past the end of the audio (e.g. a video whose
+    /// audio track is shorter than the video) instead of timing out per chunk.
+    /// Cleared on `reset` (a seek may decode fresh data again).
+    finished: AtomicBool,
 }
 
 // SAFETY: See the doc comment on ReadAheadBuffer for the full safety argument.
@@ -112,6 +118,7 @@ impl ReadAheadBuffer {
             sample_rate,
             target_frame: AtomicU64::new(0),
             export_mode: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
         }
     }
 
@@ -216,11 +223,24 @@ impl ReadAheadBuffer {
         self.export_mode.load(Ordering::Acquire)
     }
 
+    /// Mark that the source has reached EOF (set by the disk reader).
+    pub fn set_finished(&self, finished: bool) {
+        self.finished.store(finished, Ordering::Release);
+    }
+
+    /// True once the source hit EOF: no frames past the current valid range
+    /// will ever be decoded (until a `reset`/seek).
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+
     /// Reset the buffer to start at `new_start` with zero valid frames.
     /// Called by the **disk reader thread** (producer) after a seek.
     pub fn reset(&self, new_start: u64) {
         self.valid_frames.store(0, Ordering::Release);
         self.start_frame.store(new_start, Ordering::Release);
+        // A seek may decode fresh data past the previous EOF position.
+        self.finished.store(false, Ordering::Release);
     }
 
     /// Write interleaved samples into the buffer, extending the valid range.
@@ -1138,7 +1158,12 @@ impl DiskReader {
 
                 // Decode more data into the buffer.
                 match reader.decode_next(&mut decode_buf) {
-                    Ok(0) => {} // EOF
+                    Ok(0) => {
+                        // EOF: no more frames will be decoded for this buffer until a
+                        // seek. Tell export-mode waiters so they stop blocking on
+                        // past-the-end frames (e.g. video longer than its audio).
+                        buffer.set_finished(true);
+                    }
                     Ok(frames) => {
                         let was_empty = buffer.valid_frames_count() == 0;
                         buffer.write_samples(&decode_buf, frames);

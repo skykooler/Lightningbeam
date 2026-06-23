@@ -577,6 +577,14 @@ impl AudioClipPool {
                 // Spin-wait with small sleeps until the disk reader fills the buffer
                 let mut wait_iters = 0u64;
                 while !ra.has_range(src_start, frames_needed) {
+                    // The source reached EOF and these frames are past the end of the
+                    // audio (e.g. a video whose audio track is shorter than the video,
+                    // or a container without exact stream duration). They will never
+                    // arrive — stop waiting and let the render fill silence, instead of
+                    // burning the 10s safety valve on every remaining chunk.
+                    if ra.is_finished() {
+                        break;
+                    }
                     std::thread::sleep(std::time::Duration::from_micros(100));
                     wait_iters += 1;
                     if wait_iters > 100_000 {
