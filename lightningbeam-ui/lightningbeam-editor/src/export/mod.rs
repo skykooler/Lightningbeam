@@ -66,6 +66,20 @@ pub struct VideoExportState {
     next_frame_to_encode: usize,
     /// Performance metrics for instrumentation
     perf_metrics: Option<perf_metrics::ExportMetrics>,
+    /// When `Some`, the video is produced zero-copy on its own VAAPI-capable device
+    /// (renders + hardware-encodes inline), bypassing the readback pipeline + encoder
+    /// thread. Only set for the parallel video+audio H.264 path when VAAPI is available.
+    zero_copy: Option<ZeroCopyVideo>,
+}
+
+/// Zero-copy VAAPI video production: renders each frame to RGBA and hardware-encodes it
+/// into a VAAPI surface, all on the encoder's own wgpu device (no readback / swscale).
+struct ZeroCopyVideo {
+    encoder: gpu_video_encoder::encoder::ZeroCopyEncoder,
+    renderer: vello::Renderer,
+    gpu_resources: video_exporter::ExportGpuResources,
+    /// Reused RGBA target (RENDER_ATTACHMENT | TEXTURE_BINDING) on the encoder's device.
+    rgba: wgpu::Texture,
 }
 
 /// State for a single-frame image export (runs on the GPU render thread, one frame per update).
@@ -860,6 +874,7 @@ impl ExportOrchestrator {
             frames_in_flight: 0,
             next_frame_to_encode: 0,
             perf_metrics: Some(perf_metrics::ExportMetrics::new()),
+            zero_copy: None, // video-only export uses the software path for now
         });
 
         println!("🎬 [VIDEO EXPORT] Encoder thread spawned, ready for frames");
@@ -946,19 +961,82 @@ impl ExportOrchestrator {
         let video_cancel_flag = Arc::clone(&self.cancel_flag);
         let audio_cancel_flag = Arc::clone(&self.cancel_flag);
 
-        // Spawn video encoder thread
-        let video_settings_clone = video_settings.clone();
-        let temp_video_path_clone = temp_video_path.clone();
-        let video_thread = std::thread::spawn(move || {
-            Self::run_video_encoder(
-                video_settings_clone,
-                temp_video_path_clone,
-                frame_rx,
-                video_progress_tx,
-                video_cancel_flag,
-                total_frames,
-            );
-        });
+        // Try the zero-copy VAAPI path for H.264: render + hardware-encode each frame inline
+        // on its own device, writing the temp .mp4 directly (no readback / swscale / encoder
+        // thread). Falls back to the software encoder thread when unavailable.
+        let zero_copy = if matches!(video_settings.codec, lightningbeam_core::export::VideoCodec::H264) {
+            match gpu_video_encoder::encoder::ZeroCopyEncoder::new(
+                video_width,
+                video_height,
+                video_framerate.round() as i32,
+                video_settings.quality.bitrate_kbps(),
+                &temp_video_path,
+            ) {
+                Ok(encoder) => match vello::Renderer::new(
+                    encoder.device(),
+                    vello::RendererOptions {
+                        use_cpu: false,
+                        antialiasing_support: vello::AaSupport::all(),
+                        num_init_threads: None,
+                        pipeline_cache: None,
+                    },
+                ) {
+                    Ok(renderer) => {
+                        let gpu_resources = video_exporter::ExportGpuResources::new(
+                            encoder.device(),
+                            video_width,
+                            video_height,
+                        );
+                        let rgba = encoder.device().create_texture(&wgpu::TextureDescriptor {
+                            label: Some("zerocopy_export_rgba"),
+                            size: wgpu::Extent3d { width: video_width, height: video_height, depth_or_array_layers: 1 },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format: wgpu::TextureFormat::Rgba8Unorm,
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                                | wgpu::TextureUsages::TEXTURE_BINDING
+                                | wgpu::TextureUsages::COPY_SRC,
+                            view_formats: &[],
+                        });
+                        println!("🎬 [PARALLEL EXPORT] zero-copy VAAPI H.264 enabled");
+                        Some(ZeroCopyVideo { encoder, renderer, gpu_resources, rgba })
+                    }
+                    Err(e) => {
+                        println!("🎬 [PARALLEL EXPORT] zero-copy renderer init failed ({e}); software path");
+                        None
+                    }
+                },
+                Err(e) => {
+                    println!("🎬 [PARALLEL EXPORT] zero-copy unavailable ({e}); software path");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Spawn the software video encoder thread only when not zero-copy.
+        let video_thread = if zero_copy.is_none() {
+            let video_settings_clone = video_settings.clone();
+            let temp_video_path_clone = temp_video_path.clone();
+            Some(std::thread::spawn(move || {
+                Self::run_video_encoder(
+                    video_settings_clone,
+                    temp_video_path_clone,
+                    frame_rx,
+                    video_progress_tx,
+                    video_cancel_flag,
+                    total_frames,
+                );
+            }))
+        } else {
+            // In zero-copy mode the render loop writes the temp .mp4 directly and sets
+            // `video_progress` on completion, so these are unused.
+            drop(frame_rx);
+            drop(video_progress_tx);
+            None
+        };
 
         // Spawn audio export thread
         let temp_audio_path_clone = temp_audio_path.clone();
@@ -972,8 +1050,9 @@ impl ExportOrchestrator {
             );
         });
 
-        // Initialize video export state for incremental rendering
-        // GPU resources and readback pipeline will be initialized lazily on first frame (needs device)
+        // Initialize video export state for incremental rendering. GPU resources + readback
+        // pipeline init lazily on the first frame (software path); zero-copy carries its own.
+        let frame_tx = if zero_copy.is_some() { None } else { Some(frame_tx) };
         self.video_state = Some(VideoExportState {
             current_frame: 0,
             total_frames,
@@ -982,20 +1061,21 @@ impl ExportOrchestrator {
             framerate: video_framerate,
             width: video_width,
             height: video_height,
-            frame_tx: Some(frame_tx),
+            frame_tx,
             gpu_resources: None,
             readback_pipeline: None,
             cpu_yuv_converter: None,
             frames_in_flight: 0,
             next_frame_to_encode: 0,
             perf_metrics: Some(perf_metrics::ExportMetrics::new()),
+            zero_copy,
         });
 
         // Initialize parallel export state
         self.parallel_export = Some(ParallelExportState {
             video_progress_rx,
             audio_progress_rx,
-            video_thread: Some(video_thread),
+            video_thread,
             audio_thread: Some(audio_thread),
             temp_video_path,
             temp_audio_path,
@@ -1035,6 +1115,12 @@ impl ExportOrchestrator {
         raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
     ) -> Result<bool, String> {
         use std::time::Instant;
+
+        // Zero-copy VAAPI path renders + hardware-encodes inline on its own device,
+        // ignoring the passed eframe device/queue/renderer.
+        if self.video_state.as_ref().map_or(false, |s| s.zero_copy.is_some()) {
+            return self.render_next_video_frame_zerocopy(document, image_cache, video_manager, raster_store);
+        }
 
         let state = self.video_state.as_mut()
             .ok_or("No video export in progress")?;
@@ -1202,6 +1288,71 @@ impl ExportOrchestrator {
         }
 
         Ok(true) // More work to do
+    }
+
+    /// Zero-copy video production: render the document to RGBA on the encoder's own device
+    /// and hardware-encode it into a VAAPI surface, writing the temp `.mp4` directly. Drives
+    /// the parallel export's `video_progress` and triggers the mux on completion.
+    fn render_next_video_frame_zerocopy(
+        &mut self,
+        document: &mut Document,
+        image_cache: &mut ImageCache,
+        video_manager: &Arc<std::sync::Mutex<VideoManager>>,
+        raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
+    ) -> Result<bool, String> {
+        let (current, total) = {
+            let s = self.video_state.as_ref().ok_or("No video export in progress")?;
+            (s.current_frame, s.total_frames)
+        };
+
+        if current >= total {
+            // All frames rendered: flush + write the container trailer, then signal Complete
+            // so `poll_parallel_progress` muxes with the audio track.
+            let zc = self.video_state.as_mut().unwrap().zero_copy.take().unwrap();
+            let ZeroCopyVideo { encoder, .. } = zc;
+            encoder.finish()?;
+            if let Some(p) = self.parallel_export.as_mut() {
+                let path = p.temp_video_path.clone();
+                p.video_progress = Some(ExportProgress::Complete { output_path: path });
+            }
+            self.video_state = None;
+            println!("🎬 [VIDEO EXPORT] zero-copy complete: {} frames", total);
+            return Ok(false);
+        }
+
+        // Render one frame to RGBA on the encoder's device, then hardware-encode it.
+        {
+            let state = self.video_state.as_mut().unwrap();
+            let zc = state.zero_copy.as_mut().unwrap();
+            let (w, h) = (state.width, state.height);
+            let timestamp = state.start_time + (current as f64 / state.framerate);
+            let rgba_view = zc.rgba.create_view(&Default::default());
+            let cmd = video_exporter::render_frame_to_gpu_rgba(
+                document,
+                timestamp,
+                w,
+                h,
+                zc.encoder.device(),
+                zc.encoder.queue(),
+                &mut zc.renderer,
+                image_cache,
+                video_manager,
+                &mut zc.gpu_resources,
+                &rgba_view,
+                None,
+                false,
+                raster_store,
+            )?;
+            zc.encoder.queue().submit(Some(cmd.finish()));
+            zc.encoder.encode_rgba(&zc.rgba)?;
+            state.current_frame += 1;
+        }
+
+        let cur = self.video_state.as_ref().unwrap().current_frame;
+        if let Some(p) = self.parallel_export.as_mut() {
+            p.video_progress = Some(ExportProgress::FrameRendered { frame: cur, total });
+        }
+        Ok(true)
     }
 
     /// Background thread that receives frames and encodes them

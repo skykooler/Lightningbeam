@@ -9,6 +9,7 @@ license = "GPL-3.0-or-later"
 lightningbeam-core = { path = "../lightningbeam-core" }
 daw-backend = { path = "../../daw-backend" }
 beamdsp = { path = "../beamdsp" }
+gpu-video-encoder = { path = "../gpu-video-encoder" }
 rtrb = "0.3"
 cpal = "0.17"
 ffmpeg-next = { version = "8.0", features = ["static"] }

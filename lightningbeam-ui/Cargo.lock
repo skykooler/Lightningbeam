@@ -3543,6 +3543,7 @@ dependencies = [
  "egui_extras",
  "egui_node_graph2",
  "ffmpeg-next",
+ "gpu-video-encoder",
  "half",
  "image",
  "kurbo 0.12.0",
