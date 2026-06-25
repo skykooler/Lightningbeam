@@ -71,6 +71,7 @@ jobs:
             libx11-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxdo-dev libglib2.0-dev libgtk-3-dev libvulkan-dev \
             yasm libx264-dev libx265-dev libvpx-dev libmp3lame-dev libopus-dev \
+            libva-dev libdrm-dev \
             libpulse-dev squashfs-tools dpkg rpm
 
       - name: Install cargo packaging tools (Linux)
@@ -201,6 +202,20 @@ jobs:
         run: |
           mkdir -p lightningbeam-ui/target/release
           cp lightningbeam-ui/target/${{ matrix.target }}/release/lightningbeam-editor lightningbeam-ui/target/release/
+
+      # Guard: the zero-copy export needs the static ffmpeg to have h264_vaapi, which only
+      # happens if libva headers were present at ffmpeg configure time. ffmpeg autodetects it,
+      # so a missing libva-dev silently ships a software-only build. A vaapi-enabled binary
+      # links libva — assert that, so the dep can never regress unnoticed.
+      - name: Verify VAAPI is compiled in (Linux)
+        if: matrix.platform == 'ubuntu-24.04'
+        shell: bash
+        run: |
+          if ! ldd lightningbeam-ui/target/release/lightningbeam-editor | grep -q 'libva\.so'; then
+            echo "::error::Release binary does not link libva — ffmpeg was built without VAAPI (is libva-dev installed?)."
+            exit 1
+          fi
+          echo "VAAPI OK: binary links libva."
 
       # ── Stage presets next to binary for packaging ──
       - name: Stage presets in target dir
