@@ -149,13 +149,13 @@ pub fn import_raw(drm: &DrmDevice, buf: &Nv12DmaBuf) -> Result<ImportedNv12, Str
             .device
             .as_hal::<wgpu_hal::vulkan::Api>()
             .ok_or("device is not Vulkan")?;
-        let mut wrap = |img: vk::Image, format: wgpu::TextureFormat, w: u32, h: u32| -> wgpu::Texture {
+        let wrap = |img: vk::Image, format: wgpu::TextureFormat, w: u32, h: u32| -> wgpu::Texture {
             // wgpu destroys the image (after wait-idle) when the texture drops; the
             // captured Arc<MemoryGuard> frees the shared memory once both have run.
             let dev = device.clone();
             let guard = mem_guard.clone();
             let cb: wgpu_hal::DropCallback = Box::new(move || {
-                unsafe { dev.destroy_image(img, None) };
+                dev.destroy_image(img, None);
                 drop(guard);
             });
             let hal_desc = wgpu_hal::TextureDescriptor {

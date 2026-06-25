@@ -10,6 +10,7 @@ use crate::vk_device::{self, DrmDevice};
 use ffmpeg_sys_next as ff;
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::path::Path;
 use std::ptr;
 
 #[inline]
@@ -24,16 +25,26 @@ pub struct ZeroCopyEncoder {
     frames_ref: *mut ff::AVBufferRef,
     enc: *mut ff::AVCodecContext,
     pkt: *mut ff::AVPacket,
+    /// Output container (e.g. `.mp4`); packets are muxed into it directly.
+    oc: *mut ff::AVFormatContext,
+    enc_tb: ff::AVRational,
+    stream_tb: ff::AVRational,
     width: u32,
     height: u32,
     pts: i64,
     cache: HashMap<usize, ImportedNv12>,
-    out: Vec<u8>,
 }
 
 impl ZeroCopyEncoder {
-    /// Build a zero-copy `h264_vaapi` encoder, or `Err` if VAAPI/the device is unavailable.
-    pub fn new(width: u32, height: u32, framerate: i32, bitrate_kbps: u32) -> Result<Self, String> {
+    /// Build a zero-copy `h264_vaapi` encoder writing to `output_path` (container inferred
+    /// from the extension, e.g. `.mp4`). `Err` if VAAPI/the device is unavailable.
+    pub fn new(
+        width: u32,
+        height: u32,
+        framerate: i32,
+        bitrate_kbps: u32,
+        output_path: &Path,
+    ) -> Result<Self, String> {
         let drm = vk_device::create()?;
         let renderer = Rgba2Nv12::new(&drm.device);
         unsafe {
@@ -81,13 +92,59 @@ impl ZeroCopyEncoder {
             }
             (*enc).hw_frames_ctx = ff::av_buffer_ref(frames_ref);
 
-            if ff::avcodec_open2(enc, codec, ptr::null_mut()) < 0 {
+            // Output container (format inferred from the path's extension).
+            let cleanup = |frames_ref: *mut ff::AVBufferRef, enc: *mut ff::AVCodecContext, hw: *mut ff::AVBufferRef| {
                 let mut fr = frames_ref;
                 ff::av_buffer_unref(&mut fr);
                 ff::avcodec_free_context(&mut (enc as *mut _));
-                ff::av_buffer_unref(&mut hw_device);
+                let mut h = hw;
+                ff::av_buffer_unref(&mut h);
+            };
+            let path_c = CString::new(output_path.to_string_lossy().as_ref()).unwrap();
+            let mut oc: *mut ff::AVFormatContext = ptr::null_mut();
+            if ff::avformat_alloc_output_context2(&mut oc, ptr::null(), ptr::null(), path_c.as_ptr()) < 0
+                || oc.is_null()
+            {
+                cleanup(frames_ref, enc, hw_device);
+                return Err(format!("avformat_alloc_output_context2 for {output_path:?} failed"));
+            }
+            // mp4/mov want SPS/PPS in extradata, not inline — set before opening the encoder.
+            if (*(*oc).oformat).flags & ff::AVFMT_GLOBALHEADER as i32 != 0 {
+                (*enc).flags |= ff::AV_CODEC_FLAG_GLOBAL_HEADER as i32;
+            }
+
+            if ff::avcodec_open2(enc, codec, ptr::null_mut()) < 0 {
+                ff::avformat_free_context(oc);
+                cleanup(frames_ref, enc, hw_device);
                 return Err("avcodec_open2(h264_vaapi) failed".into());
             }
+
+            let stream = ff::avformat_new_stream(oc, codec);
+            if stream.is_null() {
+                ff::avformat_free_context(oc);
+                cleanup(frames_ref, enc, hw_device);
+                return Err("avformat_new_stream failed".into());
+            }
+            if ff::avcodec_parameters_from_context((*stream).codecpar, enc) < 0 {
+                ff::avformat_free_context(oc);
+                cleanup(frames_ref, enc, hw_device);
+                return Err("avcodec_parameters_from_context failed".into());
+            }
+            (*stream).time_base = (*enc).time_base;
+
+            if ff::avio_open(&mut (*oc).pb, path_c.as_ptr(), ff::AVIO_FLAG_WRITE as i32) < 0 {
+                ff::avformat_free_context(oc);
+                cleanup(frames_ref, enc, hw_device);
+                return Err(format!("avio_open {output_path:?} failed"));
+            }
+            if ff::avformat_write_header(oc, ptr::null_mut()) < 0 {
+                ff::avio_closep(&mut (*oc).pb);
+                ff::avformat_free_context(oc);
+                cleanup(frames_ref, enc, hw_device);
+                return Err("avformat_write_header failed".into());
+            }
+            // The muxer may rewrite the stream time_base in write_header.
+            let stream_tb = (*stream).time_base;
 
             Ok(Self {
                 drm,
@@ -96,11 +153,13 @@ impl ZeroCopyEncoder {
                 frames_ref,
                 enc,
                 pkt: ff::av_packet_alloc(),
+                oc,
+                enc_tb: (*enc).time_base,
+                stream_tb,
                 width,
                 height,
                 pts: 0,
                 cache: HashMap::new(),
-                out: Vec::new(),
             })
         }
     }
@@ -193,20 +252,28 @@ impl ZeroCopyEncoder {
             if r < 0 {
                 return Err(format!("avcodec_receive_packet failed: {r}"));
             }
-            let data = std::slice::from_raw_parts((*self.pkt).data, (*self.pkt).size as usize);
-            self.out.extend_from_slice(data);
-            ff::av_packet_unref(self.pkt);
+            ff::av_packet_rescale_ts(self.pkt, self.enc_tb, self.stream_tb);
+            (*self.pkt).stream_index = 0;
+            // Takes ownership of the packet's buffer (unrefs it for us).
+            let w = ff::av_interleaved_write_frame(self.oc, self.pkt);
+            if w < 0 {
+                return Err(format!("av_interleaved_write_frame failed: {w}"));
+            }
         }
         Ok(())
     }
 
-    /// Flush the encoder and return the accumulated Annex-B H.264 bitstream.
-    pub fn finish(mut self) -> Result<Vec<u8>, String> {
+    /// Flush the encoder, write the container trailer, and close the output file.
+    pub fn finish(mut self) -> Result<(), String> {
         unsafe {
             ff::avcodec_send_frame(self.enc, ptr::null_mut());
             self.drain()?;
+            if ff::av_write_trailer(self.oc) < 0 {
+                return Err("av_write_trailer failed".into());
+            }
+            ff::avio_closep(&mut (*self.oc).pb);
         }
-        Ok(std::mem::take(&mut self.out))
+        Ok(())
     }
 }
 
@@ -219,6 +286,14 @@ impl Drop for ZeroCopyEncoder {
             let mut fr = self.frames_ref;
             ff::av_buffer_unref(&mut fr);
             ff::av_buffer_unref(&mut self.hw_device);
+            if !self.oc.is_null() {
+                // `finish` nulls pb via avio_closep; close here too if it wasn't called.
+                if !(*self.oc).pb.is_null() {
+                    ff::avio_closep(&mut (*self.oc).pb);
+                }
+                ff::avformat_free_context(self.oc);
+                self.oc = ptr::null_mut();
+            }
         }
     }
 }

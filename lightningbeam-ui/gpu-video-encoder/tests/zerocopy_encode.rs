@@ -8,7 +8,9 @@ use gpu_video_encoder::encoder::ZeroCopyEncoder;
 #[test]
 fn zerocopy_encode_h264() {
     let (w, h) = (640u32, 480u32);
-    let mut enc = match ZeroCopyEncoder::new(w, h, 30, 4000) {
+    let out = std::env::temp_dir().join("gpu_video_encoder_zerocopy.mp4");
+    let _ = std::fs::remove_file(&out);
+    let mut enc = match ZeroCopyEncoder::new(w, h, 30, 4000, &out) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("[zc-encode] unavailable, skipping: {e}");
@@ -49,27 +51,26 @@ fn zerocopy_encode_h264() {
         enc.encode_rgba(&src).expect("encode_rgba");
     }
 
-    let h264 = enc.finish().expect("finish");
-    eprintln!("[zc-encode] {} frames -> {} bytes H.264", n, h264.len());
-    assert!(h264.len() > 1000, "implausibly small output");
-    assert!(
-        h264.starts_with(&[0, 0, 0, 1]) || h264.starts_with(&[0, 0, 1]),
-        "not Annex-B H.264"
-    );
+    enc.finish().expect("finish");
+    let meta = std::fs::metadata(&out).expect("output .mp4 missing");
+    eprintln!("[zc-encode] {} frames -> {} bytes mp4 at {}", n, meta.len(), out.display());
+    assert!(meta.len() > 1000, "implausibly small output");
 
-    // Write it out and ffprobe-verify if ffprobe is present.
-    let out = std::env::temp_dir().join("gpu_video_encoder_zerocopy.h264");
-    std::fs::write(&out, &h264).unwrap();
-    eprintln!("[zc-encode] wrote {}", out.display());
-    if let Ok(o) = std::process::Command::new("ffprobe")
-        .args(["-hide_banner", "-v", "error", "-show_entries", "stream=codec_name,width,height", "-of", "default=noprint_wrappers=1"])
+    // ffprobe-verify the container: H.264 stream, right dims, ~n frames.
+    let o = std::process::Command::new("ffprobe")
+        .args([
+            "-hide_banner", "-v", "error", "-count_frames",
+            "-show_entries", "stream=codec_name,width,height,nb_read_frames",
+            "-of", "default=noprint_wrappers=1",
+        ])
         .arg(&out)
         .output()
-    {
-        let s = String::from_utf8_lossy(&o.stdout);
-        eprintln!("[zc-encode] ffprobe:\n{s}");
-        assert!(s.contains("codec_name=h264"), "ffprobe didn't see H.264");
-        assert!(s.contains(&format!("width={w}")), "wrong width");
-    }
-    eprintln!("[zc-encode] ✅ zero-copy H.264 encode verified");
+        .expect("run ffprobe");
+    let s = String::from_utf8_lossy(&o.stdout);
+    eprintln!("[zc-encode] ffprobe:\n{s}");
+    assert!(s.contains("codec_name=h264"), "ffprobe didn't see H.264");
+    assert!(s.contains(&format!("width={w}")), "wrong width");
+    assert!(s.contains(&format!("height={h}")), "wrong height");
+    assert!(s.contains(&format!("nb_read_frames={n}")), "expected {n} frames");
+    eprintln!("[zc-encode] ✅ zero-copy H.264 mp4 encode verified");
 }
