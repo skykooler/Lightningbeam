@@ -35,6 +35,10 @@ pub struct ZeroCopyEncoder {
     cache: HashMap<usize, ImportedNv12>,
 }
 
+// The encoder owns its FFmpeg contexts (raw `*mut`) and Vulkan/wgpu handles exclusively; it is
+// never shared, only moved. Sending it to a dedicated export thread is sound.
+unsafe impl Send for ZeroCopyEncoder {}
+
 impl ZeroCopyEncoder {
     /// Build a zero-copy `h264_vaapi` encoder writing to `output_path` (container inferred
     /// from the extension, e.g. `.mp4`). `Err` if VAAPI/the device is unavailable.
@@ -48,18 +52,7 @@ impl ZeroCopyEncoder {
         let drm = vk_device::create()?;
         let renderer = Rgba2Nv12::new(&drm.device);
         unsafe {
-            let mut hw_device: *mut ff::AVBufferRef = ptr::null_mut();
-            let node = CString::new("/dev/dri/renderD128").unwrap();
-            if ff::av_hwdevice_ctx_create(
-                &mut hw_device,
-                ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-                node.as_ptr(),
-                ptr::null_mut(),
-                0,
-            ) < 0
-            {
-                return Err("av_hwdevice_ctx_create failed".into());
-            }
+            let mut hw_device = crate::vaapi::create_device()?;
             let name = CString::new("h264_vaapi").unwrap();
             let codec = ff::avcodec_find_encoder_by_name(name.as_ptr());
             if codec.is_null() {

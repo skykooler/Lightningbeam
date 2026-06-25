@@ -16,6 +16,48 @@ fn averror(e: i32) -> i32 {
     -e
 }
 
+/// Create a VAAPI hwdevice on `/dev/dri/renderD128`, trying driver names in turn.
+///
+/// libva's auto-selection can pick a driver that doesn't support the GPU — notably it
+/// chooses the legacy `i965` driver on newer Intel parts (Gen 11+) where the modern `iHD`
+/// driver is required. Each `av_hwdevice_ctx_create` opens a fresh VADisplay, so
+/// `LIBVA_DRIVER_NAME` is re-read per attempt. We try `iHD` first (modern Intel), then the
+/// caller's original setting, then `i965` (older Intel) and `radeonsi` (AMD). On success the
+/// working driver name is left in the env; on total failure the original value is restored.
+pub fn create_device() -> Result<*mut ff::AVBufferRef, String> {
+    unsafe {
+        let node = CString::new("/dev/dri/renderD128").unwrap();
+        let original = std::env::var_os("LIBVA_DRIVER_NAME");
+        let attempts: [Option<&str>; 4] = [Some("iHD"), None, Some("i965"), Some("radeonsi")];
+        for drv in attempts {
+            match drv {
+                Some(d) => std::env::set_var("LIBVA_DRIVER_NAME", d),
+                // `None` = the caller's original setting (or libva auto if unset).
+                None => match &original {
+                    Some(v) => std::env::set_var("LIBVA_DRIVER_NAME", v),
+                    None => std::env::remove_var("LIBVA_DRIVER_NAME"),
+                },
+            }
+            let mut hw: *mut ff::AVBufferRef = ptr::null_mut();
+            if ff::av_hwdevice_ctx_create(
+                &mut hw,
+                ff::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+                node.as_ptr(),
+                ptr::null_mut(),
+                0,
+            ) >= 0
+            {
+                return Ok(hw);
+            }
+        }
+        match &original {
+            Some(v) => std::env::set_var("LIBVA_DRIVER_NAME", v),
+            None => std::env::remove_var("LIBVA_DRIVER_NAME"),
+        }
+        Err("av_hwdevice_ctx_create(VAAPI) failed for all drivers (iHD/i965/radeonsi)".into())
+    }
+}
+
 /// Copy tight NV12 (`Y` then interleaved `UV`) into an AVFrame's planes, respecting
 /// each plane's linesize (which FFmpeg may pad).
 unsafe fn fill_nv12(frame: *mut ff::AVFrame, nv12: &[u8], width: u32, height: u32) {

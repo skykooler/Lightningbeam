@@ -131,7 +131,10 @@ unsafe fn create_inner() -> Result<DrmDevice, String> {
             &wgpu::DeviceDescriptor {
                 label: Some("drm-import-device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                // Vello's compute pipelines need more than downlevel limits (e.g.
+                // max_storage_buffers_per_shader_stage >= 5). This device only ever runs on a
+                // real VAAPI-capable GPU, so request the adapter's full limits.
+                required_limits: wgpu_adapter.limits(),
                 ..Default::default()
             },
         )
