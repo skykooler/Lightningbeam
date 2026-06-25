@@ -6124,6 +6124,10 @@ impl eframe::App for EditorApp {
                                 audio_settings,
                                 output_path,
                                 Arc::clone(audio_controller),
+                                self.action_executor.document(),
+                                Arc::clone(&self.video_manager),
+                                self.raster_store.clone(),
+                                self.current_file_path.clone(),
                             ) {
                                 Ok(()) => true,
                                 Err(err) => {
@@ -6149,10 +6153,11 @@ impl eframe::App for EditorApp {
 
         // Render export progress dialog and handle cancel
         if self.export_progress_dialog.render(ctx) {
-            // User clicked Cancel
+            // User clicked Cancel: stop + tear down the export, then dismiss the dialog.
             if let Some(orchestrator) = &mut self.export_orchestrator {
                 orchestrator.cancel();
             }
+            self.export_progress_dialog.close();
         }
 
         // Keep requesting repaints while export progress dialog is open
@@ -6181,6 +6186,11 @@ impl eframe::App for EditorApp {
         // Render video frames incrementally (if video export in progress)
         let exporting = self.export_orchestrator.as_ref().map_or(false, |o| o.is_exporting());
         if exporting {
+            // Keep the UI loop alive so progress is polled/drained even when the video is
+            // produced on a background thread (zero-copy path) that emits no UI-thread frames.
+            // Poll at ~6 Hz (not 60): the progress bar doesn't need more, and repainting the full
+            // editor every frame steals CPU/GPU from the background render thread, slowing export.
+            ctx.request_repaint_after(std::time::Duration::from_millis(160));
             if let Some(render_state) = frame.wgpu_render_state() {
                 let device = &render_state.device;
                 let queue = &render_state.queue;
@@ -6246,8 +6256,10 @@ impl eframe::App for EditorApp {
             self.export_image_cache = None;
         }
 
-        // Poll export orchestrator for progress
-        if let Some(orchestrator) = &mut self.export_orchestrator {
+        // Poll export orchestrator for progress — only while there's something to report
+        // (otherwise this runs every repaint forever, spamming logs and wasting work). The
+        // orchestrator clears its state once the terminal Complete/Error is consumed.
+        if let Some(orchestrator) = self.export_orchestrator.as_mut().filter(|o| o.has_pending_progress()) {
             // Only log occasionally to avoid spam
             use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
             static POLL_COUNT: AtomicU32 = AtomicU32::new(0);
