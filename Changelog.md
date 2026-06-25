@@ -1,3 +1,14 @@
+# 1.0.6-alpha:
+Changes:
+- Hardware-accelerated H.264 video export: each frame is rendered and encoded on the GPU (zero-copy VAAPI), roughly 2x faster, with automatic fallback to software encoding when hardware acceleration isn't available (Linux, Intel/AMD only for now)
+- Video export now runs on a background thread, so the UI stays responsive during export and edits made while exporting no longer affect the output
+- Grouped and nested video clips now composite on the GPU path
+- Video is now packed into and streamed from the .beam project container
+
+Bugfixes:
+- Fix an export hang when a video's audio track is shorter than the video
+- Fix a sample key-range overlap bug in instruments
+
 # 1.0.5-alpha:
 Changes:
 - Add shape tweens (morph vector geometry between keyframes)

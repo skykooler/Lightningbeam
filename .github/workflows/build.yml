@@ -71,6 +71,7 @@ jobs:
             libx11-dev libxkbcommon-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxdo-dev libglib2.0-dev libgtk-3-dev libvulkan-dev \
             yasm libx264-dev libx265-dev libvpx-dev libmp3lame-dev libopus-dev \
+            libva-dev libdrm-dev \
             libpulse-dev squashfs-tools dpkg rpm
 
       - name: Install cargo packaging tools (Linux)
@@ -88,7 +89,20 @@ jobs:
       - name: Install dependencies (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
-        run: choco install cmake llvm --installargs 'ADD_CMAKE_TO_PATH=System' -y
+        run: |
+          choco install cmake llvm --installargs 'ADD_CMAKE_TO_PATH=System' -y
+          # Ninja: build NeuralAudio with it instead of a Visual Studio generator,
+          # so the cmake crate doesn't need to recognize the runner's VS version.
+          choco install ninja -y
+
+      # Activate the MSVC developer environment (runs vcvars) so the cmake crate
+      # building nam-ffi/NeuralAudio can determine the Visual Studio generator.
+      # Without this, cmake-rs panics with "couldn't determine visual studio generator".
+      - name: Set up MSVC developer environment (Windows)
+        if: matrix.platform == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       # ── Common build steps ──
       - name: Extract version
@@ -116,14 +130,6 @@ jobs:
           echo "FFMPEG_DIR=$ffmpegDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           # LLVM/libclang for bindgen
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Setup icons
-        shell: bash
-        run: |
-          mkdir -p lightningbeam-ui/lightningbeam-editor/assets/icons
-          cp -f src-tauri/icons/32x32.png lightningbeam-ui/lightningbeam-editor/assets/icons/
-          cp -f src-tauri/icons/128x128.png lightningbeam-ui/lightningbeam-editor/assets/icons/
-          cp -f src-tauri/icons/icon.png lightningbeam-ui/lightningbeam-editor/assets/icons/256x256.png
 
       - name: Stage factory presets
         shell: bash
@@ -161,6 +167,7 @@ jobs:
           echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
 
       - name: Build release binary
+        if: matrix.platform != 'windows-latest'
         shell: bash
         env:
           FFMPEG_STATIC: "1"
@@ -172,12 +179,43 @@ jobs:
           fi
           cargo build --release --bin lightningbeam-editor $TARGET_FLAG
 
+      # Windows must build under pwsh, not Git Bash: Git for Windows puts its
+      # usr\bin on PATH ahead of the MSVC tools, so its coreutils `link.exe`
+      # shadows MSVC's linker and rustc fails with "extra operand". pwsh keeps
+      # the MSVC environment (set by msvc-dev-cmd) at the front of PATH.
+      - name: Build release binary (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          FFMPEG_STATIC: "1"
+          # Force Ninja for the cmake crate (nam-ffi/NeuralAudio): cmake-rs 0.1.54
+          # panics on "unknown VisualStudio version: 18.0" when it auto-detects the
+          # runner's VS generator. Ninja sidesteps that lookup entirely.
+          CMAKE_GENERATOR: Ninja
+        run: |
+          cd lightningbeam-ui
+          cargo build --release --bin lightningbeam-editor
+
       - name: Copy cross-compiled binary to release dir
         if: matrix.target != ''
         shell: bash
         run: |
           mkdir -p lightningbeam-ui/target/release
           cp lightningbeam-ui/target/${{ matrix.target }}/release/lightningbeam-editor lightningbeam-ui/target/release/
+
+      # Guard: the zero-copy export needs the static ffmpeg to have h264_vaapi, which only
+      # happens if libva headers were present at ffmpeg configure time. ffmpeg autodetects it,
+      # so a missing libva-dev silently ships a software-only build. A vaapi-enabled binary
+      # links libva — assert that, so the dep can never regress unnoticed.
+      - name: Verify VAAPI is compiled in (Linux)
+        if: matrix.platform == 'ubuntu-24.04'
+        shell: bash
+        run: |
+          if ! ldd lightningbeam-ui/target/release/lightningbeam-editor | grep -q 'libva\.so'; then
+            echo "::error::Release binary does not link libva — ffmpeg was built without VAAPI (is libva-dev installed?)."
+            exit 1
+          fi
+          echo "VAAPI OK: binary links libva."
 
       # ── Stage presets next to binary for packaging ──
       - name: Stage presets in target dir
@@ -296,7 +334,7 @@ jobs:
           mkdir -p "$APP/Contents/Resources/presets"
 
           cp lightningbeam-ui/target/release/lightningbeam-editor "$APP/Contents/MacOS/"
-          cp src-tauri/icons/icon.icns "$APP/Contents/Resources/lightningbeam-editor.icns"
+          cp lightningbeam-ui/lightningbeam-editor/assets/icons/icon.icns "$APP/Contents/Resources/lightningbeam-editor.icns"
           cp -r lightningbeam-ui/lightningbeam-editor/assets/presets/* "$APP/Contents/Resources/presets/"
 
           cat > "$APP/Contents/Info.plist" << EOF

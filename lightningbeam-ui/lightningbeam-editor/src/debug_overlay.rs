@@ -39,6 +39,77 @@ pub fn update_prepare_timing(
         t.composite_ms     = composite_ms;
     }
 }
+/// GPU-measured composite cost (from timestamp queries; see `gpu_timer.rs`).
+#[derive(Debug, Clone, Default)]
+pub struct GpuCompositeTiming {
+    /// True when the adapter supports timestamp queries (else the ms is meaningless).
+    pub supported: bool,
+    /// GPU time of the whole composite section (Vello render + sRGB→linear +
+    /// compositor + tonemap), in milliseconds. Read back asynchronously, so it
+    /// lags the displayed frame by a frame or two.
+    pub composite_gpu_ms: f64,
+    /// Layers composited this frame.
+    pub layers: u32,
+    /// `queue.submit()` calls in the composite section this frame.
+    pub submits: u32,
+}
+
+static GPU_COMPOSITE: OnceLock<Mutex<GpuCompositeTiming>> = OnceLock::new();
+
+/// Called from `VelloCallback::prepare()` with the GPU composite measurement.
+pub fn update_gpu_composite(supported: bool, composite_gpu_ms: f64, layers: u32, submits: u32) {
+    let cell = GPU_COMPOSITE.get_or_init(|| Mutex::new(GpuCompositeTiming::default()));
+    if let Ok(mut t) = cell.lock() {
+        t.supported = supported;
+        t.composite_gpu_ms = composite_gpu_ms;
+        t.layers = layers;
+        t.submits = submits;
+    }
+}
+
+fn get_gpu_composite() -> GpuCompositeTiming {
+    GPU_COMPOSITE
+        .get_or_init(|| Mutex::new(GpuCompositeTiming::default()))
+        .lock()
+        .map(|t| t.clone())
+        .unwrap_or_default()
+}
+
+/// CPU-side breakdown of the composite section (wall-clock `Instant` deltas). Since
+/// the GPU idles waiting on these CPU operations, this is where the per-frame cost
+/// actually lives. Sums should ≈ the CPU `composite_ms` for the doc's active paths.
+#[derive(Debug, Clone, Default)]
+pub struct CompositeCpuBreakdown {
+    /// `renderer.render_to_texture` — Vello scene encode + its internal submit.
+    pub vello_ms: f64,
+    /// `srgb_to_linear.convert` — recording the conversion pass.
+    pub convert_ms: f64,
+    /// `canvas_blit.blit` — recording + its internal submit.
+    pub blit_ms: f64,
+    /// `compositor.composite` — recording + per-call uniforms buffer / bind group alloc.
+    pub composite_ms: f64,
+    /// Explicit `queue.submit()` calls.
+    pub submit_ms: f64,
+}
+
+static COMPOSITE_CPU: OnceLock<Mutex<CompositeCpuBreakdown>> = OnceLock::new();
+
+/// Called from `VelloCallback::prepare()` with the composite CPU breakdown.
+pub fn update_composite_cpu(b: CompositeCpuBreakdown) {
+    let cell = COMPOSITE_CPU.get_or_init(|| Mutex::new(CompositeCpuBreakdown::default()));
+    if let Ok(mut t) = cell.lock() {
+        *t = b;
+    }
+}
+
+fn get_composite_cpu() -> CompositeCpuBreakdown {
+    COMPOSITE_CPU
+        .get_or_init(|| Mutex::new(CompositeCpuBreakdown::default()))
+        .lock()
+        .map(|t| t.clone())
+        .unwrap_or_default()
+}
+
 /// GPU memory the editor tracks itself (wgpu has no allocator query). Currently the
 /// raster-layer texture cache — the only unbounded-by-default VRAM consumer.
 #[derive(Debug, Clone, Default)]
@@ -89,6 +160,12 @@ pub struct DebugStats {
 
     // GPU prepare() timing breakdown (from render thread)
     pub prepare_timing: PrepareTiming,
+
+    // GPU-measured composite cost (timestamp queries)
+    pub gpu_composite: GpuCompositeTiming,
+
+    // CPU breakdown of the composite section
+    pub composite_cpu: CompositeCpuBreakdown,
 
     // Performance metrics for each section
     pub timing_memory_us: u64,
@@ -254,6 +331,8 @@ impl DebugStatsCollector {
             audio_input_devices,
             has_pointer,
             prepare_timing,
+            gpu_composite: get_gpu_composite(),
+            composite_cpu: get_composite_cpu(),
             timing_memory_us,
             timing_gpu_us,
             timing_midi_us,
@@ -306,8 +385,33 @@ pub fn render_debug_overlay(ctx: &egui::Context, stats: &DebugStats) {
                     ui.colored_label(egui::Color32::YELLOW, format!("GPU prepare: {:.2} ms", pt.total_ms));
                     ui.label(format!("  removals:      {:.2} ms", pt.removals_ms));
                     ui.label(format!("  gpu_dispatch:  {:.2} ms", pt.gpu_dispatches_ms));
-                    ui.label(format!("  scene_build:   {:.2} ms", pt.scene_build_ms));
-                    ui.label(format!("  composite:     {:.2} ms", pt.composite_ms));
+                    ui.label(format!("  scene_build:   {:.2} ms (CPU)", pt.scene_build_ms));
+                    ui.label(format!("  composite:     {:.2} ms (CPU)", pt.composite_ms));
+
+                    // GPU-measured composite cost (timestamp queries).
+                    let gc = &stats.gpu_composite;
+                    if gc.supported {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_GREEN,
+                            format!("GPU composite: {:.2} ms (GPU)", gc.composite_gpu_ms),
+                        );
+                        ui.label(format!("  layers: {}   submits: {}", gc.layers, gc.submits));
+                    } else {
+                        ui.label(format!(
+                            "GPU composite: n/a (no timestamp support)   layers: {}   submits: {}",
+                            gc.layers, gc.submits
+                        ));
+                    }
+
+                    // CPU breakdown of the composite (where the GPU is actually waiting).
+                    let cc = &stats.composite_cpu;
+                    let cc_sum = cc.vello_ms + cc.convert_ms + cc.blit_ms + cc.composite_ms + cc.submit_ms;
+                    ui.colored_label(egui::Color32::LIGHT_BLUE, format!("Composite CPU breakdown: {:.2} ms", cc_sum));
+                    ui.label(format!("  vello(render):  {:.2} ms", cc.vello_ms));
+                    ui.label(format!("  srgb→linear:    {:.2} ms", cc.convert_ms));
+                    ui.label(format!("  blit:           {:.2} ms", cc.blit_ms));
+                    ui.label(format!("  compositor:     {:.2} ms", cc.composite_ms));
+                    ui.label(format!("  queue.submit:   {:.2} ms", cc.submit_ms));
 
                     ui.add_space(8.0);
 

@@ -9,7 +9,7 @@
 //! too (via [`load_beam_zip_legacy`]). Saving always writes the SQLite form, so
 //! opening a legacy file and saving migrates it.
 
-use crate::beam_archive::{BeamArchive, MediaKind, MediaMeta, LARGE_MEDIA_THRESHOLD};
+use crate::beam_archive::{BeamArchive, MediaKind, MediaMeta, MediaStorage, LARGE_MEDIA_THRESHOLD};
 use crate::document::Document;
 use daw_backend::audio::pool::AudioPoolEntry;
 use daw_backend::audio::project::Project as AudioProject;
@@ -88,15 +88,6 @@ impl Default for LargeMediaMode {
 /// Settings for saving a project
 #[derive(Debug, Clone)]
 pub struct SaveSettings {
-    /// Automatically embed files smaller than this size (in bytes)
-    pub auto_embed_threshold_bytes: u64,
-
-    /// Force embedding all media files
-    pub force_embed_all: bool,
-
-    /// Force linking all media files (don't embed any)
-    pub force_link_all: bool,
-
     /// How to store files at/above [`LARGE_MEDIA_THRESHOLD`] (pack vs reference).
     /// `Ask` behaves as `Reference` here (safe default: don't bloat the DB).
     pub large_media_mode: LargeMediaMode,
@@ -105,9 +96,6 @@ pub struct SaveSettings {
 impl Default for SaveSettings {
     fn default() -> Self {
         Self {
-            auto_embed_threshold_bytes: 10_000_000, // 10 MB
-            force_embed_all: false,
-            force_link_all: false,
             large_media_mode: LargeMediaMode::Ask,
         }
     }
@@ -269,7 +257,7 @@ pub fn save_beam(
     audio_pool_entries: Vec<AudioPoolEntry>,
     layer_to_track_map: &std::collections::HashMap<uuid::Uuid, u32>,
     thumbnail_blobs: &std::collections::HashMap<uuid::Uuid, Vec<u8>>,
-    _settings: &SaveSettings,
+    settings: &SaveSettings,
 ) -> Result<(), String> {
     let fn_start = std::time::Instant::now();
     eprintln!("📊 [SAVE_BEAM] Starting save_beam() (SQLite container)...");
@@ -349,7 +337,7 @@ pub fn save_beam(
                 // (`Ask` == reference); smaller files are always packed.
                 let reference_it = entry.is_video_audio
                     || (size >= LARGE_MEDIA_THRESHOLD
-                        && _settings.large_media_mode != LargeMediaMode::Pack);
+                        && settings.large_media_mode != LargeMediaMode::Pack);
                 if reference_it {
                     referenced = Some(rel.clone());
                 } else {
@@ -462,6 +450,65 @@ pub fn save_beam(
         }
     }
 
+    // --- video clips -> media rows (Video bytes), keyed by the clip id ---
+    // Mirror the audio pack/reference decision: pack unless the file is
+    // >= LARGE_MEDIA_THRESHOLD and the user didn't choose Pack. Packed video is
+    // decoded by streaming from the blob (see video.rs `VideoSource` + ffmpeg-blob-io).
+    for (clip_id, clip) in &document.video_clips {
+        // In-place re-save: an unchanged packed video keeps its row, never re-streamed.
+        if clip.media_id == Some(*clip_id) && txn.media_exists(*clip_id)? {
+            live_media.insert(*clip_id);
+            continue;
+        }
+        if clip.file_path.is_empty() {
+            continue;
+        }
+        let full = if Path::new(&clip.file_path).is_absolute() {
+            PathBuf::from(&clip.file_path)
+        } else {
+            project_dir.join(&clip.file_path)
+        };
+        if !full.is_file() {
+            continue; // source gone — reported missing on load
+        }
+        let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+        let codec = full
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or("mp4")
+            .to_lowercase();
+        let meta = MediaMeta {
+            width: Some(clip.width as u32),
+            height: Some(clip.height as u32),
+            ..Default::default()
+        };
+        let reference_it =
+            size >= LARGE_MEDIA_THRESHOLD && settings.large_media_mode != LargeMediaMode::Pack;
+        if reference_it {
+            txn.put_media_referenced(*clip_id, MediaKind::Video, &codec, &clip.file_path, meta)?;
+        } else {
+            txn.put_media_packed_from_path(*clip_id, MediaKind::Video, &codec, &full, meta)?;
+            // The video's audio track lives in this same blob. Point the linked
+            // video-audio pool entry at the video's media row so its audio streams
+            // from the blob too (instead of re-probing the external file on load).
+            if let Some(aid) = clip.linked_audio_clip_id {
+                if let Some(crate::clip::AudioClipType::Sampled { audio_pool_index }) =
+                    document.audio_clips.get(&aid).map(|c| &c.clip_type)
+                {
+                    if let Some(e) = modified_entries
+                        .iter_mut()
+                        .find(|e| e.pool_index == *audio_pool_index)
+                    {
+                        e.media_id = Some(clip_id.to_string());
+                        e.relative_path = None;
+                        e.embedded_data = None;
+                    }
+                }
+            }
+        }
+        live_media.insert(*clip_id);
+    }
+
     // --- image assets -> media rows (original file bytes), keyed by asset id ---
     let mut image_count = 0usize;
     for (id, asset) in &document.image_assets {
@@ -498,7 +545,7 @@ pub fn save_beam(
         modified: now.clone(),
         ui_state: document.clone(),
         audio_backend: SerializedAudioBackend {
-            sample_rate: 48000, // TODO: Get from audio engine
+            sample_rate: audio_project.sample_rate(),
             project: audio_project.clone(),
             audio_pool_entries: modified_entries,
             layer_to_track_map: layer_to_track_map.clone(),
@@ -658,7 +705,7 @@ fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
 
     // Missing external files (referenced entries whose file no longer exists).
     let project_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let missing_files: Vec<MissingFileInfo> = restored_entries
+    let mut missing_files: Vec<MissingFileInfo> = restored_entries
         .iter()
         .enumerate()
         .filter_map(|(idx, entry)| {
@@ -681,6 +728,42 @@ fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
             None
         })
         .collect();
+
+    // Resolve packed/referenced video bytes per clip (mirrors audio resolution).
+    // A `MediaKind::Video` row keyed by the clip id means the bytes are in the
+    // container; the decoder streams from the blob. Referenced rows update the
+    // external path and report a missing source. Old projects (no Video row) stay
+    // referenced via their existing `file_path`.
+    for (clip_id, clip) in document.video_clips.iter_mut() {
+        match archive.media_info(*clip_id) {
+            Ok(Some(info)) if info.kind == MediaKind::Video => match info.storage {
+                MediaStorage::Packed => {
+                    clip.media_id = Some(*clip_id);
+                }
+                MediaStorage::Referenced => {
+                    clip.media_id = None;
+                    if let Some(p) = info.ext_path.clone() {
+                        clip.file_path = p;
+                    }
+                    let full = if Path::new(&clip.file_path).is_absolute() {
+                        PathBuf::from(&clip.file_path)
+                    } else {
+                        project_dir.join(&clip.file_path)
+                    };
+                    if !clip.file_path.is_empty() && !full.exists() {
+                        missing_files.push(MissingFileInfo {
+                            pool_index: 0,
+                            original_path: full,
+                            file_type: MediaFileType::Video,
+                        });
+                    }
+                }
+            },
+            _ => {
+                clip.media_id = None;
+            }
+        }
+    }
 
     // Persisted video thumbnail packs (opaque LBTN blobs), keyed by clip id. The
     // editor decodes + inserts them and skips regeneration for these clips.
@@ -879,8 +962,11 @@ fn load_beam_zip_legacy(path: &Path) -> Result<LoadedProject, String> {
     for layer in document.root.children.iter_mut() {
         if let crate::layer::AnyLayer::Raster(rl) = layer {
             for kf in &mut rl.keyframes {
-                if !kf.media_path.is_empty() {
-                    match zip.by_name(&kf.media_path) {
+                // Legacy ZIP raster entries are named "media/raster/<uuid>.png",
+                // derivable from the keyframe id (the old `media_path` field).
+                let entry_path = format!("media/raster/{}.png", kf.id);
+                {
+                    match zip.by_name(&entry_path) {
                         Ok(mut png_file) => {
                             let mut png_bytes = Vec::new();
                             let _ = png_file.read_to_end(&mut png_bytes);
@@ -890,7 +976,7 @@ fn load_beam_zip_legacy(path: &Path) -> Result<LoadedProject, String> {
                                     kf.raw_pixels = rgba.into_raw();
                                     raster_load_count += 1;
                                 }
-                                Err(e) => eprintln!("⚠️ [LOAD_BEAM] Failed to decode raster PNG {}: {}", kf.media_path, e),
+                                Err(e) => eprintln!("⚠️ [LOAD_BEAM] Failed to decode raster PNG {}: {}", entry_path, e),
                             }
                         }
                         Err(_) => {

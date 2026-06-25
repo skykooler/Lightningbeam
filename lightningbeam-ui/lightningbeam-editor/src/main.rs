@@ -50,6 +50,7 @@ use effect_thumbnails::EffectThumbnailGenerator;
 mod custom_cursor;
 mod tablet;
 mod debug_overlay;
+mod gpu_timer;
 
 #[cfg(debug_assertions)]
 mod test_mode;
@@ -140,7 +141,7 @@ fn main() -> eframe::Result {
     }
 
     // Load window icon
-    let icon_data = include_bytes!("../../../src-tauri/icons/icon.png");
+    let icon_data = include_bytes!("../assets/icons/256x256.png");
     let icon_image = match image::load_from_memory(icon_data) {
         Ok(img) => {
             let rgba = img.to_rgba8();
@@ -174,8 +175,12 @@ fn main() -> eframe::Result {
                 device_descriptor: std::sync::Arc::new(|adapter| {
                     let features = adapter.features();
                     // Request SHADER_F16 if available — needed on Mesa/llvmpipe for vello's
-                    // unpack2x16float (enables the SHADER_F16_IN_F32 downlevel capability)
-                    let optional_features = wgpu::Features::SHADER_F16;
+                    // unpack2x16float (enables the SHADER_F16_IN_F32 downlevel capability).
+                    // TIMESTAMP_QUERY(+INSIDE_ENCODERS) drives the F3 GPU composite timer
+                    // (gpu_timer.rs); both are optional and no-op when unsupported.
+                    let optional_features = wgpu::Features::SHADER_F16
+                        | wgpu::Features::TIMESTAMP_QUERY
+                        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
 
                     let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
                         wgpu::Limits::downlevel_webgl2_defaults()
@@ -731,7 +736,6 @@ impl FileOperationsWorker {
 
         let settings = SaveSettings {
             large_media_mode,
-            ..SaveSettings::default()
         };
         match save_beam(&path, &document, &mut audio_project, audio_pool_entries, layer_to_track_map, &thumbnail_blobs, &settings) {
             Ok(()) => {
@@ -2234,40 +2238,6 @@ impl EditorApp {
         }
     }
 
-    /// Porter-Duff "over" composite of `src` onto `dst` at canvas offset `(ox, oy)`.
-    /// Both buffers are sRGB-encoded premultiplied RGBA.
-    fn composite_over(
-        dst: &mut [u8], dst_w: u32, dst_h: u32,
-        src: &[u8],     src_w: u32, src_h: u32,
-        ox: i32, oy: i32,
-    ) {
-        for row in 0..src_h {
-            let dy = oy + row as i32;
-            if dy < 0 || dy >= dst_h as i32 { continue; }
-            for col in 0..src_w {
-                let dx = ox + col as i32;
-                if dx < 0 || dx >= dst_w as i32 { continue; }
-                let si = ((row * src_w + col) * 4) as usize;
-                let di = ((dy as u32 * dst_w + dx as u32) * 4) as usize;
-                let sa = src[si + 3] as u32;
-                if sa == 0 { continue; }
-                let da = dst[di + 3] as u32;
-                // out_a = src_a + dst_a * (255 - src_a) / 255
-                let out_a = sa + da * (255 - sa) / 255;
-                dst[di + 3] = out_a as u8;
-                if out_a > 0 {
-                    for c in 0..3 {
-                        // premul over: out = src + dst*(1-src_a/255)
-                        // v is in [0, 255²], so one /255 brings it back to [0, 255]
-                        let v = src[si + c] as u32 * 255
-                            + dst[di + c] as u32 * (255 - sa);
-                        dst[di + c] = (v / 255).min(255) as u8;
-                    }
-                }
-            }
-        }
-    }
-
     /// Commit a floating raster selection: composite it into the keyframe's
     /// `raw_pixels` and record a `RasterStrokeAction` for undo.
     /// Clears `selection.raster_floating` and `selection.raster_selection`.
@@ -2824,7 +2794,7 @@ impl EditorApp {
                 let canvas_before = kf.raw_pixels.clone();
                 let canvas_w = kf.width;
                 let canvas_h = kf.height;
-                drop(kf); // release immutable borrow before taking mutable
+                let _ = kf; // release immutable borrow before taking mutable
 
                 use lightningbeam_core::selection::{RasterFloatingSelection, RasterSelection};
                 self.selection.raster_floating = Some(RasterFloatingSelection {
@@ -3276,8 +3246,6 @@ impl EditorApp {
                         has_raster:   false,
                         has_vector:   false,
                         current_time: doc.current_time,
-                        doc_width:    doc.width  as u32,
-                        doc_height:   doc.height as u32,
                     };
                     scan(&doc.root.children, &mut h);
                     h
@@ -3636,7 +3604,7 @@ impl EditorApp {
 
                 let doc = self.action_executor.document();
                 let (doc_w, doc_h) = (doc.width as u32, doc.height as u32);
-                drop(doc);
+                let _ = doc;
                 let mut layer = RasterLayer::new(layer_name);
                 layer.ensure_keyframe_at(self.playback_time, doc_w, doc_h);
                 let action = lightningbeam_core::actions::AddLayerAction::new(AnyLayer::Raster(layer))
@@ -4262,6 +4230,12 @@ impl EditorApp {
             });
         }
 
+        // Set the loaded container path BEFORE registering videos: a packed video
+        // clip resolves to `VideoSource::Packed { db_path: current_file_path, .. }`,
+        // so this must be in place or the clip falls back to its (possibly missing)
+        // external file and renders black.
+        self.current_file_path = Some(path.clone());
+
         // Re-register video clips with the VideoManager (decoder + keyframe index +
         // thumbnails). Restored video_clips carry only metadata + file_path; without
         // this they render black with no thumbnails.
@@ -4272,7 +4246,6 @@ impl EditorApp {
         // Reset playback state
         self.playback_time = 0.0;
         self.is_playing = false;
-        self.current_file_path = Some(path.clone());
         // Point the raster paging store at the loaded container so faulting works.
         self.raster_store.set_path(self.current_file_path.clone());
 
@@ -4297,26 +4270,37 @@ impl EditorApp {
         let doc_width = self.action_executor.document().width as u32;
         let doc_height = self.action_executor.document().height as u32;
 
-        // Snapshot (id, path) so we don't hold the document borrow while locking
-        // the VideoManager / spawning threads.
+        // Snapshot (id, media_id, path) so we don't hold the document borrow while
+        // locking the VideoManager / spawning threads.
+        let db_path = self.current_file_path.clone();
         let videos: Vec<_> = self
             .action_executor
             .document()
             .video_clips
             .values()
-            .map(|c| (c.id, c.file_path.clone()))
+            .map(|c| (c.id, c.media_id, c.file_path.clone()))
             .collect();
 
-        for (clip_id, file_path) in videos {
-            if !std::path::Path::new(&file_path).exists() {
-                eprintln!("⚠️ [APPLY] Video file not found, skipping: {}", file_path);
-                continue;
-            }
+        for (clip_id, media_id, file_path) in videos {
+            // Packed video streams from the container blob; referenced video opens
+            // its external file (skip if it's gone).
+            let source = match (media_id, &db_path) {
+                (Some(mid), Some(db)) => {
+                    lightningbeam_core::video::VideoSource::Packed { db_path: db.clone(), media_id: mid }
+                }
+                _ => {
+                    if !std::path::Path::new(&file_path).exists() {
+                        eprintln!("⚠️ [APPLY] Video file not found, skipping: {}", file_path);
+                        continue;
+                    }
+                    lightningbeam_core::video::VideoSource::Path(file_path.clone())
+                }
+            };
 
             {
                 let mut video_mgr = self.video_manager.lock().unwrap();
-                if let Err(e) = video_mgr.load_video(clip_id, file_path.clone(), doc_width, doc_height) {
-                    eprintln!("⚠️ [APPLY] Failed to load video {}: {}", file_path, e);
+                if let Err(e) = video_mgr.load_video(clip_id, source, doc_width, doc_height) {
+                    eprintln!("⚠️ [APPLY] Failed to load video {}: {}", clip_id, e);
                     continue;
                 }
             }
@@ -4345,13 +4329,13 @@ impl EditorApp {
             };
             let Some(decoder_arc) = decoder_arc else { return; };
 
-            let (path, stream_index) = {
+            let (source, stream_index) = {
                 let decoder = decoder_arc.lock().unwrap();
                 decoder.keyframe_scan_params()
             };
 
             // Slow scan, no locks held.
-            match lightningbeam_core::video::VideoDecoder::scan_keyframes(&path, stream_index) {
+            match lightningbeam_core::video::VideoDecoder::scan_keyframes(&source, stream_index) {
                 Ok(positions) => {
                     let count = positions.len();
                     decoder_arc.lock().unwrap().set_keyframe_index(positions);
@@ -4370,22 +4354,22 @@ impl EditorApp {
     fn spawn_thumbnail_generation(&self, clip_id: uuid::Uuid) {
         let video_manager = Arc::clone(&self.video_manager);
         std::thread::spawn(move || {
-            // Grab the source path from the playback decoder (brief lock), then do
-            // all decoding on an independent decoder.
-            let path = {
+            // Grab the source from the playback decoder (brief lock), then do all
+            // decoding on an independent decoder (a fresh BlobReader for packed video).
+            let source = {
                 let decoder_arc = {
                     let vm = video_manager.lock().unwrap();
                     vm.get_decoder(&clip_id)
                 };
                 let Some(decoder_arc) = decoder_arc else { return; };
                 let decoder = decoder_arc.lock().unwrap();
-                decoder.path().to_string()
+                decoder.source()
             };
 
             let vm_insert = Arc::clone(&video_manager);
             let vm_skip = Arc::clone(&video_manager);
             let result = lightningbeam_core::video::generate_keyframe_thumbnails(
-                &path,
+                source,
                 5.0,
                 128,
                 // Resume: skip keyframes already covered (e.g. restored from a
@@ -4661,8 +4645,9 @@ impl EditorApp {
 
         let path_str = path.to_string_lossy().to_string();
 
-        // Probe video for metadata
-        let metadata = match probe_video(&path_str) {
+        // Probe video for metadata (freshly imported video is referenced until the
+        // first save packs it).
+        let metadata = match probe_video(&lightningbeam_core::video::VideoSource::Path(path_str.clone())) {
             Ok(meta) => meta,
             Err(e) => {
                 eprintln!("Failed to probe video '{}': {}", name, e);
@@ -4687,7 +4672,12 @@ impl EditorApp {
         let doc_height = self.action_executor.document().height as u32;
 
         let mut video_mgr = self.video_manager.lock().unwrap();
-        if let Err(e) = video_mgr.load_video(clip_id, path_str.clone(), doc_width, doc_height) {
+        if let Err(e) = video_mgr.load_video(
+            clip_id,
+            lightningbeam_core::video::VideoSource::Path(path_str.clone()),
+            doc_width,
+            doc_height,
+        ) {
             eprintln!("Failed to load video '{}': {}", name, e);
             return None;
         }
@@ -5775,7 +5765,7 @@ impl eframe::App for EditorApp {
                                 .map(|(&lid, _)| lid);
                             if let Some(layer_id) = recording_layer {
                                 // First, find the clip instance and clip id
-                                let (clip_id, instance_id, timeline_start, trim_start) = {
+                                let (clip_id, instance_id, _timeline_start, _trim_start) = {
                                     let document = self.action_executor.document();
                                     document.get_layer(&layer_id)
                                         .and_then(|layer| {
@@ -6134,6 +6124,10 @@ impl eframe::App for EditorApp {
                                 audio_settings,
                                 output_path,
                                 Arc::clone(audio_controller),
+                                self.action_executor.document(),
+                                Arc::clone(&self.video_manager),
+                                self.raster_store.clone(),
+                                self.current_file_path.clone(),
                             ) {
                                 Ok(()) => true,
                                 Err(err) => {
@@ -6159,10 +6153,11 @@ impl eframe::App for EditorApp {
 
         // Render export progress dialog and handle cancel
         if self.export_progress_dialog.render(ctx) {
-            // User clicked Cancel
+            // User clicked Cancel: stop + tear down the export, then dismiss the dialog.
             if let Some(orchestrator) = &mut self.export_orchestrator {
                 orchestrator.cancel();
             }
+            self.export_progress_dialog.close();
         }
 
         // Keep requesting repaints while export progress dialog is open
@@ -6191,6 +6186,11 @@ impl eframe::App for EditorApp {
         // Render video frames incrementally (if video export in progress)
         let exporting = self.export_orchestrator.as_ref().map_or(false, |o| o.is_exporting());
         if exporting {
+            // Keep the UI loop alive so progress is polled/drained even when the video is
+            // produced on a background thread (zero-copy path) that emits no UI-thread frames.
+            // Poll at ~6 Hz (not 60): the progress bar doesn't need more, and repainting the full
+            // editor every frame steals CPU/GPU from the background render thread, slowing export.
+            ctx.request_repaint_after(std::time::Duration::from_millis(160));
             if let Some(render_state) = frame.wgpu_render_state() {
                 let device = &render_state.device;
                 let queue = &render_state.queue;
@@ -6256,8 +6256,10 @@ impl eframe::App for EditorApp {
             self.export_image_cache = None;
         }
 
-        // Poll export orchestrator for progress
-        if let Some(orchestrator) = &mut self.export_orchestrator {
+        // Poll export orchestrator for progress — only while there's something to report
+        // (otherwise this runs every repaint forever, spamming logs and wasting work). The
+        // orchestrator clears its state once the terminal Complete/Error is consumed.
+        if let Some(orchestrator) = self.export_orchestrator.as_mut().filter(|o| o.has_pending_progress()) {
             // Only log occasionally to avoid spam
             use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
             static POLL_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -6551,7 +6553,6 @@ impl eframe::App for EditorApp {
                     pending_graph_loads: &self.pending_graph_loads,
                     clipboard_consumed: &mut clipboard_consumed,
                     keymap: &self.keymap,
-                    commit_raster_floating_if_any: &mut self.commit_raster_floating_if_any,
                     pending_node_group: &mut self.pending_node_group,
                     pending_node_ungroup: &mut self.pending_node_ungroup,
                     #[cfg(debug_assertions)]
@@ -6708,7 +6709,7 @@ impl eframe::App for EditorApp {
                                     eprintln!("[WEBCAM] Recording saved to: {} (recorder duration={:.4}s)", file_path_str, result.duration);
                                     // Create VideoClip + ClipInstance from recorded file
                                     if let Some(layer_id) = webcam_layer_id {
-                                        match lightningbeam_core::video::probe_video(&file_path_str) {
+                                        match lightningbeam_core::video::probe_video(&lightningbeam_core::video::VideoSource::Path(file_path_str.clone())) {
                                             Ok(info) => {
                                                 use lightningbeam_core::clip::{VideoClip, ClipInstance};
                                                 let clip = VideoClip {
@@ -6723,6 +6724,7 @@ impl eframe::App for EditorApp {
                                                     duration: info.duration,
                                                     frame_rate: info.fps,
                                                     linked_audio_clip_id: None,
+                                                    media_id: None,
                                                     folder_id: None,
                                                 };
                                                 let clip_id = clip.id;
@@ -6761,7 +6763,7 @@ impl eframe::App for EditorApp {
                                                 // for the display rect.
                                                 {
                                                     let mut vm = self.video_manager.lock().unwrap();
-                                                    if let Err(e) = vm.load_video(clip_id, file_path_str, info.width, info.height) {
+                                                    if let Err(e) = vm.load_video(clip_id, lightningbeam_core::video::VideoSource::Path(file_path_str.clone()), info.width, info.height) {
                                                         eprintln!("[WEBCAM] Failed to load recorded video: {}", e);
                                                     }
                                                 }
@@ -7512,7 +7514,7 @@ fn render_pane(
             // Active tab highlight with per-corner rounding
             if is_active {
                 let cr = corner_r as u8;
-                let rounding = egui::Rounding {
+                let rounding = egui::CornerRadius {
                     nw: if i == 0 { cr } else { 0 },
                     sw: if i == 0 { cr } else { 0 },
                     ne: if i == n - 1 { cr } else { 0 },
@@ -7557,7 +7559,7 @@ fn render_pane(
             if tab_response.hovered() && !is_active {
                 ui.painter().rect_filled(
                     tab_rect,
-                    egui::Rounding {
+                    egui::CornerRadius {
                         nw: if i == 0 { corner_r as u8 } else { 0 },
                         sw: if i == 0 { corner_r as u8 } else { 0 },
                         ne: if i == n - 1 { corner_r as u8 } else { 0 },

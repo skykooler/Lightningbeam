@@ -251,3 +251,69 @@ fn seek_is_sample_accurate() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+// ── Stage 3: stream video-audio from a byte source (packed .beam blob) ──────────
+
+/// A `MediaByteSource` over an in-memory buffer (stands in for a SQLite BlobReader).
+struct VecSource(std::io::Cursor<Vec<u8>>, u64);
+impl std::io::Read for VecSource {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> { self.0.read(b) }
+}
+impl std::io::Seek for VecSource {
+    fn seek(&mut self, p: std::io::SeekFrom) -> std::io::Result<u64> { self.0.seek(p) }
+}
+impl daw_backend::audio::disk_reader::MediaByteSource for VecSource {
+    fn byte_len(&self) -> u64 { self.1 }
+}
+
+fn ramp_wav_bytes(n: u32, sample_rate: u32) -> Vec<u8> {
+    let channels = 1u16;
+    let bps = 4u32;
+    let data_size = n * bps;
+    let mut buf = Vec::with_capacity(44 + data_size as usize);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&(36 + data_size).to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+    buf.extend_from_slice(&channels.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&(sample_rate * channels as u32 * bps).to_le_bytes());
+    buf.extend_from_slice(&((channels as u32 * bps) as u16).to_le_bytes());
+    buf.extend_from_slice(&32u16.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+    for i in 0..n {
+        buf.extend_from_slice(&((i as f32) / (n as f32)).to_le_bytes());
+    }
+    buf
+}
+
+#[test]
+fn video_audio_open_source_streams_from_bytes() {
+    let sr = 8000;
+    let n = 4000;
+    let bytes = ramp_wav_bytes(n, sr);
+    let len = bytes.len() as u64;
+    let src = Box::new(VecSource(std::io::Cursor::new(bytes), len));
+
+    // Open the audio track by streaming from the byte source (no file path).
+    let mut reader = VideoAudioReader::open_source(src, Some("wav")).unwrap();
+    assert_eq!(reader.channels(), 1);
+    assert_eq!(reader.sample_rate(), sr);
+
+    let mut all: Vec<f32> = Vec::new();
+    let mut buf: Vec<f32> = Vec::new();
+    loop {
+        let frames = reader.decode_next(&mut buf).unwrap();
+        if frames == 0 {
+            break;
+        }
+        all.extend_from_slice(&buf);
+    }
+    assert!(all.len() as u32 >= n - 4, "decoded most of the ramp: {} of {}", all.len(), n);
+    // The ramp rises monotonically; sample 0 ≈ 0.0 and the last is near 1.0.
+    assert!(all[0].abs() < 1e-3, "first sample ~0, got {}", all[0]);
+    assert!(*all.last().unwrap() > 0.9, "last sample ~1.0, got {}", all.last().unwrap());
+}

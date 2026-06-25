@@ -1161,7 +1161,7 @@ impl VectorGraph {
     /// faces that lie inside it (inheriting its colour/rule); faces outside it — or in a
     /// hole — are dropped.
     fn retrace_fills_after_cut(&mut self, new_edges: &[EdgeId]) {
-        use kurbo::{ParamCurve, Shape};
+        use kurbo::Shape;
         let new_set: HashSet<EdgeId> = new_edges
             .iter()
             .filter(|&&e| !e.is_none() && !self.edges[e.idx()].deleted)
@@ -1642,21 +1642,6 @@ impl VectorGraph {
     // Boundary tracing internals
     // -------------------------------------------------------------------
 
-    /// Find the nearest non-deleted edge to a point. Returns (EdgeId, t, distance).
-    fn nearest_edge_to_point(&self, point: Point) -> Option<(EdgeId, f64, f64)> {
-        let mut best: Option<(EdgeId, f64, f64)> = None;
-        for (i, e) in self.edges.iter().enumerate() {
-            if e.deleted {
-                continue;
-            }
-            let eid = EdgeId(i as u32);
-            let (t, dist) = nearest_point_on_cubic(&e.curve, point);
-            if best.is_none() || dist < best.unwrap().2 {
-                best = Some((eid, t, dist));
-            }
-        }
-        best
-    }
 
     /// Build a BezPath from a boundary (without storing it as a fill).
     /// Handles `EdgeId::NONE` separators to start new contours (holes).

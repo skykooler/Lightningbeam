@@ -483,7 +483,6 @@ struct AutomationLaneRender {
     value_max: f32,
     accent_color: egui::Color32,
     playback_time: f64,
-    kind: AutomationLaneKind,
 }
 
 /// Pending automation keyframe edit action from curve lane interaction
@@ -1160,7 +1159,7 @@ impl TimelinePane {
                             *shared.recording_clips.get(&layer_id).unwrap_or(&0), daw_backend::Beats::ZERO);
                         let doc_clip_id = shared.action_executor.document_mut().add_audio_clip(doc_clip);
 
-                        let mut clip_instance = ClipInstance::new(doc_clip_id)
+                        let clip_instance = ClipInstance::new(doc_clip_id)
                             .with_timeline_start(start_time);
 
                         if let Some(layer) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
@@ -3230,7 +3229,6 @@ impl TimelinePane {
                                 value_max: lane.value_max,
                                 accent_color: lane_accent,
                                 playback_time,
-                                kind: lane.kind,
                             });
                         }
                     }
@@ -4054,7 +4052,6 @@ impl TimelinePane {
                             value_max: lane.value_max,
                             accent_color: lane_accent,
                             playback_time,
-                            kind: lane.kind,
                         });
                     }
                 }
@@ -5409,12 +5406,10 @@ impl PaneRenderer for TimelinePane {
         let editing_clip_id = shared.editing_clip_id;
         let mut context_layers = document.context_layers(editing_clip_id.as_ref());
         // Prepend master track as the first row when enabled (only at root context, not inside clips)
-        let master_any_layer;
+        let _master_any_layer;
         if self.show_master_track && editing_clip_id.is_none() {
-            master_any_layer = Some(AnyLayer::Group(document.master_layer.clone()));
-            context_layers.insert(0, master_any_layer.as_ref().unwrap());
-        } else {
-            master_any_layer = None;
+            _master_any_layer = Some(AnyLayer::Group(document.master_layer.clone()));
+            context_layers.insert(0, _master_any_layer.as_ref().unwrap());
         }
         // Use virtual row count (includes expanded group children) for height calculations
         let layer_count = build_timeline_rows(&context_layers).len();

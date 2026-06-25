@@ -111,8 +111,6 @@ pub struct RasterKeyframe {
     pub time: f64,
     pub width: u32,
     pub height: u32,
-    /// ZIP-relative path: `"media/raster/<uuid>.png"`
-    pub media_path: String,
     /// Stroke history (for potential replay / future non-destructive editing)
     pub stroke_log: Vec<StrokeRecord>,
     pub tween_after: TweenType,
@@ -157,13 +155,11 @@ impl RasterKeyframe {
 
     pub fn new(time: f64, width: u32, height: u32) -> Self {
         let id = Uuid::new_v4();
-        let media_path = format!("media/raster/{}.png", id);
         Self {
             id,
             time,
             width,
             height,
-            media_path,
             stroke_log: Vec::new(),
             tween_after: TweenType::Hold,
             raw_pixels: Vec::new(),
@@ -264,10 +260,6 @@ impl RasterLayer {
             .map(|pos| self.keyframes.remove(pos))
     }
 
-    /// Return the ZIP-relative PNG path for the active keyframe at `time`, or `None`.
-    pub fn buffer_path_at_time(&self, time: f64) -> Option<&str> {
-        self.keyframe_at(time).map(|kf| kf.media_path.as_str())
-    }
 }
 
 // Delegate all LayerTrait methods to self.layer

@@ -1586,11 +1586,6 @@ impl GpuBrushEngine {
         crate::debug_overlay::update_gpu_memory(count, total);
     }
 
-    /// Get the cached display texture for a raster layer keyframe.
-    pub fn get_layer_texture(&self, kf_id: &Uuid) -> Option<&CanvasPair> {
-        self.raster_layer_cache.get(kf_id)
-    }
-
     /// Ensure a low-res proxy texture exists for `kf_id` (uploaded once; proxies are
     /// immutable). Bumps recency and evicts the least-recently-used past the budget.
     /// `pixels` is sRGB-premultiplied RGBA of length `w * h * 4`.
@@ -1778,18 +1773,6 @@ impl GpuBrushEngine {
         self.displacement_bufs.insert(id, DisplacementBuffer { buf, width, height });
     }
 
-    /// Overwrite the displacement buffer contents with the provided data.
-    pub fn upload_displacement_buf(
-        &self,
-        queue:    &wgpu::Queue,
-        id:       &Uuid,
-        data:     &[[f32; 2]],
-    ) {
-        if let Some(db) = self.displacement_bufs.get(id) {
-            queue.write_buffer(&db.buf, 0, bytemuck::cast_slice(data));
-        }
-    }
-
     /// Zero out a displacement buffer (reset all displacements to (0,0)).
     pub fn clear_displacement_buf(&self, queue: &wgpu::Queue, id: &Uuid) {
         if let Some(db) = self.displacement_bufs.get(id) {
@@ -1968,6 +1951,9 @@ impl GpuBrushEngine {
 /// the camera transform.
 pub struct CanvasBlitPipeline {
     pub pipeline: wgpu::RenderPipeline,
+    /// Variant for straight-alpha sources (hardware-sRGB video frames): the
+    /// fragment shader skips the unpremultiply. See [`CanvasBlitPipeline::blit_straight`].
+    pub pipeline_straight: wgpu::RenderPipeline,
     pub bg_layout: wgpu::BindGroupLayout,
     pub sampler: wgpu::Sampler,
     /// Bilinear sampler for smooth upscaling (used by `blit_smooth`, e.g. low-res
@@ -2149,6 +2135,39 @@ impl CanvasBlitPipeline {
             },
         );
 
+        // Variant pipeline for straight-alpha sources (hardware-sRGB video frames):
+        // identical except the fragment shader skips the unpremultiply.
+        let pipeline_straight = device.create_render_pipeline(
+            &wgpu::RenderPipelineDescriptor {
+                label:  Some("canvas_blit_pipeline_straight"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module:  &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module:  &shader,
+                    entry_point: Some("fs_main_straight"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format:     wgpu::TextureFormat::Rgba16Float,
+                        blend:      None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample:   wgpu::MultisampleState::default(),
+                multiview:     None,
+                cache:         None,
+            },
+        );
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label:          Some("canvas_blit_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -2182,7 +2201,7 @@ impl CanvasBlitPipeline {
             ..Default::default()
         });
 
-        Self { pipeline, bg_layout, sampler, linear_sampler, mask_sampler }
+        Self { pipeline, pipeline_straight, bg_layout, sampler, linear_sampler, mask_sampler }
     }
 
     /// Render the canvas texture into `target_view` (Rgba16Float) with the given camera.
@@ -2200,7 +2219,7 @@ impl CanvasBlitPipeline {
         transform:   &BlitTransform,
         mask_view:   Option<&wgpu::TextureView>,
     ) {
-        self.blit_with(device, queue, canvas_view, target_view, transform, mask_view, &self.sampler);
+        self.blit_with(device, queue, canvas_view, target_view, transform, mask_view, &self.sampler, &self.pipeline);
     }
 
     /// Blit with a bilinear sampler — smooth upscaling for low-res sources (proxies).
@@ -2213,9 +2232,25 @@ impl CanvasBlitPipeline {
         transform:   &BlitTransform,
         mask_view:   Option<&wgpu::TextureView>,
     ) {
-        self.blit_with(device, queue, canvas_view, target_view, transform, mask_view, &self.linear_sampler);
+        self.blit_with(device, queue, canvas_view, target_view, transform, mask_view, &self.linear_sampler, &self.pipeline);
     }
 
+    /// Blit a **straight-alpha** source (e.g. a video frame uploaded to an
+    /// `Rgba8UnormSrgb` texture, hardware-decoded to linear on sample). Uses the
+    /// `fs_main_straight` pipeline, which skips the unpremultiply that `blit` does.
+    pub fn blit_straight(
+        &self,
+        device:      &wgpu::Device,
+        queue:       &wgpu::Queue,
+        canvas_view: &wgpu::TextureView,
+        target_view: &wgpu::TextureView,
+        transform:   &BlitTransform,
+        mask_view:   Option<&wgpu::TextureView>,
+    ) {
+        self.blit_with(device, queue, canvas_view, target_view, transform, mask_view, &self.sampler, &self.pipeline_straight);
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn blit_with(
         &self,
         device:      &wgpu::Device,
@@ -2225,6 +2260,7 @@ impl CanvasBlitPipeline {
         transform:   &BlitTransform,
         mask_view:   Option<&wgpu::TextureView>,
         canvas_sampler: &wgpu::Sampler,
+        pipeline:    &wgpu::RenderPipeline,
     ) {
         // When no mask is provided, create a temporary 1×1 all-white texture.
         // (queue is already available here, unlike in new())
@@ -2313,7 +2349,7 @@ impl CanvasBlitPipeline {
                 occlusion_query_set:      None,
                 timestamp_writes:         None,
             });
-            rp.set_pipeline(&self.pipeline);
+            rp.set_pipeline(pipeline);
             rp.set_bind_group(0, &bg, &[]);
             rp.draw(0..4, 0..1);
         }

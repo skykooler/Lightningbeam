@@ -28,8 +28,6 @@ dist-ssr
 .gitignore
 
 # Build
-src-tauri/gen
-src-tauri/target
 lightningbeam-core/target
 daw-backend/target
 target/

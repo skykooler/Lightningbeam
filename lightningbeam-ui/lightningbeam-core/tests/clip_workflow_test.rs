@@ -309,30 +309,34 @@ fn test_clip_time_remapping() {
 
     document.root.add_child(AnyLayer::Vector(layer));
 
+    // timeline_start is in beats; at 60 BPM 1 beat == 1 second, so the tempo map
+    // is identity and these timeline values read directly as seconds.
+    let tempo_map = lightningbeam_core::tempo_map::TempoMap::constant(60.0);
+
     // Test time remapping
     // At timeline time 5.0, clip internal time should be 2.0 (trim_start)
-    let clip_time = instance.remap_time(5.0, clip_duration);
+    let clip_time = instance.remap_time(5.0, clip_duration, &tempo_map);
     assert_eq!(clip_time, Some(2.0));
 
     // At timeline time 6.0, clip internal time should be 3.0
-    let clip_time = instance.remap_time(6.0, clip_duration);
+    let clip_time = instance.remap_time(6.0, clip_duration, &tempo_map);
     assert_eq!(clip_time, Some(3.0));
 
     // At timeline time 10.999, clip internal time should be just under 8.0
     // The clip plays from timeline 5.0 to 11.0 (exclusive end)
     // At timeline 10.999: relative_time = 5.999, content_time = 5.999
     // Since content_window = 6.0, we get: trim_start + 5.999 = 7.999
-    let clip_time = instance.remap_time(10.999, clip_duration);
+    let clip_time = instance.remap_time(10.999, clip_duration, &tempo_map);
     assert!(clip_time.is_some());
     let time = clip_time.unwrap();
     assert!(time > 7.9 && time < 8.0, "Expected ~7.999, got {}", time);
 
     // At timeline time 11.0 (exact end), clip should be past its end (None)
     // because the range is [timeline_start, timeline_start + effective_duration)
-    let clip_time = instance.remap_time(11.0, clip_duration);
+    let clip_time = instance.remap_time(11.0, clip_duration, &tempo_map);
     assert_eq!(clip_time, None);
 
     // At timeline time 4.0, clip hasn't started yet (None)
-    let clip_time = instance.remap_time(4.0, clip_duration);
+    let clip_time = instance.remap_time(4.0, clip_duration, &tempo_map);
     assert_eq!(clip_time, None);
 }

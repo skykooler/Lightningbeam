@@ -1682,6 +1682,7 @@ dependencies = [
  "dasp_rms",
  "dasp_sample",
  "dasp_signal",
+ "ffmpeg-blob-io",
  "ffmpeg-next",
  "hound",
  "memmap2",
@@ -2216,6 +2217,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
+]
+
+[[package]]
+name = "ffmpeg-blob-io"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "ffmpeg-sys-next",
+ "libc",
 ]
 
 [[package]]
@@ -2837,6 +2847,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fdf242682df893b86f33a73828fb09ca4b2d3bb6cc95249707fc684d27484b91"
 dependencies = [
  "bitflags 2.10.0",
+]
+
+[[package]]
+name = "gpu-video-encoder"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "ffmpeg-sys-next",
+ "libc",
+ "pollster 0.4.0",
+ "wgpu",
+ "wgpu-hal",
+ "wgpu-types",
 ]
 
 [[package]]
@@ -3480,6 +3503,7 @@ dependencies = [
  "claxon",
  "daw-backend",
  "egui",
+ "ffmpeg-blob-io",
  "ffmpeg-next",
  "flacenc",
  "image",
@@ -3505,7 +3529,7 @@ dependencies = [
 
 [[package]]
 name = "lightningbeam-editor"
-version = "1.0.4-alpha"
+version = "1.0.5-alpha"
 dependencies = [
  "beamdsp",
  "bytemuck",
@@ -3519,6 +3543,7 @@ dependencies = [
  "egui_extras",
  "egui_node_graph2",
  "ffmpeg-next",
+ "gpu-video-encoder",
  "half",
  "image",
  "kurbo 0.12.0",

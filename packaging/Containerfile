@@ -39,6 +39,11 @@ RUN apt-get update && apt-get install -y \
     libvpx-dev \
     libmp3lame-dev \
     libopus-dev \
+    # VAAPI hardware H.264 encode (zero-copy export). FFmpeg autodetects --enable-vaapi
+    # only when these headers are present at configure time; without them the static
+    # ffmpeg has no h264_vaapi encoder and the editor silently uses the software path.
+    libva-dev \
+    libdrm-dev \
     # PulseAudio (cpal optional backend)
     libpulse-dev \
     # Packaging tools

@@ -11,7 +11,7 @@
 /// - Document settings (when nothing is focused)
 
 use eframe::egui::{self, DragValue, Ui};
-use lightningbeam_core::brush_settings::{bundled_brushes, BrushSettings};
+use lightningbeam_core::brush_settings::bundled_brushes;
 use lightningbeam_core::actions::{SetDocumentPropertiesAction, SetShapePropertiesAction, SetFillPaintAction, SetImageFillAction};
 use lightningbeam_core::gradient::ShapeGradient;
 use lightningbeam_core::layer::{AnyLayer, LayerTrait};
@@ -1436,40 +1436,6 @@ impl InfopanelPane {
 
                 ui.add_space(4.0);
             });
-    }
-}
-
-/// Draw a brush dab preview into `rect` approximating the brush falloff shape.
-///
-/// Renders N concentric filled circles from outermost to innermost.  Because each
-/// inner circle overwrites the pixels of all outer circles beneath it, the visible
-/// alpha at distance `d` from the centre equals the alpha of the innermost circle
-/// whose radius ≥ `d`.  This step-approximates the actual brush falloff formula:
-/// `opa = ((1 − r) / (1 − hardness))²` for `r > hardness`, 1 inside the hard core.
-fn paint_brush_dab(painter: &egui::Painter, rect: egui::Rect, s: &BrushSettings) {
-    let center = rect.center();
-    let max_r = (rect.width().min(rect.height()) / 2.0 - 2.0).max(1.0);
-    let h = s.hardness;
-    let a = s.opaque;
-
-    const N: usize = 12;
-    for i in 0..N {
-        // t: normalized radial position of this ring, 1.0 = outermost edge
-        let t = 1.0 - i as f32 / N as f32;
-        let r = max_r * t;
-
-        let opa_weight = if h >= 1.0 || t <= h {
-            1.0f32
-        } else {
-            let x = (1.0 - t) / (1.0 - h).max(1e-4);
-            (x * x).min(1.0)
-        };
-
-        let alpha = (opa_weight * a * 220.0).min(220.0) as u8;
-        painter.circle_filled(
-            center, r,
-            egui::Color32::from_rgba_unmultiplied(200, 200, 220, alpha),
-        );
     }
 }
 

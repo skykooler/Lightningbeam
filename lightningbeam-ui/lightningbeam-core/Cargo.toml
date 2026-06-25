@@ -29,6 +29,8 @@ daw-backend = { path = "../../daw-backend" }
 
 # Video decoding
 ffmpeg-next = "8.0"
+# AVIO-over-Read+Seek shim: decode packed video by streaming from the SQLite blob.
+ffmpeg-blob-io = { path = "../../ffmpeg-blob-io" }
 lru = "0.12"
 
 # File I/O
@@ -73,3 +75,6 @@ windows-sys = { version = "0.60", features = [
 version = "0.11"
 
 [dev-dependencies]
+# For the packed-video streaming integration test (blob -> AVIO -> ffmpeg Input).
+ffmpeg-blob-io = { path = "../../ffmpeg-blob-io" }
+ffmpeg-next = "8.0"

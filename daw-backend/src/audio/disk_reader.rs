@@ -77,6 +77,12 @@ pub struct ReadAheadBuffer {
     /// When true, `render_from_file` will block-wait for frames instead of
     /// returning silence on buffer miss. Used during offline export.
     export_mode: AtomicBool,
+    /// Set by the disk reader when the source reaches EOF (no more frames will
+    /// ever be decoded past the current valid range). Lets export-mode block-waits
+    /// give up immediately for frames past the end of the audio (e.g. a video whose
+    /// audio track is shorter than the video) instead of timing out per chunk.
+    /// Cleared on `reset` (a seek may decode fresh data again).
+    finished: AtomicBool,
 }
 
 // SAFETY: See the doc comment on ReadAheadBuffer for the full safety argument.
@@ -112,6 +118,7 @@ impl ReadAheadBuffer {
             sample_rate,
             target_frame: AtomicU64::new(0),
             export_mode: AtomicBool::new(false),
+            finished: AtomicBool::new(false),
         }
     }
 
@@ -216,11 +223,24 @@ impl ReadAheadBuffer {
         self.export_mode.load(Ordering::Acquire)
     }
 
+    /// Mark that the source has reached EOF (set by the disk reader).
+    pub fn set_finished(&self, finished: bool) {
+        self.finished.store(finished, Ordering::Release);
+    }
+
+    /// True once the source hit EOF: no frames past the current valid range
+    /// will ever be decoded (until a `reset`/seek).
+    pub fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+
     /// Reset the buffer to start at `new_start` with zero valid frames.
     /// Called by the **disk reader thread** (producer) after a seek.
     pub fn reset(&self, new_start: u64) {
         self.valid_frames.store(0, Ordering::Release);
         self.start_frame.store(new_start, Ordering::Release);
+        // A seek may decode fresh data past the previous EOF position.
+        self.finished.store(false, Ordering::Release);
     }
 
     /// Write interleaved samples into the buffer, extending the valid range.
@@ -571,8 +591,37 @@ impl CompressedReader {
 ///
 /// Public (vs. the private `CompressedReader`) only so integration tests can
 /// exercise it directly; treat it as crate-internal.
+/// Adapts a host `MediaByteSource` (Read+Seek+Send+Sync) to the `ffmpeg-blob-io`
+/// `BlobSource` (Read+Seek+Send) so a packed video can be demuxed from a blob.
+struct ByteSourceAdapter(Box<dyn MediaByteSource>);
+impl std::io::Read for ByteSourceAdapter {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+impl std::io::Seek for ByteSourceAdapter {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.seek(pos)
+    }
+}
+
+/// A demuxer input for video-audio: a video file path, or a container blob streamed
+/// via the AVIO shim. Both expose the same ffmpeg `Input`.
+enum AudioInput {
+    Path(ffmpeg_next::format::context::Input),
+    Blob(ffmpeg_blob_io::BlobInput),
+}
+impl AudioInput {
+    fn get(&mut self) -> &mut ffmpeg_next::format::context::Input {
+        match self {
+            AudioInput::Path(i) => i,
+            AudioInput::Blob(b) => b.input_mut(),
+        }
+    }
+}
+
 pub struct VideoAudioReader {
-    input: ffmpeg_next::format::context::Input,
+    input: AudioInput,
     decoder: ffmpeg_next::decoder::Audio,
     /// Built lazily from the first decoded frame's format/layout → interleaved f32.
     resampler: Option<ffmpeg_next::software::resampling::Context>,
@@ -605,15 +654,30 @@ impl VideoAudioReader {
         self.total_frames
     }
 
+    /// Open the audio track of a video **file**.
     pub fn open(path: &Path) -> Result<Self, String> {
         ffmpeg_next::init().map_err(|e| e.to_string())?;
         let input = ffmpeg_next::format::input(&path)
             .map_err(|e| format!("Failed to open media: {}", e))?;
+        Self::from_input(AudioInput::Path(input))
+    }
 
+    /// Open the audio track of a video streamed from a **byte source** (a packed
+    /// `.beam` video blob), via the `ffmpeg-blob-io` AVIO shim. `ext` is a container
+    /// hint (e.g. `"mp4"`).
+    pub fn open_source(src: Box<dyn MediaByteSource>, ext: Option<&str>) -> Result<Self, String> {
+        ffmpeg_next::init().map_err(|e| e.to_string())?;
+        let blob = ffmpeg_blob_io::BlobInput::open(Box::new(ByteSourceAdapter(src)), ext)
+            .map_err(|e| format!("Failed to open packed video audio: {}", e))?;
+        Self::from_input(AudioInput::Blob(blob))
+    }
+
+    fn from_input(mut input: AudioInput) -> Result<Self, String> {
         // Pull stream scalars + build the decoder inside a scope so the stream
         // borrow of `input` ends before we use `input` again.
         let (stream_index, time_base, stream_duration, decoder) = {
             let stream = input
+                .get()
                 .streams()
                 .best(ffmpeg_next::media::Type::Audio)
                 .ok_or_else(|| "No audio stream found".to_string())?;
@@ -631,8 +695,8 @@ impl VideoAudioReader {
 
         let duration_secs = if stream_duration > 0 {
             stream_duration as f64 * time_base
-        } else if input.duration() > 0 {
-            input.duration() as f64 / f64::from(ffmpeg_next::ffi::AV_TIME_BASE)
+        } else if input.get().duration() > 0 {
+            input.get().duration() as f64 / f64::from(ffmpeg_next::ffi::AV_TIME_BASE)
         } else {
             0.0
         };
@@ -659,6 +723,7 @@ impl VideoAudioReader {
         // Seek to at-or-before the target (max_ts = ts_av) so we can decode
         // forward to it exactly. ffmpeg-next's `seek` wants a bounded range.
         self.input
+            .get()
             .seek(ts_av, 0..(ts_av + 1))
             .map_err(|e| format!("Seek failed: {}", e))?;
         self.decoder.flush();
@@ -684,7 +749,7 @@ impl VideoAudioReader {
             }
 
             // Read one packet (owned), releasing the `input` borrow before decoding.
-            let packet = self.input.packets().next().map(|(_, p)| p);
+            let packet = self.input.get().packets().next().map(|(_, p)| p);
             match packet {
                 Some(packet) => {
                     if packet.stream() == self.stream_index {
@@ -827,8 +892,8 @@ impl StreamSource {
             (SourceKind::VideoAudio, StreamOpen::Path(p)) => {
                 Ok(StreamSource::Video(VideoAudioReader::open(&p)?))
             }
-            (SourceKind::VideoAudio, StreamOpen::Source { .. }) => {
-                Err("VideoAudio cannot be opened from a packed byte source".to_string())
+            (SourceKind::VideoAudio, StreamOpen::Source { src, ext }) => {
+                Ok(StreamSource::Video(VideoAudioReader::open_source(src, ext.as_deref())?))
             }
         }
     }
@@ -1093,7 +1158,12 @@ impl DiskReader {
 
                 // Decode more data into the buffer.
                 match reader.decode_next(&mut decode_buf) {
-                    Ok(0) => {} // EOF
+                    Ok(0) => {
+                        // EOF: no more frames will be decoded for this buffer until a
+                        // seek. Tell export-mode waiters so they stop blocking on
+                        // past-the-end frames (e.g. video longer than its audio).
+                        buffer.set_finished(true);
+                    }
                     Ok(frames) => {
                         let was_empty = buffer.valid_frames_count() == 0;
                         buffer.write_samples(&decode_buf, frames);

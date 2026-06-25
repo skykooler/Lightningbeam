@@ -343,6 +343,13 @@ pub struct VideoClip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_audio_clip_id: Option<Uuid>,
 
+    /// When set, the video bytes are packed into the `.beam` container under this
+    /// media id (== the clip id) and decoded by streaming from the SQLite blob.
+    /// `None` means the video is referenced externally via [`Self::file_path`].
+    /// Reconstructed from the archive on load (see `load_beam_sqlite`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_id: Option<Uuid>,
+
     /// Folder this clip belongs to (None = root of category)
     #[serde(default)]
     pub folder_id: Option<Uuid>,
@@ -367,6 +374,7 @@ impl VideoClip {
             duration,
             frame_rate,
             linked_audio_clip_id: None,
+            media_id: None,
             folder_id: None,
         }
     }

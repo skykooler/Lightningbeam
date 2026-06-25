@@ -205,3 +205,51 @@ fn overwrite_media_replaces_chunks() {
     assert_eq!(archive.read_media_full(id).unwrap(), vec![2u8; 50]);
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn packed_video_from_path_roundtrips() {
+    // Simulates the save path: stream a video file into a MediaKind::Video blob,
+    // then read it back (frames/audio decode would open this via the AVIO shim).
+    let path = temp_db_path("video_pack");
+    let mut src = std::env::temp_dir();
+    src.push(format!("beam_video_src_{}.mp4", std::process::id()));
+    let bytes: Vec<u8> = (0..(9 * 1024 * 1024u32)).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&src, &bytes).unwrap();
+
+    let id = Uuid::new_v4();
+    let mut archive = BeamArchive::create(&path).unwrap();
+    {
+        let txn = archive.transaction().unwrap();
+        txn.put_media_packed_from_path(
+            id,
+            MediaKind::Video,
+            "mp4",
+            &src,
+            MediaMeta { width: Some(1920), height: Some(1080), ..Default::default() },
+        )
+        .unwrap();
+        txn.commit().unwrap();
+    }
+
+    let info = archive.media_info(id).unwrap().expect("video media row");
+    assert_eq!(info.kind, MediaKind::Video);
+    assert_eq!(info.storage, MediaStorage::Packed);
+    assert_eq!(info.codec, "mp4");
+    assert_eq!(info.total_len, bytes.len() as u64);
+    assert_eq!(info.width, Some(1920));
+    assert_eq!(info.height, Some(1080));
+    assert_eq!(archive.read_media_full(id).unwrap(), bytes);
+
+    // Streaming read mirrors how the decoder pulls bytes via its BlobReader.
+    let mut reader = archive.open_blob_reader(&path, id).unwrap();
+    let mut streamed = Vec::new();
+    reader.read_to_end(&mut streamed).unwrap();
+    assert_eq!(streamed, bytes);
+    reader.seek(SeekFrom::Start(5 * 1024 * 1024)).unwrap();
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf).unwrap();
+    assert_eq!(buf[0], ((5 * 1024 * 1024u32) % 251) as u8);
+
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&path);
+}

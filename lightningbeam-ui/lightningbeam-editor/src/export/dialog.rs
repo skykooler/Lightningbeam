@@ -17,8 +17,6 @@ pub struct DocumentHint {
     pub has_raster: bool,
     pub has_vector: bool,
     pub current_time: f64,
-    pub doc_width: u32,
-    pub doc_height: u32,
 }
 
 /// Export type selection
@@ -577,7 +575,7 @@ impl ExportDialog {
 
         if ui.button("Choose location...").clicked() {
             let ext = self.current_extension();
-            let mut dialog = rfd::FileDialog::new()
+            let dialog = rfd::FileDialog::new()
                 .set_directory(&self.output_dir)
                 .set_file_name(&self.output_filename)
                 .add_filter(ext.to_uppercase(), &[ext]);

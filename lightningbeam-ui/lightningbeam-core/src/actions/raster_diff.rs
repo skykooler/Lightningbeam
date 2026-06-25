@@ -12,7 +12,7 @@
 //! correct). If the base is somehow not resident we skip rather than corrupt.
 
 /// Normalize a buffer to full length `n`; an empty/short buffer becomes transparent.
-fn normalize(buf: &[u8], n: usize) -> std::borrow::Cow<[u8]> {
+fn normalize(buf: &[u8], n: usize) -> std::borrow::Cow<'_, [u8]> {
     if buf.len() == n {
         std::borrow::Cow::Borrowed(buf)
     } else {

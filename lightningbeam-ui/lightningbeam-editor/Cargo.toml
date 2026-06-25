@@ -1,6 +1,6 @@
 [package]
 name = "lightningbeam-editor"
-version = "1.0.5-alpha"
+version = "1.0.6-alpha"
 edition = "2021"
 description = "Multimedia editor for audio, video and 2D animation"
 license = "GPL-3.0-or-later"
@@ -9,6 +9,7 @@ license = "GPL-3.0-or-later"
 lightningbeam-core = { path = "../lightningbeam-core" }
 daw-backend = { path = "../../daw-backend" }
 beamdsp = { path = "../beamdsp" }
+gpu-video-encoder = { path = "../gpu-video-encoder" }
 rtrb = "0.3"
 cpal = "0.17"
 ffmpeg-next = { version = "8.0", features = ["static"] }
@@ -78,7 +79,11 @@ extended-description = "GPU-accelerated multimedia editor for audio, video and 2
 license-file = ["../../LICENSE", "0"]
 section = "video"
 priority = "optional"
-depends = "libasound2, libwayland-client0, libx11-6, libvulkan1"
+# libva2/libva-drm2 are hard deps: the vaapi-enabled static ffmpeg links them (DT_NEEDED), so the
+# app won't launch without them. The VA *driver* is a soft dep — absent, the export falls back to
+# software — so it's a recommends (va-driver-all pulls intel-media + i965 + mesa drivers).
+depends = "libasound2, libwayland-client0, libx11-6, libvulkan1, libva2, libva-drm2, libdrm2"
+recommends = "va-driver-all"
 assets = [
     ["target/release/lightningbeam-editor", "usr/bin/", "755"],
     ["assets/com.lightningbeam.editor.desktop", "usr/share/applications/", "644"],
@@ -100,6 +105,15 @@ alsa-lib = "*"
 wayland = "*"
 libX11 = "*"
 vulkan-loader = "*"
+# Hard dep: the vaapi-enabled static ffmpeg links libva (libva.so.2 + libva-drm.so.2 + libdrm).
+libva = "*"
+libdrm = "*"
+
+# Soft deps: the VA driver is only needed to actually use hardware encode; absent it, the editor
+# falls back to software. (Requires a cargo-generate-rpm new enough to support weak-dep tables.)
+[package.metadata.generate-rpm.recommends]
+intel-media-driver = "*"
+mesa-va-drivers = "*"
 
 [[package.metadata.generate-rpm.assets]]
 source = "target/release/lightningbeam-editor"

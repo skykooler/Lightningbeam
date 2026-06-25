@@ -52,7 +52,7 @@ Lightningbeam is a 2D multimedia editor combining vector animation, audio produc
 
 Lightningbeam is undergoing a rewrite from a Tauri/JavaScript prototype to pure Rust. The original architecture hit IPC bandwidth limitations when streaming decoded video frames. The new Rust UI eliminates this bottleneck by handling all rendering natively.
 
-**Current Status**: Active development on the `rust-ui` branch. Core UI, tools, and undo system are implemented. Audio integration in progress.
+**Current Status**: Active development on the `main` branch. Core UI, tools, undo system, and audio integration are implemented.
 
 ## Technology Stack
 
@@ -486,8 +486,7 @@ lightningbeam-2/
 │       ├── synth/                 # Synthesizers
 │       └── midi/                  # MIDI handling
 │
-├── src-tauri/                     # Legacy Tauri backend
-├── src/                           # Legacy JavaScript frontend
+├── src/                           # Legacy JavaScript frontend (browser-only)
 ├── CONTRIBUTING.md                # Contributor guide
 ├── ARCHITECTURE.md                # This file
 ├── README.md                      # Project overview
