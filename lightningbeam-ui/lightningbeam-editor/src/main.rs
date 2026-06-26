@@ -79,6 +79,40 @@ struct Args {
     cpu_renderer: bool,
 }
 
+/// The default eframe wgpu device setup (wgpu picks the adapter/device). Used on non-Linux, when
+/// the shared VAAPI device is unavailable, or when disabled via `LB_NO_SHARED_DEVICE`.
+fn lb_default_wgpu_setup() -> egui_wgpu::WgpuSetup {
+    egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
+        device_descriptor: std::sync::Arc::new(|adapter| {
+            let features = adapter.features();
+            // Request SHADER_F16 if available — needed on Mesa/llvmpipe for vello's
+            // unpack2x16float (enables the SHADER_F16_IN_F32 downlevel capability).
+            // TIMESTAMP_QUERY(+INSIDE_ENCODERS) drives the F3 GPU composite timer
+            // (gpu_timer.rs); both are optional and no-op when unsupported.
+            let optional_features = wgpu::Features::SHADER_F16
+                | wgpu::Features::TIMESTAMP_QUERY
+                | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+
+            let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                wgpu::Limits::downlevel_webgl2_defaults()
+            } else {
+                wgpu::Limits::default()
+            };
+
+            wgpu::DeviceDescriptor {
+                label: Some("lightningbeam wgpu device"),
+                required_features: features & optional_features,
+                required_limits: wgpu::Limits {
+                    max_texture_dimension_2d: 8192,
+                    ..base_limits
+                },
+                ..Default::default()
+            }
+        }),
+        ..Default::default()
+    })
+}
+
 fn main() -> eframe::Result {
     println!("🚀 Starting Lightningbeam Editor...");
 
@@ -168,38 +202,38 @@ fn main() -> eframe::Result {
         viewport_builder = viewport_builder.with_icon(icon);
     }
 
+    // Prefer the shared VAAPI-capable wgpu device on Linux: eframe + the compositor + hardware
+    // video decode all run on one device, so decoded DMA-BUF frames are usable by the preview
+    // compositor (decode/encode can't share textures across devices). Falls back to wgpu's normal
+    // device (software video decode) when unavailable, on other platforms, or via LB_NO_SHARED_DEVICE.
+    // The DrmDevice's wgpu handles are cloned into eframe (Arc-backed, keep the device alive); the
+    // raw VkDevice persists with them.
+    #[allow(unused_mut)]
+    let mut wgpu_setup = lb_default_wgpu_setup();
+    #[cfg(target_os = "linux")]
+    if std::env::var("LB_NO_SHARED_DEVICE").is_ok() {
+        println!("🖥  Shared device disabled via LB_NO_SHARED_DEVICE; default wgpu device (software video decode)");
+    } else {
+        match gpu_video_encoder::vk_device::create_windowed() {
+            Ok(drm) => {
+                println!("🖥  Using shared VAAPI-capable wgpu device (hardware video decode enabled)");
+                wgpu_setup = egui_wgpu::WgpuSetup::Existing(egui_wgpu::WgpuSetupExisting {
+                    instance: drm.instance.clone(),
+                    adapter: drm.adapter.clone(),
+                    device: drm.device.clone(),
+                    queue: drm.queue.clone(),
+                });
+            }
+            Err(e) => {
+                println!("🖥  Shared device unavailable ({e}); default wgpu device (software video decode)");
+            }
+        }
+    }
+
     let options = eframe::NativeOptions {
         viewport: viewport_builder,
         wgpu_options: egui_wgpu::WgpuConfiguration {
-            wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
-                device_descriptor: std::sync::Arc::new(|adapter| {
-                    let features = adapter.features();
-                    // Request SHADER_F16 if available — needed on Mesa/llvmpipe for vello's
-                    // unpack2x16float (enables the SHADER_F16_IN_F32 downlevel capability).
-                    // TIMESTAMP_QUERY(+INSIDE_ENCODERS) drives the F3 GPU composite timer
-                    // (gpu_timer.rs); both are optional and no-op when unsupported.
-                    let optional_features = wgpu::Features::SHADER_F16
-                        | wgpu::Features::TIMESTAMP_QUERY
-                        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
-
-                    let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
-                        wgpu::Limits::downlevel_webgl2_defaults()
-                    } else {
-                        wgpu::Limits::default()
-                    };
-
-                    wgpu::DeviceDescriptor {
-                        label: Some("lightningbeam wgpu device"),
-                        required_features: features & optional_features,
-                        required_limits: wgpu::Limits {
-                            max_texture_dimension_2d: 8192,
-                            ..base_limits
-                        },
-                        ..Default::default()
-                    }
-                }),
-                ..Default::default()
-            }),
+            wgpu_setup,
             ..Default::default()
         },
         ..Default::default()
