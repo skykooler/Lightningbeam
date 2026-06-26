@@ -14,8 +14,10 @@ struct Nv12Params {
     col0: vec4<f32>,
     col1: vec4<f32>,
     col2: vec4<f32>,
-    // .x = full_range flag; .yzw padding. A vec4 keeps the struct 64 bytes (matching the Rust
-    // `u32 + [u32; 3]`); a bare u32 + vec3 would round up to 80 and mismatch the bound buffer.
+    // Y'CbCr→R'G'B' matrix from the source colorspace: [Cr→R, Cb→G, Cr→G, Cb→B].
+    coeffs: vec4<f32>,
+    // .x = full_range flag; .yzw padding. A vec4 keeps each block 16-aligned and the struct size
+    // matching the Rust `[f32;4] + u32 + [u32;3]` (80 bytes).
     flags: vec4<u32>,
 }
 
@@ -73,10 +75,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         Cr = (cbcr.g * 255.0 - 128.0) / 224.0;
     }
 
-    // BT.709 Y'CbCr → gamma-encoded R'G'B'.
-    let r = Y + 1.5748 * Cr;
-    let g = Y - 0.1873 * Cb - 0.4681 * Cr;
-    let b = Y + 1.8556 * Cb;
+    // Y'CbCr → gamma-encoded R'G'B' using the source colorspace's matrix.
+    let r = Y + params.coeffs.x * Cr;
+    let g = Y + params.coeffs.y * Cb + params.coeffs.z * Cr;
+    let b = Y + params.coeffs.w * Cb;
     let rgb_gamma = clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(1.0));
 
     // R'G'B' is gamma-encoded; the HDR target is linear → undo the transfer.

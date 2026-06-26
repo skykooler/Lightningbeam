@@ -715,6 +715,22 @@ pub struct GpuVideoFrame {
     /// Source YUV range: true = full/PC (0–255), false = limited/TV (16–235). Drives the NV12→RGB
     /// offset/scale in the compositor.
     pub full_range: bool,
+    /// Y'CbCr→R'G'B' matrix coefficients derived from the frame's colorspace (BT.709/601/2020),
+    /// so SD (BT.601) and HD/UHD clips each convert correctly: `[Cr→R, Cb→G, Cr→G, Cb→B]`.
+    ///   R = Y + c[0]·Cr,  G = Y + c[1]·Cb + c[2]·Cr,  B = Y + c[3]·Cb
+    pub coeffs: [f32; 4],
+}
+
+/// Y'CbCr→R'G'B' matrix coefficients (`[Cr→R, Cb→G, Cr→G, Cb→B]`) from the luma weights `kr`/`kb`
+/// (`kg = 1−kr−kb`). BT.709 → `[1.5748, −0.1873, −0.4681, 1.8556]`.
+pub fn ycbcr_coeffs(kr: f32, kb: f32) -> [f32; 4] {
+    let kg = 1.0 - kr - kb;
+    [
+        2.0 * (1.0 - kr),
+        -2.0 * kb * (1.0 - kb) / kg,
+        -2.0 * kr * (1.0 - kr) / kg,
+        2.0 * (1.0 - kb),
+    ]
 }
 
 /// Imports a decoded VAAPI surface (a `*mut AVFrame`, passed as an opaque pointer so core needn't

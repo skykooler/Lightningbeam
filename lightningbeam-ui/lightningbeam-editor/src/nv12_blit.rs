@@ -5,12 +5,13 @@
 
 use crate::gpu_brush::BlitTransform;
 
-/// Uniform: the `viewport_uv → frame_uv` affine (same packing as [`BlitTransform`]) plus the
-/// full-range flag. 64 bytes (48 for the matrix + a u32 + 12 padding).
+/// Uniform: the `viewport_uv → frame_uv` affine (same packing as [`BlitTransform`]), the Y'CbCr→RGB
+/// matrix coefficients, and the full-range flag. 80 bytes (48 matrix + 16 coeffs + u32 + 12 pad).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Nv12Params {
     transform: BlitTransform,
+    coeffs: [f32; 4],
     full_range: u32,
     _pad: [u32; 3],
 }
@@ -127,9 +128,11 @@ impl Nv12BlitPipeline {
         target_view: &wgpu::TextureView,
         transform: &BlitTransform,
         full_range: bool,
+        coeffs: [f32; 4],
     ) {
         let params = Nv12Params {
             transform: *transform,
+            coeffs,
             full_range: full_range as u32,
             _pad: [0; 3],
         };

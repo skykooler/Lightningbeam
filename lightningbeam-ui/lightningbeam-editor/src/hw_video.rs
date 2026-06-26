@@ -6,7 +6,9 @@
 
 use ffmpeg_next::ffi as ff;
 use gpu_video_encoder::dmabuf::{self, Nv12DmaBuf};
-use lightningbeam_core::video::{GpuVideoFrame, HwDeviceHandle, HwVideoImporter, VideoManager};
+use lightningbeam_core::video::{
+    ycbcr_coeffs, GpuVideoFrame, HwDeviceHandle, HwVideoImporter, VideoManager,
+};
 use std::sync::{Arc, Mutex};
 
 /// Imports decoded VAAPI surfaces onto the shared wgpu device. Holds clones of the shared
@@ -52,6 +54,29 @@ impl HwVideoImporter for SharedHwImporter {
         };
         let full_range = (*frame).color_range == ff::AVColorRange::AVCOL_RANGE_JPEG;
 
+        // Luma weights (kr, kb) from the frame's matrix coefficients, so SD (BT.601) and HD/UHD
+        // (BT.709) clips each convert with the right matrix. Unspecified → guess by height, as
+        // players/swscale do. SMPTE240M and BT.2020 are handled too (the latter's transfer is still
+        // approximated as sRGB — fine for SDR; true HDR is out of scope).
+        let (kr, kb) = match (*frame).colorspace {
+            ff::AVColorSpace::AVCOL_SPC_BT709 => (0.2126, 0.0722),
+            ff::AVColorSpace::AVCOL_SPC_BT470BG | ff::AVColorSpace::AVCOL_SPC_SMPTE170M => {
+                (0.299, 0.114)
+            }
+            ff::AVColorSpace::AVCOL_SPC_SMPTE240M => (0.212, 0.087),
+            ff::AVColorSpace::AVCOL_SPC_BT2020_NCL | ff::AVColorSpace::AVCOL_SPC_BT2020_CL => {
+                (0.2627, 0.0593)
+            }
+            _ => {
+                if height <= 576 {
+                    (0.299, 0.114) // SD → BT.601
+                } else {
+                    (0.2126, 0.0722) // HD/UHD → BT.709
+                }
+            }
+        };
+        let coeffs = ycbcr_coeffs(kr, kb);
+
         let imported = dmabuf::import_raw(&self.device, &self.adapter, &buf);
         ff::av_frame_free(&mut (drm_f as *mut _)); // the fd was dup'd into Vulkan
         let (y, uv) = imported.ok()?.into_planes();
@@ -61,6 +86,7 @@ impl HwVideoImporter for SharedHwImporter {
             width,
             height,
             full_range,
+            coeffs,
         })
     }
 }
