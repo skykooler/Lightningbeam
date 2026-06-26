@@ -82,6 +82,8 @@ struct ZeroCopyVideo {
     gpu_resources: video_exporter::ExportGpuResources,
     /// Reused RGBA target (RENDER_ATTACHMENT | TEXTURE_BINDING) on the encoder's device.
     rgba: wgpu::Texture,
+    /// True when running on the shared device → compositing can consume hardware-decoded GPU frames.
+    on_shared_device: bool,
 }
 
 /// State for a single-frame image export (runs on the GPU render thread, one frame per update).
@@ -895,6 +897,7 @@ impl ExportOrchestrator {
         height: u32,
         framerate: f64,
         output_path: &std::path::Path,
+        shared_device: Option<(wgpu::Device, wgpu::Queue, wgpu::Adapter)>,
     ) -> Option<ZeroCopyVideo> {
         // Zero-copy is 8-bit H.264 only; HDR needs the 10-bit HEVC software path.
         if settings.hdr.is_hdr()
@@ -902,14 +905,25 @@ impl ExportOrchestrator {
         {
             return None;
         }
-        let encoder = match gpu_video_encoder::encoder::ZeroCopyEncoder::new(
-            width,
-            height,
-            framerate.round() as i32,
-            settings.quality.bitrate_kbps(),
-            output_path,
-            settings.color_range.is_full(),
-        ) {
+        let bitrate = settings.quality.bitrate_kbps();
+        let fr = framerate.round() as i32;
+        let full = settings.color_range.is_full();
+        let on_shared_device = shared_device.is_some();
+        // Prefer the shared device → decode→composite→encode stay GPU-resident on one device.
+        // Without it, the encoder builds its own device (decode still downloads to CPU per Step 1's
+        // hardware_ok=false on this path).
+        let encoder_result = match shared_device {
+            Some((device, queue, adapter)) => {
+                println!("🎬 [EXPORT] zero-copy on shared device (GPU-resident decode)");
+                gpu_video_encoder::encoder::ZeroCopyEncoder::new_on_device(
+                    device, queue, adapter, width, height, fr, bitrate, output_path, full,
+                )
+            }
+            None => gpu_video_encoder::encoder::ZeroCopyEncoder::new(
+                width, height, fr, bitrate, output_path, full,
+            ),
+        };
+        let encoder = match encoder_result {
             Ok(e) => e,
             Err(e) => {
                 println!("🎬 [EXPORT] zero-copy unavailable ({e}); software path");
@@ -945,7 +959,7 @@ impl ExportOrchestrator {
             view_formats: &[],
         });
         println!("🎬 [EXPORT] zero-copy VAAPI H.264 enabled");
-        Some(ZeroCopyVideo { encoder, renderer, gpu_resources, rgba })
+        Some(ZeroCopyVideo { encoder, renderer, gpu_resources, rgba, on_shared_device })
     }
 
     /// Start a video export in the background.
@@ -963,6 +977,7 @@ impl ExportOrchestrator {
     /// # Returns
     /// Ok(()) on success, Err on failure
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn start_video_export(
         &mut self,
         settings: VideoExportSettings,
@@ -971,6 +986,8 @@ impl ExportOrchestrator {
         video_manager: Arc<std::sync::Mutex<VideoManager>>,
         raster_store: lightningbeam_core::raster_store::RasterStore,
         container_path: Option<PathBuf>,
+        // The shared VAAPI device, `Some` only when active → zero-copy encode runs on it.
+        shared_device: Option<(wgpu::Device, wgpu::Queue, wgpu::Adapter)>,
     ) -> Result<(), String> {
         println!("🎬 [VIDEO EXPORT] Starting video export");
 
@@ -998,7 +1015,7 @@ impl ExportOrchestrator {
         // success it returns here; otherwise we fall through to the software encoder thread.
         #[cfg(target_os = "linux")]
         {
-            if let Some(zc) = Self::try_build_zero_copy(&settings, width, height, framerate, &output_path) {
+            if let Some(zc) = Self::try_build_zero_copy(&settings, width, height, framerate, &output_path, shared_device) {
                 drop(frame_rx);
                 let document_snapshot = document.clone();
                 let mut image_cache = ImageCache::new();
@@ -1062,6 +1079,8 @@ impl ExportOrchestrator {
         video_manager: Arc<std::sync::Mutex<VideoManager>>,
         raster_store: lightningbeam_core::raster_store::RasterStore,
         container_path: Option<PathBuf>,
+        // The shared VAAPI device, `Some` only when active → zero-copy encode runs on it.
+        shared_device: Option<(wgpu::Device, wgpu::Queue, wgpu::Adapter)>,
     ) -> Result<(), String> {
         println!("🎬🎵 [PARALLEL EXPORT] Starting parallel video+audio export");
 
@@ -1128,7 +1147,7 @@ impl ExportOrchestrator {
         // by `render_next_video_frame` on the UI thread.
         #[cfg(target_os = "linux")]
         let (video_thread, video_state) = match Self::try_build_zero_copy(
-            &video_settings, video_width, video_height, video_framerate, &temp_video_path,
+            &video_settings, video_width, video_height, video_framerate, &temp_video_path, shared_device,
         ) {
             Some(zc) => {
                 drop(frame_rx); // the zero-copy path renders internally, no frame channel
@@ -1500,7 +1519,7 @@ impl ExportOrchestrator {
                 None,
                 false,
                 Some(&raster_store),
-                false, // zero-copy runs on its own device → download HW frames to CPU
+                zc.on_shared_device, // GPU-resident decode only when on the shared device
             ) {
                 Ok(cmd) => cmd,
                 Err(e) => {

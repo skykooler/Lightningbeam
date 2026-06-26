@@ -299,14 +299,18 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             #[cfg(debug_assertions)]
-            let app = EditorApp::new(cc, layouts, theme, test_mode_panic_snapshot_for_app, test_mode_pending_event_for_app, test_mode_is_replaying_for_app, test_mode_pending_geometry_for_app);
+            #[allow(unused_mut)]
+            let mut app = EditorApp::new(cc, layouts, theme, test_mode_panic_snapshot_for_app, test_mode_pending_event_for_app, test_mode_is_replaying_for_app, test_mode_pending_geometry_for_app);
             #[cfg(not(debug_assertions))]
-            let app = EditorApp::new(cc, layouts, theme);
-            // Wire hardware video decode into the VideoManager now that the shared device exists.
+            #[allow(unused_mut)]
+            let mut app = EditorApp::new(cc, layouts, theme);
+            // Wire hardware video decode into the VideoManager now that the shared device exists, and
+            // stash the shared device handles so the zero-copy export encoder can run on it too.
             #[cfg(target_os = "linux")]
             if shared_device_active {
                 if let Some(rs) = cc.wgpu_render_state.as_ref() {
                     hw_video::install(&app.video_manager, &rs.device, &rs.adapter);
+                    app.shared_device = Some((rs.device.clone(), rs.queue.clone(), rs.adapter.clone()));
                 }
             }
             Ok(Box::new(app))
@@ -990,6 +994,9 @@ struct EditorApp {
     audio_channels: u32,
     // Video decoding and management
     video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>, // Shared video manager
+    /// The shared VAAPI-capable wgpu device (device, queue, adapter), `Some` only when active. Lets
+    /// the zero-copy export encoder run on it (GPU-resident decode→composite→encode).
+    shared_device: Option<(wgpu::Device, wgpu::Queue, wgpu::Adapter)>,
     // Webcam capture state
     webcam: Option<lightningbeam_core::webcam::WebcamCapture>,
     /// Latest polled webcam frame (updated each frame for preview)
@@ -1327,6 +1334,7 @@ impl EditorApp {
             video_manager: std::sync::Arc::new(std::sync::Mutex::new(
                 lightningbeam_core::video::VideoManager::new()
             )),
+            shared_device: None,
             webcam: None,
             webcam_frame: None,
             webcam_record_command: None,
@@ -6125,6 +6133,9 @@ impl eframe::App for EditorApp {
                 self.export_orchestrator = Some(export::ExportOrchestrator::new());
             }
 
+            // Clone before the &mut self.export_orchestrator borrow below.
+            let shared_device = self.shared_device.clone();
+
             let export_started = if let Some(orchestrator) = &mut self.export_orchestrator {
                 match export_result {
                     ExportResult::Image(settings, output_path) => {
@@ -6163,6 +6174,7 @@ impl eframe::App for EditorApp {
                             Arc::clone(&self.video_manager),
                             self.raster_store.clone(),
                             self.current_file_path.clone(),
+                            shared_device.clone(),
                         ) {
                             Ok(()) => true,
                             Err(err) => {
@@ -6184,6 +6196,7 @@ impl eframe::App for EditorApp {
                                 Arc::clone(&self.video_manager),
                                 self.raster_store.clone(),
                                 self.current_file_path.clone(),
+                                shared_device.clone(),
                             ) {
                                 Ok(()) => true,
                                 Err(err) => {
