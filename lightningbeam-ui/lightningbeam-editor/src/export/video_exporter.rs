@@ -83,6 +83,11 @@ pub struct ExportGpuResources {
     pub canvas_blit: crate::gpu_brush::CanvasBlitPipeline,
     /// Per-keyframe GPU texture cache for raster layers during export.
     pub raster_cache: std::collections::HashMap<uuid::Uuid, crate::gpu_brush::CanvasPair>,
+    /// Cached HDR accumulator state after the (static) background is composited in. The document
+    /// background doesn't change across an export, so it's rendered once and restored with a cheap
+    /// texture copy each frame instead of a full Vello render + 2 passes/submits. `None` until the
+    /// first frame; invalidated on resize.
+    cached_bg_hdr: Option<wgpu::Texture>,
 }
 
 impl ExportGpuResources {
@@ -108,7 +113,8 @@ impl ExportGpuResources {
             format: HDR_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST, // restore cached background each frame
             view_formats: &[],
         });
         let hdr_texture_view = hdr_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -261,6 +267,7 @@ impl ExportGpuResources {
             linear_to_srgb_sampler,
             canvas_blit,
             raster_cache: std::collections::HashMap::new(),
+            cached_bg_hdr: None,
         }
     }
 
@@ -279,10 +286,12 @@ impl ExportGpuResources {
             format: HDR_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         self.hdr_texture_view = self.hdr_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.cached_bg_hdr = None; // dimensions changed — rebuild the background cache
     }
 }
 
@@ -748,29 +757,74 @@ fn composite_document_to_hdr(
         antialiasing_method: vello::AaConfig::Area,
     };
 
-    // --- Background ---
-    let bg_srgb = gpu_resources.buffer_pool.acquire(device, layer_spec);
-    let bg_hdr  = gpu_resources.buffer_pool.acquire(device, hdr_spec);
-    if let (Some(bg_srgb_view), Some(bg_hdr_view)) = (
-        gpu_resources.buffer_pool.get_view(bg_srgb),
-        gpu_resources.buffer_pool.get_view(bg_hdr),
-    ) {
-        renderer.render_to_texture(device, queue, &composite_result.background, bg_srgb_view, &layer_render_params)
-            .map_err(|e| format!("Failed to render background: {e}"))?;
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_bg_srgb_to_linear") });
-        gpu_resources.srgb_to_linear.convert(device, &mut enc, bg_srgb_view, bg_hdr_view);
+    let prof = render_profile_enabled();
+    let t_c0 = std::time::Instant::now();
+
+    // --- Background (cached) ---
+    // The document background is static across an export, so render it through Vello exactly once
+    // (into the accumulator) and snapshot the result; every later frame restores it with a single
+    // GPU texture copy instead of a Vello render + sRGB-convert + composite (+2 submits).
+    let bg_cached = matches!(
+        &gpu_resources.cached_bg_hdr,
+        Some(t) if t.width() == width && t.height() == height
+    );
+    let copy_size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
+    if bg_cached {
+        // Restore the cached background into the accumulator.
+        let cached = gpu_resources.cached_bg_hdr.as_ref().unwrap();
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_bg_restore") });
+        enc.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo { texture: cached, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo { texture: &gpu_resources.hdr_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            copy_size,
+        );
         queue.submit(Some(enc.finish()));
-        let bg_layer = CompositorLayer::normal(bg_hdr, 1.0);
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_bg_composite") });
-        // When transparency is allowed, start from transparent black so the background's
-        // native alpha is preserved. Otherwise force an opaque black underlay.
-        let clear = if allow_transparency { [0.0, 0.0, 0.0, 0.0] } else { [0.0, 0.0, 0.0, 1.0] };
-        gpu_resources.compositor.composite(device, queue, &mut enc, &[bg_layer],
-            &gpu_resources.buffer_pool, &gpu_resources.hdr_texture_view, Some(clear));
+    } else {
+        // First frame (or after a resize): full background render into the accumulator.
+        let bg_srgb = gpu_resources.buffer_pool.acquire(device, layer_spec);
+        let bg_hdr  = gpu_resources.buffer_pool.acquire(device, hdr_spec);
+        if let (Some(bg_srgb_view), Some(bg_hdr_view)) = (
+            gpu_resources.buffer_pool.get_view(bg_srgb),
+            gpu_resources.buffer_pool.get_view(bg_hdr),
+        ) {
+            renderer.render_to_texture(device, queue, &composite_result.background, bg_srgb_view, &layer_render_params)
+                .map_err(|e| format!("Failed to render background: {e}"))?;
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_bg_srgb_to_linear") });
+            gpu_resources.srgb_to_linear.convert(device, &mut enc, bg_srgb_view, bg_hdr_view);
+            queue.submit(Some(enc.finish()));
+            let bg_layer = CompositorLayer::normal(bg_hdr, 1.0);
+            let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_bg_composite") });
+            // When transparency is allowed, start from transparent black so the background's
+            // native alpha is preserved. Otherwise force an opaque black underlay.
+            let clear = if allow_transparency { [0.0, 0.0, 0.0, 0.0] } else { [0.0, 0.0, 0.0, 1.0] };
+            gpu_resources.compositor.composite(device, queue, &mut enc, &[bg_layer],
+                &gpu_resources.buffer_pool, &gpu_resources.hdr_texture_view, Some(clear));
+            queue.submit(Some(enc.finish()));
+        }
+        gpu_resources.buffer_pool.release(bg_srgb);
+        gpu_resources.buffer_pool.release(bg_hdr);
+
+        // Snapshot the composited background for reuse on subsequent frames.
+        let cached = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("export_cached_bg_hdr"),
+            size: copy_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_bg_snapshot") });
+        enc.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo { texture: &gpu_resources.hdr_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyTextureInfo { texture: &cached, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            copy_size,
+        );
         queue.submit(Some(enc.finish()));
+        gpu_resources.cached_bg_hdr = Some(cached);
     }
-    gpu_resources.buffer_pool.release(bg_srgb);
-    gpu_resources.buffer_pool.release(bg_hdr);
+    let t_bg = std::time::Instant::now();
 
     // --- Layers ---
     for rendered_layer in &composite_result.layers {
@@ -906,8 +960,31 @@ fn composite_document_to_hdr(
         }
     }
 
+    if prof {
+        record_composite_profile(t_bg.duration_since(t_c0), t_bg.elapsed());
+    }
+
     gpu_resources.buffer_pool.next_frame();
     Ok(())
+}
+
+/// Split of `composite_document_to_hdr`: static-background re-render vs. the layer loop
+/// (video upload + blits). Prints a running average every 200 frames under LB_RENDER_PROFILE.
+fn record_composite_profile(background: std::time::Duration, layers: std::time::Duration) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static BG_US: AtomicU64 = AtomicU64::new(0);
+    static LAYERS_US: AtomicU64 = AtomicU64::new(0);
+    static N: AtomicU64 = AtomicU64::new(0);
+    BG_US.fetch_add(background.as_micros() as u64, Ordering::Relaxed);
+    LAYERS_US.fetch_add(layers.as_micros() as u64, Ordering::Relaxed);
+    let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % 200 == 0 {
+        println!(
+            "📊 [COMPOSITE PROFILE] {n} frames avg: background-render {:.2}ms | layers(video upload+blit) {:.2}ms",
+            BG_US.load(Ordering::Relaxed) as f64 / n as f64 / 1000.0,
+            LAYERS_US.load(Ordering::Relaxed) as f64 / n as f64 / 1000.0,
+        );
+    }
 }
 
 /// Upload `pixels` to a transient GPU texture (TEXTURE_BINDING | COPY_DST) in the
@@ -1224,6 +1301,12 @@ pub fn render_frame_to_gpu_rgba(
 ) -> Result<wgpu::CommandEncoder, String> {
     use vello::kurbo::Affine;
 
+    // One-shot profiling of the render-bucket split (LB_RENDER_PROFILE=1): how much of the
+    // per-frame CPU "render" is document build (incl. video decode) vs. composite-command
+    // recording (incl. the frame texture upload) vs. the sRGB pass. Prints a running average.
+    let prof = render_profile_enabled();
+    let t0 = std::time::Instant::now();
+
     // Set document time to the frame timestamp
     document.current_time = timestamp;
 
@@ -1256,8 +1339,10 @@ pub fn render_frame_to_gpu_rgba(
         floating_selection,
         false, // No checkerboard in export
     );
+    let t_build = std::time::Instant::now();
 
     composite_document_to_hdr(&composite_result, document, device, queue, renderer, gpu_resources, width, height, allow_transparency)?;
+    let t_composite = std::time::Instant::now();
 
     // Convert HDR to sRGB (linear → sRGB), render directly to external RGBA texture
     let output_view = rgba_texture_view;
@@ -1302,9 +1387,47 @@ pub fn render_frame_to_gpu_rgba(
         render_pass.draw(0..4, 0..1);
     }
 
+    if prof {
+        record_render_profile(
+            t_build.duration_since(t0),
+            t_composite.duration_since(t_build),
+            t_composite.elapsed(),
+        );
+    }
+
     // Return encoder for caller to submit (ReadbackPipeline will handle submission and async readback)
     // Frame is already rendered to external RGBA texture, no GPU YUV conversion needed
     Ok(encoder)
+}
+
+/// `LB_RENDER_PROFILE` gate, checked once.
+fn render_profile_enabled() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("LB_RENDER_PROFILE").is_ok())
+}
+
+/// Accumulate the per-frame render split and print a running average every 200 frames.
+/// `build` = document build incl. video decode; `composite` = composite-command recording
+/// incl. the frame texture upload; `srgb` = the linear→sRGB pass.
+fn record_render_profile(build: std::time::Duration, composite: std::time::Duration, srgb: std::time::Duration) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static BUILD_US: AtomicU64 = AtomicU64::new(0);
+    static COMPOSITE_US: AtomicU64 = AtomicU64::new(0);
+    static SRGB_US: AtomicU64 = AtomicU64::new(0);
+    static N: AtomicU64 = AtomicU64::new(0);
+    BUILD_US.fetch_add(build.as_micros() as u64, Ordering::Relaxed);
+    COMPOSITE_US.fetch_add(composite.as_micros() as u64, Ordering::Relaxed);
+    SRGB_US.fetch_add(srgb.as_micros() as u64, Ordering::Relaxed);
+    let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+    if n % 200 == 0 {
+        let (b, c, s) = (BUILD_US.load(Ordering::Relaxed), COMPOSITE_US.load(Ordering::Relaxed), SRGB_US.load(Ordering::Relaxed));
+        println!(
+            "📊 [RENDER PROFILE] {n} frames avg: build(+decode) {:.2}ms | composite(+upload) {:.2}ms | srgb {:.2}ms",
+            b as f64 / n as f64 / 1000.0,
+            c as f64 / n as f64 / 1000.0,
+            s as f64 / n as f64 / 1000.0,
+        );
+    }
 }
 
 #[cfg(test)]

@@ -2238,6 +2238,8 @@ impl CanvasBlitPipeline {
     /// Blit a **straight-alpha** source (e.g. a video frame uploaded to an
     /// `Rgba8UnormSrgb` texture, hardware-decoded to linear on sample). Uses the
     /// `fs_main_straight` pipeline, which skips the unpremultiply that `blit` does.
+    /// Bilinear-sampled: video frames are scaled to the output size (document→export, or any
+    /// non-1:1 transform), and nearest sampling makes that look blocky.
     pub fn blit_straight(
         &self,
         device:      &wgpu::Device,
@@ -2247,7 +2249,7 @@ impl CanvasBlitPipeline {
         transform:   &BlitTransform,
         mask_view:   Option<&wgpu::TextureView>,
     ) {
-        self.blit_with(device, queue, canvas_view, target_view, transform, mask_view, &self.sampler, &self.pipeline_straight);
+        self.blit_with(device, queue, canvas_view, target_view, transform, mask_view, &self.linear_sampler, &self.pipeline_straight);
     }
 
     #[allow(clippy::too_many_arguments)]
