@@ -53,7 +53,7 @@ impl Action for RasterFillAction {
         if let Some(full) = self.full_after.take() {
             kf.raw_pixels = full;
         } else {
-            self.diff.apply_after(&mut kf.raw_pixels);
+            self.diff.apply_after(&mut kf.raw_pixels, kf.width, kf.height);
         }
         kf.texture_dirty = true;
         kf.dirty = true;
@@ -71,7 +71,7 @@ impl Action for RasterFillAction {
         let kf = raster
             .keyframe_at_mut(self.time)
             .ok_or_else(|| format!("No raster keyframe at/before t={}", self.time))?;
-        self.diff.apply_before(&mut kf.raw_pixels);
+        self.diff.apply_before(&mut kf.raw_pixels, kf.width, kf.height);
         kf.texture_dirty = true;
         kf.dirty = true;
         Ok(())

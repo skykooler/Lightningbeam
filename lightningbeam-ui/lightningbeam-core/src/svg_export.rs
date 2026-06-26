@@ -266,6 +266,9 @@ pub fn document_to_svg(document: &Document, time: f64) -> String {
 fn layer_to_svg(layer: &AnyLayer, time: f64, parent_opacity: f64, body: &mut String, defs: &mut String, grad_n: &mut usize) {
     match layer {
         AnyLayer::Vector(vl) => {
+            if !vl.layer.visible {
+                return; // hidden layers are not rendered, so don't export them
+            }
             let opacity = parent_opacity * vl.layer.opacity;
             if let Some(graph) = vl.tweened_graph_at(time) {
                 let wrap = opacity < 0.999;
@@ -281,12 +284,21 @@ fn layer_to_svg(layer: &AnyLayer, time: f64, parent_opacity: f64, body: &mut Str
             // exported — a refinement once loose-geometry export is verified.
         }
         AnyLayer::Group(g) => {
-            let opacity = parent_opacity * g.layer.opacity;
-            body.push_str(&format!(r#"<g opacity="{opacity:.4}">"#));
-            for child in &g.children {
-                layer_to_svg(child, time, 1.0, body, defs, grad_n);
+            if !g.layer.visible {
+                return;
             }
-            body.push_str("</g>");
+            // Render children first; only emit the <g> wrapper if it has exportable content
+            // (avoids empty groups when every child is a non-vector/hidden layer).
+            let mut inner = String::new();
+            for child in &g.children {
+                layer_to_svg(child, time, 1.0, &mut inner, defs, grad_n);
+            }
+            if !inner.is_empty() {
+                let opacity = parent_opacity * g.layer.opacity;
+                body.push_str(&format!(r#"<g opacity="{opacity:.4}">"#));
+                body.push_str(&inner);
+                body.push_str("</g>");
+            }
         }
         // Raster/Video/Audio/Effect have no lossless vector representation — skipped this pass.
         _ => {}

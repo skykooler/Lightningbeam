@@ -57,6 +57,9 @@ pub struct VideoExportState {
     hdr: lightningbeam_core::export::HdrExportMode,
     /// How the document is fit into the export frame (stretch/letterbox/crop).
     fit: lightningbeam_core::export::ExportFitMode,
+    /// SDR color range: true = full (PC, 0–255), false = limited (TV, 16–235). The YUV
+    /// converters and the encoder color tag must agree on this.
+    full_range: bool,
     /// Channel to send rendered frames to encoder thread
     frame_tx: Option<Sender<VideoFrameMessage>>,
     /// HDR GPU resources for compositing pipeline (effects, color conversion)
@@ -868,6 +871,7 @@ impl ExportOrchestrator {
     ) -> (std::thread::JoinHandle<()>, VideoExportState) {
         let hdr = settings.hdr;
         let fit = settings.fit;
+        let full_range = settings.color_range.is_full();
         let handle = std::thread::spawn(move || {
             Self::run_video_encoder(settings, output_path, frame_rx, progress_tx, cancel_flag, total_frames);
         });
@@ -882,6 +886,7 @@ impl ExportOrchestrator {
             height,
             hdr,
             fit,
+            full_range,
             frame_tx: Some(frame_tx),
             gpu_resources: None,
             readback_pipeline: None,
@@ -1333,8 +1338,8 @@ impl ExportOrchestrator {
             if !gpu_yuv_tight {
                 println!("🎬 [VIDEO EXPORT] YUV planes are padded at {width}x{height}; using CPU YUV path");
             }
-            state.readback_pipeline = Some(readback_pipeline::ReadbackPipeline::new(device, queue, width, height, gpu_yuv_tight));
-            state.cpu_yuv_converter = Some(cpu_yuv_converter::CpuYuvConverter::new(width, height)?);
+            state.readback_pipeline = Some(readback_pipeline::ReadbackPipeline::new(device, queue, width, height, gpu_yuv_tight, state.full_range));
+            state.cpu_yuv_converter = Some(cpu_yuv_converter::CpuYuvConverter::new(width, height, state.full_range)?);
             println!("🚀 [ASYNC PIPELINE] Triple-buffered pipeline initialized");
             println!("🚀 [CPU YUV] swscale converter initialized");
         }
@@ -1638,6 +1643,21 @@ impl ExportOrchestrator {
         // Convert codec enum to FFmpeg codec ID. HDR requires 10-bit HEVC (Main10), so force HEVC
         // regardless of the chosen codec when an HDR mode is selected.
         let codec_id = if settings.hdr.is_hdr() {
+            // HEVC can only be muxed into MP4/MOV, not WebM — reject the incompatible combo up
+            // front with a clear message instead of letting the muxer fail cryptically.
+            if settings.codec.container_format() == "webm" {
+                return Err(format!(
+                    "HDR export needs H.265/HEVC in an MP4 container, but {} uses WebM. \
+                     Pick H.265 (or H.264) for HDR.",
+                    settings.codec.name()
+                ));
+            }
+            if !matches!(settings.codec, VideoCodec::H265) {
+                println!(
+                    "⚠️  [ENCODER] HDR selected: overriding codec {} → H.265/HEVC (Main10)",
+                    settings.codec.name()
+                );
+            }
             ffmpeg_next::codec::Id::HEVC
         } else {
             match settings.codec {
@@ -1690,6 +1710,7 @@ impl ExportOrchestrator {
             framerate,
             bitrate_kbps,
             settings.hdr,
+            settings.color_range.is_full(),
         )?;
 
         // Pixel format the encoder frames are built in (matches setup_video_encoder).

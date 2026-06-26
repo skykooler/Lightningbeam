@@ -118,10 +118,14 @@ fn convert_path(path: &usvg::Path, graph: &mut VectorGraph) {
                     slot.color = Some(ShapeColor::rgba(c.red, c.green, c.blue, opacity_u8(fill.opacity())));
                 }
                 usvg::Paint::LinearGradient(g) => {
-                    slot.gradient_fill = Some(linear_gradient(g, ts));
+                    let mut grad = linear_gradient(g, ts);
+                    apply_fill_opacity(&mut grad, fill.opacity());
+                    slot.gradient_fill = Some(grad);
                 }
                 usvg::Paint::RadialGradient(g) => {
-                    slot.gradient_fill = Some(radial_gradient(g, ts));
+                    let mut grad = radial_gradient(g, ts);
+                    apply_fill_opacity(&mut grad, fill.opacity());
+                    slot.gradient_fill = Some(grad);
                 }
                 usvg::Paint::Pattern(_) => {
                     // Patterns aren't representable yet — neutral gray so the shape stays visible.
@@ -214,6 +218,17 @@ fn radial_gradient(g: &usvg::RadialGradient, abs: usvg::Transform) -> ShapeGradi
         extend: spread(g),
         start_world: Some(center),
         end_world: Some(rim),
+    }
+}
+
+/// Fold the path's `fill-opacity` into a gradient's stop alphas (SVG multiplies them).
+fn apply_fill_opacity(grad: &mut ShapeGradient, op: usvg::Opacity) {
+    let f = op.get();
+    if f >= 1.0 {
+        return;
+    }
+    for s in &mut grad.stops {
+        s.color.a = (s.color.a as f32 * f).round().clamp(0.0, 255.0) as u8;
     }
 }
 

@@ -1627,12 +1627,24 @@ impl GpuBrushEngine {
         self.proxy_layer_cache.get(kf_id)
     }
 
-    /// Remove the cached texture for a raster layer keyframe (e.g. when deleted).
+    /// Remove the cached texture for a raster layer keyframe (e.g. when deleted or edited).
     pub fn remove_layer_texture(&mut self, kf_id: &Uuid) {
-        if self.raster_layer_cache.remove(kf_id).is_some() {
+        let mut changed = self.raster_layer_cache.remove(kf_id).is_some();
+        if changed {
             if let Some(pos) = self.raster_layer_lru.iter().position(|id| id == kf_id) {
                 self.raster_layer_lru.remove(pos);
             }
+        }
+        // Also drop the low-res proxy: proxies are uploaded once and never refreshed, so a
+        // stale pre-edit proxy left here would be blitted (flashing old content) if the full-res
+        // texture is later evicted before the edited pixels page back in.
+        if self.proxy_layer_cache.remove(kf_id).is_some() {
+            if let Some(pos) = self.proxy_layer_lru.iter().position(|id| id == kf_id) {
+                self.proxy_layer_lru.remove(pos);
+            }
+            changed = true;
+        }
+        if changed {
             self.report_raster_cache_vram();
         }
     }

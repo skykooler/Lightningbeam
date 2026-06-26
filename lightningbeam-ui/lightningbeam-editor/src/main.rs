@@ -2392,6 +2392,12 @@ impl EditorApp {
                         kf.needs_fault_in = false;
                     }
                 }
+                // Track these resident pixels in the LRU so they count toward
+                // RASTER_RESIDENT_MAX and can be evicted later; without this, a frame
+                // faulted in for undo/redo that ends up clean would stay resident forever,
+                // letting resident RAM grow past the cap.
+                self.raster_resident_lru.retain(|id| *id != kf_id);
+                self.raster_resident_lru.push_back(kf_id);
             }
         }
     }
@@ -4523,7 +4529,9 @@ impl EditorApp {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => {
-                eprintln!("❌ Failed to read SVG {}: {}", path.display(), e);
+                let msg = format!("Failed to read SVG: {}", e);
+                eprintln!("❌ {} ({})", msg, path.display());
+                notifications::notify_error("SVG Import Failed", &msg);
                 return;
             }
         };
@@ -4532,6 +4540,7 @@ impl EditorApp {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("❌ {}", e);
+                notifications::notify_error("SVG Import Failed", &e);
                 return;
             }
         };

@@ -32,6 +32,11 @@ pub fn notify_export_complete(output_path: &Path) {
 
 /// Show a desktop notification for an export error (fire-and-forget).
 pub fn notify_export_error(error_message: &str) {
+    notify_error("Export Failed", error_message);
+}
+
+/// Show a desktop error notification with a custom title (fire-and-forget).
+pub fn notify_error(title: &'static str, error_message: &str) {
     // Truncate very long error messages (on a char boundary).
     let truncated = if error_message.chars().count() > 100 {
         let prefix: String = error_message.chars().take(97).collect();
@@ -42,7 +47,7 @@ pub fn notify_export_error(error_message: &str) {
 
     std::thread::spawn(move || {
         if let Err(e) = Notification::new()
-            .summary("Export Failed")
+            .summary(title)
             .body(&truncated)
             .icon("dialog-error")  // Standard error icon
             .timeout(10000)  // 10 seconds for errors (longer to read)

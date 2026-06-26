@@ -61,7 +61,7 @@ impl Action for RasterStrokeAction {
             kf.raw_pixels = full;
         } else {
             // Redo: replay via the diff onto the (resident) base.
-            self.diff.apply_after(&mut kf.raw_pixels);
+            self.diff.apply_after(&mut kf.raw_pixels, kf.width, kf.height);
         }
         kf.texture_dirty = true;
         kf.dirty = true;
@@ -70,7 +70,7 @@ impl Action for RasterStrokeAction {
 
     fn rollback(&mut self, document: &mut Document) -> Result<(), String> {
         let kf = get_keyframe_mut(document, &self.layer_id, self.time, self.width, self.height)?;
-        self.diff.apply_before(&mut kf.raw_pixels);
+        self.diff.apply_before(&mut kf.raw_pixels, kf.width, kf.height);
         kf.texture_dirty = true;
         kf.dirty = true;
         Ok(())

@@ -374,7 +374,11 @@ impl BeamArchive {
         let rows = stmt
             .query_map([&id_bytes], |r| r.get::<_, Vec<u8>>(0))
             .map_err(map_sql)?;
-        let mut out = Vec::with_capacity(info.total_len as usize);
+        // `total_len` is an untrusted DB field; cap the preallocation so a corrupt/oversized
+        // value can't trigger a multi-GB eager allocation (or, on 32-bit, a truncated `as usize`).
+        // The Vec still grows to fit the actual chunk bytes regardless.
+        const PREALLOC_CAP: u64 = 64 * 1024 * 1024;
+        let mut out = Vec::with_capacity(info.total_len.min(PREALLOC_CAP) as usize);
         for row in rows {
             out.extend_from_slice(&row.map_err(map_sql)?);
         }

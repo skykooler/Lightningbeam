@@ -36,6 +36,47 @@ impl Drop for MemoryGuard {
     }
 }
 
+/// Frees the duplicated dma-buf fd and any partially-created Vulkan objects when an import
+/// errors out before ownership has been handed to wgpu/`MemoryGuard`. `commit()` disarms it on
+/// the success path; `fd_consumed()` is called once `vkAllocateMemory` has taken the fd.
+struct ImportGuard {
+    device: ash::Device,
+    fd: libc::c_int,
+    img_y: vk::Image,
+    img_uv: vk::Image,
+    memory: vk::DeviceMemory,
+    armed: bool,
+}
+impl ImportGuard {
+    fn fd_consumed(&mut self) {
+        self.fd = -1; // vkAllocateMemory owns the fd now; don't close it ourselves
+    }
+    fn commit(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for ImportGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        unsafe {
+            if self.img_uv != vk::Image::null() {
+                self.device.destroy_image(self.img_uv, None);
+            }
+            if self.img_y != vk::Image::null() {
+                self.device.destroy_image(self.img_y, None);
+            }
+            if self.memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.memory, None);
+            }
+            if self.fd >= 0 {
+                libc::close(self.fd);
+            }
+        }
+    }
+}
+
 /// A VAAPI surface imported as two wgpu plane textures. The underlying Vulkan image/
 /// memory are destroyed by wgpu (via drop callbacks) when these textures drop.
 pub struct ImportedNv12 {
@@ -103,6 +144,16 @@ pub fn import_raw(
         if dup_fd < 0 {
             return Err("dup(dma-buf fd) failed".into());
         }
+        // Owns the fd + any Vk objects created below until ownership transfers to wgpu; on any
+        // early `?`/return before that, its Drop frees them (was leaking on every failed import).
+        let mut guard = ImportGuard {
+            device: raw_device.clone(),
+            fd: dup_fd,
+            img_y: vk::Image::null(),
+            img_uv: vk::Image::null(),
+            memory: vk::DeviceMemory::null(),
+            armed: true,
+        };
 
         // 16-bit-norm plane formats (P010) are NOT renderable, so the import is sample-only for
         // those (decode path). 8-bit planes keep COLOR_ATTACHMENT for the encoder's RGBA→NV12 write.
@@ -155,7 +206,9 @@ pub fn import_raw(
         };
 
         let img_y = make_image(vk_y, buf.width, buf.height, buf.y_pitch)?;
+        guard.img_y = img_y;
         let img_uv = make_image(vk_uv, buf.width / 2, buf.height / 2, buf.uv_pitch)?;
+        guard.img_uv = img_uv;
 
         let fd_dev = ash::khr::external_memory_fd::Device::new(instance, &raw_device);
         let mut fd_props = vk::MemoryFdPropertiesKHR::default();
@@ -180,6 +233,8 @@ pub fn import_raw(
         let memory = raw_device
             .allocate_memory(&alloc, None)
             .map_err(|e| format!("vkAllocateMemory(import dma-buf) failed: {e:?}"))?;
+        guard.fd_consumed(); // the import transferred fd ownership to Vulkan
+        guard.memory = memory;
 
         raw_device
             .bind_image_memory(img_y, memory, buf.y_offset)
@@ -242,6 +297,9 @@ pub fn import_raw(
                 },
             )
         };
+        // Ownership of the images (→ texture drop callbacks) and memory (→ MemoryGuard) has now
+        // transferred to wgpu; disarm the cleanup guard so it doesn't double-free them.
+        guard.commit();
         let y = wrap(img_y, wgpu_y, buf.width, buf.height);
         let uv = wrap(img_uv, wgpu_uv, buf.width / 2, buf.height / 2);
         drop(hal_device);

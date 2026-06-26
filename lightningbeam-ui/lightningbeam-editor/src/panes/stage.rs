@@ -2080,7 +2080,11 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
         // fills the black's gaps → interlocking black/yellow marching-ants.
         if let Some(active_id) = self.ctx.active_layer_id {
             if let Some(lightningbeam_core::layer::AnyLayer::Raster(rl)) = self.ctx.document.get_layer(&active_id) {
-                if let Some(kf) = rl.keyframe_at(self.ctx.document.current_time) {
+                // Use playback_time (clip-local when editing a movie clip) like every other
+                // keyframe lookup in prepare(), and overlay_transform so the outline tracks the
+                // layer's pixels through any clip-instance affine (it equals camera_transform
+                // outside clip-edit mode).
+                if let Some(kf) = rl.keyframe_at(self.ctx.playback_time) {
                     let rect = vello::kurbo::Rect::new(0.0, 0.0, kf.width as f64, kf.height as f64);
                     // Sizes are in document space; divide by zoom so they're ~constant on screen.
                     let inv_zoom = 1.0 / (self.ctx.zoom as f64).max(1e-3);
@@ -2089,14 +2093,14 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     let pattern = [dash, dash];
                     scene.stroke(
                         &vello::kurbo::Stroke::new(stroke_w).with_dashes(0.0, pattern),
-                        camera_transform,
+                        overlay_transform,
                         vello::peniko::Color::new([0.0, 0.0, 0.0, 1.0]),
                         None,
                         &rect,
                     );
                     scene.stroke(
                         &vello::kurbo::Stroke::new(stroke_w).with_dashes(dash, pattern),
-                        camera_transform,
+                        overlay_transform,
                         vello::peniko::Color::new([1.0, 0.85, 0.0, 1.0]),
                         None,
                         &rect,

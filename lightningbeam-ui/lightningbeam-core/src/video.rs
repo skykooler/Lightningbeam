@@ -120,6 +120,153 @@ enum DecodedFrame {
     Gpu(GpuVideoFrame),
 }
 
+/// Result of processing one decoded frame against the requested target timestamp.
+enum FrameOutcome {
+    /// Frame consumed; keep decoding.
+    Continue,
+    /// `current_frame_ts >= frame_ts` — caller should return the best frame found.
+    ReachedTarget,
+    /// Hardware surface import failed; caller should fall back to software.
+    HwImportFailed,
+}
+
+/// Process one decoded `frame`: update the best-so-far (`best_*`) toward `frame_ts`, importing a
+/// GPU surface (`gpu_out`) or swscaling to RGBA otherwise. Pulled out of the decode loop so the
+/// same logic runs both for packet-fed frames and for frames flushed out of the codec at EOF.
+#[allow(clippy::too_many_arguments)]
+fn process_decoded_video_frame(
+    frame: &mut ffmpeg::util::frame::Video,
+    decoder: &ffmpeg::decoder::Video,
+    gpu_out: bool,
+    hw: bool,
+    out_w: u32,
+    out_h: u32,
+    frame_ts: i64,
+    importer: Option<&Arc<dyn HwVideoImporter>>,
+    scaler: &mut Option<(ffmpeg::format::Pixel, u32, u32, u32, u32, SendScaler)>,
+    best_frame_data: &mut Option<Vec<u8>>,
+    best_gpu: &mut Option<GpuVideoFrame>,
+    best_frame_ts: &mut Option<i64>,
+    last_decoded_ts: &mut i64,
+    scale_time_ms: &mut u128,
+) -> Result<FrameOutcome, String> {
+    use std::time::Instant;
+
+    // A frame with no PTS continues monotonically from the last decoded position rather than
+    // snapping to 0 — treating "no timestamp" as ts=0 would look like a huge backward jump and
+    // corrupt the best-frame / seek logic on streams with missing PTS.
+    let current_frame_ts = frame.timestamp().unwrap_or(*last_decoded_ts + 1);
+    *last_decoded_ts = current_frame_ts;
+
+    let is_better = match *best_frame_ts {
+        None => true,
+        Some(best_ts) => (current_frame_ts - frame_ts).abs() < (best_ts - frame_ts).abs(),
+    };
+
+    if is_better {
+        if gpu_out {
+            // VAAPI hw frames often don't carry the stream's colour tags, so the importer would
+            // mis-detect transfer/gamut. Copy the authoritative values from the codec context
+            // (parsed from the bitstream) onto the frame when it left them unspecified.
+            unsafe {
+                use ffmpeg::ffi::*;
+                let fp = frame.as_mut_ptr();
+                let cp = decoder.as_ptr();
+                if (*fp).color_trc == AVColorTransferCharacteristic::AVCOL_TRC_UNSPECIFIED {
+                    (*fp).color_trc = (*cp).color_trc;
+                }
+                if (*fp).color_primaries == AVColorPrimaries::AVCOL_PRI_UNSPECIFIED {
+                    (*fp).color_primaries = (*cp).color_primaries;
+                }
+                if (*fp).colorspace == AVColorSpace::AVCOL_SPC_UNSPECIFIED {
+                    (*fp).colorspace = (*cp).colorspace;
+                }
+                if (*fp).color_range == AVColorRange::AVCOL_RANGE_UNSPECIFIED {
+                    (*fp).color_range = (*cp).color_range;
+                }
+            }
+            let importer = importer.unwrap();
+            match unsafe { importer.import(frame.as_mut_ptr() as *mut std::ffi::c_void) } {
+                Some(gpu) => {
+                    *best_gpu = Some(gpu);
+                    *best_frame_ts = Some(current_frame_ts);
+                }
+                None => return Ok(FrameOutcome::HwImportFailed),
+            }
+        } else {
+            let t_scale_start = Instant::now();
+
+            // A hardware decoder produces VAAPI surfaces; a CPU consumer (export) downloads to
+            // system memory first, then swscales like the software path.
+            let downloaded;
+            let src: &ffmpeg::util::frame::Video = if hw {
+                let mut dl = ffmpeg::util::frame::Video::empty();
+                let r = unsafe {
+                    ffmpeg::ffi::av_hwframe_transfer_data(dl.as_mut_ptr(), frame.as_ptr(), 0)
+                };
+                if r < 0 {
+                    return Err(format!("av_hwframe_transfer_data failed: {r}"));
+                }
+                downloaded = dl;
+                &downloaded
+            } else {
+                &*frame
+            };
+
+            // Reuse the RGBA scaler across frames; rebuild only if the input format/size or the
+            // requested output size changes.
+            let need_new = match scaler {
+                Some((fmt, w, h, ow, oh, _)) => {
+                    *fmt != src.format() || *w != src.width() || *h != src.height()
+                        || *ow != out_w || *oh != out_h
+                }
+                None => true,
+            };
+            if need_new {
+                let ctx = ffmpeg::software::scaling::context::Context::get(
+                    src.format(),
+                    src.width(),
+                    src.height(),
+                    ffmpeg::format::Pixel::RGBA,
+                    out_w,
+                    out_h,
+                    ffmpeg::software::scaling::flag::Flags::BILINEAR,
+                ).map_err(|e| e.to_string())?;
+                *scaler = Some((src.format(), src.width(), src.height(), out_w, out_h, SendScaler(ctx)));
+            }
+            let scaler = &mut scaler.as_mut().unwrap().5.0;
+
+            let mut rgb_frame = ffmpeg::util::frame::Video::empty();
+            scaler.run(src, &mut rgb_frame)
+                .map_err(|e| e.to_string())?;
+
+            // Remove stride padding to create tightly packed RGBA data
+            let width = out_w as usize;
+            let height = out_h as usize;
+            let stride = rgb_frame.stride(0);
+            let row_size = width * 4; // RGBA = 4 bytes per pixel
+            let source_data = rgb_frame.data(0);
+
+            let mut packed_data = Vec::with_capacity(row_size * height);
+            for y in 0..height {
+                let row_start = y * stride;
+                let row_end = row_start + row_size;
+                packed_data.extend_from_slice(&source_data[row_start..row_end]);
+            }
+
+            *scale_time_ms += t_scale_start.elapsed().as_millis();
+            *best_frame_data = Some(packed_data);
+            *best_frame_ts = Some(current_frame_ts);
+        }
+    }
+
+    if current_frame_ts >= frame_ts {
+        Ok(FrameOutcome::ReachedTarget)
+    } else {
+        Ok(FrameOutcome::Continue)
+    }
+}
+
 /// `get_format` callback for hardware decode: select VAAPI surfaces. With `hw_device_ctx` set,
 /// FFmpeg auto-allocates the frames context.
 unsafe extern "C" fn get_vaapi_format(
@@ -459,159 +606,73 @@ impl VideoDecoder {
         let mut scale_time_ms = 0u128;
         let mut hw_import_failed = false;
 
-        'decode: for (stream, packet) in input.packets() {
-            if stream.index() == self.stream_index {
-                decoder.send_packet(&packet)
-                    .map_err(|e| e.to_string())?;
+        'decode: {
+            for (stream, packet) in input.packets() {
+                if stream.index() == self.stream_index {
+                    decoder.send_packet(&packet)
+                        .map_err(|e| e.to_string())?;
 
+                    let mut frame = ffmpeg::util::frame::Video::empty();
+                    while decoder.receive_frame(&mut frame).is_ok() {
+                        decode_count += 1;
+                        match process_decoded_video_frame(
+                            &mut frame, decoder, gpu_out, hw, out_w, out_h, frame_ts,
+                            self.importer.as_ref(), &mut self.scaler,
+                            &mut best_frame_data, &mut best_gpu, &mut best_frame_ts,
+                            &mut self.last_decoded_ts, &mut scale_time_ms,
+                        )? {
+                            FrameOutcome::Continue => {}
+                            FrameOutcome::ReachedTarget => break 'decode,
+                            FrameOutcome::HwImportFailed => {
+                                self.hw_failed = true;
+                                hw_import_failed = true;
+                                break 'decode;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Flush: the codec may still hold buffered frames (B-frame reorder delay) past the
+            // last packet. Drain them so requesting the final frame(s) of a clip — scrubbing to
+            // the end or exporting the tail — doesn't fail with "Failed to decode frame".
+            if !hw_import_failed {
+                let _ = decoder.send_eof();
                 let mut frame = ffmpeg::util::frame::Video::empty();
                 while decoder.receive_frame(&mut frame).is_ok() {
                     decode_count += 1;
-                    let current_frame_ts = frame.timestamp().unwrap_or(0);
-                    self.last_decoded_ts = current_frame_ts; // Update last decoded position
-
-                    // Check if this frame is closer to our target than the previous best
-                    let is_better = match best_frame_ts {
-                        None => true,
-                        Some(best_ts) => {
-                            (current_frame_ts - frame_ts).abs() < (best_ts - frame_ts).abs()
+                    match process_decoded_video_frame(
+                        &mut frame, decoder, gpu_out, hw, out_w, out_h, frame_ts,
+                        self.importer.as_ref(), &mut self.scaler,
+                        &mut best_frame_data, &mut best_gpu, &mut best_frame_ts,
+                        &mut self.last_decoded_ts, &mut scale_time_ms,
+                    )? {
+                        FrameOutcome::Continue => {}
+                        FrameOutcome::ReachedTarget => break 'decode,
+                        FrameOutcome::HwImportFailed => {
+                            self.hw_failed = true;
+                            hw_import_failed = true;
+                            break 'decode;
                         }
-                    };
-
-                    if is_better {
-                        if gpu_out {
-                            // Hardware + GPU consumer: import the VAAPI surface as wgpu NV12 textures
-                            // (no CPU copy).
-                            // VAAPI hw frames often don't carry the stream's colour tags, so the
-                            // importer (which only sees the frame) would mis-detect transfer/gamut.
-                            // Copy the authoritative values from the codec context (parsed from the
-                            // bitstream) onto the frame when it left them unspecified.
-                            unsafe {
-                                use ffmpeg::ffi::*;
-                                let fp = frame.as_mut_ptr();
-                                let cp = decoder.as_ptr();
-                                if (*fp).color_trc == AVColorTransferCharacteristic::AVCOL_TRC_UNSPECIFIED {
-                                    (*fp).color_trc = (*cp).color_trc;
-                                }
-                                if (*fp).color_primaries == AVColorPrimaries::AVCOL_PRI_UNSPECIFIED {
-                                    (*fp).color_primaries = (*cp).color_primaries;
-                                }
-                                if (*fp).colorspace == AVColorSpace::AVCOL_SPC_UNSPECIFIED {
-                                    (*fp).colorspace = (*cp).colorspace;
-                                }
-                                if (*fp).color_range == AVColorRange::AVCOL_RANGE_UNSPECIFIED {
-                                    (*fp).color_range = (*cp).color_range;
-                                }
-                            }
-                            let importer = self.importer.as_ref().unwrap();
-                            match unsafe { importer.import(frame.as_mut_ptr() as *mut std::ffi::c_void) } {
-                                Some(gpu) => {
-                                    best_gpu = Some(gpu);
-                                    best_frame_ts = Some(current_frame_ts);
-                                }
-                                None => {
-                                    // Import failed → fall back to software for this clip.
-                                    self.hw_failed = true;
-                                    hw_import_failed = true;
-                                    break 'decode;
-                                }
-                            }
-                        } else {
-                            let t_scale_start = Instant::now();
-
-                            // A hardware decoder produces VAAPI surfaces; a CPU consumer (export)
-                            // downloads to system memory first, then swscales like the software path.
-                            let downloaded;
-                            let src: &ffmpeg::util::frame::Video = if hw {
-                                let mut dl = ffmpeg::util::frame::Video::empty();
-                                let r = unsafe {
-                                    ffmpeg::ffi::av_hwframe_transfer_data(dl.as_mut_ptr(), frame.as_ptr(), 0)
-                                };
-                                if r < 0 {
-                                    return Err(format!("av_hwframe_transfer_data failed: {r}"));
-                                }
-                                downloaded = dl;
-                                &downloaded
-                            } else {
-                                &frame
-                            };
-
-                            // Reuse the RGBA scaler across frames; rebuild only if the input
-                            // format/size or the requested output size changes.
-                            let need_new = match &self.scaler {
-                                Some((fmt, w, h, ow, oh, _)) => {
-                                    *fmt != src.format() || *w != src.width() || *h != src.height()
-                                        || *ow != out_w || *oh != out_h
-                                }
-                                None => true,
-                            };
-                            if need_new {
-                                let ctx = ffmpeg::software::scaling::context::Context::get(
-                                    src.format(),
-                                    src.width(),
-                                    src.height(),
-                                    ffmpeg::format::Pixel::RGBA,
-                                    out_w,
-                                    out_h,
-                                    ffmpeg::software::scaling::flag::Flags::BILINEAR,
-                                ).map_err(|e| e.to_string())?;
-                                self.scaler = Some((src.format(), src.width(), src.height(), out_w, out_h, SendScaler(ctx)));
-                            }
-                            let scaler = &mut self.scaler.as_mut().unwrap().5.0;
-
-                            let mut rgb_frame = ffmpeg::util::frame::Video::empty();
-                            scaler.run(src, &mut rgb_frame)
-                                .map_err(|e| e.to_string())?;
-
-                            // Remove stride padding to create tightly packed RGBA data
-                            let width = out_w as usize;
-                            let height = out_h as usize;
-                            let stride = rgb_frame.stride(0);
-                            let row_size = width * 4; // RGBA = 4 bytes per pixel
-                            let source_data = rgb_frame.data(0);
-
-                            let mut packed_data = Vec::with_capacity(row_size * height);
-                            for y in 0..height {
-                                let row_start = y * stride;
-                                let row_end = row_start + row_size;
-                                packed_data.extend_from_slice(&source_data[row_start..row_end]);
-                            }
-
-                            scale_time_ms += t_scale_start.elapsed().as_millis();
-                            best_frame_data = Some(packed_data);
-                            best_frame_ts = Some(current_frame_ts);
-                        }
-                    }
-
-                    // If we've reached or passed the target timestamp, we can stop
-                    if current_frame_ts >= frame_ts {
-                        if video_debug() {
-                            let total_time = t_start.elapsed().as_millis();
-                            let decode_time = t_decode_start.elapsed().as_millis();
-                            eprintln!("[Video Timing] ts={:.3}s | Decoded {} frames in {}ms | Scale: {}ms | Total: {}ms | {}",
-                                timestamp, decode_count, decode_time, scale_time_ms, total_time, if hw { "hw" } else { "sw" });
-                        }
-                        if gpu_out {
-                            if let Some(gpu) = best_gpu.take() {
-                                return Ok(DecodedFrame::Gpu(gpu));
-                            }
-                        } else if let Some(data) = best_frame_data {
-                            self.frame_cache.put(cache_key, data.clone());
-                            return Ok(DecodedFrame::Cpu { rgba: data, width: out_w, height: out_h });
-                        }
-                        break 'decode;
                     }
                 }
             }
         }
 
-        // Reached EOF without hitting the target, or HW import failed mid-stream.
+        if video_debug() {
+            let total_time = t_start.elapsed().as_millis();
+            let decode_time = t_decode_start.elapsed().as_millis();
+            eprintln!("[Video Timing] ts={:.3}s | Decoded {} frames in {}ms | Scale: {}ms | Total: {}ms | {}",
+                timestamp, decode_count, decode_time, scale_time_ms, total_time, if hw { "hw" } else { "sw" });
+        }
+
+        // Reached the target, EOF, or HW import failed mid-stream.
         if hw_import_failed {
             self.decoder = None; // force a software rebuild next call (decoder borrow ended here)
             self.input = None;
             return Err("hardware frame import failed; retrying software".to_string());
         }
-        // EOF: return the closest frame we found, if any.
+        // Return the closest frame we found, if any.
         if gpu_out {
             if let Some(gpu) = best_gpu.take() {
                 return Ok(DecodedFrame::Gpu(gpu));
@@ -673,8 +734,23 @@ pub fn generate_keyframe_thumbnails(
         }
         // Decode at the thumbnail width (large height so width is the constraint), capped to native.
         // Thumbnail decoders are always software (no hardware importer).
-        if let Ok(DecodedFrame::Cpu { rgba, .. }) = decoder.get_frame(ks, thumb_width, 100_000, false) {
-            on_thumb(ks, Arc::new(rgba));
+        if let Ok(DecodedFrame::Cpu { rgba, width, height }) = decoder.get_frame(ks, thumb_width, 100_000, false) {
+            // `capped_output` never upscales, so a source narrower than `thumb_width` decodes
+            // smaller — but `get_thumbnail_at` reconstructs height assuming an exact `thumb_width`.
+            // Force the exact width here (rare path) so that assumption holds and the thumbnail
+            // isn't shown stretched.
+            let data = if width == thumb_width || width == 0 || height == 0 {
+                rgba
+            } else {
+                let new_h = ((thumb_width as u64 * height as u64) / width as u64).max(1) as u32;
+                match image::RgbaImage::from_raw(width, height, rgba) {
+                    Some(img) => image::imageops::resize(
+                        &img, thumb_width, new_h, image::imageops::FilterType::Triangle,
+                    ).into_raw(),
+                    None => continue,
+                }
+            };
+            on_thumb(ks, Arc::new(data));
         }
     }
     Ok(())

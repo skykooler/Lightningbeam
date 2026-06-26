@@ -560,6 +560,7 @@ pub fn setup_video_encoder(
     framerate: f64,
     bitrate_kbps: u32,
     hdr: lightningbeam_core::export::HdrExportMode,
+    full_range: bool,
 ) -> Result<(ffmpeg::encoder::Video, ffmpeg::Codec), String> {
     // Try to find codec by ID first
     println!("🔍 Looking for codec: {:?}", codec_id);
@@ -641,7 +642,12 @@ pub fn setup_video_encoder(
         color_opts.set("profile", "main10");
     } else {
         encoder.set_colorspace(ffmpeg::color::Space::BT709);
-        encoder.set_color_range(ffmpeg::color::Range::JPEG); // full range
+        // Range must match what the YUV converters (gpu_yuv / cpu_yuv) actually produce.
+        encoder.set_color_range(if full_range {
+            ffmpeg::color::Range::JPEG // full (PC, 0–255)
+        } else {
+            ffmpeg::color::Range::MPEG // limited (TV, 16–235)
+        });
         color_opts.set("color_primaries", "bt709");
         color_opts.set("color_trc", "bt709");
     }
@@ -1133,232 +1139,9 @@ fn upload_transient_texture(
     tex
 }
 
-/// Render a document frame using the HDR compositing pipeline with effects
-///
-/// This function uses the same rendering pipeline as the stage preview,
-/// ensuring effects are applied correctly during export.
-///
-/// # Arguments
-/// * `document` - Document to render (current_time will be modified)
-/// * `timestamp` - Time in seconds to render at
-/// * `width` - Frame width in pixels
-/// * `height` - Frame height in pixels
-/// * `device` - wgpu device
-/// * `queue` - wgpu queue
-/// * `renderer` - Vello renderer
-/// * `image_cache` - Image cache for rendering
-/// * `video_manager` - Video manager for video clips
-/// * `gpu_resources` - HDR GPU resources for compositing
-///
-/// # Returns
-/// Ok((y_plane, u_plane, v_plane)) with YUV420p planes on success, Err with message on failure
-pub fn render_frame_to_rgba_hdr(
-    document: &mut Document,
-    timestamp: f64,
-    width: u32,
-    height: u32,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    renderer: &mut vello::Renderer,
-    image_cache: &mut ImageCache,
-    video_manager: &Arc<std::sync::Mutex<VideoManager>>,
-    gpu_resources: &mut ExportGpuResources,
-) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
-    use vello::kurbo::Affine;
-
-    // Set document time to the frame timestamp
-    document.current_time = timestamp;
-
-    // Scale the document to the export resolution. The core renderer bakes this
-    // base transform into every layer (vector scenes, raster and video layer
-    // transforms), so the whole stage scales up/down to fill the output. When the
-    // export size matches the document this is the identity.
-    let base_transform = if document.width > 0.0 && document.height > 0.0 {
-        Affine::scale_non_uniform(
-            width as f64 / document.width,
-            height as f64 / document.height,
-        )
-    } else {
-        Affine::IDENTITY
-    };
-
-    // Export composites on the encoder's own device, not the shared one, so it cannot use
-    // hardware-decoded GPU frames (textures can't cross devices). Force software frames; a
-    // hardware decoder downloads its surface to CPU instead.
-    if let Ok(mut vm) = video_manager.lock() {
-        vm.set_render_hardware_ok(false);
-    }
-
-    // Render document for compositing (returns per-layer scenes)
-    let composite_result = render_document_for_compositing(
-        document,
-        base_transform,
-        image_cache,
-        video_manager,
-        None, // No webcam during export
-        None, // No floating selection during export
-        false, // No checkerboard in export
-    );
-
-    // Video export is never transparent.
-    composite_document_to_hdr(&composite_result, document, device, queue, renderer, gpu_resources, width, height, false)?;
-
-    // Use persistent output texture (already created in ExportGpuResources)
-    let output_view = &gpu_resources.output_texture_view;
-
-    // Convert HDR to sRGB for output
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("export_linear_to_srgb_bind_group"),
-        layout: &gpu_resources.linear_to_srgb_bind_group_layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&gpu_resources.hdr_texture_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&gpu_resources.linear_to_srgb_sampler),
-            },
-        ],
-    });
-
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("export_linear_to_srgb_encoder"),
-    });
-
-    {
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("export_linear_to_srgb_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &output_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-        });
-
-        let final_pipeline = match document.hdr_output_mode {
-            lightningbeam_core::document::HdrOutputMode::HighlightRolloff => &gpu_resources.linear_to_srgb_pipeline_rolloff,
-            lightningbeam_core::document::HdrOutputMode::Clip => &gpu_resources.linear_to_srgb_pipeline,
-        };
-        render_pass.set_pipeline(final_pipeline);
-        render_pass.set_bind_group(0, &bind_group, &[]);
-        render_pass.draw(0..4, 0..1);
-    }
-
-    queue.submit(Some(encoder.finish()));
-
-    // GPU YUV conversion: Convert RGBA output to YUV420p
-    let mut yuv_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("export_yuv_conversion_encoder"),
-    });
-
-    gpu_resources.yuv_converter.convert(
-        device,
-        &mut yuv_encoder,
-        output_view,
-        &gpu_resources.yuv_texture_view,
-        width,
-        height,
-    );
-
-    // Copy YUV texture to persistent staging buffer
-    let yuv_height = height + height / 2; // Y plane + U plane + V plane
-    yuv_encoder.copy_texture_to_buffer(
-        wgpu::TexelCopyTextureInfo {
-            texture: &gpu_resources.yuv_texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        wgpu::TexelCopyBufferInfo {
-            buffer: &gpu_resources.staging_buffer,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4), // Rgba8Unorm = 4 bytes per pixel
-                rows_per_image: Some(yuv_height),
-            },
-        },
-        wgpu::Extent3d {
-            width,
-            height: yuv_height,
-            depth_or_array_layers: 1,
-        },
-    );
-
-    queue.submit(Some(yuv_encoder.finish()));
-
-    // Map buffer and read YUV pixels (synchronous)
-    let buffer_slice = gpu_resources.staging_buffer.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        sender.send(result).ok();
-    });
-
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
-
-    receiver
-        .recv()
-        .map_err(|_| "Failed to receive buffer mapping result")?
-        .map_err(|e| format!("Failed to map buffer: {:?}", e))?;
-
-    // Extract Y, U, V planes from packed YUV buffer
-    let data = buffer_slice.get_mapped_range();
-    let width_usize = width as usize;
-    let height_usize = height as usize;
-
-    // Y plane: rows 0 to height-1 (extract R channel from Rgba8Unorm)
-    let y_plane_size = width_usize * height_usize;
-    let mut y_plane = vec![0u8; y_plane_size];
-    for y in 0..height_usize {
-        let src_row_offset = y * width_usize * 4; // 4 bytes per pixel (Rgba8Unorm)
-        let dst_row_offset = y * width_usize;
-        for x in 0..width_usize {
-            y_plane[dst_row_offset + x] = data[src_row_offset + x * 4]; // Extract R channel
-        }
-    }
-
-    // U and V planes: rows height to height + height/2 - 1 (half resolution, side-by-side layout)
-    // U plane is in left half (columns 0 to width/2-1), V plane is in right half (columns width/2 to width-1)
-    let chroma_width = width_usize / 2;
-    let chroma_height = height_usize / 2;
-    let chroma_row_start = height_usize * width_usize * 4; // Start of chroma rows in bytes
-
-    let mut u_plane = vec![0u8; chroma_width * chroma_height];
-    let mut v_plane = vec![0u8; chroma_width * chroma_height];
-
-    for y in 0..chroma_height {
-        let row_offset = chroma_row_start + y * width_usize * 4; // Full width rows in chroma region
-
-        // Extract U plane (left half: columns 0 to chroma_width-1)
-        let u_start = row_offset;
-        let dst_offset = y * chroma_width;
-        for x in 0..chroma_width {
-            u_plane[dst_offset + x] = data[u_start + x * 4]; // Extract R channel
-        }
-
-        // Extract V plane (right half: columns width/2 to width/2+chroma_width-1)
-        let v_start = row_offset + chroma_width * 4;
-        for x in 0..chroma_width {
-            v_plane[dst_offset + x] = data[v_start + x * 4]; // Extract R channel
-        }
-    }
-
-    drop(data);
-    gpu_resources.staging_buffer.unmap();
-
-    Ok((y_plane, u_plane, v_plane))
-}
-
 /// Render frame to GPU RGBA texture (non-blocking, for async pipeline)
 ///
-/// Similar to render_frame_to_rgba_hdr but renders to an external RGBA texture view
+/// Renders to an external RGBA texture view
 /// (provided by ReadbackPipeline) and returns the command encoder WITHOUT blocking on readback.
 /// The caller (ReadbackPipeline) will submit the encoder and handle async readback.
 ///

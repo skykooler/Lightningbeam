@@ -1302,21 +1302,26 @@ impl VectorGraph {
     /// bouncing across near-coincident duplicate edges). These are zero-area and would make
     /// `boundary_to_bezpath` render a stray hair; collapsing them yields a simple loop.
     fn collapse_boundary_spikes(&self, face: &mut Vec<(EdgeId, Direction)>) {
-        let dstart = |entry: &(EdgeId, Direction)| -> Point {
+        // The four control points of an entry's curve in its traversal order.
+        let traversed = |entry: &(EdgeId, Direction)| -> [Point; 4] {
             let c = self.edges[entry.0.idx()].curve;
             match entry.1 {
-                Direction::Forward => c.p0,
-                Direction::Backward => c.p3,
-            }
-        };
-        let dend = |entry: &(EdgeId, Direction)| -> Point {
-            let c = self.edges[entry.0.idx()].curve;
-            match entry.1 {
-                Direction::Forward => c.p3,
-                Direction::Backward => c.p0,
+                Direction::Forward => [c.p0, c.p1, c.p2, c.p3],
+                Direction::Backward => [c.p3, c.p2, c.p1, c.p0],
             }
         };
         const EPS: f64 = 0.5;
+        // Entries i and j cancel only when j is the *exact reverse* of i — every control point of
+        // j matches the mirror of i. Testing endpoints alone would also collapse a genuine
+        // lens/sliver (two distinct edges that merely share near-coincident endpoints), silently
+        // deleting real boundary geometry and dropping the fill.
+        let reverses = |a: &(EdgeId, Direction), b: &(EdgeId, Direction)| -> bool {
+            let (ca, cb) = (traversed(a), traversed(b));
+            (0..4).all(|k| {
+                let (p, q) = (ca[k], cb[3 - k]);
+                (p.x - q.x).hypot(p.y - q.y) < EPS
+            })
+        };
         loop {
             let n = face.len();
             if n < 2 {
@@ -1325,10 +1330,7 @@ impl VectorGraph {
             let mut collapsed = false;
             for i in 0..n {
                 let j = (i + 1) % n;
-                // entries i and j cancel when j ends back at i's start.
-                let si = dstart(&face[i]);
-                let ej = dend(&face[j]);
-                if (si.x - ej.x).hypot(si.y - ej.y) < EPS {
+                if reverses(&face[i], &face[j]) {
                     let (hi, lo) = if i > j { (i, j) } else { (j, i) };
                     face.remove(hi);
                     face.remove(lo);
