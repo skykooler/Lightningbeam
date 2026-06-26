@@ -6107,7 +6107,14 @@ impl eframe::App for EditorApp {
                     ExportResult::VideoOnly(settings, output_path) => {
                         println!("🎬 [MAIN] Starting video-only export: {}", output_path.display());
 
-                        match orchestrator.start_video_export(settings, output_path) {
+                        match orchestrator.start_video_export(
+                            settings,
+                            output_path,
+                            self.action_executor.document(),
+                            Arc::clone(&self.video_manager),
+                            self.raster_store.clone(),
+                            self.current_file_path.clone(),
+                        ) {
                             Ok(()) => true,
                             Err(err) => {
                                 eprintln!("❌ Failed to start video export: {}", err);
