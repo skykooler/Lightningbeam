@@ -940,6 +940,17 @@ impl VideoManager {
         // Whether this pass wants (and can produce) a GPU frame. Gated on HW being configured at all
         // so that with software-only decode preview and export share one cache entry (no double-cache).
         let want_gpu = self.render_hardware_ok && self.hw_device.is_some();
+        self.get_frame_inner(clip_id, timestamp, target_w, target_h, want_gpu)
+    }
+
+    /// Like [`get_frame`](Self::get_frame) but always returns a CPU (RGBA) frame, ignoring the
+    /// render-pass hardware flag. For consumers that need pixel bytes (thumbnails, image readback)
+    /// regardless of whether a render pass last enabled GPU frames.
+    pub fn get_frame_cpu(&mut self, clip_id: &Uuid, timestamp: f64, target_w: u32, target_h: u32) -> Option<Arc<VideoFrame>> {
+        self.get_frame_inner(clip_id, timestamp, target_w, target_h, false)
+    }
+
+    fn get_frame_inner(&mut self, clip_id: &Uuid, timestamp: f64, target_w: u32, target_h: u32, want_gpu: bool) -> Option<Arc<VideoFrame>> {
         // The cache key includes (target size, want_gpu): preview (GPU, preview res) and export
         // (CPU, export res) request the same clip/time and must not collide or cross representation.
         let timestamp_ms = (timestamp * 1000.0) as i64;
