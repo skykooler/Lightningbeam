@@ -67,6 +67,9 @@ cd /build/src/lightningbeam-ui
 
 # Build FFmpeg from source and link statically (no .so bundling needed)
 sed -i 's/ffmpeg-next = { version = \"8.0\", features = \[\"static\"\] }/ffmpeg-next = { version = \"8.0\", features = [\"build\", \"static\"] }/' lightningbeam-editor/Cargo.toml
+# Enable VAAPI: ffmpeg-sys-next configures with --disable-autodetect and only passes
+# --enable-vaapi when its build-vaapi feature is set (ffmpeg-next 8.0 doesn't forward it).
+sed -i '/^ffmpeg-next = /a ffmpeg-sys-next = { version = "8.0", features = ["build-vaapi"] }' lightningbeam-editor/Cargo.toml
 export FFMPEG_STATIC=1
 
 # Stage factory presets for packaging
