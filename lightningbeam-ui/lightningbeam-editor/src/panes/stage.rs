@@ -2074,6 +2074,37 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             scene
         };
 
+        // Active raster-layer border: a black+yellow dashed outline of the layer's canvas bounds (in
+        // document space) so its size is visible — especially when it differs from the document (e.g.
+        // after a doc resize). Two strokes sharing one dash pattern, offset by a dash so the yellow
+        // fills the black's gaps → interlocking black/yellow marching-ants.
+        if let Some(active_id) = self.ctx.active_layer_id {
+            if let Some(lightningbeam_core::layer::AnyLayer::Raster(rl)) = self.ctx.document.get_layer(&active_id) {
+                if let Some(kf) = rl.keyframe_at(self.ctx.document.current_time) {
+                    let rect = vello::kurbo::Rect::new(0.0, 0.0, kf.width as f64, kf.height as f64);
+                    // Sizes are in document space; divide by zoom so they're ~constant on screen.
+                    let inv_zoom = 1.0 / (self.ctx.zoom as f64).max(1e-3);
+                    let stroke_w = 1.5 * inv_zoom;
+                    let dash = 6.0 * inv_zoom;
+                    let pattern = [dash, dash];
+                    scene.stroke(
+                        &vello::kurbo::Stroke::new(stroke_w).with_dashes(0.0, pattern),
+                        camera_transform,
+                        vello::peniko::Color::new([0.0, 0.0, 0.0, 1.0]),
+                        None,
+                        &rect,
+                    );
+                    scene.stroke(
+                        &vello::kurbo::Stroke::new(stroke_w).with_dashes(dash, pattern),
+                        camera_transform,
+                        vello::peniko::Color::new([1.0, 0.85, 0.0, 1.0]),
+                        None,
+                        &rect,
+                    );
+                }
+            }
+        }
+
         // Render drag preview objects with transparency
         if let (Some(delta), Some(active_layer_id)) = (self.ctx.drag_delta, self.ctx.active_layer_id) {
             if let Some(layer) = self.ctx.document.get_layer(&active_layer_id) {
