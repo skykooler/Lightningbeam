@@ -625,6 +625,7 @@ impl ExportOrchestrator {
                 floating_selection,
                 state.settings.allow_transparency,
                 raster_store,
+                true, // image export composites on the shared device
             )?;
             queue.submit(Some(encoder.finish()));
 
@@ -1393,6 +1394,7 @@ impl ExportOrchestrator {
                     None,  // No floating selection during video export
                     false, // Video export is never transparent
                     raster_store,
+                    true,  // software export composites on the shared device → may use HW frames
                 )?;
                 let render_end = Instant::now();
 
@@ -1498,6 +1500,7 @@ impl ExportOrchestrator {
                 None,
                 false,
                 Some(&raster_store),
+                false, // zero-copy runs on its own device → download HW frames to CPU
             ) {
                 Ok(cmd) => cmd,
                 Err(e) => {

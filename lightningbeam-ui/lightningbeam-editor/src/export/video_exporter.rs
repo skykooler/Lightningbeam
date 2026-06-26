@@ -83,6 +83,8 @@ pub struct ExportGpuResources {
     pub linear_to_srgb_sampler: wgpu::Sampler,
     /// Canvas blit pipeline for raster/video/float layers (bypasses Vello).
     pub canvas_blit: crate::gpu_brush::CanvasBlitPipeline,
+    /// NV12→linear blit for hardware-decoded video frames (export on the shared device).
+    pub nv12_blit: crate::nv12_blit::Nv12BlitPipeline,
     /// Per-keyframe GPU texture cache for raster layers during export.
     pub raster_cache: std::collections::HashMap<uuid::Uuid, crate::gpu_brush::CanvasPair>,
     /// Cached HDR accumulator state after the (static) background is composited in. The document
@@ -287,6 +289,7 @@ impl ExportGpuResources {
         });
 
         let canvas_blit = crate::gpu_brush::CanvasBlitPipeline::new(device);
+        let nv12_blit = crate::nv12_blit::Nv12BlitPipeline::new(device);
 
         Self {
             buffer_pool,
@@ -306,6 +309,7 @@ impl ExportGpuResources {
             linear_to_srgb_bind_group_layout,
             linear_to_srgb_sampler,
             canvas_blit,
+            nv12_blit,
             raster_cache: std::collections::HashMap::new(),
             cached_bg_hdr: None,
             hdr_pipeline: None,
@@ -959,16 +963,26 @@ fn composite_document_to_hdr(
             }
             RenderedLayerType::Video { instances } => {
                 for inst in instances {
-                    if inst.rgba_data.is_empty() { continue; }
+                    if inst.gpu.is_none() && inst.rgba_data.is_empty() { continue; }
                     let hdr_layer_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
                     if let Some(hdr_layer_view) = gpu_resources.buffer_pool.get_view(hdr_layer_handle) {
-                        // Upload raw sRGB straight-alpha bytes into an sRGB texture; the GPU
-                        // decodes to linear on sample (no per-pixel CPU conversion). Blit with
-                        // blit_straight so the shader doesn't unpremultiply.
-                        let tex = upload_transient_texture(device, queue, &inst.rgba_data, inst.width, inst.height, wgpu::TextureFormat::Rgba8UnormSrgb, Some("export_video_frame_tex"));
-                        let tex_view = tex.create_view(&Default::default());
                         let bt = crate::gpu_brush::BlitTransform::new(inst.transform, inst.width, inst.height, width, height);
-                        gpu_resources.canvas_blit.blit_straight(device, queue, &tex_view, hdr_layer_view, &bt, None);
+                        if let Some(gpu) = &inst.gpu {
+                            // Hardware-decoded NV12 plane textures → linear, no CPU upload.
+                            let y_view = gpu.y.create_view(&Default::default());
+                            let uv_view = gpu.uv.create_view(&Default::default());
+                            gpu_resources.nv12_blit.blit(
+                                device, queue, &y_view, &uv_view, hdr_layer_view, &bt,
+                                gpu.full_range, gpu.coeffs, gpu.transfer, gpu.primaries,
+                            );
+                        } else {
+                            // Upload raw sRGB straight-alpha bytes into an sRGB texture; the GPU
+                            // decodes to linear on sample (no per-pixel CPU conversion). Blit with
+                            // blit_straight so the shader doesn't unpremultiply.
+                            let tex = upload_transient_texture(device, queue, &inst.rgba_data, inst.width, inst.height, wgpu::TextureFormat::Rgba8UnormSrgb, Some("export_video_frame_tex"));
+                            let tex_view = tex.create_view(&Default::default());
+                            gpu_resources.canvas_blit.blit_straight(device, queue, &tex_view, hdr_layer_view, &bt, None);
+                        }
                         let compositor_layer = CompositorLayer::new(hdr_layer_handle, inst.opacity, lightningbeam_core::gpu::BlendMode::Normal);
                         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("export_video_composite") });
                         gpu_resources.compositor.composite(device, queue, &mut enc, &[compositor_layer], &gpu_resources.buffer_pool, &gpu_resources.hdr_texture_view, None);
@@ -1401,9 +1415,9 @@ pub fn render_frame_to_yuv10_hdr(
         Affine::IDENTITY
     };
 
-    // Export composites on a separate device → force software video frames.
+    // HDR export composites on the shared device, so it can consume hardware-decoded GPU frames.
     if let Ok(mut vm) = video_manager.lock() {
-        vm.set_render_hardware_ok(false);
+        vm.set_render_hardware_ok(true);
     }
 
     let composite_result = render_document_for_compositing(
@@ -1437,6 +1451,9 @@ pub fn render_frame_to_gpu_rgba(
     floating_selection: Option<&lightningbeam_core::selection::RasterFloatingSelection>,
     allow_transparency: bool,
     raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
+    // True when compositing on the shared device (software/image export) → may consume
+    // hardware-decoded GPU frames; false for the zero-copy path on its own device.
+    hardware_ok: bool,
 ) -> Result<wgpu::CommandEncoder, String> {
     use vello::kurbo::Affine;
 
@@ -1468,9 +1485,10 @@ pub fn render_frame_to_gpu_rgba(
         Affine::IDENTITY
     };
 
-    // Export composites on a separate device — force software frames (see above).
+    // GPU frames are usable only on the shared device (software/image export); the zero-copy path
+    // runs on its own device and must download to CPU.
     if let Ok(mut vm) = video_manager.lock() {
-        vm.set_render_hardware_ok(false);
+        vm.set_render_hardware_ok(hardware_ok);
     }
 
     // Render document for compositing (returns per-layer scenes)
