@@ -96,6 +96,10 @@ pub struct VideoDecoder {
     input: Option<OwnedInput>,
     decoder: Option<ffmpeg::decoder::Video>,
     last_decoded_ts: i64, // Track the last decoded frame timestamp
+    /// The `frame_ts` requested by the previous `get_frame` call. Used to detect a genuine backward
+    /// jump (scrub/loop) from the request stream, which — unlike the decoded PTS — is strictly
+    /// monotonic during forward playback, so it never falses on the request-vs-PTS grid mismatch.
+    last_requested_ts: i64,
     keyframe_positions: Vec<i64>, // Index of keyframe timestamps for fast seeking
     /// Reused RGBA scaler, keyed by `(input format, input w, input h, output w, output h)`.
     /// Building an swscale context isn't free; a stream's frames share one input format/size and a
@@ -223,6 +227,7 @@ impl VideoDecoder {
             input: None,
             decoder: None,
             last_decoded_ts: -1,
+            last_requested_ts: i64::MIN,
             keyframe_positions,
             scaler: None,
             hw_device: None,
@@ -353,11 +358,28 @@ impl VideoDecoder {
             }
         }
 
-        // Determine if we need to seek
-        // Seek if: no decoder open, going backwards, or jumping forward more than 2 seconds
+        // Determine if we need to seek. Seek if: no decoder open, the *request* jumped backward
+        // (scrub/step-back/loop), or the request is more than 2s ahead of the decoder's position.
+        //
+        // Detect "backward" from the request stream, NOT the decoded frame PTS. The requested
+        // presentation time is rounded to a frame and converted through floats
+        // (`round(ts/fd)*fd / time_base`), which routinely lands a frame *behind* the exact PTS of
+        // the frame just produced — so `frame_ts < last_decoded_ts` falsely fires during smooth
+        // forward playback (every ~10 frames → a 40ms seek + whole-GOP re-decode = the 4K jerk).
+        // The request `frame_ts` is strictly monotonic while playing forward, so comparing against
+        // the previous request never falses; a real backward scrub still decreases it.
         let need_seek = self.decoder.is_none()
-            || frame_ts < self.last_decoded_ts
+            || frame_ts < self.last_requested_ts
             || frame_ts > self.last_decoded_ts + (2.0 / self.time_base) as i64;
+
+        if need_seek && video_debug() {
+            let reason = if self.decoder.is_none() { "no decoder" }
+                else if frame_ts < self.last_requested_ts { "backward" }
+                else { "forward>2s" };
+            eprintln!("[Video Seek?] need_seek={reason} frame_ts={frame_ts} last_requested_ts={} last_decoded_ts={}",
+                self.last_requested_ts, self.last_decoded_ts);
+        }
+        self.last_requested_ts = frame_ts;
 
         if need_seek {
             let t_seek_start = Instant::now();
@@ -951,19 +973,26 @@ impl VideoManager {
     }
 
     fn get_frame_inner(&mut self, clip_id: &Uuid, timestamp: f64, target_w: u32, target_h: u32, want_gpu: bool) -> Option<Arc<VideoFrame>> {
-        // The cache key includes (target size, want_gpu): preview (GPU, preview res) and export
+        // Get the decoder for this clip. Clone the Arc so we don't hold a borrow of
+        // `self.decoders` across the `&mut self` cache insert below.
+        let decoder_arc = Arc::clone(self.decoders.get(clip_id)?);
+
+        // Key the cache on the video FRAME INDEX, not milliseconds. A UI that refreshes finer than
+        // the video frame rate (e.g. a 60 Hz canvas on a 30 fps clip) would otherwise miss the cache
+        // on every sub-frame request and decode the NEXT frame each time — advancing the video faster
+        // than the clock (it plays sped-up). Rounding to round(ts·fps) maps all requests within one
+        // frame to a single entry, so each frame is decoded exactly once.
+        let fps = decoder_arc.lock().ok()?.fps;
+        let frame_index = if fps > 0.0 { (timestamp * fps).round() as i64 } else { (timestamp * 1000.0) as i64 };
+        // The key also includes (target size, want_gpu): preview (GPU, preview res) and export
         // (CPU, export res) request the same clip/time and must not collide or cross representation.
-        let timestamp_ms = (timestamp * 1000.0) as i64;
-        let cache_key = (*clip_id, timestamp_ms, target_w, target_h, want_gpu);
+        let cache_key = (*clip_id, frame_index, target_w, target_h, want_gpu);
 
         // Check frame cache first
         if let Some(cached_frame) = self.frame_cache.get(&cache_key) {
             return Some(Arc::clone(cached_frame));
         }
 
-        // Get decoder for this clip. Clone the Arc so we don't hold a borrow of
-        // `self.decoders` across the `&mut self` cache insert below.
-        let decoder_arc = Arc::clone(self.decoders.get(clip_id)?);
         let mut decoder = decoder_arc.lock().ok()?;
 
         // Decode the frame at the requested target (capped to native by the decoder).
