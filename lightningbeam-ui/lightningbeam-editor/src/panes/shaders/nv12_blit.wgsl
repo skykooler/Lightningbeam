@@ -14,8 +14,9 @@ struct Nv12Params {
     col0: vec4<f32>,
     col1: vec4<f32>,
     col2: vec4<f32>,
-    full_range: u32,
-    _pad: vec3<u32>,
+    // .x = full_range flag; .yzw padding. A vec4 keeps the struct 64 bytes (matching the Rust
+    // `u32 + [u32; 3]`); a bare u32 + vec3 would round up to 80 and mismatch the bound buffer.
+    flags: vec4<u32>,
 }
 
 @group(0) @binding(0) var y_tex:        texture_2d<f32>;
@@ -60,7 +61,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var Y: f32;
     var Cb: f32;
     var Cr: f32;
-    if params.full_range != 0u {
+    if params.flags.x != 0u {
         // Full ("JPEG") range: [0,255] luma, chroma centered at 128.
         Y = yv;
         Cb = cbcr.r - 0.5;
