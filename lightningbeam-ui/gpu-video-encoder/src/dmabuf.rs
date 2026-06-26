@@ -104,6 +104,18 @@ pub fn import_raw(
             return Err("dup(dma-buf fd) failed".into());
         }
 
+        // 16-bit-norm plane formats (P010) are NOT renderable, so the import is sample-only for
+        // those (decode path). 8-bit planes keep COLOR_ATTACHMENT for the encoder's RGBA→NV12 write.
+        let vk_usage = if buf.ten_bit {
+            vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST
+        } else {
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST
+        };
         let make_image = |format: vk::Format, w: u32, h: u32, pitch: u64| -> Result<vk::Image, String> {
             let mut ext = vk::ExternalMemoryImageCreateInfo::default()
                 .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
@@ -119,12 +131,7 @@ pub fn import_raw(
                 .array_layers(1)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-                .usage(
-                    vk::ImageUsageFlags::COLOR_ATTACHMENT
-                        | vk::ImageUsageFlags::SAMPLED
-                        | vk::ImageUsageFlags::TRANSFER_SRC
-                        | vk::ImageUsageFlags::TRANSFER_DST,
-                )
+                .usage(vk_usage)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .push_next(&mut ext)
@@ -184,6 +191,22 @@ pub fn import_raw(
         // Shared guard: frees `memory` once both images' drop callbacks have run.
         let mem_guard = std::sync::Arc::new(MemoryGuard { device: raw_device.clone(), memory });
 
+        // Match the Vulkan usage: 16-bit-norm planes (P010) are sample-only (not renderable).
+        let (hal_usage, wgpu_usage) = if buf.ten_bit {
+            (
+                wgpu_types::TextureUses::RESOURCE | wgpu_types::TextureUses::COPY_SRC,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            )
+        } else {
+            (
+                wgpu_types::TextureUses::COLOR_TARGET
+                    | wgpu_types::TextureUses::RESOURCE
+                    | wgpu_types::TextureUses::COPY_SRC,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+            )
+        };
         let wrap = |img: vk::Image, format: wgpu::TextureFormat, w: u32, h: u32| -> wgpu::Texture {
             // wgpu destroys the image (after wait-idle) when the texture drops; the
             // captured Arc<MemoryGuard> frees the shared memory once both have run.
@@ -200,9 +223,7 @@ pub fn import_raw(
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu_types::TextureUses::COLOR_TARGET
-                    | wgpu_types::TextureUses::RESOURCE
-                    | wgpu_types::TextureUses::COPY_SRC,
+                usage: hal_usage,
                 memory_flags: wgpu_hal::MemoryFlags::empty(),
                 view_formats: vec![],
             };
@@ -216,9 +237,7 @@ pub fn import_raw(
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_SRC,
+                    usage: wgpu_usage,
                     view_formats: &[],
                 },
             )
