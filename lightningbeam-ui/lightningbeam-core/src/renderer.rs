@@ -221,8 +221,11 @@ fn decode_image_brush(data: &[u8]) -> Option<ImageBrush> {
 
 /// A single decoded video frame ready for GPU upload, with its document-space transform.
 pub struct VideoRenderInstance {
-    /// sRGB RGBA8 pixel data (straight alpha — as decoded by ffmpeg).
+    /// sRGB RGBA8 pixel data (straight alpha — as decoded by ffmpeg). Empty when `gpu` is `Some`.
     pub rgba_data: Arc<Vec<u8>>,
+    /// Hardware-decoded frame as GPU NV12 textures (preview path). When `Some`, the compositor
+    /// samples it directly (NV12→RGB) instead of uploading `rgba_data`.
+    pub gpu: Option<crate::video::GpuVideoFrame>,
     pub width: u32,
     pub height: u32,
     /// Affine transform that maps from video-pixel space to document space.
@@ -609,6 +612,7 @@ pub fn render_layer_isolated(
                 };
                 instances.push(VideoRenderInstance {
                     rgba_data: frame.rgba_data.clone(),
+                    gpu: frame.gpu.clone(),
                     width: frame.width,
                     height: frame.height,
                     transform: base_transform * clip_transform * frame_to_clip,
@@ -629,6 +633,7 @@ pub fn render_layer_isolated(
                         * Affine::scale(scale);
                     instances.push(VideoRenderInstance {
                         rgba_data: frame.rgba_data.clone(),
+                        gpu: None, // webcam frames are always CPU
                         width: frame.width,
                         height: frame.height,
                         transform: cam_transform,
@@ -1260,6 +1265,7 @@ fn render_video_layer(
         if let Some(ex) = extract.as_deref_mut() {
             ex.instances.push(VideoRenderInstance {
                 rgba_data: frame.rgba_data.clone(),
+                gpu: frame.gpu.clone(),
                 width: frame.width,
                 height: frame.height,
                 transform: instance_transform * brush_transform,
@@ -1314,6 +1320,7 @@ fn render_video_layer(
             if let Some(ex) = extract.as_deref_mut() {
                 ex.instances.push(VideoRenderInstance {
                     rgba_data: frame.rgba_data.clone(),
+                    gpu: None, // webcam frames are always CPU
                     width: frame.width,
                     height: frame.height,
                     transform: preview_transform,
