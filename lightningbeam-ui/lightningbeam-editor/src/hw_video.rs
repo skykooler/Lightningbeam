@@ -133,7 +133,15 @@ impl HwVideoImporter for SharedHwImporter {
 
         let imported = dmabuf::import_raw(&self.device, &self.adapter, &buf);
         ff::av_frame_free(&mut (drm_f as *mut _)); // the fd was dup'd into Vulkan
-        let (y, uv) = imported.ok()?.into_planes();
+        let (y, uv) = match imported {
+            Ok(t) => t.into_planes(),
+            Err(e) => {
+                // Surface the failure: a silent None here makes core fall back to software (no gamut
+                // conversion → BT.2020 looks washed out). 10-bit P010 import is the likely culprit.
+                eprintln!("[hw_video] import_raw failed (ten_bit={ten_bit}): {e}");
+                return None;
+            }
+        };
         Some(GpuVideoFrame {
             y: Arc::new(y),
             uv: Arc::new(uv),
