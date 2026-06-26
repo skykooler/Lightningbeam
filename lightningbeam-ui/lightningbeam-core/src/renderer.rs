@@ -366,6 +366,20 @@ pub struct CompositeRenderResult {
 /// and effects in the GPU compositor.
 ///
 /// Layers are returned in bottom-to-top order for compositing.
+/// Decode-target resolution for video clips = the output (export/preview) resolution, derived from
+/// the document→output `base_transform` scale. The decoder caps this to the source's native size,
+/// so it means "decode at the size we'll actually display, never upscaling": full detail when
+/// exporting above document res (instead of upscaling a document-res frame), and cheap small frames
+/// for the canvas. Stable per render pass, so it doesn't thrash the decoder's scaler/cache.
+fn video_decode_target(document: &Document, base_transform: Affine) -> (u32, u32) {
+    let c = base_transform.as_coeffs(); // [a, b, c, d, e, f]
+    let sx = (c[0] * c[0] + c[1] * c[1]).sqrt();
+    let sy = (c[2] * c[2] + c[3] * c[3]).sqrt();
+    let w = (document.width * sx).ceil().max(1.0) as u32;
+    let h = (document.height * sy).ceil().max(1.0) as u32;
+    (w, h)
+}
+
 pub fn render_document_for_compositing(
     document: &Document,
     base_transform: Affine,
@@ -545,12 +559,13 @@ pub fn render_layer_isolated(
             let layer_opacity = layer.opacity();
             let mut video_mgr = video_manager.lock().unwrap();
             let mut instances = Vec::new();
+            let (target_w, target_h) = video_decode_target(document, base_transform);
 
             let tempo_map = document.tempo_map();
             for clip_instance in &video_layer.clip_instances {
                 let Some(video_clip) = document.video_clips.get(&clip_instance.clip_id) else { continue };
                 let Some(clip_time) = clip_instance.remap_time(time, video_clip.duration, tempo_map) else { continue };
-                let Some(frame) = video_mgr.get_frame(&clip_instance.clip_id, clip_time) else { continue };
+                let Some(frame) = video_mgr.get_frame(&clip_instance.clip_id, clip_time, target_w, target_h) else { continue };
 
                 // Evaluate animated transform properties.
                 let anim = &video_layer.layer.animation_data;
@@ -1095,8 +1110,9 @@ fn render_video_layer(
             continue; // Clip instance not active at this time
         };
 
-        // Get video frame from VideoManager
-        let Some(frame) = video_manager.get_frame(&clip_instance.clip_id, clip_time) else {
+        // Get video frame from VideoManager at the output (export/preview) resolution.
+        let (target_w, target_h) = video_decode_target(document, base_transform);
+        let Some(frame) = video_manager.get_frame(&clip_instance.clip_id, clip_time, target_w, target_h) else {
             continue; // Frame not available
         };
 

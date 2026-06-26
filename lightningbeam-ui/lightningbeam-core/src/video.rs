@@ -84,22 +84,23 @@ pub struct VideoMetadata {
 /// Video decoder with LRU frame caching
 pub struct VideoDecoder {
     source: VideoSource,
-    _width: u32,          // Original video width
-    _height: u32,         // Original video height
-    output_width: u32,   // Scaled output width
-    output_height: u32,  // Scaled output height
+    native_width: u32,    // Original (decoded) video width
+    native_height: u32,   // Original (decoded) video height
     fps: f64,
     _duration: f64,
     time_base: f64,
     stream_index: usize,
-    frame_cache: LruCache<i64, Vec<u8>>, // timestamp -> RGBA data
+    // Decoded RGBA keyed by (frame timestamp, output width, output height): the same source
+    // frame may be requested at different sizes (preview res vs export res).
+    frame_cache: LruCache<(i64, u32, u32), Vec<u8>>,
     input: Option<OwnedInput>,
     decoder: Option<ffmpeg::decoder::Video>,
     last_decoded_ts: i64, // Track the last decoded frame timestamp
     keyframe_positions: Vec<i64>, // Index of keyframe timestamps for fast seeking
-    /// Reused RGBA scaler, keyed by the input (format, width, height). Building an swscale
-    /// context is not free; a stream's frames share one format/size, so build it once.
-    scaler: Option<(ffmpeg::format::Pixel, u32, u32, SendScaler)>,
+    /// Reused RGBA scaler, keyed by `(input format, input w, input h, output w, output h)`.
+    /// Building an swscale context isn't free; a stream's frames share one input format/size and a
+    /// consumer keeps one output size, so it's built once and rebuilt only when either changes.
+    scaler: Option<(ffmpeg::format::Pixel, u32, u32, u32, u32, SendScaler)>,
 }
 
 /// `SwsContext` is `!Send` in ffmpeg-next, but a `VideoDecoder` (like its decoder/input) is only
@@ -145,14 +146,12 @@ impl VideoDecoder {
         let height = decoder.height();
         let time_base = f64::from(video_stream.time_base());
 
-        // Calculate output dimensions (scale down if larger than max)
-        let (output_width, output_height) = if let (Some(max_w), Some(max_h)) = (max_width, max_height) {
-            // Calculate scale to fit within max dimensions while preserving aspect ratio
-            let scale = (max_w as f32 / width as f32).min(max_h as f32 / height as f32).min(1.0);
-            ((width as f32 * scale) as u32, (height as f32 * scale) as u32)
-        } else {
-            (width, height)
-        };
+        // Output dimensions are now chosen per `get_frame` call (the caller's target res, capped to
+        // native) rather than frozen here — so the same clip can be decoded at preview res for the
+        // canvas and at full export res, and exporting above document res no longer upscales.
+        // `max_width`/`max_height` are retained as an upper bound for callers that want a fixed cap
+        // (e.g. thumbnails pass their thumb width per call instead).
+        let _ = (max_width, max_height);
 
         // Try to get duration from stream, fallback to container
         let duration = if video_stream.duration() > 0 {
@@ -184,10 +183,8 @@ impl VideoDecoder {
 
         Ok(Self {
             source,
-            _width: width,
-            _height: height,
-            output_width,
-            output_height,
+            native_width: width,
+            native_height: height,
             fps,
             _duration: duration,
             time_base,
@@ -218,19 +215,18 @@ impl VideoDecoder {
         self.keyframe_positions = positions;
     }
 
-    /// Get the output width (scaled dimensions)
-    pub fn get_output_width(&self) -> u32 {
-        self.output_width
+    /// The output size for a requested target: the target capped to native resolution, preserving
+    /// aspect ratio (never upscale beyond native — there's no detail to invent).
+    fn capped_output(&self, target_w: u32, target_h: u32) -> (u32, u32) {
+        let (nw, nh) = (self.native_width as f32, self.native_height as f32);
+        if nw <= 0.0 || nh <= 0.0 { return (self.native_width.max(1), self.native_height.max(1)); }
+        let scale = (target_w as f32 / nw).min(target_h as f32 / nh).min(1.0);
+        (((nw * scale) as u32).max(1), ((nh * scale) as u32).max(1))
     }
 
-    /// Get the output height (scaled dimensions)
-    pub fn get_output_height(&self) -> u32 {
-        self.output_height
-    }
-
-    /// Decode a frame at the specified timestamp (public wrapper)
+    /// Decode a frame at the specified timestamp, at native resolution (public wrapper).
     pub fn decode_frame(&mut self, timestamp: f64) -> Result<Vec<u8>, String> {
-        self.get_frame(timestamp)
+        self.get_frame(timestamp, self.native_width, self.native_height).map(|(d, _, _)| d)
     }
 
     /// Build an index of all keyframe positions in the video by scanning packets
@@ -273,9 +269,13 @@ impl VideoDecoder {
     }
 
     /// Get a decoded frame at the specified timestamp
-    fn get_frame(&mut self, timestamp: f64) -> Result<Vec<u8>, String> {
+    /// Decode the frame at `timestamp`, scaled to `capped_output(target_w, target_h)`. Returns the
+    /// RGBA bytes and the actual output dimensions.
+    fn get_frame(&mut self, timestamp: f64, target_w: u32, target_h: u32) -> Result<(Vec<u8>, u32, u32), String> {
         use std::time::Instant;
         let t_start = Instant::now();
+
+        let (out_w, out_h) = self.capped_output(target_w, target_h);
 
         // Round timestamp to nearest frame boundary to improve cache hits
         // This ensures that timestamps like 1.0001s and 0.9999s both map to frame 1.0s
@@ -284,13 +284,14 @@ impl VideoDecoder {
 
         // Convert timestamp to frame timestamp
         let frame_ts = (rounded_timestamp / self.time_base) as i64;
+        let cache_key = (frame_ts, out_w, out_h);
 
         // Check cache
-        if let Some(cached_frame) = self.frame_cache.get(&frame_ts) {
+        if let Some(cached_frame) = self.frame_cache.get(&cache_key) {
             if video_debug() {
                 eprintln!("[Video Timing] Cache hit for ts={:.3}s ({}ms)", timestamp, t_start.elapsed().as_millis());
             }
-            return Ok(cached_frame.clone());
+            return Ok((cached_frame.clone(), out_w, out_h));
         }
 
         // Determine if we need to seek
@@ -378,10 +379,11 @@ impl VideoDecoder {
                         let t_scale_start = Instant::now();
 
                         // Reuse the RGBA scaler across frames; rebuild only if the input
-                        // format/size changes (it won't within a stream).
+                        // format/size or the requested output size changes.
                         let need_new = match &self.scaler {
-                            Some((fmt, w, h, _)) => {
+                            Some((fmt, w, h, ow, oh, _)) => {
                                 *fmt != frame.format() || *w != frame.width() || *h != frame.height()
+                                    || *ow != out_w || *oh != out_h
                             }
                             None => true,
                         };
@@ -391,21 +393,21 @@ impl VideoDecoder {
                                 frame.width(),
                                 frame.height(),
                                 ffmpeg::format::Pixel::RGBA,
-                                self.output_width,
-                                self.output_height,
+                                out_w,
+                                out_h,
                                 ffmpeg::software::scaling::flag::Flags::BILINEAR,
                             ).map_err(|e| e.to_string())?;
-                            self.scaler = Some((frame.format(), frame.width(), frame.height(), SendScaler(ctx)));
+                            self.scaler = Some((frame.format(), frame.width(), frame.height(), out_w, out_h, SendScaler(ctx)));
                         }
-                        let scaler = &mut self.scaler.as_mut().unwrap().3.0;
+                        let scaler = &mut self.scaler.as_mut().unwrap().5.0;
 
                         let mut rgb_frame = ffmpeg::util::frame::Video::empty();
                         scaler.run(&frame, &mut rgb_frame)
                             .map_err(|e| e.to_string())?;
 
                         // Remove stride padding to create tightly packed RGBA data
-                        let width = self.output_width as usize;
-                        let height = self.output_height as usize;
+                        let width = out_w as usize;
+                        let height = out_h as usize;
                         let stride = rgb_frame.stride(0);
                         let row_size = width * 4; // RGBA = 4 bytes per pixel
                         let source_data = rgb_frame.data(0);
@@ -432,8 +434,8 @@ impl VideoDecoder {
                                 eprintln!("[Video Timing] ts={:.3}s | Decoded {} frames in {}ms | Scale: {}ms | Total: {}ms",
                                     timestamp, decode_count, decode_time, scale_time_ms, total_time);
                             }
-                            self.frame_cache.put(frame_ts, data.clone());
-                            return Ok(data);
+                            self.frame_cache.put(cache_key, data.clone());
+                            return Ok((data, out_w, out_h));
                         }
                         break;
                     }
@@ -491,7 +493,8 @@ pub fn generate_keyframe_thumbnails(
         if should_skip(ks) {
             continue;
         }
-        if let Ok(rgba) = decoder.get_frame(ks) {
+        // Decode at the thumbnail width (large height so width is the constraint), capped to native.
+        if let Ok((rgba, _, _)) = decoder.get_frame(ks, thumb_width, 100_000) {
             on_thumb(ks, Arc::new(rgba));
         }
     }
@@ -569,7 +572,7 @@ pub struct VideoManager {
     /// zero-copy rendering. Bounded by a **byte budget** (not a frame count, which
     /// would be unsafe across resolutions — a 4K frame is ~33MB vs ~2MB at 800x600)
     /// so playback of arbitrarily long video never grows unbounded.
-    frame_cache: LruCache<(Uuid, i64), Arc<VideoFrame>>,
+    frame_cache: LruCache<(Uuid, i64, u32, u32), Arc<VideoFrame>>,
     /// Running total of bytes held in `frame_cache` (sum of each frame's RGBA len),
     /// kept in sync on insert/evict/remove so eviction is O(1) per frame.
     frame_cache_bytes: usize,
@@ -647,10 +650,12 @@ impl VideoManager {
     ///
     /// Returns None if the clip is not loaded or decoding fails.
     /// Frames are cached for performance.
-    pub fn get_frame(&mut self, clip_id: &Uuid, timestamp: f64) -> Option<Arc<VideoFrame>> {
-        // Convert timestamp to milliseconds for cache key
+    pub fn get_frame(&mut self, clip_id: &Uuid, timestamp: f64, target_w: u32, target_h: u32) -> Option<Arc<VideoFrame>> {
+        // Convert timestamp to milliseconds for cache key. The target size is part of the key: the
+        // canvas (preview res) and an in-progress export (export res) request the same clip/time at
+        // different sizes, and must not collide.
         let timestamp_ms = (timestamp * 1000.0) as i64;
-        let cache_key = (*clip_id, timestamp_ms);
+        let cache_key = (*clip_id, timestamp_ms, target_w, target_h);
 
         // Check frame cache first
         if let Some(cached_frame) = self.frame_cache.get(&cache_key) {
@@ -662,10 +667,8 @@ impl VideoManager {
         let decoder_arc = Arc::clone(self.decoders.get(clip_id)?);
         let mut decoder = decoder_arc.lock().ok()?;
 
-        // Decode the frame
-        let rgba_data = decoder.get_frame(timestamp).ok()?;
-        let width = decoder.output_width;
-        let height = decoder.output_height;
+        // Decode the frame at the requested target (capped to native by the decoder).
+        let (rgba_data, width, height) = decoder.get_frame(timestamp, target_w, target_h).ok()?;
         drop(decoder); // release the lock before touching `self`
 
         // Create VideoFrame and cache it
@@ -683,7 +686,7 @@ impl VideoManager {
 
     /// Insert a frame into the byte-budgeted cache, evicting least-recently-used
     /// frames until the total is within [`FRAME_CACHE_BYTE_BUDGET`].
-    fn cache_frame(&mut self, key: (Uuid, i64), frame: Arc<VideoFrame>) {
+    fn cache_frame(&mut self, key: (Uuid, i64, u32, u32), frame: Arc<VideoFrame>) {
         let bytes = frame.rgba_data.len();
         if let Some(old) = self.frame_cache.put(key, frame) {
             self.frame_cache_bytes = self.frame_cache_bytes.saturating_sub(old.rgba_data.len());
@@ -799,10 +802,10 @@ impl VideoManager {
 
         // Remove all cached frames for this clip (LruCache has no retain; collect
         // matching keys, then pop each, keeping the byte total in sync).
-        let keys: Vec<(Uuid, i64)> = self
+        let keys: Vec<(Uuid, i64, u32, u32)> = self
             .frame_cache
             .iter()
-            .filter(|((id, _), _)| id == clip_id)
+            .filter(|((id, _, _, _), _)| id == clip_id)
             .map(|(k, _)| *k)
             .collect();
         for key in keys {

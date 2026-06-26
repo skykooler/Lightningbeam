@@ -316,7 +316,8 @@ fn generate_video_thumbnail(
 
     let frame = {
         let mut video_mgr = video_manager.lock().ok()?;
-        video_mgr.get_frame(clip_id, timestamp)?
+        // Small frame for the asset thumbnail (capped to native, aspect preserved).
+        video_mgr.get_frame(clip_id, timestamp, THUMBNAIL_SIZE, THUMBNAIL_SIZE)?
     };
 
     let src_width = frame.width as usize;
