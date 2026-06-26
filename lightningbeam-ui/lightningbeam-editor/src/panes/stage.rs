@@ -1703,7 +1703,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                     let y_view = gpu.y.create_view(&Default::default());
                                     let uv_view = gpu.uv.create_view(&Default::default());
                                     shared.nv12_blit.blit(
-                                        device, queue, &y_view, &uv_view, hdr_layer_view, &bt, gpu.full_range, gpu.coeffs,
+                                        device, queue, &y_view, &uv_view, hdr_layer_view, &bt,
+                                        gpu.full_range, gpu.coeffs, gpu.transfer, gpu.primaries,
                                     );
                                 } else {
                                     // Reuse the GPU texture for this frame if it's unchanged (a

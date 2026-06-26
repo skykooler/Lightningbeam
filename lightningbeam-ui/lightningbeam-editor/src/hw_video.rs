@@ -7,7 +7,8 @@
 use ffmpeg_next::ffi as ff;
 use gpu_video_encoder::dmabuf::{self, Nv12DmaBuf};
 use lightningbeam_core::video::{
-    ycbcr_coeffs, GpuVideoFrame, HwDeviceHandle, HwVideoImporter, VideoManager,
+    ycbcr_coeffs, GpuVideoFrame, HwDeviceHandle, HwVideoImporter, VideoManager, VideoPrimaries,
+    VideoTransfer,
 };
 use std::sync::{Arc, Mutex};
 
@@ -77,6 +78,26 @@ impl HwVideoImporter for SharedHwImporter {
         };
         let coeffs = ycbcr_coeffs(kr, kb);
 
+        // Transfer characteristic → which EOTF the compositor applies to reach scene-linear.
+        let transfer = match (*frame).color_trc {
+            ff::AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084 => VideoTransfer::Pq,
+            ff::AVColorTransferCharacteristic::AVCOL_TRC_ARIB_STD_B67 => VideoTransfer::Hlg,
+            _ => VideoTransfer::Gamma,
+        };
+        // Primaries → BT.2020 is gamut-mapped to BT.709; unspecified follows the matrix guess above.
+        let primaries = match (*frame).color_primaries {
+            ff::AVColorPrimaries::AVCOL_PRI_BT2020 => VideoPrimaries::Bt2020,
+            ff::AVColorPrimaries::AVCOL_PRI_UNSPECIFIED
+                if matches!(
+                    (*frame).colorspace,
+                    ff::AVColorSpace::AVCOL_SPC_BT2020_NCL | ff::AVColorSpace::AVCOL_SPC_BT2020_CL
+                ) =>
+            {
+                VideoPrimaries::Bt2020
+            }
+            _ => VideoPrimaries::Bt709,
+        };
+
         let imported = dmabuf::import_raw(&self.device, &self.adapter, &buf);
         ff::av_frame_free(&mut (drm_f as *mut _)); // the fd was dup'd into Vulkan
         let (y, uv) = imported.ok()?.into_planes();
@@ -87,6 +108,8 @@ impl HwVideoImporter for SharedHwImporter {
             height,
             full_range,
             coeffs,
+            transfer,
+            primaries,
         })
     }
 }

@@ -4,16 +4,17 @@
 //! software-decoded video look identical. See `panes/shaders/nv12_blit.wgsl`.
 
 use crate::gpu_brush::BlitTransform;
+use lightningbeam_core::video::{VideoPrimaries, VideoTransfer};
 
 /// Uniform: the `viewport_uv → frame_uv` affine (same packing as [`BlitTransform`]), the Y'CbCr→RGB
-/// matrix coefficients, and the full-range flag. 80 bytes (48 matrix + 16 coeffs + u32 + 12 pad).
+/// matrix coefficients, and a flags vec4. 80 bytes (48 matrix + 16 coeffs + 16 flags).
+/// `flags`: `[full_range, transfer (0 gamma / 1 PQ / 2 HLG), primaries (0 BT.709 / 1 BT.2020), pad]`.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Nv12Params {
     transform: BlitTransform,
     coeffs: [f32; 4],
-    full_range: u32,
-    _pad: [u32; 3],
+    flags: [u32; 4],
 }
 
 pub struct Nv12BlitPipeline {
@@ -129,12 +130,22 @@ impl Nv12BlitPipeline {
         transform: &BlitTransform,
         full_range: bool,
         coeffs: [f32; 4],
+        transfer: VideoTransfer,
+        primaries: VideoPrimaries,
     ) {
+        let transfer_code = match transfer {
+            VideoTransfer::Gamma => 0,
+            VideoTransfer::Pq => 1,
+            VideoTransfer::Hlg => 2,
+        };
+        let primaries_code = match primaries {
+            VideoPrimaries::Bt709 => 0,
+            VideoPrimaries::Bt2020 => 1,
+        };
         let params = Nv12Params {
             transform: *transform,
             coeffs,
-            full_range: full_range as u32,
-            _pad: [0; 3],
+            flags: [full_range as u32, transfer_code, primaries_code, 0],
         };
         let param_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("nv12_blit_params"),

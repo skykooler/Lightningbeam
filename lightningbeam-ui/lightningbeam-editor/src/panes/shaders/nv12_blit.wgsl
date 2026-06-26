@@ -16,8 +16,8 @@ struct Nv12Params {
     col2: vec4<f32>,
     // Y'CbCr→R'G'B' matrix from the source colorspace: [Cr→R, Cb→G, Cr→G, Cb→B].
     coeffs: vec4<f32>,
-    // .x = full_range flag; .yzw padding. A vec4 keeps each block 16-aligned and the struct size
-    // matching the Rust `[f32;4] + u32 + [u32;3]` (80 bytes).
+    // .x = full_range; .y = transfer (0 gamma, 1 PQ, 2 HLG); .z = primaries (0 BT.709, 1 BT.2020).
+    // A vec4 keeps each block 16-aligned and the struct 80 bytes (Rust `[f32;4] + u32 + [u32;3]`).
     flags: vec4<u32>,
 }
 
@@ -45,6 +45,41 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     let lo = c / 12.92;
     let hi = pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
     return select(lo, hi, c > vec3<f32>(0.04045));
+}
+
+// SMPTE ST 2084 (PQ) EOTF: encoded [0,1] → absolute luminance, then normalize so the 203-nit
+// graphics white = 1.0 (HDR highlights exceed 1.0). Per-channel.
+fn pq_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let m1 = 0.1593017578125;
+    let m2 = 78.84375;
+    let c1 = 0.8359375;
+    let c2 = 18.8515625;
+    let c3 = 18.6875;
+    let e = pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / m2));
+    let num = max(e - vec3<f32>(c1), vec3<f32>(0.0));
+    let den = vec3<f32>(c2) - c3 * e;
+    let nits = pow(num / den, vec3<f32>(1.0 / m1)) * 10000.0; // 0..10000 cd/m²
+    return nits / 203.0;
+}
+
+// ARIB STD-B67 (HLG) inverse-OETF → scene light, normalized so reference white (signal 0.75) = 1.0.
+// The display OOTF is omitted (scene-referred compositing); approximate but reasonable for SDR-out.
+fn hlg_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let a = 0.17883277;
+    let b = 0.28466892;
+    let cc = 0.55991073;
+    let lo = (c * c) / 3.0;
+    let hi = (exp((c - vec3<f32>(cc)) / a) + vec3<f32>(b)) / 12.0;
+    let scene = select(lo, hi, c > vec3<f32>(0.5));
+    return scene / 0.26496256; // hlg_inv_oetf(0.75): put reference white at 1.0
+}
+
+// BT.2020 → BT.709 primaries, linear light (ITU-R BT.2087). Out-of-709 colours go negative → clamp.
+fn bt2020_to_bt709(c: vec3<f32>) -> vec3<f32> {
+    let r = 1.660491 * c.r - 0.587641 * c.g - 0.072850 * c.b;
+    let g = -0.124550 * c.r + 1.132900 * c.g - 0.008349 * c.b;
+    let b = -0.018151 * c.r - 0.100579 * c.g + 1.118730 * c.b;
+    return max(vec3<f32>(r, g, b), vec3<f32>(0.0));
 }
 
 @fragment
@@ -79,9 +114,23 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let r = Y + params.coeffs.x * Cr;
     let g = Y + params.coeffs.y * Cb + params.coeffs.z * Cr;
     let b = Y + params.coeffs.w * Cb;
-    let rgb_gamma = clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(1.0));
+    // Valid encoded signal is [0,1]; clamp before the EOTF (HDR comes from the EOTF, not overshoot).
+    let rgb_enc = clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(1.0));
 
-    // R'G'B' is gamma-encoded; the HDR target is linear → undo the transfer.
-    let rgb_lin = srgb_to_linear(rgb_gamma);
+    // Encoded R'G'B' → scene-linear (graphics white = 1.0; HDR may exceed 1.0).
+    var rgb_lin: vec3<f32>;
+    if params.flags.y == 1u {
+        rgb_lin = pq_to_linear(rgb_enc);
+    } else if params.flags.y == 2u {
+        rgb_lin = hlg_to_linear(rgb_enc);
+    } else {
+        rgb_lin = srgb_to_linear(rgb_enc);
+    }
+
+    // Wide-gamut → BT.709 in linear light to match the compositor's primaries.
+    if params.flags.z == 1u {
+        rgb_lin = bt2020_to_bt709(rgb_lin);
+    }
+
     return vec4<f32>(rgb_lin, 1.0);
 }

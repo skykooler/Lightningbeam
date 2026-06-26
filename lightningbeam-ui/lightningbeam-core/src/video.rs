@@ -719,6 +719,31 @@ pub struct GpuVideoFrame {
     /// so SD (BT.601) and HD/UHD clips each convert correctly: `[Cr→R, Cb→G, Cr→G, Cb→B]`.
     ///   R = Y + c[0]·Cr,  G = Y + c[1]·Cb + c[2]·Cr,  B = Y + c[3]·Cb
     pub coeffs: [f32; 4],
+    /// Opto-electronic transfer of the encoded R'G'B' — the compositor applies the matching EOTF to
+    /// reach scene-linear (graphics white = 1.0). HDR (PQ/HLG) values exceed 1.0.
+    pub transfer: VideoTransfer,
+    /// Colour primaries; BT.2020 is gamut-mapped to the compositor's BT.709 space in linear light.
+    pub primaries: VideoPrimaries,
+}
+
+/// Transfer characteristic of a decoded video frame (selects the EOTF in the NV12→linear pass).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoTransfer {
+    /// SDR gamma (BT.709/sRGB/601/gamma22) — approximated by the sRGB EOTF.
+    Gamma,
+    /// SMPTE ST 2084 (PQ) — absolute, normalized so 203 nits (graphics white) = 1.0.
+    Pq,
+    /// ARIB STD-B67 (HLG) — scene-referred, normalized so reference white ≈ 1.0.
+    Hlg,
+}
+
+/// Colour primaries of a decoded video frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoPrimaries {
+    /// BT.709 / sRGB (also used for BT.601, whose primaries differ only slightly).
+    Bt709,
+    /// BT.2020 (wide gamut) — converted to BT.709 in linear light by the compositor.
+    Bt2020,
 }
 
 /// Y'CbCr→R'G'B' matrix coefficients (`[Cr→R, Cb→G, Cr→G, Cb→B]`) from the luma weights `kr`/`kb`
