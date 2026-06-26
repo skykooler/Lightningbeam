@@ -16,6 +16,30 @@ use lightningbeam_core::gpu::{
     SrgbToLinearConverter, EffectProcessor, YuvConverter, HDR_FORMAT,
 };
 
+/// The document→export-pixels transform for a given fit mode. Stretch distorts to fill; Letterbox
+/// scales uniformly to fit (centered, black bars); Crop scales uniformly to fill (centered, trims).
+pub fn export_base_transform(
+    doc_w: f64,
+    doc_h: f64,
+    out_w: f64,
+    out_h: f64,
+    fit: lightningbeam_core::export::ExportFitMode,
+) -> vello::kurbo::Affine {
+    use lightningbeam_core::export::ExportFitMode;
+    use vello::kurbo::Affine;
+    if doc_w <= 0.0 || doc_h <= 0.0 {
+        return Affine::IDENTITY;
+    }
+    let (sx, sy) = (out_w / doc_w, out_h / doc_h);
+    match fit {
+        ExportFitMode::Stretch => Affine::scale_non_uniform(sx, sy),
+        ExportFitMode::Letterbox | ExportFitMode::Crop => {
+            let s = if matches!(fit, ExportFitMode::Letterbox) { sx.min(sy) } else { sx.max(sy) };
+            Affine::translate(((out_w - doc_w * s) / 2.0, (out_h - doc_h * s) / 2.0)) * Affine::scale(s)
+        }
+    }
+}
+
 /// Reusable frame buffers to avoid allocations
 struct FrameBuffers {
     /// RGBA buffer from GPU readback (width * height * 4 bytes)
@@ -1402,18 +1426,13 @@ pub fn render_frame_to_yuv10_hdr(
     video_manager: &Arc<std::sync::Mutex<VideoManager>>,
     gpu_resources: &mut ExportGpuResources,
     hdr_mode: lightningbeam_core::export::HdrExportMode,
+    fit: lightningbeam_core::export::ExportFitMode,
     raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
-    use vello::kurbo::Affine;
-
     document.current_time = timestamp;
     fault_in_raster_for_frame(document, raster_store);
 
-    let base_transform = if document.width > 0.0 && document.height > 0.0 {
-        Affine::scale_non_uniform(width as f64 / document.width, height as f64 / document.height)
-    } else {
-        Affine::IDENTITY
-    };
+    let base_transform = export_base_transform(document.width, document.height, width as f64, height as f64, fit);
 
     // HDR export composites on the shared device, so it can consume hardware-decoded GPU frames.
     if let Ok(mut vm) = video_manager.lock() {
@@ -1454,9 +1473,8 @@ pub fn render_frame_to_gpu_rgba(
     // True when compositing on the shared device (software/image export) → may consume
     // hardware-decoded GPU frames; false for the zero-copy path on its own device.
     hardware_ok: bool,
+    fit: lightningbeam_core::export::ExportFitMode,
 ) -> Result<wgpu::CommandEncoder, String> {
-    use vello::kurbo::Affine;
-
     // One-shot profiling of the render-bucket split (LB_RENDER_PROFILE=1): how much of the
     // per-frame CPU "render" is document build (incl. video decode) vs. composite-command
     // recording (incl. the frame texture upload) vs. the sRGB pass. Prints a running average.
@@ -1476,14 +1494,7 @@ pub fn render_frame_to_gpu_rgba(
     // base transform into every layer (vector scenes, raster and video layer
     // transforms), so the whole stage scales up/down to fill the output. When the
     // export size matches the document this is the identity.
-    let base_transform = if document.width > 0.0 && document.height > 0.0 {
-        Affine::scale_non_uniform(
-            width as f64 / document.width,
-            height as f64 / document.height,
-        )
-    } else {
-        Affine::IDENTITY
-    };
+    let base_transform = export_base_transform(document.width, document.height, width as f64, height as f64, fit);
 
     // GPU frames are usable only on the shared device (software/image export); the zero-copy path
     // runs on its own device and must download to CPU.

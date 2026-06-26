@@ -320,6 +320,29 @@ impl HdrExportMode {
     }
 }
 
+/// How the document is fit into the export frame when the export resolution's aspect ratio differs
+/// from the document's. Applied as the export `base_transform` (document space → export pixels).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ExportFitMode {
+    /// Scale each axis independently to fill the frame — distorts when aspects differ.
+    Stretch,
+    /// Scale uniformly to fit, centered, with black bars (letterbox/pillarbox). Preserves aspect.
+    #[default]
+    Letterbox,
+    /// Scale uniformly to fill, centered, cropping the overflow. Preserves aspect, no bars.
+    Crop,
+}
+
+impl ExportFitMode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ExportFitMode::Stretch => "Stretch (distort to fill)",
+            ExportFitMode::Letterbox => "Letterbox (fit, black bars)",
+            ExportFitMode::Crop => "Crop (fill, trim edges)",
+        }
+    }
+}
+
 /// Video quality presets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoQuality {
@@ -385,6 +408,10 @@ pub struct VideoExportSettings {
     #[serde(default)]
     pub hdr: HdrExportMode,
 
+    /// How the document is fit into the export frame when aspect ratios differ (default Letterbox).
+    #[serde(default)]
+    pub fit: ExportFitMode,
+
     /// Audio settings (None = no audio)
     pub audio: Option<AudioExportSettings>,
 
@@ -405,6 +432,7 @@ impl Default for VideoExportSettings {
             quality: VideoQuality::High,
             color_range: ColorRange::Limited,
             hdr: HdrExportMode::Sdr,
+            fit: ExportFitMode::Letterbox,
             audio: Some(AudioExportSettings::high_quality_aac()),
             start_time: 0.0,
             end_time: 60.0,

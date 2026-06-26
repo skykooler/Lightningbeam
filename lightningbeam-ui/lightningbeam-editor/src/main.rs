@@ -4974,25 +4974,8 @@ impl EditorApp {
                 if asset_info.clip_type == panes::DragClipType::Video {
                     if let Some((video_width, video_height)) = asset_info.dimensions {
                         let doc = self.action_executor.document();
-                        let doc_width = doc.width;
-                        let doc_height = doc.height;
-
-                        // Calculate scale to fit (use minimum to preserve aspect ratio)
-                        let scale_x = doc_width / video_width;
-                        let scale_y = doc_height / video_height;
-                        let uniform_scale = scale_x.min(scale_y);
-
-                        clip_instance.transform.scale_x = uniform_scale;
-                        clip_instance.transform.scale_y = uniform_scale;
-
-                        // Center the video in the document
-                        let scaled_width = video_width * uniform_scale;
-                        let scaled_height = video_height * uniform_scale;
-                        let center_x = (doc_width - scaled_width) / 2.0;
-                        let center_y = (doc_height - scaled_height) / 2.0;
-
-                        clip_instance.transform.x = center_x;
-                        clip_instance.transform.y = center_y;
+                        // Fit uniformly + centered (preserve aspect). Shared with the timeline drag path.
+                        clip_instance.transform.fit_centered(video_width, video_height, doc.width, doc.height);
                     }
                 } else {
                     // Audio clips are centered in document

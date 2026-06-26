@@ -55,6 +55,8 @@ pub struct VideoExportState {
     height: u32,
     /// HDR output mode — HDR uses a synchronous 10-bit path instead of the async RGBA pipeline.
     hdr: lightningbeam_core::export::HdrExportMode,
+    /// How the document is fit into the export frame (stretch/letterbox/crop).
+    fit: lightningbeam_core::export::ExportFitMode,
     /// Channel to send rendered frames to encoder thread
     frame_tx: Option<Sender<VideoFrameMessage>>,
     /// HDR GPU resources for compositing pipeline (effects, color conversion)
@@ -84,6 +86,8 @@ struct ZeroCopyVideo {
     rgba: wgpu::Texture,
     /// True when running on the shared device → compositing can consume hardware-decoded GPU frames.
     on_shared_device: bool,
+    /// How the document is fit into the export frame (stretch/letterbox/crop).
+    fit: lightningbeam_core::export::ExportFitMode,
 }
 
 /// State for a single-frame image export (runs on the GPU render thread, one frame per update).
@@ -628,6 +632,8 @@ impl ExportOrchestrator {
                 state.settings.allow_transparency,
                 raster_store,
                 true, // image export composites on the shared device
+                // Image export renders at the document's own size, so the fit transform is identity.
+                lightningbeam_core::export::ExportFitMode::Letterbox,
             )?;
             queue.submit(Some(encoder.finish()));
 
@@ -861,6 +867,7 @@ impl ExportOrchestrator {
         height: u32,
     ) -> (std::thread::JoinHandle<()>, VideoExportState) {
         let hdr = settings.hdr;
+        let fit = settings.fit;
         let handle = std::thread::spawn(move || {
             Self::run_video_encoder(settings, output_path, frame_rx, progress_tx, cancel_flag, total_frames);
         });
@@ -874,6 +881,7 @@ impl ExportOrchestrator {
             width,
             height,
             hdr,
+            fit,
             frame_tx: Some(frame_tx),
             gpu_resources: None,
             readback_pipeline: None,
@@ -959,7 +967,7 @@ impl ExportOrchestrator {
             view_formats: &[],
         });
         println!("🎬 [EXPORT] zero-copy VAAPI H.264 enabled");
-        Some(ZeroCopyVideo { encoder, renderer, gpu_resources, rgba, on_shared_device })
+        Some(ZeroCopyVideo { encoder, renderer, gpu_resources, rgba, on_shared_device, fit: settings.fit })
     }
 
     /// Start a video export in the background.
@@ -1270,6 +1278,7 @@ impl ExportOrchestrator {
 
         let width = state.width;
         let height = state.height;
+        let fit = state.fit;
 
         // HDR path: synchronous 10-bit render (composite → PQ/HLG → readback → 10-bit YUV), one
         // frame per call. Bypasses the SDR async RGBA pipeline (which is 8-bit only).
@@ -1284,7 +1293,7 @@ impl ExportOrchestrator {
                 let (y, u, v) = video_exporter::render_frame_to_yuv10_hdr(
                     document, timestamp, width, height,
                     device, queue, renderer, image_cache, video_manager,
-                    gpu_resources, state.hdr, raster_store,
+                    gpu_resources, state.hdr, fit, raster_store,
                 )?;
                 if let Some(tx) = &state.frame_tx {
                     tx.send(VideoFrameMessage::Frame {
@@ -1414,6 +1423,7 @@ impl ExportOrchestrator {
                     false, // Video export is never transparent
                     raster_store,
                     true,  // software export composites on the shared device → may use HW frames
+                    fit,
                 )?;
                 let render_end = Instant::now();
 
@@ -1504,6 +1514,7 @@ impl ExportOrchestrator {
             let rgba_view = zc.rgba.create_view(&Default::default());
 
             let t0 = std::time::Instant::now();
+            let fit = zc.fit;
             let cmd = match video_exporter::render_frame_to_gpu_rgba(
                 &mut document,
                 timestamp,
@@ -1520,6 +1531,7 @@ impl ExportOrchestrator {
                 false,
                 Some(&raster_store),
                 zc.on_shared_device, // GPU-resident decode only when on the shared device
+                fit,
             ) {
                 Ok(cmd) => cmd,
                 Err(e) => {

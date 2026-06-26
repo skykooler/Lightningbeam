@@ -504,6 +504,19 @@ impl ExportDialog {
             }
         });
 
+        // Fit mode — how the document maps into the export frame when the aspect ratios differ.
+        ui.horizontal(|ui| {
+            use lightningbeam_core::export::ExportFitMode;
+            ui.label("Fit:");
+            egui::ComboBox::from_id_salt("video_fit_mode")
+                .selected_text(self.video_settings.fit.name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.video_settings.fit, ExportFitMode::Letterbox, ExportFitMode::Letterbox.name());
+                    ui.selectable_value(&mut self.video_settings.fit, ExportFitMode::Crop, ExportFitMode::Crop.name());
+                    ui.selectable_value(&mut self.video_settings.fit, ExportFitMode::Stretch, ExportFitMode::Stretch.name());
+                });
+        });
+
         ui.horizontal(|ui| {
             ui.label("FPS:");
             egui::ComboBox::from_id_salt("framerate")
