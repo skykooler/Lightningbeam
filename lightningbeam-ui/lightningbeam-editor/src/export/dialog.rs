@@ -25,6 +25,8 @@ pub enum ExportType {
     Audio,
     Image,
     Video,
+    /// Vector-only SVG of the current frame (lossless; raster/video layers skipped).
+    Svg,
 }
 
 /// Export result from dialog
@@ -34,6 +36,8 @@ pub enum ExportResult {
     Image(ImageExportSettings, PathBuf),
     VideoOnly(VideoExportSettings, PathBuf),
     VideoWithAudio(VideoExportSettings, AudioExportSettings, PathBuf),
+    /// SVG of vector layers at the given document time.
+    Svg(f64, PathBuf),
 }
 
 /// Export dialog state
@@ -156,6 +160,7 @@ impl ExportDialog {
             ExportType::Audio => self.audio_settings.format.extension(),
             ExportType::Image => self.image_settings.format.extension(),
             ExportType::Video => self.video_settings.codec.container_format(),
+            ExportType::Svg => "svg",
         }
     }
 
@@ -198,6 +203,7 @@ impl ExportDialog {
             ExportType::Audio => "Export Audio",
             ExportType::Image => "Export Image",
             ExportType::Video => "Export Video",
+            ExportType::Svg => "Export SVG",
         };
 
         let modal_response = egui::Modal::new(egui::Id::new("export_dialog_modal"))
@@ -219,6 +225,7 @@ impl ExportDialog {
                         (ExportType::Audio, "Audio"),
                         (ExportType::Image, "Image"),
                         (ExportType::Video, "Video"),
+                        (ExportType::Svg, "SVG"),
                     ] {
                         if ui.selectable_value(&mut self.export_type, variant, label).clicked() {
                             self.update_filename_extension();
@@ -235,6 +242,7 @@ impl ExportDialog {
                     ExportType::Audio => self.render_audio_basic(ui),
                     ExportType::Image => self.render_image_settings(ui),
                     ExportType::Video => self.render_video_basic(ui),
+                    ExportType::Svg => self.render_svg_settings(ui),
                 }
 
                 ui.add_space(12.0);
@@ -253,6 +261,7 @@ impl ExportDialog {
                         ExportType::Audio => self.render_audio_advanced(ui),
                         ExportType::Image => self.render_image_advanced(ui),
                         ExportType::Video => self.render_video_advanced(ui),
+                        ExportType::Svg => {} // SVG has no advanced settings
                     }
                 }
 
@@ -354,6 +363,20 @@ impl ExportDialog {
         if self.image_settings.format != ImageFormat::Jpeg {
             ui.checkbox(&mut self.image_settings.allow_transparency, "Allow transparency");
         }
+    }
+
+    /// Render SVG export settings — just the frame time (reuses the image time field).
+    fn render_svg_settings(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Time:");
+            ui.add(egui::DragValue::new(&mut self.image_settings.time)
+                .speed(0.01)
+                .range(0.0..=f64::MAX)
+                .suffix(" s"));
+        });
+        ui.add_space(4.0);
+        ui.weak("Exports vector layers losslessly at this frame. Raster, video, and");
+        ui.weak("effect layers are not included.");
     }
 
     /// Render advanced image export settings (time, resolution override).
@@ -595,7 +618,7 @@ impl ExportDialog {
     fn render_time_range(&mut self, ui: &mut egui::Ui) {
         let (start_time, end_time) = match self.export_type {
             ExportType::Audio => (&mut self.audio_settings.start_time, &mut self.audio_settings.end_time),
-            ExportType::Image => return, // image uses a single time field, not a range
+            ExportType::Image | ExportType::Svg => return, // single time field, not a range
             ExportType::Video => (&mut self.video_settings.start_time, &mut self.video_settings.end_time),
         };
 
@@ -669,6 +692,7 @@ impl ExportDialog {
                 }
                 Some(ExportResult::Image(self.image_settings.clone(), output_path))
             }
+            ExportType::Svg => Some(ExportResult::Svg(self.image_settings.time, output_path)),
             ExportType::Audio => {
                 // Validate audio settings
                 if let Err(err) = self.audio_settings.validate() {

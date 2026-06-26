@@ -60,6 +60,7 @@ mod test_mode;
 
 mod sample_import;
 mod sample_import_dialog;
+mod svg_import;
 
 mod curve_editor;
 
@@ -3238,7 +3239,11 @@ impl EditorApp {
                         .and_then(|e| e.to_str())
                         .unwrap_or("");
 
-                    let imported_asset = match get_file_type(extension) {
+                    // SVG imports as a new vector layer (not a placeable asset).
+                    let imported_asset = if extension.eq_ignore_ascii_case("svg") {
+                        self.import_svg_file(&path);
+                        None
+                    } else { match get_file_type(extension) {
                         Some(FileType::Image) => {
                             self.last_import_filter = ImportFilter::Images;
                             self.import_image(&path)
@@ -3255,11 +3260,12 @@ impl EditorApp {
                             self.last_import_filter = ImportFilter::Midi;
                             self.import_midi(&path)
                         }
+                        Some(FileType::Vector) => None, // handled by the svg intercept above
                         None => {
                             println!("Unsupported file type: {}", extension);
                             None
                         }
-                    };
+                    } };
 
                     eprintln!("[TIMING] import took {:.1}ms", _import_timer.elapsed().as_secs_f64() * 1000.0);
                     // Auto-place if this is "Import" (not "Import to Library")
@@ -4512,6 +4518,53 @@ impl EditorApp {
     }
 
     /// Import an image file as an ImageAsset
+    /// Import an `.svg` file as a new vector layer (one static keyframe at the playhead).
+    fn import_svg_file(&mut self, path: &std::path::Path) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("❌ Failed to read SVG {}: {}", path.display(), e);
+                return;
+            }
+        };
+
+        let graph = match svg_import::import_svg(&bytes) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("❌ {}", e);
+                return;
+            }
+        };
+
+        let name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("SVG")
+            .to_string();
+
+        // Build a vector layer holding the imported graph as a keyframe at the current time.
+        let mut layer = lightningbeam_core::layer::VectorLayer::new(name);
+        let mut keyframe = lightningbeam_core::layer::ShapeKeyframe::new(self.playback_time);
+        keyframe.graph = graph;
+        layer.keyframes.push(keyframe);
+
+        let editing_clip_id = self.editing_context.current_clip_id();
+        let action = lightningbeam_core::actions::AddLayerAction::new(
+            lightningbeam_core::layer::AnyLayer::Vector(layer),
+        )
+        .with_target_clip(editing_clip_id);
+        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+            eprintln!("❌ Failed to add imported SVG layer: {}", e);
+            return;
+        }
+
+        // Select the newly created layer.
+        let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+        if let Some(last_layer) = context_layers.last() {
+            self.active_layer_id = Some(last_layer.id());
+        }
+        self.last_import_filter = ImportFilter::Images;
+    }
+
     fn import_image(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::ImageAsset;
         self.note_possible_large_media(path);
@@ -6131,6 +6184,19 @@ impl eframe::App for EditorApp {
                             doc.height as u32,
                         );
                         false // image export is silent (no progress dialog)
+                    }
+                    ExportResult::Svg(time, output_path) => {
+                        println!("🖋 [MAIN] Exporting SVG: {}", output_path.display());
+                        let svg = lightningbeam_core::svg_export::document_to_svg(
+                            self.action_executor.document(),
+                            time,
+                        );
+                        if let Err(err) = std::fs::write(&output_path, svg) {
+                            eprintln!("❌ Failed to write SVG: {}", err);
+                        } else {
+                            println!("✅ SVG written: {}", output_path.display());
+                        }
+                        false // synchronous; no progress dialog
                     }
                     ExportResult::AudioOnly(settings, output_path) => {
                         println!("🎵 [MAIN] Starting audio-only export: {}", output_path.display());

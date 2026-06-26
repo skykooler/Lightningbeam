@@ -1344,7 +1344,7 @@ fn render_video_layer(
 /// The axis is centred on the bbox midpoint and oriented at `angle_deg` degrees
 /// (0 = left→right, 90 = top→bottom).  The axis extends ± half the bbox diagonal
 /// so the gradient covers the entire shape regardless of angle.
-fn gradient_bbox_endpoints(angle_deg: f32, bbox: kurbo::Rect) -> (kurbo::Point, kurbo::Point) {
+pub(crate) fn gradient_bbox_endpoints(angle_deg: f32, bbox: kurbo::Rect) -> (kurbo::Point, kurbo::Point) {
     let cx = bbox.center().x;
     let cy = bbox.center().y;
     let dx = bbox.width();
