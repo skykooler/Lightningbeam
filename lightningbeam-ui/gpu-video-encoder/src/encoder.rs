@@ -42,15 +42,17 @@ unsafe impl Send for ZeroCopyEncoder {}
 impl ZeroCopyEncoder {
     /// Build a zero-copy `h264_vaapi` encoder writing to `output_path` (container inferred
     /// from the extension, e.g. `.mp4`). `Err` if VAAPI/the device is unavailable.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         width: u32,
         height: u32,
         framerate: i32,
         bitrate_kbps: u32,
         output_path: &Path,
+        full_range: bool,
     ) -> Result<Self, String> {
         let drm = vk_device::create()?;
-        let renderer = Rgba2Nv12::new(&drm.device);
+        let renderer = Rgba2Nv12::new(&drm.device, full_range);
         unsafe {
             let mut hw_device = crate::vaapi::create_device()?;
             let name = CString::new("h264_vaapi").unwrap();
@@ -66,6 +68,17 @@ impl ZeroCopyEncoder {
             (*enc).framerate = ff::AVRational { num: framerate, den: 1 };
             (*enc).pix_fmt = ff::AVPixelFormat::AV_PIX_FMT_VAAPI;
             (*enc).bit_rate = (bitrate_kbps as i64) * 1000;
+            // Color signalling for the H.264 VUI. The Rgba2Nv12 shader produces BT.709 luma/chroma
+            // in the matching range; without these tags players assume limited range and a
+            // full-range stream looks dark + oversaturated.
+            (*enc).color_range = if full_range {
+                ff::AVColorRange::AVCOL_RANGE_JPEG
+            } else {
+                ff::AVColorRange::AVCOL_RANGE_MPEG
+            };
+            (*enc).colorspace = ff::AVColorSpace::AVCOL_SPC_BT709;
+            (*enc).color_primaries = ff::AVColorPrimaries::AVCOL_PRI_BT709;
+            (*enc).color_trc = ff::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
 
             let frames_ref = ff::av_hwframe_ctx_alloc(hw_device);
             {

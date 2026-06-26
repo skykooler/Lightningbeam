@@ -10,7 +10,7 @@ fn zerocopy_encode_h264() {
     let (w, h) = (640u32, 480u32);
     let out = std::env::temp_dir().join("gpu_video_encoder_zerocopy.mp4");
     let _ = std::fs::remove_file(&out);
-    let mut enc = match ZeroCopyEncoder::new(w, h, 30, 4000, &out) {
+    let mut enc = match ZeroCopyEncoder::new(w, h, 30, 4000, &out, false) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("[zc-encode] unavailable, skipping: {e}");

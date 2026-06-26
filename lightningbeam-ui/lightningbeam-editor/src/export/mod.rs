@@ -899,6 +899,7 @@ impl ExportOrchestrator {
             framerate.round() as i32,
             settings.quality.bitrate_kbps(),
             output_path,
+            settings.color_range.is_full(),
         ) {
             Ok(e) => e,
             Err(e) => {

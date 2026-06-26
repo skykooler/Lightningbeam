@@ -6,7 +6,7 @@ use eframe::egui;
 use lightningbeam_core::export::{
     AudioExportSettings, AudioFormat,
     ImageExportSettings, ImageFormat,
-    VideoExportSettings, VideoCodec, VideoQuality,
+    VideoExportSettings, VideoCodec, VideoQuality, ColorRange,
 };
 use std::path::PathBuf;
 
@@ -526,6 +526,20 @@ impl ExportDialog {
                     ui.selectable_value(&mut self.video_settings.quality, VideoQuality::VeryHigh, VideoQuality::VeryHigh.name());
                 });
         });
+
+        // Color range applies to H.264 (the VAAPI zero-copy encoder honors it). Limited/TV is the
+        // compatible default; Full/PC only looks right in players that read the full-range tag.
+        if matches!(self.video_settings.codec, VideoCodec::H264) {
+            ui.horizontal(|ui| {
+                ui.label("Color range:");
+                egui::ComboBox::from_id_salt("video_color_range")
+                    .selected_text(self.video_settings.color_range.name())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.video_settings.color_range, ColorRange::Limited, ColorRange::Limited.name());
+                        ui.selectable_value(&mut self.video_settings.color_range, ColorRange::Full, ColorRange::Full.name());
+                    });
+            });
+        }
 
         ui.checkbox(&mut self.include_audio, "Include Audio");
 

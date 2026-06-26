@@ -265,6 +265,29 @@ impl VideoCodec {
     }
 }
 
+/// YUV color range for the encoded video (currently H.264). Limited/TV (16–235) is what nearly
+/// every player assumes; Full/PC (0–255) keeps a bit more precision but only looks right in players
+/// that honor the full-range tag — so Limited is the safe default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColorRange {
+    Limited,
+    Full,
+}
+
+impl Default for ColorRange {
+    fn default() -> Self { ColorRange::Limited }
+}
+
+impl ColorRange {
+    pub fn is_full(&self) -> bool { matches!(self, ColorRange::Full) }
+    pub fn name(&self) -> &'static str {
+        match self {
+            ColorRange::Limited => "Limited (TV, 16–235)",
+            ColorRange::Full => "Full (PC, 0–255)",
+        }
+    }
+}
+
 /// Video quality presets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoQuality {
@@ -322,6 +345,10 @@ pub struct VideoExportSettings {
     /// Video quality
     pub quality: VideoQuality,
 
+    /// YUV color range (H.264 only; ignored by other codecs).
+    #[serde(default)]
+    pub color_range: ColorRange,
+
     /// Audio settings (None = no audio)
     pub audio: Option<AudioExportSettings>,
 
@@ -340,6 +367,7 @@ impl Default for VideoExportSettings {
             height: None,
             framerate: 60.0,
             quality: VideoQuality::High,
+            color_range: ColorRange::Limited,
             audio: Some(AudioExportSettings::high_quality_aac()),
             start_time: 0.0,
             end_time: 60.0,
