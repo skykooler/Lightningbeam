@@ -97,6 +97,22 @@ pub struct VideoDecoder {
     decoder: Option<ffmpeg::decoder::Video>,
     last_decoded_ts: i64, // Track the last decoded frame timestamp
     keyframe_positions: Vec<i64>, // Index of keyframe timestamps for fast seeking
+    /// Reused RGBA scaler, keyed by the input (format, width, height). Building an swscale
+    /// context is not free; a stream's frames share one format/size, so build it once.
+    scaler: Option<(ffmpeg::format::Pixel, u32, u32, SendScaler)>,
+}
+
+/// `SwsContext` is `!Send` in ffmpeg-next, but a `VideoDecoder` (like its decoder/input) is only
+/// ever accessed under the `VideoManager` mutex — never concurrently — so moving it between
+/// threads is sound. The decoder/input fields rely on the same invariant.
+struct SendScaler(ffmpeg::software::scaling::context::Context);
+unsafe impl Send for SendScaler {}
+
+/// Per-frame video decode tracing, gated behind `LB_VIDEO_DEBUG` (checked once). Off by
+/// default — at export frame rates these prints are a lot of locked stderr writes.
+fn video_debug() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("LB_VIDEO_DEBUG").is_ok())
 }
 
 impl VideoDecoder {
@@ -183,6 +199,7 @@ impl VideoDecoder {
             decoder: None,
             last_decoded_ts: -1,
             keyframe_positions,
+            scaler: None,
         })
     }
 
@@ -270,7 +287,9 @@ impl VideoDecoder {
 
         // Check cache
         if let Some(cached_frame) = self.frame_cache.get(&frame_ts) {
-            eprintln!("[Video Timing] Cache hit for ts={:.3}s ({}ms)", timestamp, t_start.elapsed().as_millis());
+            if video_debug() {
+                eprintln!("[Video Timing] Cache hit for ts={:.3}s ({}ms)", timestamp, t_start.elapsed().as_millis());
+            }
             return Ok(cached_frame.clone());
         }
 
@@ -292,8 +311,10 @@ impl VideoDecoder {
             let keyframe_seconds = keyframe_ts_stream as f64 * self.time_base;
             let keyframe_ts_av = (keyframe_seconds * 1_000_000.0) as i64; // AV_TIME_BASE = 1000000
 
-            eprintln!("[Video Seek] Target: {} | Keyframe(stream): {} | Keyframe(AV): {} | Index size: {}",
-                frame_ts, keyframe_ts_stream, keyframe_ts_av, self.keyframe_positions.len());
+            if video_debug() {
+                eprintln!("[Video Seek] Target: {} | Keyframe(stream): {} | Keyframe(AV): {} | Index size: {}",
+                    frame_ts, keyframe_ts_stream, keyframe_ts_av, self.keyframe_positions.len());
+            }
 
             // Reopen input (a fresh BlobReader for packed sources).
             let mut owned = self.source.open()
@@ -306,7 +327,9 @@ impl VideoDecoder {
                 input.seek(keyframe_ts_av, keyframe_ts_av..(keyframe_ts_av + 1))
                     .map_err(|e| format!("Seek failed: {}", e))?;
 
-                eprintln!("[Video Timing] Seek call took {}ms", t_seek_start.elapsed().as_millis());
+                if video_debug() {
+                    eprintln!("[Video Timing] Seek call took {}ms", t_seek_start.elapsed().as_millis());
+                }
 
                 let context_decoder = ffmpeg::codec::context::Context::from_parameters(
                     input.streams().best(ffmpeg::media::Type::Video).unwrap().parameters()
@@ -354,16 +377,27 @@ impl VideoDecoder {
                     if is_better {
                         let t_scale_start = Instant::now();
 
-                        // Convert to RGBA and scale to output size
-                        let mut scaler = ffmpeg::software::scaling::context::Context::get(
-                            frame.format(),
-                            frame.width(),
-                            frame.height(),
-                            ffmpeg::format::Pixel::RGBA,
-                            self.output_width,
-                            self.output_height,
-                            ffmpeg::software::scaling::flag::Flags::BILINEAR,
-                        ).map_err(|e| e.to_string())?;
+                        // Reuse the RGBA scaler across frames; rebuild only if the input
+                        // format/size changes (it won't within a stream).
+                        let need_new = match &self.scaler {
+                            Some((fmt, w, h, _)) => {
+                                *fmt != frame.format() || *w != frame.width() || *h != frame.height()
+                            }
+                            None => true,
+                        };
+                        if need_new {
+                            let ctx = ffmpeg::software::scaling::context::Context::get(
+                                frame.format(),
+                                frame.width(),
+                                frame.height(),
+                                ffmpeg::format::Pixel::RGBA,
+                                self.output_width,
+                                self.output_height,
+                                ffmpeg::software::scaling::flag::Flags::BILINEAR,
+                            ).map_err(|e| e.to_string())?;
+                            self.scaler = Some((frame.format(), frame.width(), frame.height(), SendScaler(ctx)));
+                        }
+                        let scaler = &mut self.scaler.as_mut().unwrap().3.0;
 
                         let mut rgb_frame = ffmpeg::util::frame::Video::empty();
                         scaler.run(&frame, &mut rgb_frame)
@@ -392,10 +426,12 @@ impl VideoDecoder {
                     if current_frame_ts >= frame_ts {
                         // Found our frame, cache and return it
                         if let Some(data) = best_frame_data {
-                            let total_time = t_start.elapsed().as_millis();
-                            let decode_time = t_decode_start.elapsed().as_millis();
-                            eprintln!("[Video Timing] ts={:.3}s | Decoded {} frames in {}ms | Scale: {}ms | Total: {}ms",
-                                timestamp, decode_count, decode_time, scale_time_ms, total_time);
+                            if video_debug() {
+                                let total_time = t_start.elapsed().as_millis();
+                                let decode_time = t_decode_start.elapsed().as_millis();
+                                eprintln!("[Video Timing] ts={:.3}s | Decoded {} frames in {}ms | Scale: {}ms | Total: {}ms",
+                                    timestamp, decode_count, decode_time, scale_time_ms, total_time);
+                            }
                             self.frame_cache.put(frame_ts, data.clone());
                             return Ok(data);
                         }
