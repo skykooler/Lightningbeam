@@ -980,10 +980,10 @@ impl InfopanelPane {
 
                 // Extract all needed values up front, then drop the borrow before closures
                 // that need mutable access to shared or self.
-                let (mut width, mut height, mut duration, mut framerate, layer_count, background_color) = {
+                let (mut width, mut height, mut duration, mut framerate, layer_count, background_color, mut hdr_mode) = {
                     let document = shared.action_executor.document();
                     (document.width, document.height, document.duration, document.framerate,
-                     document.root.children.len(), document.background_color)
+                     document.root.children.len(), document.background_color, document.hdr_output_mode)
                 };
 
                 // Canvas width
@@ -1085,6 +1085,23 @@ impl InfopanelPane {
                         );
                         shared.pending_actions.push(Box::new(action));
                     }
+                });
+
+                // HDR output mode (how super-white video highlights map to SDR output)
+                ui.horizontal(|ui| {
+                    use lightningbeam_core::document::HdrOutputMode;
+                    ui.label("HDR output:");
+                    egui::ComboBox::from_id_salt(("hdr_output_mode", path))
+                        .selected_text(hdr_mode.name())
+                        .show_ui(ui, |ui| {
+                            let mut changed = false;
+                            changed |= ui.selectable_value(&mut hdr_mode, HdrOutputMode::Clip, HdrOutputMode::Clip.name()).changed();
+                            changed |= ui.selectable_value(&mut hdr_mode, HdrOutputMode::HighlightRolloff, HdrOutputMode::HighlightRolloff.name()).changed();
+                            if changed {
+                                let action = SetDocumentPropertiesAction::set_hdr_output_mode(hdr_mode);
+                                shared.pending_actions.push(Box::new(action));
+                            }
+                        });
                 });
 
                 // Layer count (read-only)

@@ -135,6 +135,8 @@ struct SharedVelloResources {
     blit_bind_group_layout: wgpu::BindGroupLayout,
     /// HDR to sRGB blit pipeline (linear→sRGB conversion for display)
     hdr_blit_pipeline: wgpu::RenderPipeline,
+    /// Variant of `hdr_blit_pipeline` with highlight rolloff (document HDR output mode).
+    hdr_blit_pipeline_rolloff: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     /// Shared image cache for avoiding re-decoding images every frame
     image_cache: Mutex<lightningbeam_core::renderer::ImageCache>,
@@ -346,6 +348,41 @@ impl SharedVelloResources {
             cache: None,
         });
 
+        // Variant with highlight rolloff (document HDR output mode); identical but `fs_main_rolloff`.
+        let hdr_blit_pipeline_rolloff = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("hdr_blit_pipeline_rolloff"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &hdr_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &hdr_shader,
+                entry_point: Some("fs_main_rolloff"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         // Create sampler
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vello_blit_sampler"),
@@ -383,6 +420,7 @@ impl SharedVelloResources {
             blit_pipeline,
             blit_bind_group_layout,
             hdr_blit_pipeline,
+            hdr_blit_pipeline_rolloff,
             sampler,
             image_cache: Mutex::new(lightningbeam_core::renderer::ImageCache::new()),
             video_manager,
@@ -2947,7 +2985,11 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             occlusion_query_set: None,
                         });
 
-                        render_pass.set_pipeline(&shared.hdr_blit_pipeline);
+                        let hdr_pipeline = match self.ctx.document.hdr_output_mode {
+                            lightningbeam_core::document::HdrOutputMode::HighlightRolloff => &shared.hdr_blit_pipeline_rolloff,
+                            lightningbeam_core::document::HdrOutputMode::Clip => &shared.hdr_blit_pipeline,
+                        };
+                        render_pass.set_pipeline(hdr_pipeline);
                         render_pass.set_bind_group(0, hdr_bind_group, &[]);
                         render_pass.draw(0..3, 0..1); // Full-screen triangle (3 vertices)
                     }

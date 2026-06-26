@@ -75,6 +75,8 @@ pub struct ExportGpuResources {
     pub staging_buffer: wgpu::Buffer,
     /// Linear to sRGB blit pipeline for final output
     pub linear_to_srgb_pipeline: wgpu::RenderPipeline,
+    /// Variant with highlight rolloff (document HDR output mode = Highlight rolloff).
+    pub linear_to_srgb_pipeline_rolloff: wgpu::RenderPipeline,
     /// Bind group layout for linear to sRGB blit
     pub linear_to_srgb_bind_group_layout: wgpu::BindGroupLayout,
     /// Sampler for linear to sRGB conversion
@@ -236,6 +238,41 @@ impl ExportGpuResources {
             cache: None,
         });
 
+        // Highlight-rolloff variant: identical but the `fs_main_rolloff` entry point.
+        let linear_to_srgb_pipeline_rolloff = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("linear_to_srgb_pipeline_rolloff"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main_rolloff"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let linear_to_srgb_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear_to_srgb_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -263,6 +300,7 @@ impl ExportGpuResources {
             yuv_texture_view,
             staging_buffer,
             linear_to_srgb_pipeline,
+            linear_to_srgb_pipeline_rolloff,
             linear_to_srgb_bind_group_layout,
             linear_to_srgb_sampler,
             canvas_blit,
@@ -338,6 +376,32 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Convert linear HDR to sRGB
     let srgb = linear_to_srgb(straight);
 
+    return vec4<f32>(srgb, a);
+}
+
+// Highlight rolloff: identity below the knee, smooth C1 rolloff [knee,∞)→[knee,1) above (recovers
+// super-white HDR detail). SDR below the knee is untouched. Mirrors panes/shaders/linear_to_srgb.wgsl.
+fn highlight_rolloff_ch(x: f32) -> f32 {
+    let knee = 0.8;
+    if x <= knee {
+        return x;
+    }
+    let headroom = 1.0 - knee;
+    return knee + headroom * (1.0 - exp(-(x - knee) / headroom));
+}
+
+// Variant of fs_main with highlight rolloff (document HDR output mode = Highlight rolloff).
+@fragment
+fn fs_main_rolloff(in: VertexOutput) -> @location(0) vec4<f32> {
+    let src = textureSample(source_tex, source_sampler, in.uv);
+    let a = src.a;
+    let straight = select(src.rgb / a, vec3<f32>(0.0), a <= 0.0);
+    let rolled = vec3<f32>(
+        highlight_rolloff_ch(straight.r),
+        highlight_rolloff_ch(straight.g),
+        highlight_rolloff_ch(straight.b),
+    );
+    let srgb = linear_to_srgb(rolled);
     return vec4<f32>(srgb, a);
 }
 "#;
@@ -1127,7 +1191,11 @@ pub fn render_frame_to_rgba_hdr(
             timestamp_writes: None,
         });
 
-        render_pass.set_pipeline(&gpu_resources.linear_to_srgb_pipeline);
+        let final_pipeline = match document.hdr_output_mode {
+            lightningbeam_core::document::HdrOutputMode::HighlightRolloff => &gpu_resources.linear_to_srgb_pipeline_rolloff,
+            lightningbeam_core::document::HdrOutputMode::Clip => &gpu_resources.linear_to_srgb_pipeline,
+        };
+        render_pass.set_pipeline(final_pipeline);
         render_pass.set_bind_group(0, &bind_group, &[]);
         render_pass.draw(0..4, 0..1);
     }
@@ -1394,7 +1462,11 @@ pub fn render_frame_to_gpu_rgba(
             timestamp_writes: None,
         });
 
-        render_pass.set_pipeline(&gpu_resources.linear_to_srgb_pipeline);
+        let final_pipeline = match document.hdr_output_mode {
+            lightningbeam_core::document::HdrOutputMode::HighlightRolloff => &gpu_resources.linear_to_srgb_pipeline_rolloff,
+            lightningbeam_core::document::HdrOutputMode::Clip => &gpu_resources.linear_to_srgb_pipeline,
+        };
+        render_pass.set_pipeline(final_pipeline);
         render_pass.set_bind_group(0, &bind_group, &[]);
         render_pass.draw(0..4, 0..1);
     }

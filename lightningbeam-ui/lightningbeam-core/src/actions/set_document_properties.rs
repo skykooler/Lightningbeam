@@ -4,7 +4,7 @@
 //! with undo/redo support.
 
 use crate::action::Action;
-use crate::document::Document;
+use crate::document::{Document, HdrOutputMode};
 use crate::shape::ShapeColor;
 
 /// Individual property change for a document
@@ -15,6 +15,7 @@ pub enum DocumentPropertyChange {
     Duration(f64),
     Framerate(f64),
     BackgroundColor(ShapeColor),
+    HdrOutputMode(HdrOutputMode),
 }
 
 /// Stored old value for undo (either f64 or color)
@@ -22,6 +23,7 @@ pub enum DocumentPropertyChange {
 enum OldValue {
     F64(f64),
     Color(ShapeColor),
+    Hdr(HdrOutputMode),
 }
 
 /// Action that sets a property on the document
@@ -72,6 +74,14 @@ impl SetDocumentPropertiesAction {
             old_value: None,
         }
     }
+
+    /// Create a new action to set the HDR→SDR output mode
+    pub fn set_hdr_output_mode(mode: HdrOutputMode) -> Self {
+        Self {
+            property: DocumentPropertyChange::HdrOutputMode(mode),
+            old_value: None,
+        }
+    }
 }
 
 impl Action for SetDocumentPropertiesAction {
@@ -83,6 +93,7 @@ impl Action for SetDocumentPropertiesAction {
                 DocumentPropertyChange::Duration(_) => OldValue::F64(document.duration),
                 DocumentPropertyChange::Framerate(_) => OldValue::F64(document.framerate),
                 DocumentPropertyChange::BackgroundColor(_) => OldValue::Color(document.background_color),
+                DocumentPropertyChange::HdrOutputMode(_) => OldValue::Hdr(document.hdr_output_mode),
             });
         }
 
@@ -92,6 +103,7 @@ impl Action for SetDocumentPropertiesAction {
             DocumentPropertyChange::Duration(v) => document.duration = *v,
             DocumentPropertyChange::Framerate(v) => document.framerate = *v,
             DocumentPropertyChange::BackgroundColor(c) => document.background_color = *c,
+            DocumentPropertyChange::HdrOutputMode(m) => document.hdr_output_mode = *m,
         }
         Ok(())
     }
@@ -106,10 +118,14 @@ impl Action for SetDocumentPropertiesAction {
                     DocumentPropertyChange::Duration(_) => document.duration = v,
                     DocumentPropertyChange::Framerate(_) => document.framerate = v,
                     DocumentPropertyChange::BackgroundColor(_) => {}
+                    DocumentPropertyChange::HdrOutputMode(_) => {}
                 }
             }
             Some(OldValue::Color(c)) => {
                 document.background_color = *c;
+            }
+            Some(OldValue::Hdr(m)) => {
+                document.hdr_output_mode = *m;
             }
             None => {}
         }
@@ -123,6 +139,7 @@ impl Action for SetDocumentPropertiesAction {
             DocumentPropertyChange::Duration(_) => "duration",
             DocumentPropertyChange::Framerate(_) => "framerate",
             DocumentPropertyChange::BackgroundColor(_) => "background color",
+            DocumentPropertyChange::HdrOutputMode(_) => "HDR output mode",
         };
         format!("Set {}", property_name)
     }
