@@ -378,6 +378,19 @@ impl ExportDialog {
             if changed_h { self.image_settings.height = if h == 0 { None } else { Some(h) }; }
             ui.weak("(0 = document size)");
         });
+
+        // Fit mode — how the document maps into the output frame when aspect ratios differ.
+        ui.horizontal(|ui| {
+            use lightningbeam_core::export::ExportFitMode;
+            ui.label("Fit:");
+            egui::ComboBox::from_id_salt("image_fit_mode")
+                .selected_text(self.image_settings.fit.name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.image_settings.fit, ExportFitMode::Letterbox, ExportFitMode::Letterbox.name());
+                    ui.selectable_value(&mut self.image_settings.fit, ExportFitMode::Crop, ExportFitMode::Crop.name());
+                    ui.selectable_value(&mut self.image_settings.fit, ExportFitMode::Stretch, ExportFitMode::Stretch.name());
+                });
+        });
     }
 
     /// Render advanced audio settings (sample rate, channels, bit depth, bitrate, time range)

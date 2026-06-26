@@ -524,11 +524,14 @@ pub struct ImageExportSettings {
     /// When false, the image is composited onto an opaque background before encoding.
     /// Only meaningful for formats that support alpha (PNG, WebP).
     pub allow_transparency: bool,
+    /// How the document is fit into the output frame when aspect ratios differ (default Letterbox).
+    #[serde(default)]
+    pub fit: ExportFitMode,
 }
 
 impl Default for ImageExportSettings {
     fn default() -> Self {
-        Self { format: ImageFormat::Png, time: 0.0, width: None, height: None, quality: 90, allow_transparency: false }
+        Self { format: ImageFormat::Png, time: 0.0, width: None, height: None, quality: 90, allow_transparency: false, fit: ExportFitMode::Letterbox }
     }
 }
 

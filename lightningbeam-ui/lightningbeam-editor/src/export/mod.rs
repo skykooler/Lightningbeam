@@ -598,6 +598,7 @@ impl ExportOrchestrator {
             // ── First call: render the frame to the GPU output texture ────────
             let w = state.width;
             let h = state.height;
+            let fit = state.settings.fit;
 
             if state.gpu_resources.is_none() {
                 state.gpu_resources = Some(video_exporter::ExportGpuResources::new(device, w, h));
@@ -632,8 +633,7 @@ impl ExportOrchestrator {
                 state.settings.allow_transparency,
                 raster_store,
                 true, // image export composites on the shared device
-                // Image export renders at the document's own size, so the fit transform is identity.
-                lightningbeam_core::export::ExportFitMode::Letterbox,
+                fit,
             )?;
             queue.submit(Some(encoder.finish()));
 
