@@ -1066,6 +1066,13 @@ pub fn render_frame_to_rgba_hdr(
         Affine::IDENTITY
     };
 
+    // Export composites on the encoder's own device, not the shared one, so it cannot use
+    // hardware-decoded GPU frames (textures can't cross devices). Force software frames; a
+    // hardware decoder downloads its surface to CPU instead.
+    if let Ok(mut vm) = video_manager.lock() {
+        vm.set_render_hardware_ok(false);
+    }
+
     // Render document for compositing (returns per-layer scenes)
     let composite_result = render_document_for_compositing(
         document,
@@ -1328,6 +1335,11 @@ pub fn render_frame_to_gpu_rgba(
     } else {
         Affine::IDENTITY
     };
+
+    // Export composites on a separate device — force software frames (see above).
+    if let Ok(mut vm) = video_manager.lock() {
+        vm.set_render_hardware_ok(false);
+    }
 
     // Render document for compositing (returns per-layer scenes)
     let composite_result = render_document_for_compositing(

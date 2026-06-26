@@ -875,11 +875,13 @@ impl VideoManager {
     /// [`set_render_hardware_ok`](Self::set_render_hardware_ok), set per render pass (true for the
     /// preview, false for export, which composites on a different device).
     pub fn get_frame(&mut self, clip_id: &Uuid, timestamp: f64, target_w: u32, target_h: u32) -> Option<Arc<VideoFrame>> {
-        let hardware_ok = self.render_hardware_ok;
-        // The cache key includes (target size, hardware_ok): preview (GPU, preview res) and export
+        // Whether this pass wants (and can produce) a GPU frame. Gated on HW being configured at all
+        // so that with software-only decode preview and export share one cache entry (no double-cache).
+        let want_gpu = self.render_hardware_ok && self.hw_device.is_some();
+        // The cache key includes (target size, want_gpu): preview (GPU, preview res) and export
         // (CPU, export res) request the same clip/time and must not collide or cross representation.
         let timestamp_ms = (timestamp * 1000.0) as i64;
-        let cache_key = (*clip_id, timestamp_ms, target_w, target_h, hardware_ok);
+        let cache_key = (*clip_id, timestamp_ms, target_w, target_h, want_gpu);
 
         // Check frame cache first
         if let Some(cached_frame) = self.frame_cache.get(&cache_key) {
@@ -892,7 +894,7 @@ impl VideoManager {
         let mut decoder = decoder_arc.lock().ok()?;
 
         // Decode the frame at the requested target (capped to native by the decoder).
-        let decoded = decoder.get_frame(timestamp, target_w, target_h, hardware_ok).ok()?;
+        let decoded = decoder.get_frame(timestamp, target_w, target_h, want_gpu).ok()?;
         drop(decoder); // release the lock before touching `self`
 
         // Create VideoFrame and cache it.

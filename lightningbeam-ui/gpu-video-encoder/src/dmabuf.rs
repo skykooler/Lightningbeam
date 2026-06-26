@@ -47,6 +47,10 @@ impl ImportedNv12 {
     pub fn uv(&self) -> &wgpu::Texture {
         &self.uv
     }
+    /// Consume into the `(Y, UV)` plane textures (for handing to a longer-lived owner).
+    pub fn into_planes(self) -> (wgpu::Texture, wgpu::Texture) {
+        (self.y, self.uv)
+    }
 }
 
 /// Convenience: map a freshly-allocated `MappedSurface` and import it onto `drm`.
@@ -113,6 +117,7 @@ pub fn import_raw(
                 .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
                 .usage(
                     vk::ImageUsageFlags::COLOR_ATTACHMENT
+                        | vk::ImageUsageFlags::SAMPLED
                         | vk::ImageUsageFlags::TRANSFER_SRC
                         | vk::ImageUsageFlags::TRANSFER_DST,
                 )
@@ -178,7 +183,9 @@ pub fn import_raw(
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu_types::TextureUses::COLOR_TARGET | wgpu_types::TextureUses::COPY_SRC,
+                usage: wgpu_types::TextureUses::COLOR_TARGET
+                    | wgpu_types::TextureUses::RESOURCE
+                    | wgpu_types::TextureUses::COPY_SRC,
                 memory_flags: wgpu_hal::MemoryFlags::empty(),
                 view_formats: vec![],
             };
@@ -192,7 +199,9 @@ pub fn import_raw(
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 },
             )

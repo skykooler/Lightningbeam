@@ -51,6 +51,9 @@ mod custom_cursor;
 mod tablet;
 mod debug_overlay;
 mod gpu_timer;
+#[cfg(target_os = "linux")]
+mod hw_video;
+mod nv12_blit;
 
 #[cfg(debug_assertions)]
 mod test_mode;
@@ -210,6 +213,10 @@ fn main() -> eframe::Result {
     // raw VkDevice persists with them.
     #[allow(unused_mut)]
     let mut wgpu_setup = lb_default_wgpu_setup();
+    // Whether the shared VAAPI-capable device is in use — only then can decoded DMA-BUF frames be
+    // imported + composited, so hardware decode is injected into the VideoManager only if true.
+    #[allow(unused_assignments, unused_mut)]
+    let mut shared_device_active = false;
     #[cfg(target_os = "linux")]
     if std::env::var("LB_NO_SHARED_DEVICE").is_ok() {
         println!("🖥  Shared device disabled via LB_NO_SHARED_DEVICE; default wgpu device (software video decode)");
@@ -223,6 +230,7 @@ fn main() -> eframe::Result {
                     device: drm.device.clone(),
                     queue: drm.queue.clone(),
                 });
+                shared_device_active = true;
             }
             Err(e) => {
                 println!("🖥  Shared device unavailable ({e}); default wgpu device (software video decode)");
@@ -294,6 +302,13 @@ fn main() -> eframe::Result {
             let app = EditorApp::new(cc, layouts, theme, test_mode_panic_snapshot_for_app, test_mode_pending_event_for_app, test_mode_is_replaying_for_app, test_mode_pending_geometry_for_app);
             #[cfg(not(debug_assertions))]
             let app = EditorApp::new(cc, layouts, theme);
+            // Wire hardware video decode into the VideoManager now that the shared device exists.
+            #[cfg(target_os = "linux")]
+            if shared_device_active {
+                if let Some(rs) = cc.wgpu_render_state.as_ref() {
+                    hw_video::install(&app.video_manager, &rs.device, &rs.adapter);
+                }
+            }
             Ok(Box::new(app))
         }),
     )

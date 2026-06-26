@@ -152,6 +152,8 @@ struct SharedVelloResources {
     gpu_brush: Mutex<crate::gpu_brush::GpuBrushEngine>,
     /// Canvas blit pipeline (renders GPU canvas to layer sRGB buffer)
     canvas_blit: crate::gpu_brush::CanvasBlitPipeline,
+    /// NV12→linear blit for hardware-decoded video frames (GPU plane textures → HDR layer).
+    nv12_blit: crate::nv12_blit::Nv12BlitPipeline,
     /// True when Vello is running its CPU software renderer (either forced or GPU fallback).
     /// Used to select cheaper antialiasing — Msaa16 on CPU costs 16× as much as Area.
     is_cpu_renderer: bool,
@@ -372,6 +374,7 @@ impl SharedVelloResources {
         // Initialize GPU raster brush engine
         let gpu_brush = crate::gpu_brush::GpuBrushEngine::new(device);
         let canvas_blit = crate::gpu_brush::CanvasBlitPipeline::new(device);
+        let nv12_blit = crate::nv12_blit::Nv12BlitPipeline::new(device);
 
         println!("✅ Vello shared resources initialized (renderer, shaders, HDR compositor, effect processor, color converter, and GPU brush engine)");
 
@@ -389,6 +392,7 @@ impl SharedVelloResources {
             srgb_to_linear,
             gpu_brush: Mutex::new(gpu_brush),
             canvas_blit,
+            nv12_blit,
             is_cpu_renderer: use_cpu || is_cpu_renderer,
             gpu_timer: Mutex::new(None),
             video_frame_cache: Mutex::new(VideoFrameTexCache::new()),
@@ -1062,6 +1066,12 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             // Let the cache page image bytes from the project container on a decode miss.
             image_cache.set_container_path(self.ctx.container_path.clone());
 
+            // Preview composites on the shared device, so it can consume hardware-decoded GPU
+            // frames — but only the GPU renderer; the CPU fallback needs software frames.
+            if let Ok(mut vm) = shared.video_manager.lock() {
+                vm.set_render_hardware_ok(!shared.is_cpu_renderer);
+            }
+
             let composite_result = if shared.is_cpu_renderer {
                 lightningbeam_core::renderer::render_document_for_compositing_cpu(
                     &self.ctx.document,
@@ -1678,25 +1688,33 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     RenderedLayerType::Video { instances } => {
                         // Video layer — per-instance: (cached) frame texture → blit → composite.
                         for inst in instances {
-                            if inst.rgba_data.is_empty() { continue; }
+                            if inst.gpu.is_none() && inst.rgba_data.is_empty() { continue; }
                             let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
                             if let (Some(hdr_layer_view), Some(hdr_view)) = (
                                 buffer_pool.get_view(hdr_layer_handle),
                                 &instance_resources.hdr_texture_view,
                             ) {
-                                // Reuse the GPU texture for this frame if it's unchanged (a
-                                // static/paused video → no CPU conversion, alloc, or upload).
-                                // Timed into `blit_ms` (incl the cache lookup + per-frame view).
                                 let _t = std::time::Instant::now();
-                                let tex_view = shared
-                                    .video_frame_cache
-                                    .lock()
-                                    .unwrap()
-                                    .texture_view(device, queue, &inst.rgba_data, inst.width, inst.height);
                                 let bt = crate::gpu_brush::BlitTransform::new(
                                     inst.transform, inst.width, inst.height, width, height,
                                 );
-                                shared.canvas_blit.blit_straight(device, queue, &tex_view, hdr_layer_view, &bt, None);
+                                if let Some(gpu) = &inst.gpu {
+                                    // Hardware-decoded NV12 plane textures → linear RGB, no CPU upload.
+                                    let y_view = gpu.y.create_view(&Default::default());
+                                    let uv_view = gpu.uv.create_view(&Default::default());
+                                    shared.nv12_blit.blit(
+                                        device, queue, &y_view, &uv_view, hdr_layer_view, &bt, gpu.full_range,
+                                    );
+                                } else {
+                                    // Reuse the GPU texture for this frame if it's unchanged (a
+                                    // static/paused video → no CPU conversion, alloc, or upload).
+                                    let tex_view = shared
+                                        .video_frame_cache
+                                        .lock()
+                                        .unwrap()
+                                        .texture_view(device, queue, &inst.rgba_data, inst.width, inst.height);
+                                    shared.canvas_blit.blit_straight(device, queue, &tex_view, hdr_layer_view, &bt, None);
+                                }
                                 cput.blit_ms += _t.elapsed().as_secs_f64() * 1000.0;
 
                                 let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
