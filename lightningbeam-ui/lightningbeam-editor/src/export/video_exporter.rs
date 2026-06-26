@@ -528,6 +528,7 @@ pub fn setup_video_encoder(
     height: u32,
     framerate: f64,
     bitrate_kbps: u32,
+    hdr: lightningbeam_core::export::HdrExportMode,
 ) -> Result<(ffmpeg::encoder::Video, ffmpeg::Codec), String> {
     // Try to find codec by ID first
     println!("🔍 Looking for codec: {:?}", codec_id);
@@ -583,31 +584,41 @@ pub fn setup_video_encoder(
     // Configure encoder parameters BEFORE opening (critical!)
     encoder.set_width(aligned_width);
     encoder.set_height(aligned_height);
-    encoder.set_format(ffmpeg::format::Pixel::YUV420P);
+    // HDR encodes 10-bit BT.2020 (limited range); SDR keeps 8-bit full-range BT.709.
+    if hdr.is_hdr() {
+        encoder.set_format(ffmpeg::format::Pixel::YUV420P10LE);
+    } else {
+        encoder.set_format(ffmpeg::format::Pixel::YUV420P);
+    }
     encoder.set_time_base(ffmpeg::Rational(1, (framerate * 1000.0) as i32));
     encoder.set_frame_rate(Some(ffmpeg::Rational(framerate as i32, 1)));
     encoder.set_bit_rate((bitrate_kbps * 1000) as usize);
     encoder.set_gop(framerate as u32); // 1 second GOP
 
-    // Tag the color metadata so players interpret the YUV correctly. Our
-    // RGB→YUV conversion uses the BT.709 matrix with FULL-range (0–255) luma
-    // and no transfer applied to the already-sRGB-encoded RGB. Tagging this
-    // as full-range BT.709 (matrix/primaries/transfer) prevents the level/
-    // hue shift that occurs when a player assumes limited-range or BT.601.
-    // colorspace (matrix) and range have safe setters; primaries and trc are
-    // generic AVCodecContext options set via the open dictionary below.
-    encoder.set_colorspace(ffmpeg::color::Space::BT709);
-    encoder.set_color_range(ffmpeg::color::Range::JPEG); // full range
-
-    println!("📐 Video dimensions: {}×{} (aligned to {}×{} for H.264)",
-             width, height, aligned_width, aligned_height);
-
-    // Open encoder with codec (like working MP3 export). color_primaries and
-    // color_trc have no typed setter on the encoder, so pass them as generic
-    // AVCodecContext options (BT.709) through the open dictionary.
+    // Tag the color metadata so players interpret the YUV correctly.
+    // SDR: our RGB→YUV uses the BT.709 matrix with FULL-range (0–255) luma and no transfer applied
+    // to the already-sRGB-encoded RGB, so tag full-range BT.709 to avoid level/hue shifts.
+    // HDR: BT.2020 non-constant-luminance matrix, LIMITED range (standard for HDR10/HLG), with the
+    // PQ or HLG transfer; the 10-bit YUV is produced from PQ/HLG-encoded BT.2020 RGB.
     let mut color_opts = ffmpeg::Dictionary::new();
-    color_opts.set("color_primaries", "bt709");
-    color_opts.set("color_trc", "bt709");
+    if hdr.is_hdr() {
+        encoder.set_colorspace(ffmpeg::color::Space::BT2020NCL);
+        encoder.set_color_range(ffmpeg::color::Range::MPEG); // limited
+        color_opts.set("color_primaries", "bt2020");
+        color_opts.set("color_trc", hdr.transfer_name());
+        // HEVC 10-bit profile (the only HDR-capable codec we wire up).
+        color_opts.set("profile", "main10");
+    } else {
+        encoder.set_colorspace(ffmpeg::color::Space::BT709);
+        encoder.set_color_range(ffmpeg::color::Range::JPEG); // full range
+        color_opts.set("color_primaries", "bt709");
+        color_opts.set("color_trc", "bt709");
+    }
+
+    println!("📐 Video dimensions: {}×{} (aligned to {}×{}){}",
+             width, height, aligned_width, aligned_height,
+             if hdr.is_hdr() { " [HDR 10-bit BT.2020]" } else { "" });
+
     let encoder = encoder
         .open_as_with(codec, color_opts)
         .map_err(|e| format!("Failed to open video encoder: {}", e))?;

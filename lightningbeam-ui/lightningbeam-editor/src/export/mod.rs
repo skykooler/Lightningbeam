@@ -1556,13 +1556,18 @@ impl ExportOrchestrator {
         // Initialize FFmpeg
         ffmpeg_next::init().map_err(|e| format!("Failed to initialize FFmpeg: {}", e))?;
 
-        // Convert codec enum to FFmpeg codec ID
-        let codec_id = match settings.codec {
-            VideoCodec::H264 => ffmpeg_next::codec::Id::H264,
-            VideoCodec::H265 => ffmpeg_next::codec::Id::HEVC,
-            VideoCodec::VP8 => ffmpeg_next::codec::Id::VP8,
-            VideoCodec::VP9 => ffmpeg_next::codec::Id::VP9,
-            VideoCodec::ProRes422 => ffmpeg_next::codec::Id::PRORES,
+        // Convert codec enum to FFmpeg codec ID. HDR requires 10-bit HEVC (Main10), so force HEVC
+        // regardless of the chosen codec when an HDR mode is selected.
+        let codec_id = if settings.hdr.is_hdr() {
+            ffmpeg_next::codec::Id::HEVC
+        } else {
+            match settings.codec {
+                VideoCodec::H264 => ffmpeg_next::codec::Id::H264,
+                VideoCodec::H265 => ffmpeg_next::codec::Id::HEVC,
+                VideoCodec::VP8 => ffmpeg_next::codec::Id::VP8,
+                VideoCodec::VP9 => ffmpeg_next::codec::Id::VP9,
+                VideoCodec::ProRes422 => ffmpeg_next::codec::Id::PRORES,
+            }
         };
 
         // Get bitrate from quality settings
@@ -1605,7 +1610,15 @@ impl ExportOrchestrator {
             height,
             framerate,
             bitrate_kbps,
+            settings.hdr,
         )?;
+
+        // Pixel format the encoder frames are built in (matches setup_video_encoder).
+        let pixel_format = if settings.hdr.is_hdr() {
+            ffmpeg_next::format::Pixel::YUV420P10LE
+        } else {
+            ffmpeg_next::format::Pixel::YUV420P
+        };
 
         // Create output file
         let mut output = ffmpeg_next::format::output(&output_path)
@@ -1635,6 +1648,7 @@ impl ExportOrchestrator {
                 width,
                 height,
                 timestamp,
+                pixel_format,
             )?;
 
             // Send progress update for first frame
@@ -1662,6 +1676,7 @@ impl ExportOrchestrator {
                         width,
                         height,
                         timestamp,
+                        pixel_format,
                     )?;
 
                     frames_encoded += 1;
@@ -1706,29 +1721,33 @@ impl ExportOrchestrator {
         width: u32,
         height: u32,
         timestamp: f64,
+        pixel_format: ffmpeg_next::format::Pixel,
     ) -> Result<(), String> {
-        // YUV planes already converted by GPU (no CPU conversion needed)
+        // YUV planes already converted (8-bit YUV420P, or 10-bit YUV420P10LE for HDR).
 
-        // Create FFmpeg video frame
-        let mut video_frame = ffmpeg_next::frame::Video::new(
-            ffmpeg_next::format::Pixel::YUV420P,
-            width,
-            height,
-        );
+        // Create FFmpeg video frame in the encoder's pixel format.
+        let mut video_frame = ffmpeg_next::frame::Video::new(pixel_format, width, height);
 
-        // Copy YUV planes to frame
-        // Use safe slice copy - LLVM optimizes this to memcpy, same performance as copy_nonoverlapping
-        let y_dest = video_frame.data_mut(0);
-        let y_len = y_plane.len().min(y_dest.len());
-        y_dest[..y_len].copy_from_slice(&y_plane[..y_len]);
-
-        let u_dest = video_frame.data_mut(1);
-        let u_len = u_plane.len().min(u_dest.len());
-        u_dest[..u_len].copy_from_slice(&u_plane[..u_len]);
-
-        let v_dest = video_frame.data_mut(2);
-        let v_len = v_plane.len().min(v_dest.len());
-        v_dest[..v_len].copy_from_slice(&v_plane[..v_len]);
+        // Copy each plane row-by-row honoring the frame's stride (10-bit / arbitrary widths can have
+        // row padding that a flat copy would misalign). `bytes_per_row` = samples × sample size.
+        let ten_bit = matches!(pixel_format, ffmpeg_next::format::Pixel::YUV420P10LE);
+        let sample_bytes = if ten_bit { 2usize } else { 1usize };
+        let copy_plane = |frame: &mut ffmpeg_next::frame::Video, idx: usize, src: &[u8], w: usize, h: usize| {
+            let bytes_per_row = w * sample_bytes;
+            let stride = frame.stride(idx);
+            let dst = frame.data_mut(idx);
+            for row in 0..h {
+                let s = row * bytes_per_row;
+                let d = row * stride;
+                let n = bytes_per_row.min(src.len().saturating_sub(s)).min(dst.len().saturating_sub(d));
+                if n == 0 { break; }
+                dst[d..d + n].copy_from_slice(&src[s..s + n]);
+            }
+        };
+        let (w, h) = (width as usize, height as usize);
+        copy_plane(&mut video_frame, 0, y_plane, w, h);
+        copy_plane(&mut video_frame, 1, u_plane, w / 2, h / 2);
+        copy_plane(&mut video_frame, 2, v_plane, w / 2, h / 2);
 
         // Set PTS (presentation timestamp) in encoder's time base
         // Encoder time base is 1/(framerate * 1000), so PTS = timestamp * (framerate * 1000)

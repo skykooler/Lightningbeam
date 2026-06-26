@@ -288,6 +288,38 @@ impl ColorRange {
     }
 }
 
+/// HDR output mode for video export. SDR encodes BT.709 8-bit as before; the HDR modes encode
+/// 10-bit BT.2020 with the PQ (HDR10) or HLG transfer, preserving super-white highlights from the
+/// linear compositor. HDR requires a 10-bit codec (HEVC Main10) — the exporter forces H.265.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HdrExportMode {
+    #[default]
+    Sdr,
+    /// PQ (SMPTE ST 2084) — HDR10. Graphics white at 203 nits (matches the compositor convention).
+    Pq,
+    /// HLG (ARIB STD-B67) — broadcast HDR, also displayable as SDR.
+    Hlg,
+}
+
+impl HdrExportMode {
+    pub fn is_hdr(&self) -> bool { !matches!(self, HdrExportMode::Sdr) }
+    pub fn name(&self) -> &'static str {
+        match self {
+            HdrExportMode::Sdr => "SDR (BT.709, 8-bit)",
+            HdrExportMode::Pq => "HDR10 / PQ (BT.2020, 10-bit)",
+            HdrExportMode::Hlg => "HLG (BT.2020, 10-bit)",
+        }
+    }
+    /// FFmpeg transfer-characteristic name for the color tags.
+    pub fn transfer_name(&self) -> &'static str {
+        match self {
+            HdrExportMode::Sdr => "bt709",
+            HdrExportMode::Pq => "smpte2084",
+            HdrExportMode::Hlg => "arib-std-b67",
+        }
+    }
+}
+
 /// Video quality presets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoQuality {
@@ -349,6 +381,10 @@ pub struct VideoExportSettings {
     #[serde(default)]
     pub color_range: ColorRange,
 
+    /// HDR output mode. HDR forces 10-bit HEVC (BT.2020 + PQ/HLG); SDR is the default.
+    #[serde(default)]
+    pub hdr: HdrExportMode,
+
     /// Audio settings (None = no audio)
     pub audio: Option<AudioExportSettings>,
 
@@ -368,6 +404,7 @@ impl Default for VideoExportSettings {
             framerate: 60.0,
             quality: VideoQuality::High,
             color_range: ColorRange::Limited,
+            hdr: HdrExportMode::Sdr,
             audio: Some(AudioExportSettings::high_quality_aac()),
             start_time: 0.0,
             end_time: 60.0,
