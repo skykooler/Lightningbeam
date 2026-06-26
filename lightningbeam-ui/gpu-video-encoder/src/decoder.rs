@@ -194,6 +194,7 @@ impl VaapiDecoder {
             y_pitch: y_pl.pitch as u64,
             uv_offset: uv_pl.offset as u64,
             uv_pitch: uv_pl.pitch as u64,
+            ten_bit: false,
         };
         let imported = dmabuf::import_raw(&self.drm.device, &self.drm.adapter, &buf);
         ff::av_frame_free(&mut (drm_f as *mut _)); // the fd was dup'd into Vulkan

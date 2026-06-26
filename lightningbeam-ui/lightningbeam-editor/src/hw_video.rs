@@ -36,6 +36,26 @@ impl HwVideoImporter for SharedHwImporter {
         let obj = &(*desc).objects[0];
         let width = (*frame).width as u32;
         let height = (*frame).height as u32;
+
+        // 10/12/16-bit content decodes to P010-style surfaces (16-bit planes). Detect via the hw
+        // frames context's software format so the import builds R16/Rg16 textures.
+        let ten_bit = {
+            let hwfc = (*frame).hw_frames_ctx;
+            if hwfc.is_null() {
+                false
+            } else {
+                let ctx = (*hwfc).data as *const ff::AVHWFramesContext;
+                matches!(
+                    (*ctx).sw_format,
+                    ff::AVPixelFormat::AV_PIX_FMT_P010LE
+                        | ff::AVPixelFormat::AV_PIX_FMT_P010BE
+                        | ff::AVPixelFormat::AV_PIX_FMT_P012LE
+                        | ff::AVPixelFormat::AV_PIX_FMT_P012BE
+                        | ff::AVPixelFormat::AV_PIX_FMT_P016LE
+                        | ff::AVPixelFormat::AV_PIX_FMT_P016BE
+                )
+            }
+        };
         // NV12: Y then UV — two layers (one plane each) or one layer with two planes.
         let (y_pl, uv_pl) = if (*desc).nb_layers >= 2 {
             (&(*desc).layers[0].planes[0], &(*desc).layers[1].planes[0])
@@ -52,6 +72,7 @@ impl HwVideoImporter for SharedHwImporter {
             y_pitch: y_pl.pitch as u64,
             uv_offset: uv_pl.offset as u64,
             uv_pitch: uv_pl.pitch as u64,
+            ten_bit,
         };
         let full_range = (*frame).color_range == ff::AVColorRange::AVCOL_RANGE_JPEG;
 

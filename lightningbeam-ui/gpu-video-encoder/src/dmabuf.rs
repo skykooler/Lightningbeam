@@ -6,7 +6,7 @@ use crate::vaapi::MappedSurface;
 use crate::vk_device::DrmDevice;
 use ash::vk;
 
-/// Plane layout for a single-object NV12 DMA-BUF (the common VAAPI case).
+/// Plane layout for a single-object NV12/P010 DMA-BUF (the common VAAPI case).
 #[derive(Clone, Copy)]
 pub struct Nv12DmaBuf {
     pub fd: i32,
@@ -18,6 +18,9 @@ pub struct Nv12DmaBuf {
     pub y_pitch: u64,
     pub uv_offset: u64,
     pub uv_pitch: u64,
+    /// True for 10/12/16-bit content (P010 etc.): planes are 16-bit (R16/Rg16) rather than 8-bit
+    /// (R8/Rg8). The sampled float is normalized either way, so the consumer needs no change.
+    pub ten_bit: bool,
 }
 
 /// Frees the shared imported `VkDeviceMemory` once both plane images are gone. Held by
@@ -68,6 +71,7 @@ pub fn import(drm: &DrmDevice, surf: &MappedSurface) -> Result<ImportedNv12, Str
             y_pitch: surf.y_pitch,
             uv_offset: surf.uv_offset,
             uv_pitch: surf.uv_pitch,
+            ten_bit: false,
         },
     )
 }
@@ -130,8 +134,21 @@ pub fn import_raw(
                 .map_err(|e| format!("vkCreateImage(modifier) failed: {e:?}"))
         };
 
-        let img_y = make_image(vk::Format::R8_UNORM, buf.width, buf.height, buf.y_pitch)?;
-        let img_uv = make_image(vk::Format::R8G8_UNORM, buf.width / 2, buf.height / 2, buf.uv_pitch)?;
+        // 8-bit NV12 → R8/Rg8 planes; 10/12/16-bit P010-style → R16/Rg16 (sampled value is
+        // normalized either way, so the NV12→RGB consumer is unchanged).
+        let (vk_y, vk_uv) = if buf.ten_bit {
+            (vk::Format::R16_UNORM, vk::Format::R16G16_UNORM)
+        } else {
+            (vk::Format::R8_UNORM, vk::Format::R8G8_UNORM)
+        };
+        let (wgpu_y, wgpu_uv) = if buf.ten_bit {
+            (wgpu::TextureFormat::R16Unorm, wgpu::TextureFormat::Rg16Unorm)
+        } else {
+            (wgpu::TextureFormat::R8Unorm, wgpu::TextureFormat::Rg8Unorm)
+        };
+
+        let img_y = make_image(vk_y, buf.width, buf.height, buf.y_pitch)?;
+        let img_uv = make_image(vk_uv, buf.width / 2, buf.height / 2, buf.uv_pitch)?;
 
         let fd_dev = ash::khr::external_memory_fd::Device::new(instance, &raw_device);
         let mut fd_props = vk::MemoryFdPropertiesKHR::default();
@@ -206,8 +223,8 @@ pub fn import_raw(
                 },
             )
         };
-        let y = wrap(img_y, wgpu::TextureFormat::R8Unorm, buf.width, buf.height);
-        let uv = wrap(img_uv, wgpu::TextureFormat::Rg8Unorm, buf.width / 2, buf.height / 2);
+        let y = wrap(img_y, wgpu_y, buf.width, buf.height);
+        let uv = wrap(img_uv, wgpu_uv, buf.width / 2, buf.height / 2);
         drop(hal_device);
 
         Ok(ImportedNv12 { y, uv })

@@ -143,7 +143,10 @@ unsafe fn create_inner(windowed: bool) -> Result<DrmDevice, String> {
             open_device,
             &wgpu::DeviceDescriptor {
                 label: Some("drm-import-device"),
-                required_features: wgpu::Features::empty(),
+                // R16/Rg16 plane textures for P010 (10-bit HDR) import need this; request it only
+                // when the adapter supports it (else 10-bit falls back to software decode).
+                required_features: wgpu_adapter.features()
+                    & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
                 // Vello's compute pipelines need more than downlevel limits (e.g.
                 // max_storage_buffers_per_shader_stage >= 5). This device only ever runs on a
                 // real VAAPI-capable GPU, so request the adapter's full limits.
