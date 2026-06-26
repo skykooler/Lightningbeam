@@ -49,10 +49,11 @@ impl ImportedNv12 {
     }
 }
 
-/// Convenience: map a freshly-allocated `MappedSurface` and import it.
+/// Convenience: map a freshly-allocated `MappedSurface` and import it onto `drm`.
 pub fn import(drm: &DrmDevice, surf: &MappedSurface) -> Result<ImportedNv12, String> {
     import_raw(
-        drm,
+        &drm.device,
+        &drm.adapter,
         &Nv12DmaBuf {
             fd: surf.fd,
             size: surf.size,
@@ -67,12 +68,28 @@ pub fn import(drm: &DrmDevice, surf: &MappedSurface) -> Result<ImportedNv12, Str
     )
 }
 
-/// Import an NV12 DMA-BUF (described by `buf`) as two wgpu plane textures. The fd is
-/// duplicated, so the caller keeps ownership of theirs.
-pub fn import_raw(drm: &DrmDevice, buf: &Nv12DmaBuf) -> Result<ImportedNv12, String> {
+/// Import an NV12 DMA-BUF (described by `buf`) as two wgpu plane textures **on `device`**. The raw
+/// Vulkan handles are extracted from `device`/`adapter` via `as_hal`, so this works with any
+/// DMA-BUF-import-capable wgpu device — the encoder/decoder's own `DrmDevice` *or* the editor's
+/// shared device. The fd is duplicated, so the caller keeps ownership of theirs.
+pub fn import_raw(
+    device: &wgpu::Device,
+    adapter: &wgpu::Adapter,
+    buf: &Nv12DmaBuf,
+) -> Result<ImportedNv12, String> {
+    use wgpu_hal::vulkan::Api as Vk;
     unsafe {
-        let device = drm.raw_device.clone();
-        let instance = &drm.raw_instance;
+        let hal_device = device
+            .as_hal::<Vk>()
+            .ok_or("device is not Vulkan")?;
+        let raw_device = hal_device.raw_device().clone();
+        let raw_instance = adapter
+            .as_hal::<Vk>()
+            .ok_or("adapter is not Vulkan")?
+            .shared_instance()
+            .raw_instance()
+            .clone();
+        let instance = &raw_instance;
 
         let dup_fd = libc::dup(buf.fd);
         if dup_fd < 0 {
@@ -103,7 +120,7 @@ pub fn import_raw(drm: &DrmDevice, buf: &Nv12DmaBuf) -> Result<ImportedNv12, Str
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .push_next(&mut ext)
                 .push_next(&mut drm_info);
-            device
+            raw_device
                 .create_image(&info, None)
                 .map_err(|e| format!("vkCreateImage(modifier) failed: {e:?}"))
         };
@@ -111,13 +128,13 @@ pub fn import_raw(drm: &DrmDevice, buf: &Nv12DmaBuf) -> Result<ImportedNv12, Str
         let img_y = make_image(vk::Format::R8_UNORM, buf.width, buf.height, buf.y_pitch)?;
         let img_uv = make_image(vk::Format::R8G8_UNORM, buf.width / 2, buf.height / 2, buf.uv_pitch)?;
 
-        let fd_dev = ash::khr::external_memory_fd::Device::new(instance, &device);
+        let fd_dev = ash::khr::external_memory_fd::Device::new(instance, &raw_device);
         let mut fd_props = vk::MemoryFdPropertiesKHR::default();
         fd_dev
             .get_memory_fd_properties(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT, dup_fd, &mut fd_props)
             .map_err(|e| format!("vkGetMemoryFdPropertiesKHR failed: {e:?}"))?;
-        let req_y = device.get_image_memory_requirements(img_y);
-        let req_uv = device.get_image_memory_requirements(img_uv);
+        let req_y = raw_device.get_image_memory_requirements(img_y);
+        let req_uv = raw_device.get_image_memory_requirements(img_uv);
         let type_bits = fd_props.memory_type_bits & req_y.memory_type_bits & req_uv.memory_type_bits;
         if type_bits == 0 {
             return Err("no memory type compatible with dma-buf + both plane images".into());
@@ -131,28 +148,24 @@ pub fn import_raw(drm: &DrmDevice, buf: &Nv12DmaBuf) -> Result<ImportedNv12, Str
             .allocation_size(buf.size)
             .memory_type_index(mem_type)
             .push_next(&mut import_info);
-        let memory = device
+        let memory = raw_device
             .allocate_memory(&alloc, None)
             .map_err(|e| format!("vkAllocateMemory(import dma-buf) failed: {e:?}"))?;
 
-        device
+        raw_device
             .bind_image_memory(img_y, memory, buf.y_offset)
             .map_err(|e| format!("bind Y plane: {e:?}"))?;
-        device
+        raw_device
             .bind_image_memory(img_uv, memory, buf.uv_offset)
             .map_err(|e| format!("bind UV plane: {e:?}"))?;
 
         // Shared guard: frees `memory` once both images' drop callbacks have run.
-        let mem_guard = std::sync::Arc::new(MemoryGuard { device: device.clone(), memory });
+        let mem_guard = std::sync::Arc::new(MemoryGuard { device: raw_device.clone(), memory });
 
-        let hal_device = drm
-            .device
-            .as_hal::<wgpu_hal::vulkan::Api>()
-            .ok_or("device is not Vulkan")?;
         let wrap = |img: vk::Image, format: wgpu::TextureFormat, w: u32, h: u32| -> wgpu::Texture {
             // wgpu destroys the image (after wait-idle) when the texture drops; the
             // captured Arc<MemoryGuard> frees the shared memory once both have run.
-            let dev = device.clone();
+            let dev = raw_device.clone();
             let guard = mem_guard.clone();
             let cb: wgpu_hal::DropCallback = Box::new(move || {
                 dev.destroy_image(img, None);
@@ -170,7 +183,7 @@ pub fn import_raw(drm: &DrmDevice, buf: &Nv12DmaBuf) -> Result<ImportedNv12, Str
                 view_formats: vec![],
             };
             let hal_tex = hal_device.texture_from_raw(img, &hal_desc, Some(cb));
-            drm.device.create_texture_from_hal::<wgpu_hal::vulkan::Api>(
+            device.create_texture_from_hal::<wgpu_hal::vulkan::Api>(
                 hal_tex,
                 &wgpu::TextureDescriptor {
                     label: Some("vaapi-plane"),

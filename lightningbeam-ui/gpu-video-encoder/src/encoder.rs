@@ -215,7 +215,7 @@ impl ZeroCopyEncoder {
                     uv_offset: uv.offset as u64,
                     uv_pitch: uv.pitch as u64,
                 };
-                let imported = match dmabuf::import_raw(&self.drm, &buf) {
+                let imported = match dmabuf::import_raw(&self.drm.device, &self.drm.adapter, &buf) {
                     Ok(i) => i,
                     Err(e) => {
                         ff::av_frame_free(&mut (drm_f as *mut _));
