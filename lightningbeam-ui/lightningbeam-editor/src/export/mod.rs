@@ -11,6 +11,7 @@ pub mod readback_pipeline;
 pub mod perf_metrics;
 pub mod cpu_yuv_converter;
 pub mod gpu_yuv;
+pub mod hdr_frame;
 
 use lightningbeam_core::export::{AudioExportSettings, ImageExportSettings, VideoExportSettings, ExportProgress};
 use lightningbeam_core::document::Document;
@@ -52,6 +53,8 @@ pub struct VideoExportState {
     width: u32,
     /// Export height in pixels
     height: u32,
+    /// HDR output mode — HDR uses a synchronous 10-bit path instead of the async RGBA pipeline.
+    hdr: lightningbeam_core::export::HdrExportMode,
     /// Channel to send rendered frames to encoder thread
     frame_tx: Option<Sender<VideoFrameMessage>>,
     /// HDR GPU resources for compositing pipeline (effects, color conversion)
@@ -854,6 +857,7 @@ impl ExportOrchestrator {
         width: u32,
         height: u32,
     ) -> (std::thread::JoinHandle<()>, VideoExportState) {
+        let hdr = settings.hdr;
         let handle = std::thread::spawn(move || {
             Self::run_video_encoder(settings, output_path, frame_rx, progress_tx, cancel_flag, total_frames);
         });
@@ -866,6 +870,7 @@ impl ExportOrchestrator {
             framerate,
             width,
             height,
+            hdr,
             frame_tx: Some(frame_tx),
             gpu_resources: None,
             readback_pipeline: None,
@@ -890,7 +895,10 @@ impl ExportOrchestrator {
         framerate: f64,
         output_path: &std::path::Path,
     ) -> Option<ZeroCopyVideo> {
-        if !matches!(settings.codec, lightningbeam_core::export::VideoCodec::H264) {
+        // Zero-copy is 8-bit H.264 only; HDR needs the 10-bit HEVC software path.
+        if settings.hdr.is_hdr()
+            || !matches!(settings.codec, lightningbeam_core::export::VideoCodec::H264)
+        {
             return None;
         }
         let encoder = match gpu_video_encoder::encoder::ZeroCopyEncoder::new(
@@ -1242,6 +1250,43 @@ impl ExportOrchestrator {
 
         let width = state.width;
         let height = state.height;
+
+        // HDR path: synchronous 10-bit render (composite → PQ/HLG → readback → 10-bit YUV), one
+        // frame per call. Bypasses the SDR async RGBA pipeline (which is 8-bit only).
+        if state.hdr.is_hdr() {
+            if state.gpu_resources.is_none() {
+                println!("🎬 [VIDEO EXPORT] Initializing HDR GPU resources {}x{} ({})", width, height, state.hdr.name());
+                state.gpu_resources = Some(video_exporter::ExportGpuResources::new(device, width, height));
+            }
+            if state.current_frame < state.total_frames {
+                let timestamp = state.start_time + (state.current_frame as f64 / state.framerate);
+                let gpu_resources = state.gpu_resources.as_mut().unwrap();
+                let (y, u, v) = video_exporter::render_frame_to_yuv10_hdr(
+                    document, timestamp, width, height,
+                    device, queue, renderer, image_cache, video_manager,
+                    gpu_resources, state.hdr, raster_store,
+                )?;
+                if let Some(tx) = &state.frame_tx {
+                    tx.send(VideoFrameMessage::Frame {
+                        frame_num: state.current_frame,
+                        timestamp,
+                        y_plane: y,
+                        u_plane: u,
+                        v_plane: v,
+                    }).map_err(|_| "Failed to send HDR frame")?;
+                }
+                state.current_frame += 1;
+            }
+            if state.current_frame >= state.total_frames {
+                println!("🎬 [VIDEO EXPORT] HDR complete: {} frames", state.total_frames);
+                if let Some(tx) = state.frame_tx.take() {
+                    tx.send(VideoFrameMessage::Done).ok();
+                }
+                state.gpu_resources = None;
+                return Ok(false);
+            }
+            return Ok(true);
+        }
 
         // Initialize GPU resources and readback pipeline on first frame
         if state.gpu_resources.is_none() {

@@ -90,6 +90,8 @@ pub struct ExportGpuResources {
     /// texture copy each frame instead of a full Vello render + 2 passes/submits. `None` until the
     /// first frame; invalidated on resize.
     cached_bg_hdr: Option<wgpu::Texture>,
+    /// HDR encode pipeline (linear→PQ/HLG BT.2020 → 10-bit YUV). Lazily built on the first HDR frame.
+    hdr_pipeline: Option<super::hdr_frame::HdrFramePipeline>,
 }
 
 impl ExportGpuResources {
@@ -306,6 +308,7 @@ impl ExportGpuResources {
             canvas_blit,
             raster_cache: std::collections::HashMap::new(),
             cached_bg_hdr: None,
+            hdr_pipeline: None,
         }
     }
 
@@ -1367,6 +1370,56 @@ fn fault_in_raster_for_frame(
             }
         }
     }
+}
+
+/// Render one frame as 10-bit HDR YUV420P10LE planes (BT.2020 + PQ/HLG). Synchronous: composites,
+/// runs the linear→PQ/HLG GPU pass, reads it back, and CPU-converts to 10-bit YUV. Used by the
+/// HDR export path instead of the async readback pipeline.
+#[allow(clippy::too_many_arguments)]
+pub fn render_frame_to_yuv10_hdr(
+    document: &mut Document,
+    timestamp: f64,
+    width: u32,
+    height: u32,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut vello::Renderer,
+    image_cache: &mut ImageCache,
+    video_manager: &Arc<std::sync::Mutex<VideoManager>>,
+    gpu_resources: &mut ExportGpuResources,
+    hdr_mode: lightningbeam_core::export::HdrExportMode,
+    raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
+    use vello::kurbo::Affine;
+
+    document.current_time = timestamp;
+    fault_in_raster_for_frame(document, raster_store);
+
+    let base_transform = if document.width > 0.0 && document.height > 0.0 {
+        Affine::scale_non_uniform(width as f64 / document.width, height as f64 / document.height)
+    } else {
+        Affine::IDENTITY
+    };
+
+    // Export composites on a separate device → force software video frames.
+    if let Ok(mut vm) = video_manager.lock() {
+        vm.set_render_hardware_ok(false);
+    }
+
+    let composite_result = render_document_for_compositing(
+        document, base_transform, image_cache, video_manager, None, None, false,
+    );
+    composite_document_to_hdr(&composite_result, document, device, queue, renderer, gpu_resources, width, height, false)?;
+
+    if gpu_resources.hdr_pipeline.is_none() {
+        gpu_resources.hdr_pipeline = Some(super::hdr_frame::HdrFramePipeline::new(device, width, height));
+    }
+    let planes = gpu_resources
+        .hdr_pipeline
+        .as_ref()
+        .unwrap()
+        .render_to_yuv10(device, queue, &gpu_resources.hdr_texture_view, hdr_mode);
+    Ok(planes)
 }
 
 pub fn render_frame_to_gpu_rgba(

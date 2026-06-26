@@ -541,6 +541,22 @@ impl ExportDialog {
             });
         }
 
+        // HDR output: 10-bit BT.2020 PQ/HLG (HEVC). Forces H.265; software path (no zero-copy).
+        ui.horizontal(|ui| {
+            use lightningbeam_core::export::HdrExportMode;
+            ui.label("Dynamic range:");
+            egui::ComboBox::from_id_salt("video_hdr_mode")
+                .selected_text(self.video_settings.hdr.name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.video_settings.hdr, HdrExportMode::Sdr, HdrExportMode::Sdr.name());
+                    ui.selectable_value(&mut self.video_settings.hdr, HdrExportMode::Pq, HdrExportMode::Pq.name());
+                    ui.selectable_value(&mut self.video_settings.hdr, HdrExportMode::Hlg, HdrExportMode::Hlg.name());
+                });
+        });
+        if self.video_settings.hdr.is_hdr() {
+            ui.label(egui::RichText::new("HDR exports as 10-bit HEVC (H.265), BT.2020.").weak().small());
+        }
+
         ui.checkbox(&mut self.include_audio, "Include Audio");
 
         ui.add_space(8.0);
