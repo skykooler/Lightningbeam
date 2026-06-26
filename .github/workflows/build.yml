@@ -118,6 +118,19 @@ jobs:
         run: |
           sed -i.bak 's/ffmpeg-next = { version = "8.0", features = \["static"\] }/ffmpeg-next = { version = "8.0", features = ["build", "static"] }/' lightningbeam-ui/lightningbeam-editor/Cargo.toml
 
+      # ffmpeg-sys-next configures FFmpeg with --disable-autodetect and only passes --enable-vaapi
+      # when its build-vaapi feature is set; ffmpeg-next 8.0 doesn't forward it, so depend on the
+      # sys crate directly. Linux only (the feature is a no-op elsewhere and we only ship VAAPI on
+      # Linux). With it set, a missing libva-dev makes FFmpeg configure fail loudly instead of
+      # silently shipping a software-only build.
+      - name: Enable VAAPI in FFmpeg build (Linux)
+        if: matrix.platform == 'ubuntu-24.04'
+        shell: bash
+        run: |
+          sed -i '/^ffmpeg-next = /a ffmpeg-sys-next = { version = "8.0", features = ["build-vaapi"] }' \
+            lightningbeam-ui/lightningbeam-editor/Cargo.toml
+          grep -n 'ffmpeg-sys-next' lightningbeam-ui/lightningbeam-editor/Cargo.toml
+
       - name: Setup FFmpeg (Windows)
         if: matrix.platform == 'windows-latest'
         shell: pwsh
