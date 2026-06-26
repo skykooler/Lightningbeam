@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex};
 struct SharedHwImporter {
     device: wgpu::Device,
     adapter: wgpu::Adapter,
+    /// Log the detected colour info once (under LB_VIDEO_DEBUG) rather than per frame.
+    logged: std::sync::atomic::AtomicBool,
 }
 
 impl HwVideoImporter for SharedHwImporter {
@@ -99,6 +101,16 @@ impl HwVideoImporter for SharedHwImporter {
         };
         let coeffs = ycbcr_coeffs(kr, kb);
 
+        if std::env::var("LB_VIDEO_DEBUG").is_ok()
+            && !self.logged.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            eprintln!(
+                "[hw_video] {}x{} ten_bit={} full_range={} colorspace={:?} primaries={:?} trc={:?}",
+                width, height, ten_bit, full_range,
+                (*frame).colorspace, (*frame).color_primaries, (*frame).color_trc,
+            );
+        }
+
         // Transfer characteristic → which EOTF the compositor applies to reach scene-linear.
         let transfer = match (*frame).color_trc {
             ff::AVColorTransferCharacteristic::AVCOL_TRC_SMPTE2084 => VideoTransfer::Pq,
@@ -143,6 +155,7 @@ pub fn install(vm: &Arc<Mutex<VideoManager>>, device: &wgpu::Device, adapter: &w
             let importer = Arc::new(SharedHwImporter {
                 device: device.clone(),
                 adapter: adapter.clone(),
+                logged: std::sync::atomic::AtomicBool::new(false),
             });
             if let Ok(mut vm) = vm.lock() {
                 vm.set_hardware_decode(

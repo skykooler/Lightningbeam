@@ -460,6 +460,27 @@ impl VideoDecoder {
                         if gpu_out {
                             // Hardware + GPU consumer: import the VAAPI surface as wgpu NV12 textures
                             // (no CPU copy).
+                            // VAAPI hw frames often don't carry the stream's colour tags, so the
+                            // importer (which only sees the frame) would mis-detect transfer/gamut.
+                            // Copy the authoritative values from the codec context (parsed from the
+                            // bitstream) onto the frame when it left them unspecified.
+                            unsafe {
+                                use ffmpeg::ffi::*;
+                                let fp = frame.as_mut_ptr();
+                                let cp = decoder.as_ptr();
+                                if (*fp).color_trc == AVColorTransferCharacteristic::AVCOL_TRC_UNSPECIFIED {
+                                    (*fp).color_trc = (*cp).color_trc;
+                                }
+                                if (*fp).color_primaries == AVColorPrimaries::AVCOL_PRI_UNSPECIFIED {
+                                    (*fp).color_primaries = (*cp).color_primaries;
+                                }
+                                if (*fp).colorspace == AVColorSpace::AVCOL_SPC_UNSPECIFIED {
+                                    (*fp).colorspace = (*cp).colorspace;
+                                }
+                                if (*fp).color_range == AVColorRange::AVCOL_RANGE_UNSPECIFIED {
+                                    (*fp).color_range = (*cp).color_range;
+                                }
+                            }
                             let importer = self.importer.as_ref().unwrap();
                             match unsafe { importer.import(frame.as_mut_ptr() as *mut std::ffi::c_void) } {
                                 Some(gpu) => {
