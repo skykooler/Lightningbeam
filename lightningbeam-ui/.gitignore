@@ -15,3 +15,8 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# Local, machine-specific cargo config (e.g. PKG_CONFIG_PATH for a local ffmpeg).
+# CI/packaging build ffmpeg from source (see .github/workflows/build.yml), so this
+# must never leak into a commit.
+.cargo/config.toml

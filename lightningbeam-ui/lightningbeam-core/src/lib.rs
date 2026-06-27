@@ -54,6 +54,8 @@ pub mod svg_export;
 pub mod snap;
 pub mod webcam;
 pub mod raster_layer;
+pub mod text_layer;
+pub mod fonts;
 pub mod raster_store;
 pub mod brush_settings;
 pub mod brush_engine;

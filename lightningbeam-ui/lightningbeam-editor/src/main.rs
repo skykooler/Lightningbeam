@@ -2130,7 +2130,7 @@ impl EditorApp {
                 AnyLayer::Audio(al) => find_splittable_clips(&al.clip_instances, split_time, document),
                 AnyLayer::Video(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
                 AnyLayer::Effect(el) => find_splittable_clips(&el.clip_instances, split_time, document),
-                AnyLayer::Group(_) | AnyLayer::Raster(_) => vec![],
+                AnyLayer::Group(_) | AnyLayer::Raster(_) | AnyLayer::Text(_) => vec![],
             };
 
             for instance_id in active_layer_clips {
@@ -2148,7 +2148,7 @@ impl EditorApp {
                                     AnyLayer::Audio(al) => find_splittable_clips(&al.clip_instances, split_time, document),
                                     AnyLayer::Video(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
                                     AnyLayer::Effect(el) => find_splittable_clips(&el.clip_instances, split_time, document),
-                                    AnyLayer::Group(_) | AnyLayer::Raster(_) => vec![],
+                                    AnyLayer::Group(_) | AnyLayer::Raster(_) | AnyLayer::Text(_) => vec![],
                                 };
                                 if member_splittable.contains(member_instance_id) {
                                     clips_to_split.push((*member_layer_id, *member_instance_id));
@@ -2499,7 +2499,7 @@ impl EditorApp {
                 AnyLayer::Audio(al) => &al.clip_instances,
                 AnyLayer::Video(vl) => &vl.clip_instances,
                 AnyLayer::Effect(el) => &el.clip_instances,
-                AnyLayer::Group(_) | AnyLayer::Raster(_) => &[],
+                AnyLayer::Group(_) | AnyLayer::Raster(_) | AnyLayer::Text(_) => &[],
             };
             let instances: Vec<_> = clip_slice
             .iter()
@@ -2911,7 +2911,7 @@ impl EditorApp {
                     AnyLayer::Audio(al) => &al.clip_instances,
                     AnyLayer::Video(vl) => &vl.clip_instances,
                     AnyLayer::Effect(el) => &el.clip_instances,
-                    AnyLayer::Group(_) | AnyLayer::Raster(_) => &[],
+                    AnyLayer::Group(_) | AnyLayer::Raster(_) | AnyLayer::Text(_) => &[],
                 };
                 instances.iter()
                     .filter(|ci| selection.contains_clip_instance(&ci.id))
@@ -3303,7 +3303,7 @@ impl EditorApp {
                                 AnyLayer::Video(_)  => hint.has_video  = true,
                                 AnyLayer::Audio(_)  => hint.has_audio  = true,
                                 AnyLayer::Raster(_) => hint.has_raster = true,
-                                AnyLayer::Vector(_) | AnyLayer::Effect(_) => hint.has_vector = true,
+                                AnyLayer::Vector(_) | AnyLayer::Effect(_) | AnyLayer::Text(_) => hint.has_vector = true,
                                 AnyLayer::Group(g)  => scan(&g.children, hint),
                             }
                         }

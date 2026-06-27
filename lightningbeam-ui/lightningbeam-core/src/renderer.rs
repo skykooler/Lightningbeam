@@ -698,6 +698,11 @@ pub fn render_layer_isolated(
                 };
             }
         }
+        AnyLayer::Text(text_layer) => {
+            // Text composites as vector geometry (glyphs in the Vello scene).
+            rendered.has_content =
+                render_text_layer_to_scene(text_layer, time, &mut rendered.scene, base_transform);
+        }
     }
 
     rendered
@@ -755,6 +760,57 @@ fn render_raster_layer_to_scene(
     let brush = ImageBrush::new(image_data).with_quality(ImageQuality::Low);
     let canvas_rect = Rect::new(0.0, 0.0, kf.width as f64, kf.height as f64);
     scene.fill(Fill::NonZero, base_transform, &brush, None, &canvas_rect);
+}
+
+/// Render a text layer's glyphs into a Vello scene.
+///
+/// Text is laid out with parley (wrapped to the box width) and drawn via
+/// `Scene::draw_glyphs`. The box origin offsets the whole layout; `base_transform`
+/// carries the layer/clip-instance transform and camera. Returns whether anything
+/// was drawn.
+fn render_text_layer_to_scene(
+    layer: &crate::text_layer::TextLayer,
+    time: f64,
+    scene: &mut Scene,
+    base_transform: Affine,
+) -> bool {
+    let content = layer.content_at(time);
+    if content.text.is_empty() {
+        return false;
+    }
+    let color = vello::peniko::Color::new(content.color);
+    let origin = Affine::translate((layer.box_origin.x, layer.box_origin.y));
+    let mut drew = false;
+    crate::fonts::with_layout(content, layer.box_width as f32, |layout| {
+        for line in layout.lines() {
+            for item in line.items() {
+                let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else { continue };
+                let run = glyph_run.run();
+                let font = run.font();
+                let font_size = run.font_size();
+                let synthesis = run.synthesis();
+                let glyph_xform = synthesis
+                    .skew()
+                    .map(|angle| Affine::skew((angle as f64).to_radians().tan(), 0.0));
+                drew = true;
+                scene
+                    .draw_glyphs(font)
+                    .font_size(font_size)
+                    .brush(color)
+                    .transform(base_transform * origin)
+                    .glyph_transform(glyph_xform)
+                    .draw(
+                        Fill::NonZero,
+                        glyph_run.positioned_glyphs().map(|g| vello::Glyph {
+                            id: g.id as u32,
+                            x: g.x,
+                            y: g.y,
+                        }),
+                    );
+            }
+        }
+    });
+    drew
 }
 
 // ============================================================================
@@ -883,6 +939,11 @@ fn render_layer(
             // Raster is non-video content — force the Vello fallback if extracting.
             if let Some(ex) = extract.as_deref_mut() { ex.drew_other = true; }
             render_raster_layer_to_scene(raster_layer, time, scene, base_transform);
+        }
+        AnyLayer::Text(text_layer) => {
+            // Text is non-video content — force the Vello fallback if extracting.
+            if let Some(ex) = extract.as_deref_mut() { ex.drew_other = true; }
+            render_text_layer_to_scene(text_layer, time, scene, base_transform);
         }
     }
 }
@@ -1900,7 +1961,9 @@ fn render_vector_content_cpu(
                 render_vector_content_cpu(document, time, child, pixmap, base_transform, parent_opacity, image_cache);
             }
         }
-        AnyLayer::Audio(_) | AnyLayer::Video(_) | AnyLayer::Effect(_) | AnyLayer::Raster(_) => {}
+        // Text is not rendered in the tiny-skia CPU fallback (GPU path only) for v1.
+        AnyLayer::Audio(_) | AnyLayer::Video(_) | AnyLayer::Effect(_) | AnyLayer::Raster(_)
+        | AnyLayer::Text(_) => {}
     }
 }
 

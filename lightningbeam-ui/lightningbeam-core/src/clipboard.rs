@@ -62,6 +62,7 @@ impl ClipboardLayerType {
             AnyLayer::Effect(_) => ClipboardLayerType::Effect,
             AnyLayer::Group(_) => ClipboardLayerType::Vector,
             AnyLayer::Raster(_) => ClipboardLayerType::Vector,
+            AnyLayer::Text(_) => ClipboardLayerType::Vector,
         }
     }
 
@@ -448,6 +449,13 @@ fn regen_any_layer(layer: &AnyLayer, id_map: &mut HashMap<Uuid, Uuid>) -> AnyLay
             let mut nl = rl.clone();
             nl.layer.id = new_layer_id;
             AnyLayer::Raster(nl)
+        }
+        AnyLayer::Text(tl) => {
+            let new_layer_id = Uuid::new_v4();
+            id_map.insert(tl.layer.id, new_layer_id);
+            let mut nl = tl.clone();
+            nl.layer.id = new_layer_id;
+            AnyLayer::Text(nl)
         }
         AnyLayer::Group(gl) => {
             let new_layer_id = Uuid::new_v4();

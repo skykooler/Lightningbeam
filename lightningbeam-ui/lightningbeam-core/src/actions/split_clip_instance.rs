@@ -114,6 +114,7 @@ impl Action for SplitClipInstanceAction {
             AnyLayer::Effect(el) => &el.clip_instances,
             AnyLayer::Group(_) => return Err("Cannot split clip instances on group layers".to_string()),
             AnyLayer::Raster(_) => return Err("Cannot split clip instances on group layers".to_string()),
+            AnyLayer::Text(_) => return Err("Cannot split clip instances on group layers".to_string()),
         };
 
         let instance = clip_instances
@@ -233,7 +234,7 @@ impl Action for SplitClipInstanceAction {
             AnyLayer::Group(_) => {
                 return Err("Cannot split clip instances on group layers".to_string());
             }
-            AnyLayer::Raster(_) => {
+            AnyLayer::Raster(_) | AnyLayer::Text(_) => {
                 return Err("Cannot split clip instances on group layers".to_string());
             }
         }
@@ -294,8 +295,8 @@ impl Action for SplitClipInstanceAction {
             AnyLayer::Group(_) => {
                 // Group layers don't have clip instances, nothing to rollback
             }
-            AnyLayer::Raster(_) => {
-                // Raster layers don't have clip instances, nothing to rollback
+            AnyLayer::Raster(_) | AnyLayer::Text(_) => {
+                // Raster/text layers don't have clip instances, nothing to rollback
             }
         }
 

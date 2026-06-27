@@ -18,6 +18,9 @@ bytemuck = { version = "1.14", features = ["derive"] }
 kurbo = { workspace = true }
 vello = { workspace = true }
 
+# Text layout/shaping (text layers)
+parley = { workspace = true }
+
 # Image decoding for image fills
 image = { workspace = true }
 

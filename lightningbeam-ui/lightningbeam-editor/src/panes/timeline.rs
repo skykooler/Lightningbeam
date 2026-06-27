@@ -212,6 +212,7 @@ fn effective_clip_duration(
         AnyLayer::Effect(_) => Some(lightningbeam_core::effect::EFFECT_DURATION),
         AnyLayer::Group(_) => None,
         AnyLayer::Raster(_) => None,
+        AnyLayer::Text(_) => None,
     }
 }
 
@@ -685,6 +686,7 @@ fn layer_clips<'a>(
         AnyLayer::Effect(l) => &l.clip_instances,
         AnyLayer::Group(_) => &[],
         AnyLayer::Raster(_) => &[],
+        AnyLayer::Text(_) => &[],
     }
 }
 
@@ -718,6 +720,7 @@ fn collect_clip_instances<'a>(
             }
         }
         AnyLayer::Raster(_) => {}
+        AnyLayer::Text(_) => {}
     }
 }
 
@@ -768,6 +771,7 @@ fn layer_type_info(layer: &AnyLayer) -> (&'static str, egui::Color32) {
         AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
         AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
         AnyLayer::Raster(_) => ("Raster", egui::Color32::from_rgb(160, 100, 200)),
+        AnyLayer::Text(_) => ("Text", egui::Color32::from_rgb(220, 200, 120)),
     }
 }
 

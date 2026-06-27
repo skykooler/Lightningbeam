@@ -24,6 +24,11 @@ vello = { git = "https://github.com/linebender/vello", branch = "main" }
 wgpu = { version = "27", features = ["vulkan", "metal", "gles"] }
 kurbo = { version = "0.12", features = ["serde"] }
 peniko = "0.5"
+# Text layout/shaping for text layers. Pinned to git main to match the peniko 0.5
+# / skrifa 0.37 that vello's git-main resolves to — a released parley still pins
+# peniko 0.4, which would split `peniko::Font` into two incompatible types at the
+# vello `draw_glyphs` boundary.
+parley = { git = "https://github.com/linebender/parley", branch = "main" }
 
 # Windowing
 winit = "0.30"

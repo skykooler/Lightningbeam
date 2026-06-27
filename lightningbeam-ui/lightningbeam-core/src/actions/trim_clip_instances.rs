@@ -101,6 +101,7 @@ impl Action for TrimClipInstancesAction {
                                                 AnyLayer::Effect(el) => &el.clip_instances,
                                                 AnyLayer::Group(_) => &[],
                                                 AnyLayer::Raster(_) => &[],
+                                                AnyLayer::Text(_) => &[],
                                                         };
 
                                             if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
@@ -138,6 +139,7 @@ impl Action for TrimClipInstancesAction {
                                             AnyLayer::Effect(el) => &el.clip_instances,
                                             AnyLayer::Group(_) => &[],
                                             AnyLayer::Raster(_) => &[],
+                                            AnyLayer::Text(_) => &[],
                                                 };
 
                                         if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
@@ -182,6 +184,7 @@ impl Action for TrimClipInstancesAction {
                     AnyLayer::Effect(el) => &el.clip_instances,
                     AnyLayer::Group(_) => &[],
                     AnyLayer::Raster(_) => &[],
+                    AnyLayer::Text(_) => &[],
                     };
 
                 let instance = clip_instances.iter()
@@ -275,6 +278,7 @@ impl Action for TrimClipInstancesAction {
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
                 AnyLayer::Raster(_) => continue,
+                AnyLayer::Text(_) => continue,
             };
 
             // Apply trims
@@ -315,6 +319,7 @@ impl Action for TrimClipInstancesAction {
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
                 AnyLayer::Raster(_) => continue,
+                AnyLayer::Text(_) => continue,
             };
 
             // Restore original trim values

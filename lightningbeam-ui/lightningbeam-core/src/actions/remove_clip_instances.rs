@@ -46,6 +46,7 @@ impl Action for RemoveClipInstancesAction {
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
                 AnyLayer::Raster(_) => continue,
+                AnyLayer::Text(_) => continue,
             };
 
             // Find and remove the instance, saving it for rollback
@@ -72,6 +73,7 @@ impl Action for RemoveClipInstancesAction {
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
                 AnyLayer::Raster(_) => continue,
+                AnyLayer::Text(_) => continue,
             };
 
             clip_instances.push(instance);

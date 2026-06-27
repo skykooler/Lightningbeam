@@ -44,6 +44,9 @@ pub mod resize_raster_layer;
 pub mod move_layer;
 pub mod set_fill_paint;
 pub mod set_image_fill;
+pub mod create_text_clip;
+pub mod set_text_content;
+pub mod resize_text_box;
 
 pub use add_clip_instance::AddClipInstanceAction;
 pub use add_effect::AddEffectAction;
@@ -84,3 +87,6 @@ pub use set_fill_paint::SetFillPaintAction;
 pub use set_image_fill::SetImageFillAction;
 pub use change_bpm::ChangeBpmAction;
 pub use change_fps::ChangeFpsAction;
+pub use create_text_clip::CreateTextClipAction;
+pub use set_text_content::SetTextContentAction;
+pub use resize_text_box::ResizeTextBoxAction;

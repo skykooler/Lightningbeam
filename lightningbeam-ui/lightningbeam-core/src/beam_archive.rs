@@ -62,6 +62,10 @@ pub enum MediaKind {
     /// the keyframe id). Decoded eagerly on load and shown while the full-res pixels
     /// page in, so cold scrubs don't flash blank. See `raster_proxy_media_id`.
     RasterProxy = 6,
+    /// An embedded font file (TTF/OTF) used by a text layer (keyed by a content hash
+    /// of the bytes so identical fonts dedupe). Registered into the font collection
+    /// on load so documents render faithfully on machines lacking the font.
+    Font = 7,
 }
 
 impl MediaKind {
@@ -74,6 +78,7 @@ impl MediaKind {
             4 => Some(Self::Waveform),
             5 => Some(Self::Thumbnail),
             6 => Some(Self::RasterProxy),
+            7 => Some(Self::Font),
             _ => None,
         }
     }

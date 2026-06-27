@@ -575,6 +575,9 @@ struct VelloRenderContext {
     is_playing: bool,
     /// Active layer for tool operations
     active_layer_id: Option<uuid::Uuid>,
+    /// Text layer being edited in place, with the caret + selection as byte offsets
+    /// into its text (start, end). Drives the Vello-drawn caret/selection.
+    text_edit: Option<(uuid::Uuid, usize, usize)>,
     /// Delta for drag preview (world space)
     drag_delta: Option<vello::kurbo::Vec2>,
     /// Current selection state
@@ -2109,6 +2112,74 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             }
         }
 
+        // Active text-layer border: the same black/yellow marching-ants outline as
+        // raster, around the text box bounds (so its size is visible while selected).
+        if let Some(active_id) = self.ctx.active_layer_id {
+            if let Some(lightningbeam_core::layer::AnyLayer::Text(tl)) = self.ctx.document.get_layer(&active_id) {
+                let rect = vello::kurbo::Rect::from_origin_size(
+                    tl.box_origin,
+                    (tl.box_width, tl.box_height),
+                );
+                let inv_zoom = 1.0 / (self.ctx.zoom as f64).max(1e-3);
+                let stroke_w = 1.5 * inv_zoom;
+                let dash = 6.0 * inv_zoom;
+                let pattern = [dash, dash];
+                scene.stroke(
+                    &vello::kurbo::Stroke::new(stroke_w).with_dashes(0.0, pattern),
+                    overlay_transform,
+                    vello::peniko::Color::new([0.0, 0.0, 0.0, 1.0]),
+                    None,
+                    &rect,
+                );
+                scene.stroke(
+                    &vello::kurbo::Stroke::new(stroke_w).with_dashes(dash, pattern),
+                    overlay_transform,
+                    vello::peniko::Color::new([1.0, 0.85, 0.0, 1.0]),
+                    None,
+                    &rect,
+                );
+
+                // 8 resize handles (corners + edge midpoints), constant screen size.
+                let (ox, oy, bw, bh) = (tl.box_origin.x, tl.box_origin.y, tl.box_width, tl.box_height);
+                let hs = 4.0 * inv_zoom;
+                let handle_pts = [
+                    (ox, oy), (ox + bw, oy), (ox + bw, oy + bh), (ox, oy + bh),
+                    (ox + bw * 0.5, oy), (ox + bw, oy + bh * 0.5),
+                    (ox + bw * 0.5, oy + bh), (ox, oy + bh * 0.5),
+                ];
+                for (hx, hy) in handle_pts {
+                    let hr = vello::kurbo::Rect::new(hx - hs, hy - hs, hx + hs, hy + hs);
+                    scene.fill(vello::peniko::Fill::NonZero, overlay_transform,
+                        vello::peniko::Color::new([1.0, 1.0, 1.0, 1.0]), None, &hr);
+                    scene.stroke(&vello::kurbo::Stroke::new(stroke_w), overlay_transform,
+                        vello::peniko::Color::new([0.0, 0.0, 0.0, 1.0]), None, &hr);
+                }
+            }
+        }
+
+        // In-place text editing: Vello-drawn selection highlight + caret for the layer
+        // being edited (egui drives the input; we render the caret ourselves so it tracks
+        // any clip-instance transform). Byte offsets come from the egui field's cursor.
+        if let Some((edit_id, sel_start, sel_end)) = self.ctx.text_edit {
+            if let Some(lightningbeam_core::layer::AnyLayer::Text(tl)) = self.ctx.document.get_layer(&edit_id) {
+                use vello::peniko::{Color, Fill};
+                let box_xf = overlay_transform * vello::kurbo::Affine::translate((tl.box_origin.x, tl.box_origin.y));
+                let content = tl.content_at(self.ctx.playback_time);
+                let max_w = tl.box_width as f32;
+                // Selection highlight (behind would be ideal; semi-transparent so glyphs show through).
+                let (lo, hi) = (sel_start.min(sel_end), sel_start.max(sel_end));
+                for (x0, y0, x1, y1) in lightningbeam_core::fonts::selection_geometry(content, max_w, lo, hi) {
+                    let r = vello::kurbo::Rect::new(x0, y0, x1, y1);
+                    scene.fill(Fill::NonZero, box_xf, Color::new([0.30, 0.55, 1.0, 0.35]), None, &r);
+                }
+                // Caret at the primary cursor (sel_end).
+                if let Some((x0, y0, x1, y1)) = lightningbeam_core::fonts::caret_geometry(content, max_w, sel_end) {
+                    let r = vello::kurbo::Rect::new(x0, y0, x1.max(x0 + 1.0), y1);
+                    scene.fill(Fill::NonZero, box_xf, Color::new([0.05, 0.05, 0.05, 1.0]), None, &r);
+                }
+            }
+        }
+
         // Render drag preview objects with transparency
         if let (Some(delta), Some(active_layer_id)) = (self.ctx.drag_delta, self.ctx.active_layer_id) {
             if let Some(layer) = self.ctx.document.get_layer(&active_layer_id) {
@@ -3267,6 +3338,28 @@ pub struct StagePane {
     /// Synthetic drag/click override for test mode replay (debug builds only)
     #[cfg(debug_assertions)]
     replay_override: Option<ReplayDragState>,
+
+    // --- Text layer in-place editing ---
+    /// The text layer currently being edited in place (None = not editing).
+    text_edit_layer: Option<uuid::Uuid>,
+    /// Working buffer mirrored to/from the hidden egui TextEdit while editing.
+    text_edit_buffer: String,
+    /// Set the frame editing begins so the egui field grabs focus exactly once.
+    text_edit_request_focus: bool,
+    /// Caret + selection as BYTE offsets into the text (anchor, focus), for the Vello caret.
+    text_edit_cursor: Option<(usize, usize)>,
+    /// The text content captured when editing began, for a single clean undo step.
+    text_edit_original: Option<lightningbeam_core::text_layer::TextContent>,
+    /// True when the current edit is of a freshly-created layer whose creation is still the
+    /// top undo entry — so committing it empty can remove it by rolling that creation back.
+    /// Cleared if another action (e.g. a resize) is pushed during the edit.
+    text_edit_is_new: bool,
+    /// If the current edit created a new clip (vector branch), its id — so an empty commit
+    /// also exits that clip after removing it.
+    text_edit_created_clip: Option<uuid::Uuid>,
+    /// Active drag of a text box resize handle:
+    /// (layer_id, handle_index, start_origin_x, start_origin_y, start_w, start_h).
+    text_box_drag: Option<(uuid::Uuid, usize, f64, f64, f64, f64)>,
 }
 
 /// Synthetic drag/click state injected during test mode replay
@@ -3620,6 +3713,27 @@ fn selection_stipple_brush() -> &'static vello::peniko::ImageBrush {
     })
 }
 
+/// Convert a character index (egui caret) to a byte offset (parley/`str`).
+fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    s.char_indices().nth(char_idx).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+/// Diagonal resize cursor for an axis-aligned box corner (0=TL, 1=TR, 2=BR, 3=BL).
+fn corner_resize_cursor(corner: usize) -> egui::CursorIcon {
+    match corner % 4 {
+        0 | 2 => egui::CursorIcon::ResizeNwSe, // TL / BR
+        _ => egui::CursorIcon::ResizeNeSw,     // TR / BL
+    }
+}
+
+/// Axis resize cursor for an axis-aligned box edge (0=Top, 1=Right, 2=Bottom, 3=Left).
+fn edge_resize_cursor(edge: usize) -> egui::CursorIcon {
+    match edge % 4 {
+        0 | 2 => egui::CursorIcon::ResizeVertical,   // Top / Bottom
+        _ => egui::CursorIcon::ResizeHorizontal,     // Right / Left
+    }
+}
+
 impl StagePane {
     pub fn new() -> Self {
         let instance_id = INSTANCE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3661,6 +3775,14 @@ impl StagePane {
             pending_tool_readback_b: None,
             #[cfg(debug_assertions)]
             replay_override: None,
+            text_edit_layer: None,
+            text_edit_buffer: String::new(),
+            text_edit_request_focus: false,
+            text_edit_cursor: None,
+            text_edit_original: None,
+            text_edit_is_new: false,
+            text_edit_created_clip: None,
+            text_box_drag: None,
         }
     }
 
@@ -4832,6 +4954,364 @@ impl StagePane {
                     // Clear tool state to stop preview rendering
                     *shared.tool_state = ToolState::Idle;
                 }
+            }
+        }
+    }
+
+    /// Text tool: click the stage to create a text layer.
+    /// - Active layer is Vector → create a clip (VectorClip + instance) containing a
+    ///   text layer, then enter that clip so the text is directly editable.
+    /// - Otherwise (raster/video/none) → create a new top-level text layer.
+    fn handle_text_tool(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) {
+        use lightningbeam_core::layer::AnyLayer;
+        use lightningbeam_core::text_layer::{TextLayer, TextContent};
+        use lightningbeam_core::actions::{AddLayerAction, CreateTextClipAction};
+        use vello::kurbo::Point;
+
+        // Allow dragging the active text layer's resize handles with the Text tool too
+        // (runs on drag events, so it must precede the click-only guard below).
+        if self.handle_text_box_resize(ui, response, world_pos, shared) {
+            return;
+        }
+        // Only act on a click (ignore drags / hovers).
+        if !self.rsp_clicked(response) {
+            return;
+        }
+
+        let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+
+        // Click on an existing text box → edit it (don't spawn a duplicate).
+        if let Some(hit_id) = self.text_layer_at(point, shared) {
+            if self.text_edit_layer != Some(hit_id) {
+                if let Some(cur) = self.text_edit_layer {
+                    self.commit_text_edit(shared, cur);
+                }
+                *shared.active_layer_id = Some(hit_id);
+                self.begin_text_edit(hit_id);
+            }
+            return;
+        }
+
+        // Empty space → commit any in-progress edit, then create a new text layer.
+        if let Some(cur) = self.text_edit_layer {
+            self.commit_text_edit(shared, cur);
+        }
+
+        let fc = *shared.fill_color;
+        let color = [
+            fc.r() as f32 / 255.0,
+            fc.g() as f32 / 255.0,
+            fc.b() as f32 / 255.0,
+            fc.a() as f32 / 255.0,
+        ];
+
+        let is_vector = shared
+            .active_layer_id
+            .and_then(|id| shared.action_executor.document().get_layer(&id))
+            .map_or(false, |l| matches!(l, AnyLayer::Vector(_)));
+
+        if is_vector {
+            let parent_id = shared.active_layer_id.unwrap();
+            // The text layer sits at the clip's origin; the instance is placed at the click.
+            let mut tl = TextLayer::new("Text", Point::ZERO);
+            tl.content = TextContent { color, ..TextContent::default() };
+            let text_layer_id = tl.layer.id;
+            let clip_id = uuid::Uuid::new_v4();
+            let instance_id = uuid::Uuid::new_v4();
+            let action = CreateTextClipAction::new(parent_id, tl, (point.x, point.y))
+                .with_ids(clip_id, instance_id);
+            if shared.action_executor.execute(Box::new(action)).is_ok() {
+                // Enter the new clip; main.rs activates the clip's first layer (the text layer).
+                *shared.pending_enter_clip = Some((clip_id, instance_id, parent_id));
+                self.begin_text_edit(text_layer_id);
+                self.text_edit_is_new = true;
+                self.text_edit_created_clip = Some(clip_id);
+            }
+        } else {
+            // Raster / video / group / no layer → new top-level text layer, created in
+            // the current editing context (root, or the clip currently being edited).
+            let mut tl = TextLayer::new("Text", point);
+            tl.content = TextContent { color, ..TextContent::default() };
+            let text_layer_id = tl.layer.id;
+            let action = AddLayerAction::new(AnyLayer::Text(tl))
+                .with_target_clip(shared.editing_clip_id);
+            if shared.action_executor.execute(Box::new(action)).is_ok() {
+                *shared.active_layer_id = Some(text_layer_id);
+                self.begin_text_edit(text_layer_id);
+                self.text_edit_is_new = true;
+            }
+        }
+    }
+
+    /// Handle dragging a text box resize handle. Returns true if the interaction was
+    /// consumed (so the normal select/create logic should be skipped this frame).
+    /// `world_pos` is in the active layer's local space (clip-local when editing a clip),
+    /// which matches the box coordinates, so hit-testing is axis-aligned here.
+    /// Index (0..8) of the text-box resize handle under `(mx,my)`, if any.
+    /// 0=TL 1=TR 2=BR 3=BL (corners), 4=Top 5=Right 6=Bottom 7=Left (edges).
+    fn text_handle_at(ox: f64, oy: f64, bw: f64, bh: f64, mx: f64, my: f64, tol: f64) -> Option<usize> {
+        let pts = [
+            (ox, oy), (ox + bw, oy), (ox + bw, oy + bh), (ox, oy + bh),
+            (ox + bw * 0.5, oy), (ox + bw, oy + bh * 0.5),
+            (ox + bw * 0.5, oy + bh), (ox, oy + bh * 0.5),
+        ];
+        pts.iter().position(|(hx, hy)| (hx - mx).abs() <= tol && (hy - my).abs() <= tol)
+    }
+
+    /// Resize cursor for a text-box handle index (reuses the shared corner/edge mapping).
+    fn text_handle_cursor(idx: usize) -> egui::CursorIcon {
+        if idx < 4 { corner_resize_cursor(idx) } else { edge_resize_cursor(idx - 4) }
+    }
+
+    fn handle_text_box_resize(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        world_pos: egui::Vec2,
+        shared: &mut SharedPaneState,
+    ) -> bool {
+        use lightningbeam_core::layer::AnyLayer;
+
+        let Some(layer_id) = *shared.active_layer_id else { return false };
+        let Some((ox, oy, bw, bh)) = (match shared.action_executor.document().get_layer(&layer_id) {
+            Some(AnyLayer::Text(tl)) => Some((tl.box_origin.x, tl.box_origin.y, tl.box_width, tl.box_height)),
+            _ => None,
+        }) else { return false };
+
+        let (mx, my) = (world_pos.x as f64, world_pos.y as f64);
+        let tol = 6.0 / (self.zoom as f64).max(1e-3);
+
+        // Hover feedback: show a resize cursor over a handle when not already dragging.
+        if self.text_box_drag.is_none() {
+            if let Some(idx) = Self::text_handle_at(ox, oy, bw, bh, mx, my, tol) {
+                ui.ctx().set_cursor_icon(Self::text_handle_cursor(idx));
+            }
+        }
+
+        // Begin a handle drag: hit-test the 8 handles.
+        if self.rsp_drag_started(response) && self.text_box_drag.is_none() {
+            if let Some(idx) = Self::text_handle_at(ox, oy, bw, bh, mx, my, tol) {
+                self.text_box_drag = Some((layer_id, idx, ox, oy, bw, bh));
+                return true;
+            }
+        }
+
+        let Some((drag_id, idx, sox, soy, sbw, sbh)) = self.text_box_drag else { return false };
+        if drag_id != layer_id { return false; }
+
+        if self.rsp_dragged(response) {
+            let (no, nw, nh) = Self::resize_text_box(idx, sox, soy, sbw, sbh, mx, my);
+            // Live preview (no undo entry).
+            let doc = shared.action_executor.document_mut();
+            if let Some(AnyLayer::Text(tl)) = doc.get_layer_mut(&layer_id) {
+                tl.box_origin = no;
+                tl.box_width = nw;
+                tl.box_height = nh;
+            }
+            return true;
+        }
+
+        if self.rsp_drag_stopped(response) {
+            let (no, nw, nh) = Self::resize_text_box(idx, sox, soy, sbw, sbh, mx, my);
+            // Restore the start box, then record one undoable resize.
+            {
+                let doc = shared.action_executor.document_mut();
+                if let Some(AnyLayer::Text(tl)) = doc.get_layer_mut(&layer_id) {
+                    tl.box_origin = vello::kurbo::Point::new(sox, soy);
+                    tl.box_width = sbw;
+                    tl.box_height = sbh;
+                }
+            }
+            let action = lightningbeam_core::actions::ResizeTextBoxAction::new(layer_id, no, nw, nh);
+            let _ = shared.action_executor.execute(Box::new(action));
+            self.text_box_drag = None;
+            // A resize is now the top undo entry, so the creation can no longer be
+            // rolled back by an empty-commit; keep the layer even if left empty.
+            self.text_edit_is_new = false;
+            return true;
+        }
+
+        true
+    }
+
+    /// Compute a new (origin, width, height) for a text box given a dragged handle.
+    /// Handles: 0=TL 1=TR 2=BR 3=BL (corners), 4=T 5=R 6=B 7=L (edges).
+    fn resize_text_box(idx: usize, ox: f64, oy: f64, w: f64, h: f64, mx: f64, my: f64)
+        -> (vello::kurbo::Point, f64, f64)
+    {
+        const MIN: f64 = 8.0;
+        let (mut l, mut r, mut t, mut b) = (ox, ox + w, oy, oy + h);
+        match idx {
+            0 => { l = mx; t = my; }
+            1 => { r = mx; t = my; }
+            2 => { r = mx; b = my; }
+            3 => { l = mx; b = my; }
+            4 => { t = my; }
+            5 => { r = mx; }
+            6 => { b = my; }
+            7 => { l = mx; }
+            _ => {}
+        }
+        if r - l < MIN {
+            if matches!(idx, 0 | 3 | 7) { l = r - MIN; } else { r = l + MIN; }
+        }
+        if b - t < MIN {
+            if matches!(idx, 0 | 1 | 4) { t = b - MIN; } else { b = t + MIN; }
+        }
+        (vello::kurbo::Point::new(l, t), r - l, b - t)
+    }
+
+    /// Begin in-place editing of an existing text layer (not a fresh creation).
+    fn begin_text_edit(&mut self, layer_id: uuid::Uuid) {
+        self.text_edit_layer = Some(layer_id);
+        self.text_edit_buffer.clear();
+        self.text_edit_request_focus = true;
+        self.text_edit_cursor = None;
+        self.text_edit_original = None; // captured on the first update frame
+        self.text_edit_is_new = false;
+        self.text_edit_created_clip = None;
+    }
+
+    /// Clear all in-place text editing state.
+    fn finish_text_edit_state(&mut self) {
+        self.text_edit_layer = None;
+        self.text_edit_buffer.clear();
+        self.text_edit_cursor = None;
+        self.text_edit_original = None;
+        self.text_edit_request_focus = false;
+        self.text_edit_is_new = false;
+        self.text_edit_created_clip = None;
+    }
+
+    /// Commit the current in-place edit as a single undoable step.
+    fn commit_text_edit(&mut self, shared: &mut SharedPaneState, layer_id: uuid::Uuid) {
+        use lightningbeam_core::actions::SetTextContentAction;
+
+        // A freshly-created layer left empty is removed by rolling back its creation
+        // (the top undo entry), which cleanly reverses both the root and clip branches.
+        if self.text_edit_is_new && self.text_edit_buffer.trim().is_empty() {
+            let _ = shared.action_executor.undo();
+            if *shared.active_layer_id == Some(layer_id) {
+                *shared.active_layer_id = None;
+            }
+            // If creating it entered a new clip, leave that clip (it no longer exists).
+            if self.text_edit_created_clip.is_some() {
+                *shared.pending_exit_clip = true;
+            }
+            self.finish_text_edit_state();
+            return;
+        }
+
+        if let Some(orig) = self.text_edit_original.take() {
+            let mut final_content = orig.clone();
+            final_content.text = self.text_edit_buffer.clone();
+            if final_content != orig {
+                // The document already holds `final_content` (live preview); with_old
+                // records the pre-edit value so undo restores it in one step.
+                let action = SetTextContentAction::with_old(layer_id, orig, final_content);
+                let _ = shared.action_executor.execute(Box::new(action));
+            }
+        }
+        self.finish_text_edit_state();
+    }
+
+    /// Find the topmost text layer in the current editing context whose box contains
+    /// `point` (in the context's local space, which matches `world_pos`).
+    fn text_layer_at(&self, point: vello::kurbo::Point, shared: &SharedPaneState) -> Option<uuid::Uuid> {
+        use lightningbeam_core::layer::AnyLayer;
+        let doc = shared.action_executor.document();
+        let layers = doc.context_layers(shared.editing_clip_id.as_ref());
+        for layer in layers.into_iter().rev() {
+            if let AnyLayer::Text(tl) = layer {
+                let r = vello::kurbo::Rect::from_origin_size(
+                    tl.box_origin, (tl.box_width, tl.box_height));
+                if r.contains(point) {
+                    return Some(tl.layer.id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Drive the hybrid in-place text editor: a hidden, focused egui `TextEdit` captures
+    /// keystrokes/IME and the caret position; the text + caret are rendered in Vello.
+    /// The field is parked far offscreen (`constrain(false)` so egui doesn't clamp it back
+    /// on-screen) — invisible and not intercepting pointer events over the text box.
+    fn update_text_editing(&mut self, ui: &mut egui::Ui, shared: &mut SharedPaneState) {
+        use lightningbeam_core::layer::AnyLayer;
+        let Some(layer_id) = self.text_edit_layer else { return };
+
+        // Current text, or bail (and clear) if the layer is gone / not text anymore.
+        let cur_text = {
+            let doc = shared.action_executor.document();
+            match doc.get_layer(&layer_id) {
+                Some(AnyLayer::Text(tl)) => {
+                    if self.text_edit_original.is_none() {
+                        self.text_edit_original = Some(tl.content.clone());
+                        self.text_edit_buffer = tl.content.text.clone();
+                    }
+                    tl.content.text.clone()
+                }
+                _ => { self.finish_text_edit_state(); return; }
+            }
+        };
+
+        // Escape cancels: restore the pre-edit content and exit.
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if let Some(orig) = self.text_edit_original.take() {
+                let doc = shared.action_executor.document_mut();
+                if let Some(AnyLayer::Text(tl)) = doc.get_layer_mut(&layer_id) {
+                    tl.content = orig;
+                }
+            }
+            self.finish_text_edit_state();
+            return;
+        }
+
+        // Hidden, focused TextEdit parked offscreen (constrain(false) keeps egui from
+        // clamping it back into view). Captures keyboard/IME + caret only.
+        let te_id = egui::Id::new(("lb_text_edit", layer_id));
+        let output = egui::Area::new(egui::Id::new(("lb_text_edit_area", layer_id)))
+            .constrain(false)
+            .fixed_pos(egui::pos2(-100_000.0, -100_000.0))
+            .show(ui.ctx(), |ui| {
+                egui::TextEdit::multiline(&mut self.text_edit_buffer)
+                    .id(te_id)
+                    .desired_width(1.0)
+                    .show(ui)
+            })
+            .inner;
+
+        // Acquire and hold keyboard focus; once acquired, losing it commits the edit.
+        if self.text_edit_request_focus {
+            if output.response.has_focus() {
+                self.text_edit_request_focus = false;
+            } else {
+                output.response.request_focus();
+            }
+        } else if !output.response.has_focus() {
+            self.commit_text_edit(shared, layer_id);
+            return;
+        }
+
+        // Caret/selection → byte offsets for the Vello caret.
+        if let Some(cr) = output.cursor_range {
+            let anchor = char_to_byte(&self.text_edit_buffer, cr.secondary.index);
+            let focus = char_to_byte(&self.text_edit_buffer, cr.primary.index);
+            self.text_edit_cursor = Some((anchor, focus));
+        }
+
+        // Live preview: push the buffer into the document text (no undo entry).
+        if self.text_edit_buffer != cur_text {
+            let doc = shared.action_executor.document_mut();
+            if let Some(AnyLayer::Text(tl)) = doc.get_layer_mut(&layer_id) {
+                tl.content.text = self.text_edit_buffer.clone();
             }
         }
     }
@@ -9928,29 +10408,17 @@ impl StagePane {
             // Check corner handles with correct diagonal cursors
             for (idx, corner) in world_corners.iter().enumerate() {
                 if point.distance(*corner) < tolerance {
-                    // Top-left (0) and bottom-right (2): NW-SE diagonal (\)
-                    // Top-right (1) and bottom-left (3): NE-SW diagonal (/)
-                    let cursor = match idx {
-                        0 | 2 => egui::CursorIcon::ResizeNwSe, // Top-left, Bottom-right
-                        1 | 3 => egui::CursorIcon::ResizeNeSw, // Top-right, Bottom-left
-                        _ => egui::CursorIcon::Default,
-                    };
-                    ui.ctx().set_cursor_icon(cursor);
+                    ui.ctx().set_cursor_icon(corner_resize_cursor(idx));
                     hovering_handle = true;
                     break;
                 }
             }
 
-            // Check edge handles
+            // Check edge handles (midpoints are ordered top, right, bottom, left)
             if !hovering_handle {
                 for (idx, edge_pos) in edge_midpoints.iter().enumerate() {
                     if point.distance(*edge_pos) < tolerance {
-                        let cursor = match idx {
-                            0 | 2 => egui::CursorIcon::ResizeVertical,   // Top/Bottom
-                            1 | 3 => egui::CursorIcon::ResizeHorizontal, // Right/Left
-                            _ => egui::CursorIcon::Default,
-                        };
-                        ui.ctx().set_cursor_icon(cursor);
+                        ui.ctx().set_cursor_icon(edge_resize_cursor(idx));
                         hovering_handle = true;
                         break;
                     }
@@ -10863,10 +11331,19 @@ impl StagePane {
 
             match *shared.selected_tool {
                 Tool::Select => {
-                    let is_raster = shared.active_layer_id.and_then(|id| {
+                    let active = shared.active_layer_id.and_then(|id| {
                         shared.action_executor.document().get_layer(&id)
-                    }).map_or(false, |l| matches!(l, lightningbeam_core::layer::AnyLayer::Raster(_)));
-                    if is_raster {
+                    });
+                    let is_raster = matches!(active, Some(lightningbeam_core::layer::AnyLayer::Raster(_)));
+                    let is_text = matches!(active, Some(lightningbeam_core::layer::AnyLayer::Text(_)));
+                    if is_text && self.handle_text_box_resize(ui, &response, world_pos, shared) {
+                        // Consumed by a resize-handle drag.
+                    } else if is_text && response.double_clicked() {
+                        // Double-click a selected text layer to edit it in place.
+                        if let Some(id) = *shared.active_layer_id {
+                            self.begin_text_edit(id);
+                        }
+                    } else if is_raster {
                         self.handle_raster_select_tool(ui, &response, world_pos, shared);
                     } else {
                         self.handle_select_tool(ui, &response, world_pos, shift_held, shared);
@@ -10931,6 +11408,9 @@ impl StagePane {
                 }
                 Tool::Gradient => {
                     self.handle_raster_gradient_tool(ui, &response, world_pos, shared);
+                }
+                Tool::Text => {
+                    self.handle_text_tool(ui, &response, world_pos, shared);
                 }
                 _ => {
                     // Other tools not implemented yet
@@ -11765,6 +12245,9 @@ impl PaneRenderer for StagePane {
         // Handle input for pan/zoom and tool controls
         self.handle_input(ui, rect, shared);
 
+        // Drive the in-place text editor (hidden egui field → Vello caret).
+        self.update_text_editing(ui, shared);
+
         // Handle asset drag-and-drop from Asset Library
         if let Some(dragging) = shared.dragging_asset.clone() {
             if let Some(pointer_pos) = ui.ctx().pointer_interact_pos() {
@@ -12143,6 +12626,9 @@ impl PaneRenderer for StagePane {
             container_path: shared.container_path.clone(),
             is_playing: *shared.is_playing,
             active_layer_id: *shared.active_layer_id,
+            text_edit: self.text_edit_layer.and_then(|id| {
+                self.text_edit_cursor.map(|(s, e)| (id, s, e))
+            }),
             drag_delta,
             selection: shared.selection.clone(),
             fill_color: *shared.fill_color,
