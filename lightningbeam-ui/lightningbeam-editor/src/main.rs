@@ -3727,8 +3727,21 @@ impl EditorApp {
                 // TODO: Implement delete layer
             }
             MenuAction::ToggleLayerVisibility => {
-                println!("Menu: Toggle Layer Visibility");
-                // TODO: Implement toggle layer visibility
+                use lightningbeam_core::actions::{SetLayerPropertiesAction, set_layer_properties::LayerProperty};
+                use lightningbeam_core::layer::LayerTrait;
+                if let Some(layer_id) = self.active_layer_id {
+                    let cur = self.action_executor.document()
+                        .get_layer(&layer_id)
+                        .map(|l| l.visible());
+                    if let Some(cur) = cur {
+                        let action = SetLayerPropertiesAction::new(layer_id, LayerProperty::Visible(!cur));
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Toggle layer visibility: {}", e);
+                        }
+                    }
+                } else {
+                    println!("Toggle Layer Visibility: no active layer");
+                }
             }
             MenuAction::ShowMasterTrack => {
                 // Toggle show_master_track on all Timeline pane instances

@@ -921,6 +921,8 @@ impl ExportOrchestrator {
         let bitrate = settings.quality.bitrate_kbps();
         let fr = framerate.round() as i32;
         let full = settings.color_range.is_full();
+        println!("🎬 [EXPORT] zero-copy H.264 color range: {} (full_range={})",
+            settings.color_range.name(), full);
         let on_shared_device = shared_device.is_some();
         // Prefer the shared device → decode→composite→encode stay GPU-resident on one device.
         // Without it, the encoder builds its own device (decode still downloads to CPU per Step 1's
