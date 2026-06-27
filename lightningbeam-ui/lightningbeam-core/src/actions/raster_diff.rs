@@ -98,10 +98,15 @@ impl RasterDiff {
         self.before_region.len() + self.after_region.len()
     }
 
-    /// Restore the pre-edit pixels into `raw` (undo / first-execute rollback).
-    pub fn apply_before(&self, raw: &mut Vec<u8>) {
+    /// Restore the pre-edit pixels into `raw` (undo / first-execute rollback). `cur_w`/`cur_h`
+    /// are the keyframe's current dimensions; if they differ from the diff's captured size the
+    /// diff predates a resize and is skipped rather than applied at mismatched dims.
+    pub fn apply_before(&self, raw: &mut Vec<u8>, cur_w: u32, cur_h: u32) {
         if self.bbox.is_none() {
             return; // no change
+        }
+        if cur_w != self.full_width || cur_h != self.full_height {
+            return; // diff predates a keyframe resize
         }
         if self.before_blank {
             // The frame was blank before this edit (it was the first stroke); undoing
@@ -112,10 +117,15 @@ impl RasterDiff {
         self.stamp_resident(&self.before_region, raw);
     }
 
-    /// Apply the post-edit pixels into `raw` (commit / redo).
-    pub fn apply_after(&self, raw: &mut Vec<u8>) {
+    /// Apply the post-edit pixels into `raw` (commit / redo). `cur_w`/`cur_h` are the keyframe's
+    /// current dimensions; a mismatch with the captured size means the diff predates a resize, so
+    /// it's skipped rather than rebuilding the buffer at stale dimensions.
+    pub fn apply_after(&self, raw: &mut Vec<u8>, cur_w: u32, cur_h: u32) {
         if self.bbox.is_none() {
             return; // no change
+        }
+        if cur_w != self.full_width || cur_h != self.full_height {
+            return; // diff predates a keyframe resize
         }
         if self.before_blank {
             // Base was blank: build a full transparent buffer then stamp the bbox. The
@@ -175,9 +185,9 @@ mod tests {
         assert_eq!(diff.bbox, Some((3, 2, 2, 2)));
 
         let mut buf = after.clone();
-        diff.apply_before(&mut buf);
+        diff.apply_before(&mut buf, w, h);
         assert_eq!(buf, before, "undo must reproduce the pre-edit buffer exactly");
-        diff.apply_after(&mut buf);
+        diff.apply_after(&mut buf, w, h);
         assert_eq!(buf, after, "redo must reproduce the post-edit buffer exactly");
     }
 
@@ -195,15 +205,15 @@ mod tests {
         // First execute / redo from EMPTY raw_pixels (the real commit path): builds
         // the full buffer from transparent + the stroke.
         let mut buf: Vec<u8> = Vec::new();
-        diff.apply_after(&mut buf);
+        diff.apply_after(&mut buf, w, h);
         assert_eq!(buf, after, "commit/redo must build the frame from a blank base");
 
         // Undo the first stroke → back to blank (empty).
-        diff.apply_before(&mut buf);
+        diff.apply_before(&mut buf, w, h);
         assert!(buf.is_empty(), "undoing the first stroke restores the blank keyframe");
 
         // Redo again from the now-empty buffer.
-        diff.apply_after(&mut buf);
+        diff.apply_after(&mut buf, w, h);
         assert_eq!(buf, after);
     }
 
@@ -215,7 +225,7 @@ mod tests {
         assert_eq!(diff.bbox, None);
         assert_eq!(diff.byte_size(), 0);
         let mut b = buf.clone();
-        diff.apply_before(&mut b);
+        diff.apply_before(&mut b, w, h);
         assert_eq!(b, buf);
     }
 
@@ -226,7 +236,7 @@ mod tests {
         let after = solid(w, h, [1, 2, 3, 255]);
         let diff = RasterDiff::compute(&before, &after, w, h);
         let mut empty: Vec<u8> = Vec::new();
-        diff.apply_before(&mut empty); // base not resident
+        diff.apply_before(&mut empty, w, h); // base not resident
         assert!(empty.is_empty(), "must not resize/corrupt a non-resident base");
     }
 }

@@ -145,6 +145,26 @@ pub enum TimelineMode {
     Frames,
 }
 
+/// How super-white (HDR) values are mapped to the SDR display/export output at the final
+/// linear→sRGB encode. SDR content sits in [0,1] and is unaffected by either mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HdrOutputMode {
+    /// Hard-clip values above 1.0 (the historical behaviour). SDR-exact; HDR highlights blow out.
+    #[default]
+    Clip,
+    /// Roll highlights above a knee smoothly toward 1.0 to recover detail. Slightly dims near-white.
+    HighlightRolloff,
+}
+
+impl HdrOutputMode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            HdrOutputMode::Clip => "Clip",
+            HdrOutputMode::HighlightRolloff => "Highlight rolloff",
+        }
+    }
+}
+
 /// Asset category for folder tree access
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetCategory {
@@ -244,6 +264,10 @@ pub struct Document {
     #[serde(default)]
     pub timeline_mode: TimelineMode,
 
+    /// How HDR (super-white) values are mapped to the SDR output at the final encode.
+    #[serde(default)]
+    pub hdr_output_mode: HdrOutputMode,
+
     /// Current UI layout state (serialized for save/load)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_layout: Option<LayoutNode>,
@@ -278,6 +302,7 @@ impl Default for Document {
                 ml
             },
             duration: 10.0,
+            hdr_output_mode: HdrOutputMode::default(),
             root: GraphicsObject::default(),
             vector_clips: HashMap::new(),
             video_clips: HashMap::new(),

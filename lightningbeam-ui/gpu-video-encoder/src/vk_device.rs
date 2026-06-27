@@ -22,12 +22,20 @@ pub struct DrmDevice {
     pub raw_instance: ash::Instance,
 }
 
-/// Create the device, or `Err` if Vulkan/the extension isn't available (caller falls back).
+/// Create a headless DMA-BUF-import device (encoder/decoder), or `Err` if Vulkan/the extension
+/// isn't available (caller falls back).
 pub fn create() -> Result<DrmDevice, String> {
-    unsafe { create_inner() }
+    unsafe { create_inner(false) }
 }
 
-unsafe fn create_inner() -> Result<DrmDevice, String> {
+/// Like [`create`] but also enables `VK_KHR_swapchain` so the device can present to a window —
+/// for use as the editor's **shared** wgpu device (eframe + compositor + decode + encode all on
+/// one device, so hardware-decoded DMA-BUF textures are usable by the preview compositor).
+pub fn create_windowed() -> Result<DrmDevice, String> {
+    unsafe { create_inner(true) }
+}
+
+unsafe fn create_inner(windowed: bool) -> Result<DrmDevice, String> {
     use wgpu_hal::vulkan::Api as Vk;
     // Bring the HAL Instance trait into scope for `init` / `enumerate_adapters`.
     use wgpu_hal::Instance as _;
@@ -72,14 +80,19 @@ unsafe fn create_inner() -> Result<DrmDevice, String> {
         exposed.adapter.required_device_extensions(exposed.features);
     // Only the genuine extensions; external_memory / bind_memory2 / ycbcr / format_list
     // are core in Vulkan 1.1+ (this device is 1.3) so they need no enabling.
-    let extra: &[&'static CStr] = &[
+    let mut extra: Vec<&'static CStr> = vec![
         ash::ext::image_drm_format_modifier::NAME,
         ash::khr::external_memory_fd::NAME,
         ash::ext::external_memory_dma_buf::NAME,
         ash::ext::queue_family_foreign::NAME,
     ];
+    // Presentation (windowed shared device only): the WSI surface instance extensions are already
+    // enabled by `Instance::init`; the device needs the swapchain extension to present.
+    if windowed {
+        extra.push(ash::khr::swapchain::NAME);
+    }
     for e in extra {
-        if !ext_names.contains(e) {
+        if !ext_names.contains(&e) {
             ext_names.push(e);
         }
     }
@@ -130,7 +143,10 @@ unsafe fn create_inner() -> Result<DrmDevice, String> {
             open_device,
             &wgpu::DeviceDescriptor {
                 label: Some("drm-import-device"),
-                required_features: wgpu::Features::empty(),
+                // R16/Rg16 plane textures for P010 (10-bit HDR) import need this; request it only
+                // when the adapter supports it (else 10-bit falls back to software decode).
+                required_features: wgpu_adapter.features()
+                    & wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
                 // Vello's compute pipelines need more than downlevel limits (e.g.
                 // max_storage_buffers_per_shader_stage >= 5). This device only ever runs on a
                 // real VAAPI-capable GPU, so request the adapter's full limits.

@@ -51,12 +51,16 @@ mod custom_cursor;
 mod tablet;
 mod debug_overlay;
 mod gpu_timer;
+#[cfg(target_os = "linux")]
+mod hw_video;
+mod nv12_blit;
 
 #[cfg(debug_assertions)]
 mod test_mode;
 
 mod sample_import;
 mod sample_import_dialog;
+mod svg_import;
 
 mod curve_editor;
 
@@ -77,6 +81,40 @@ struct Args {
     /// Useful for testing the CPU fallback path or working around GPU driver issues.
     #[arg(long)]
     cpu_renderer: bool,
+}
+
+/// The default eframe wgpu device setup (wgpu picks the adapter/device). Used on non-Linux, when
+/// the shared VAAPI device is unavailable, or when disabled via `LB_NO_SHARED_DEVICE`.
+fn lb_default_wgpu_setup() -> egui_wgpu::WgpuSetup {
+    egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
+        device_descriptor: std::sync::Arc::new(|adapter| {
+            let features = adapter.features();
+            // Request SHADER_F16 if available — needed on Mesa/llvmpipe for vello's
+            // unpack2x16float (enables the SHADER_F16_IN_F32 downlevel capability).
+            // TIMESTAMP_QUERY(+INSIDE_ENCODERS) drives the F3 GPU composite timer
+            // (gpu_timer.rs); both are optional and no-op when unsupported.
+            let optional_features = wgpu::Features::SHADER_F16
+                | wgpu::Features::TIMESTAMP_QUERY
+                | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+
+            let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
+                wgpu::Limits::downlevel_webgl2_defaults()
+            } else {
+                wgpu::Limits::default()
+            };
+
+            wgpu::DeviceDescriptor {
+                label: Some("lightningbeam wgpu device"),
+                required_features: features & optional_features,
+                required_limits: wgpu::Limits {
+                    max_texture_dimension_2d: 8192,
+                    ..base_limits
+                },
+                ..Default::default()
+            }
+        }),
+        ..Default::default()
+    })
 }
 
 fn main() -> eframe::Result {
@@ -168,38 +206,43 @@ fn main() -> eframe::Result {
         viewport_builder = viewport_builder.with_icon(icon);
     }
 
+    // Prefer the shared VAAPI-capable wgpu device on Linux: eframe + the compositor + hardware
+    // video decode all run on one device, so decoded DMA-BUF frames are usable by the preview
+    // compositor (decode/encode can't share textures across devices). Falls back to wgpu's normal
+    // device (software video decode) when unavailable, on other platforms, or via LB_NO_SHARED_DEVICE.
+    // The DrmDevice's wgpu handles are cloned into eframe (Arc-backed, keep the device alive); the
+    // raw VkDevice persists with them.
+    #[allow(unused_mut)]
+    let mut wgpu_setup = lb_default_wgpu_setup();
+    // Whether the shared VAAPI-capable device is in use — only then can decoded DMA-BUF frames be
+    // imported + composited, so hardware decode is injected into the VideoManager only if true.
+    #[allow(unused_assignments, unused_mut)]
+    let mut shared_device_active = false;
+    #[cfg(target_os = "linux")]
+    if std::env::var("LB_NO_SHARED_DEVICE").is_ok() {
+        println!("🖥  Shared device disabled via LB_NO_SHARED_DEVICE; default wgpu device (software video decode)");
+    } else {
+        match gpu_video_encoder::vk_device::create_windowed() {
+            Ok(drm) => {
+                println!("🖥  Using shared VAAPI-capable wgpu device (hardware video decode enabled)");
+                wgpu_setup = egui_wgpu::WgpuSetup::Existing(egui_wgpu::WgpuSetupExisting {
+                    instance: drm.instance.clone(),
+                    adapter: drm.adapter.clone(),
+                    device: drm.device.clone(),
+                    queue: drm.queue.clone(),
+                });
+                shared_device_active = true;
+            }
+            Err(e) => {
+                println!("🖥  Shared device unavailable ({e}); default wgpu device (software video decode)");
+            }
+        }
+    }
+
     let options = eframe::NativeOptions {
         viewport: viewport_builder,
         wgpu_options: egui_wgpu::WgpuConfiguration {
-            wgpu_setup: egui_wgpu::WgpuSetup::CreateNew(egui_wgpu::WgpuSetupCreateNew {
-                device_descriptor: std::sync::Arc::new(|adapter| {
-                    let features = adapter.features();
-                    // Request SHADER_F16 if available — needed on Mesa/llvmpipe for vello's
-                    // unpack2x16float (enables the SHADER_F16_IN_F32 downlevel capability).
-                    // TIMESTAMP_QUERY(+INSIDE_ENCODERS) drives the F3 GPU composite timer
-                    // (gpu_timer.rs); both are optional and no-op when unsupported.
-                    let optional_features = wgpu::Features::SHADER_F16
-                        | wgpu::Features::TIMESTAMP_QUERY
-                        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
-
-                    let base_limits = if adapter.get_info().backend == wgpu::Backend::Gl {
-                        wgpu::Limits::downlevel_webgl2_defaults()
-                    } else {
-                        wgpu::Limits::default()
-                    };
-
-                    wgpu::DeviceDescriptor {
-                        label: Some("lightningbeam wgpu device"),
-                        required_features: features & optional_features,
-                        required_limits: wgpu::Limits {
-                            max_texture_dimension_2d: 8192,
-                            ..base_limits
-                        },
-                        ..Default::default()
-                    }
-                }),
-                ..Default::default()
-            }),
+            wgpu_setup,
             ..Default::default()
         },
         ..Default::default()
@@ -257,9 +300,20 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             #[cfg(debug_assertions)]
-            let app = EditorApp::new(cc, layouts, theme, test_mode_panic_snapshot_for_app, test_mode_pending_event_for_app, test_mode_is_replaying_for_app, test_mode_pending_geometry_for_app);
+            #[allow(unused_mut)]
+            let mut app = EditorApp::new(cc, layouts, theme, test_mode_panic_snapshot_for_app, test_mode_pending_event_for_app, test_mode_is_replaying_for_app, test_mode_pending_geometry_for_app);
             #[cfg(not(debug_assertions))]
-            let app = EditorApp::new(cc, layouts, theme);
+            #[allow(unused_mut)]
+            let mut app = EditorApp::new(cc, layouts, theme);
+            // Wire hardware video decode into the VideoManager now that the shared device exists, and
+            // stash the shared device handles so the zero-copy export encoder can run on it too.
+            #[cfg(target_os = "linux")]
+            if shared_device_active {
+                if let Some(rs) = cc.wgpu_render_state.as_ref() {
+                    hw_video::install(&app.video_manager, &rs.device, &rs.adapter);
+                    app.shared_device = Some((rs.device.clone(), rs.queue.clone(), rs.adapter.clone()));
+                }
+            }
             Ok(Box::new(app))
         }),
     )
@@ -941,6 +995,9 @@ struct EditorApp {
     audio_channels: u32,
     // Video decoding and management
     video_manager: std::sync::Arc<std::sync::Mutex<lightningbeam_core::video::VideoManager>>, // Shared video manager
+    /// The shared VAAPI-capable wgpu device (device, queue, adapter), `Some` only when active. Lets
+    /// the zero-copy export encoder run on it (GPU-resident decode→composite→encode).
+    shared_device: Option<(wgpu::Device, wgpu::Queue, wgpu::Adapter)>,
     // Webcam capture state
     webcam: Option<lightningbeam_core::webcam::WebcamCapture>,
     /// Latest polled webcam frame (updated each frame for preview)
@@ -1278,6 +1335,7 @@ impl EditorApp {
             video_manager: std::sync::Arc::new(std::sync::Mutex::new(
                 lightningbeam_core::video::VideoManager::new()
             )),
+            shared_device: None,
             webcam: None,
             webcam_frame: None,
             webcam_record_command: None,
@@ -2334,6 +2392,12 @@ impl EditorApp {
                         kf.needs_fault_in = false;
                     }
                 }
+                // Track these resident pixels in the LRU so they count toward
+                // RASTER_RESIDENT_MAX and can be evicted later; without this, a frame
+                // faulted in for undo/redo that ends up clean would stay resident forever,
+                // letting resident RAM grow past the cap.
+                self.raster_resident_lru.retain(|id| *id != kf_id);
+                self.raster_resident_lru.push_back(kf_id);
             }
         }
     }
@@ -3181,7 +3245,11 @@ impl EditorApp {
                         .and_then(|e| e.to_str())
                         .unwrap_or("");
 
-                    let imported_asset = match get_file_type(extension) {
+                    // SVG imports as a new vector layer (not a placeable asset).
+                    let imported_asset = if extension.eq_ignore_ascii_case("svg") {
+                        self.import_svg_file(&path);
+                        None
+                    } else { match get_file_type(extension) {
                         Some(FileType::Image) => {
                             self.last_import_filter = ImportFilter::Images;
                             self.import_image(&path)
@@ -3198,11 +3266,12 @@ impl EditorApp {
                             self.last_import_filter = ImportFilter::Midi;
                             self.import_midi(&path)
                         }
+                        Some(FileType::Vector) => None, // handled by the svg intercept above
                         None => {
                             println!("Unsupported file type: {}", extension);
                             None
                         }
-                    };
+                    } };
 
                     eprintln!("[TIMING] import took {:.1}ms", _import_timer.elapsed().as_secs_f64() * 1000.0);
                     // Auto-place if this is "Import" (not "Import to Library")
@@ -3658,8 +3727,21 @@ impl EditorApp {
                 // TODO: Implement delete layer
             }
             MenuAction::ToggleLayerVisibility => {
-                println!("Menu: Toggle Layer Visibility");
-                // TODO: Implement toggle layer visibility
+                use lightningbeam_core::actions::{SetLayerPropertiesAction, set_layer_properties::LayerProperty};
+                use lightningbeam_core::layer::LayerTrait;
+                if let Some(layer_id) = self.active_layer_id {
+                    let cur = self.action_executor.document()
+                        .get_layer(&layer_id)
+                        .map(|l| l.visible());
+                    if let Some(cur) = cur {
+                        let action = SetLayerPropertiesAction::new(layer_id, LayerProperty::Visible(!cur));
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Toggle layer visibility: {}", e);
+                        }
+                    }
+                } else {
+                    println!("Toggle Layer Visibility: no active layer");
+                }
             }
             MenuAction::ShowMasterTrack => {
                 // Toggle show_master_track on all Timeline pane instances
@@ -4455,6 +4537,56 @@ impl EditorApp {
     }
 
     /// Import an image file as an ImageAsset
+    /// Import an `.svg` file as a new vector layer (one static keyframe at the playhead).
+    fn import_svg_file(&mut self, path: &std::path::Path) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = format!("Failed to read SVG: {}", e);
+                eprintln!("❌ {} ({})", msg, path.display());
+                notifications::notify_error("SVG Import Failed", &msg);
+                return;
+            }
+        };
+
+        let graph = match svg_import::import_svg(&bytes) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("❌ {}", e);
+                notifications::notify_error("SVG Import Failed", &e);
+                return;
+            }
+        };
+
+        let name = path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("SVG")
+            .to_string();
+
+        // Build a vector layer holding the imported graph as a keyframe at the current time.
+        let mut layer = lightningbeam_core::layer::VectorLayer::new(name);
+        let mut keyframe = lightningbeam_core::layer::ShapeKeyframe::new(self.playback_time);
+        keyframe.graph = graph;
+        layer.keyframes.push(keyframe);
+
+        let editing_clip_id = self.editing_context.current_clip_id();
+        let action = lightningbeam_core::actions::AddLayerAction::new(
+            lightningbeam_core::layer::AnyLayer::Vector(layer),
+        )
+        .with_target_clip(editing_clip_id);
+        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+            eprintln!("❌ Failed to add imported SVG layer: {}", e);
+            return;
+        }
+
+        // Select the newly created layer.
+        let context_layers = self.action_executor.document().context_layers(editing_clip_id.as_ref());
+        if let Some(last_layer) = context_layers.last() {
+            self.active_layer_id = Some(last_layer.id());
+        }
+        self.last_import_filter = ImportFilter::Images;
+    }
+
     fn import_image(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::ImageAsset;
         self.note_possible_large_media(path);
@@ -4917,25 +5049,8 @@ impl EditorApp {
                 if asset_info.clip_type == panes::DragClipType::Video {
                     if let Some((video_width, video_height)) = asset_info.dimensions {
                         let doc = self.action_executor.document();
-                        let doc_width = doc.width;
-                        let doc_height = doc.height;
-
-                        // Calculate scale to fit (use minimum to preserve aspect ratio)
-                        let scale_x = doc_width / video_width;
-                        let scale_y = doc_height / video_height;
-                        let uniform_scale = scale_x.min(scale_y);
-
-                        clip_instance.transform.scale_x = uniform_scale;
-                        clip_instance.transform.scale_y = uniform_scale;
-
-                        // Center the video in the document
-                        let scaled_width = video_width * uniform_scale;
-                        let scaled_height = video_height * uniform_scale;
-                        let center_x = (doc_width - scaled_width) / 2.0;
-                        let center_y = (doc_height - scaled_height) / 2.0;
-
-                        clip_instance.transform.x = center_x;
-                        clip_instance.transform.y = center_y;
+                        // Fit uniformly + centered (preserve aspect). Shared with the timeline drag path.
+                        clip_instance.transform.fit_centered(video_width, video_height, doc.width, doc.height);
                     }
                 } else {
                     // Audio clips are centered in document
@@ -6076,6 +6191,9 @@ impl eframe::App for EditorApp {
                 self.export_orchestrator = Some(export::ExportOrchestrator::new());
             }
 
+            // Clone before the &mut self.export_orchestrator borrow below.
+            let shared_device = self.shared_device.clone();
+
             let export_started = if let Some(orchestrator) = &mut self.export_orchestrator {
                 match export_result {
                     ExportResult::Image(settings, output_path) => {
@@ -6088,6 +6206,19 @@ impl eframe::App for EditorApp {
                             doc.height as u32,
                         );
                         false // image export is silent (no progress dialog)
+                    }
+                    ExportResult::Svg(time, output_path) => {
+                        println!("🖋 [MAIN] Exporting SVG: {}", output_path.display());
+                        let svg = lightningbeam_core::svg_export::document_to_svg(
+                            self.action_executor.document(),
+                            time,
+                        );
+                        if let Err(err) = std::fs::write(&output_path, svg) {
+                            eprintln!("❌ Failed to write SVG: {}", err);
+                        } else {
+                            println!("✅ SVG written: {}", output_path.display());
+                        }
+                        false // synchronous; no progress dialog
                     }
                     ExportResult::AudioOnly(settings, output_path) => {
                         println!("🎵 [MAIN] Starting audio-only export: {}", output_path.display());
@@ -6114,6 +6245,7 @@ impl eframe::App for EditorApp {
                             Arc::clone(&self.video_manager),
                             self.raster_store.clone(),
                             self.current_file_path.clone(),
+                            shared_device.clone(),
                         ) {
                             Ok(()) => true,
                             Err(err) => {
@@ -6135,6 +6267,7 @@ impl eframe::App for EditorApp {
                                 Arc::clone(&self.video_manager),
                                 self.raster_store.clone(),
                                 self.current_file_path.clone(),
+                                shared_device.clone(),
                             ) {
                                 Ok(()) => true,
                                 Err(err) => {

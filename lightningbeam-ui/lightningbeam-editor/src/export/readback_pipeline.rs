@@ -91,12 +91,12 @@ impl ReadbackPipeline {
     /// `enable_gpu_yuv` should be `true` only when the caller has verified the encoder's
     /// `YUV420P` plane strides are tight (== width / width-2), so the packed GPU planes
     /// drop straight into the `AVFrame` without row misalignment.
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, enable_gpu_yuv: bool) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32, enable_gpu_yuv: bool, full_range: bool) -> Self {
         let (readback_tx, readback_rx) = channel();
 
         // GPU YUV conversion when enabled AND the dimensions fit the packed shader; else RGBA + CPU.
         let gpu_yuv = if enable_gpu_yuv && super::gpu_yuv::supports(width, height) {
-            Some(super::gpu_yuv::GpuYuv::new(device))
+            Some(super::gpu_yuv::GpuYuv::new(device, full_range))
         } else {
             None
         };

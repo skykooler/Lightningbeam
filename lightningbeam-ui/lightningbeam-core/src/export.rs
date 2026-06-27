@@ -265,6 +265,84 @@ impl VideoCodec {
     }
 }
 
+/// YUV color range for the encoded video (currently H.264). Limited/TV (16–235) is what nearly
+/// every player assumes; Full/PC (0–255) keeps a bit more precision but only looks right in players
+/// that honor the full-range tag — so Limited is the safe default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColorRange {
+    Limited,
+    Full,
+}
+
+impl Default for ColorRange {
+    fn default() -> Self { ColorRange::Limited }
+}
+
+impl ColorRange {
+    pub fn is_full(&self) -> bool { matches!(self, ColorRange::Full) }
+    pub fn name(&self) -> &'static str {
+        match self {
+            ColorRange::Limited => "Limited (TV, 16–235)",
+            ColorRange::Full => "Full (PC, 0–255)",
+        }
+    }
+}
+
+/// HDR output mode for video export. SDR encodes BT.709 8-bit as before; the HDR modes encode
+/// 10-bit BT.2020 with the PQ (HDR10) or HLG transfer, preserving super-white highlights from the
+/// linear compositor. HDR requires a 10-bit codec (HEVC Main10) — the exporter forces H.265.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum HdrExportMode {
+    #[default]
+    Sdr,
+    /// PQ (SMPTE ST 2084) — HDR10. Graphics white at 203 nits (matches the compositor convention).
+    Pq,
+    /// HLG (ARIB STD-B67) — broadcast HDR, also displayable as SDR.
+    Hlg,
+}
+
+impl HdrExportMode {
+    pub fn is_hdr(&self) -> bool { !matches!(self, HdrExportMode::Sdr) }
+    pub fn name(&self) -> &'static str {
+        match self {
+            HdrExportMode::Sdr => "SDR (BT.709, 8-bit)",
+            HdrExportMode::Pq => "HDR10 / PQ (BT.2020, 10-bit)",
+            HdrExportMode::Hlg => "HLG (BT.2020, 10-bit)",
+        }
+    }
+    /// FFmpeg transfer-characteristic name for the color tags.
+    pub fn transfer_name(&self) -> &'static str {
+        match self {
+            HdrExportMode::Sdr => "bt709",
+            HdrExportMode::Pq => "smpte2084",
+            HdrExportMode::Hlg => "arib-std-b67",
+        }
+    }
+}
+
+/// How the document is fit into the export frame when the export resolution's aspect ratio differs
+/// from the document's. Applied as the export `base_transform` (document space → export pixels).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ExportFitMode {
+    /// Scale each axis independently to fill the frame — distorts when aspects differ.
+    Stretch,
+    /// Scale uniformly to fit, centered, with black bars (letterbox/pillarbox). Preserves aspect.
+    #[default]
+    Letterbox,
+    /// Scale uniformly to fill, centered, cropping the overflow. Preserves aspect, no bars.
+    Crop,
+}
+
+impl ExportFitMode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            ExportFitMode::Stretch => "Stretch (distort to fill)",
+            ExportFitMode::Letterbox => "Letterbox (fit, black bars)",
+            ExportFitMode::Crop => "Crop (fill, trim edges)",
+        }
+    }
+}
+
 /// Video quality presets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoQuality {
@@ -322,6 +400,18 @@ pub struct VideoExportSettings {
     /// Video quality
     pub quality: VideoQuality,
 
+    /// YUV color range (H.264 only; ignored by other codecs).
+    #[serde(default)]
+    pub color_range: ColorRange,
+
+    /// HDR output mode. HDR forces 10-bit HEVC (BT.2020 + PQ/HLG); SDR is the default.
+    #[serde(default)]
+    pub hdr: HdrExportMode,
+
+    /// How the document is fit into the export frame when aspect ratios differ (default Letterbox).
+    #[serde(default)]
+    pub fit: ExportFitMode,
+
     /// Audio settings (None = no audio)
     pub audio: Option<AudioExportSettings>,
 
@@ -340,6 +430,9 @@ impl Default for VideoExportSettings {
             height: None,
             framerate: 60.0,
             quality: VideoQuality::High,
+            color_range: ColorRange::Limited,
+            hdr: HdrExportMode::Sdr,
+            fit: ExportFitMode::Letterbox,
             audio: Some(AudioExportSettings::high_quality_aac()),
             start_time: 0.0,
             end_time: 60.0,
@@ -431,11 +524,14 @@ pub struct ImageExportSettings {
     /// When false, the image is composited onto an opaque background before encoding.
     /// Only meaningful for formats that support alpha (PNG, WebP).
     pub allow_transparency: bool,
+    /// How the document is fit into the output frame when aspect ratios differ (default Letterbox).
+    #[serde(default)]
+    pub fit: ExportFitMode,
 }
 
 impl Default for ImageExportSettings {
     fn default() -> Self {
-        Self { format: ImageFormat::Png, time: 0.0, width: None, height: None, quality: 90, allow_transparency: false }
+        Self { format: ImageFormat::Png, time: 0.0, width: None, height: None, quality: 90, allow_transparency: false, fit: ExportFitMode::Letterbox }
     }
 }
 

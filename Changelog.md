@@ -1,3 +1,27 @@
+# 1.0.7-alpha:
+Changes:
+- HDR video support: PQ/HLG/BT.2020 video is now read correctly (decoded to scene-linear), with a per-document output mode (clip vs highlight rolloff) and 10-bit HDR export (HEVC Main10, PQ or HLG)
+- Hardware-accelerated video decode (VAAPI) for both playback and export, including a GPU NV12 preview path; the editor now runs on a shared VAAPI-capable GPU device so decode → composite → encode stay GPU-resident
+- SVG import and export for vector layers: export the current frame to .svg, and import .svg as a new vector layer (Ctrl+I)
+- Export fit modes: choose Stretch, Letterbox, or Crop when the export resolution's aspect ratio differs from the document (video and image export)
+- Videos imported directly and dragged in from the asset library now use the same placement, so they no longer end up with different aspect ratios
+- Resizing the document now leaves raster layers untouched; the Info Panel shows the active raster layer's size and a "Layer to document size" button (scale or expand/crop)
+- The active raster layer now shows a dashed outline on the canvas
+- H.264 export gained a color-range option (Limited/TV or Full/PC)
+- Hide/Show Layer now works
+
+Bugfixes:
+- Fix sped-up and jerky 4K video playback (frame-index frame cache + request-based seeking)
+- Fix washed-out HDR/10-bit video (propagate stream color tags to hardware frames, P010 import)
+- Fix the final frame(s) of a clip occasionally failing to render at the end of the stream
+- Fix the CPU export color path producing shifted colors on unusual resolutions (BT.709 + honor the chosen range)
+- Fix fills occasionally vanishing after a paint-bucket or lasso cut
+- Fix silent gaps in exported audio
+- Fix black video thumbnails and decoder thrashing
+- Fix file-descriptor and GPU-memory leaks on hardware-import error paths
+- SVG export now omits hidden layers; SVG import respects gradient opacity
+- Fix the macOS/Windows build (hardware export is Linux-only)
+
 # 1.0.6-alpha:
 Changes:
 - Hardware-accelerated H.264 video export: each frame is rendered and encoded on the GPU (zero-copy VAAPI), roughly 2x faster, with automatic fallback to software encoding when hardware acceleration isn't available (Linux, Intel/AMD only for now)

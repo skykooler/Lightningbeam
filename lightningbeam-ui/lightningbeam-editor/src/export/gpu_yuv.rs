@@ -6,8 +6,8 @@
 //! 8.3 MB RGBA) and — more importantly — the per-frame CPU `rgba_to_yuv420p` (swscale)
 //! is eliminated.
 //!
-//! Color math is BT.709 **full-range** (JPEG range), matching the encoder color tags
-//! set in `setup_video_encoder` (`Space::BT709` + `Range::JPEG`).
+//! Color math is BT.709; the Y/chroma scale+offset (full vs limited range) is selected by
+//! the `full_range` flag and must match the encoder color tags set in `setup_video_encoder`.
 //!
 //! Output buffer layout (tight, little-endian byte packing into `array<u32>`):
 //! - `[0, W*H)`            Y plane, row stride `W`
@@ -30,15 +30,36 @@ pub fn yuv420p_len(width: u32, height: u32) -> usize {
     y + 2 * c
 }
 
+/// `(y_offset, y_scale, chroma_offset, chroma_scale)` as fractions of 255, selecting
+/// limited (TV, 16–235 / 16–240) vs full (PC, 0–255) range. Mirrors `render_nv12`.
+fn range_params(full_range: bool) -> [f32; 4] {
+    if full_range {
+        [0.0, 1.0, 128.0 / 255.0, 1.0]
+    } else {
+        [16.0 / 255.0, 219.0 / 255.0, 128.0 / 255.0, 224.0 / 255.0]
+    }
+}
+
 /// GPU compute pipeline: `Rgba8Unorm` texture → tight planar YUV420p storage buffer.
 pub struct GpuYuv {
     y_pipeline: wgpu::ComputePipeline,
     uv_pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    range_buffer: wgpu::Buffer,
 }
 
 impl GpuYuv {
-    pub fn new(device: &wgpu::Device) -> Self {
+    /// `full_range`: true → full/PC range (Y 0–255), false → limited/TV range (Y 16–235).
+    /// The encoder must tag the stream to match (`setup_video_encoder`'s `full_range`).
+    pub fn new(device: &wgpu::Device, full_range: bool) -> Self {
+        use wgpu::util::DeviceExt;
+        let params = range_params(full_range);
+        let range_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gpu_yuv_range"),
+            contents: bytemuck::cast_slice(&params),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("gpu_yuv_bgl"),
             entries: &[
@@ -59,6 +80,17 @@ impl GpuYuv {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // 2: range params (y_offset, y_scale, chroma_offset, chroma_scale)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -93,6 +125,7 @@ impl GpuYuv {
             y_pipeline: mk("y_main"),
             uv_pipeline: mk("uv_main"),
             bind_group_layout,
+            range_buffer,
         }
     }
 
@@ -118,6 +151,7 @@ impl GpuYuv {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(rgba_view) },
                 wgpu::BindGroupEntry { binding: 1, resource: yuv_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: self.range_buffer.as_entire_binding() },
             ],
         });
 
@@ -142,12 +176,12 @@ impl GpuYuv {
 
 /// CPU reference for the exact math/layout the shader produces — used by unit tests so
 /// the packing and BT.709 coefficients stay verifiable without a GPU.
-#[cfg(test)]
-fn cpu_reference(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+fn cpu_reference(rgba: &[u8], width: u32, height: u32, full_range: bool) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;
     let cw = w / 2;
     let ch = h / 2;
+    let [yo, ys, co, cs] = range_params(full_range);
     let mut out = vec![0u8; yuv420p_len(width, height)];
     let to_byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
     let px = |x: usize, y: usize| {
@@ -158,7 +192,8 @@ fn cpu_reference(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
     for y in 0..h {
         for x in 0..w {
             let p = px(x, y);
-            out[y * w + x] = to_byte(0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]);
+            let yy = 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+            out[y * w + x] = to_byte(yo + ys * yy);
         }
     }
     // U/V (2x2 average)
@@ -172,19 +207,21 @@ fn cpu_reference(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
                 acc[0] += p[0]; acc[1] += p[1]; acc[2] += p[2];
             }
             let a = [acc[0] / 4.0, acc[1] / 4.0, acc[2] / 4.0];
-            let u = -0.1146 * a[0] - 0.3854 * a[1] + 0.5000 * a[2] + 0.5;
-            let v = 0.5000 * a[0] - 0.4542 * a[1] - 0.0458 * a[2] + 0.5;
-            out[y_size + cy * cw + cx] = to_byte(u);
-            out[y_size + uv_size + cy * cw + cx] = to_byte(v);
+            let uc = -0.1146 * a[0] - 0.3854 * a[1] + 0.5000 * a[2];
+            let vc = 0.5000 * a[0] - 0.4542 * a[1] - 0.0458 * a[2];
+            out[y_size + cy * cw + cx] = to_byte(co + cs * uc);
+            out[y_size + uv_size + cy * cw + cx] = to_byte(co + cs * vc);
         }
     }
     out
 }
 
 const SHADER: &str = r#"
-// RGBA -> tight planar YUV420p (BT.709 full-range), packed 4 bytes/u32.
+// RGBA -> tight planar YUV420p (BT.709), packed 4 bytes/u32.
+// rng = (y_offset, y_scale, chroma_offset, chroma_scale): selects limited vs full range.
 @group(0) @binding(0) var input_rgba: texture_2d<f32>;
 @group(0) @binding(1) var<storage, read_write> out_buf: array<u32>;
+@group(0) @binding(2) var<uniform> rng: vec4<f32>;
 
 fn to_byte(v: f32) -> u32 { return u32(clamp(v, 0.0, 1.0) * 255.0 + 0.5); }
 
@@ -201,7 +238,7 @@ fn y_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var i = 0u; i < 4u; i = i + 1u) {
         let c = textureLoad(input_rgba, vec2<u32>(x4 + i, y), 0).rgb;
         let yy = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
-        packed = packed | (to_byte(yy) << (8u * i));
+        packed = packed | (to_byte(rng.x + rng.y * yy) << (8u * i));
     }
     out_buf[(y * w + x4) / 4u] = packed;
 }
@@ -230,10 +267,11 @@ fn uv_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let p01 = textureLoad(input_rgba, vec2<u32>(sx, sy + 1u), 0).rgb;
         let p11 = textureLoad(input_rgba, vec2<u32>(sx + 1u, sy + 1u), 0).rgb;
         let a = (p00 + p10 + p01 + p11) * 0.25;
-        let u = -0.1146 * a.r - 0.3854 * a.g + 0.5000 * a.b + 0.5;
-        let v =  0.5000 * a.r - 0.4542 * a.g - 0.0458 * a.b + 0.5;
-        up = up | (to_byte(u) << (8u * i));
-        vp = vp | (to_byte(v) << (8u * i));
+        // Centered chroma in [-0.5, 0.5], then map to range via (offset + scale*coef).
+        let uc = -0.1146 * a.r - 0.3854 * a.g + 0.5000 * a.b;
+        let vc =  0.5000 * a.r - 0.4542 * a.g - 0.0458 * a.b;
+        up = up | (to_byte(rng.z + rng.w * uc) << (8u * i));
+        vp = vp | (to_byte(rng.z + rng.w * vc) << (8u * i));
     }
     out_buf[(y_size + cy * cw + cx4) / 4u] = up;
     out_buf[(y_size + uv_size + cy * cw + cx4) / 4u] = vp;
@@ -264,14 +302,14 @@ mod tests {
     fn reference_known_colors() {
         // 8x2 solid white → Y≈255, U≈V≈128. Solid black → Y=0, U=V≈128.
         let white = vec![255u8; 8 * 2 * 4];
-        let out = cpu_reference(&white, 8, 2);
+        let out = cpu_reference(&white, 8, 2, true);
         let (cw, ch) = (4usize, 1usize);
         let y_size = 8 * 2;
         for &y in &out[..y_size] { assert!(y >= 254, "white Y={y}"); }
         for &u in &out[y_size..y_size + cw * ch] { assert!((u as i32 - 128).abs() <= 1, "white U={u}"); }
 
         let black = vec![0u8; 8 * 2 * 4];
-        let out = cpu_reference(&black, 8, 2);
+        let out = cpu_reference(&black, 8, 2, true);
         for &y in &out[..y_size] { assert_eq!(y, 0); }
         for &v in &out[y_size + cw * ch..] { assert!((v as i32 - 128).abs() <= 1, "black V={v}"); }
     }
@@ -280,7 +318,7 @@ mod tests {
     fn reference_red_bt709() {
         // Solid red (255,0,0): Y=0.2126*255≈54; V high, U low (full range).
         let red: Vec<u8> = (0..8 * 2).flat_map(|_| [255u8, 0, 0, 255]).collect();
-        let out = cpu_reference(&red, 8, 2);
+        let out = cpu_reference(&red, 8, 2, true);
         assert!((out[0] as i32 - 54).abs() <= 1, "red Y={}", out[0]);
         let y_size = 8 * 2;
         let u = out[y_size];

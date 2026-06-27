@@ -1627,12 +1627,24 @@ impl GpuBrushEngine {
         self.proxy_layer_cache.get(kf_id)
     }
 
-    /// Remove the cached texture for a raster layer keyframe (e.g. when deleted).
+    /// Remove the cached texture for a raster layer keyframe (e.g. when deleted or edited).
     pub fn remove_layer_texture(&mut self, kf_id: &Uuid) {
-        if self.raster_layer_cache.remove(kf_id).is_some() {
+        let mut changed = self.raster_layer_cache.remove(kf_id).is_some();
+        if changed {
             if let Some(pos) = self.raster_layer_lru.iter().position(|id| id == kf_id) {
                 self.raster_layer_lru.remove(pos);
             }
+        }
+        // Also drop the low-res proxy: proxies are uploaded once and never refreshed, so a
+        // stale pre-edit proxy left here would be blitted (flashing old content) if the full-res
+        // texture is later evicted before the edited pixels page back in.
+        if self.proxy_layer_cache.remove(kf_id).is_some() {
+            if let Some(pos) = self.proxy_layer_lru.iter().position(|id| id == kf_id) {
+                self.proxy_layer_lru.remove(pos);
+            }
+            changed = true;
+        }
+        if changed {
             self.report_raster_cache_vram();
         }
     }
@@ -2238,6 +2250,8 @@ impl CanvasBlitPipeline {
     /// Blit a **straight-alpha** source (e.g. a video frame uploaded to an
     /// `Rgba8UnormSrgb` texture, hardware-decoded to linear on sample). Uses the
     /// `fs_main_straight` pipeline, which skips the unpremultiply that `blit` does.
+    /// Bilinear-sampled: video frames are scaled to the output size (document→export, or any
+    /// non-1:1 transform), and nearest sampling makes that look blocky.
     pub fn blit_straight(
         &self,
         device:      &wgpu::Device,
@@ -2247,7 +2261,7 @@ impl CanvasBlitPipeline {
         transform:   &BlitTransform,
         mask_view:   Option<&wgpu::TextureView>,
     ) {
-        self.blit_with(device, queue, canvas_view, target_view, transform, mask_view, &self.sampler, &self.pipeline_straight);
+        self.blit_with(device, queue, canvas_view, target_view, transform, mask_view, &self.linear_sampler, &self.pipeline_straight);
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -15,7 +15,9 @@ pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "mov", "avi", "mkv", "webm", "m4v
 /// Supported MIDI file extensions
 pub const MIDI_EXTENSIONS: &[&str] = &["mid", "midi"];
 
-// Note: SVG import deferred to future task
+/// Supported vector file extensions (imported as a new vector layer, not an asset)
+pub const VECTOR_EXTENSIONS: &[&str] = &["svg"];
+
 // Note: .beam project files handled separately in file save/load feature
 
 /// File type categories for import routing
@@ -25,6 +27,7 @@ pub enum FileType {
     Audio,
     Video,
     Midi,
+    Vector,
 }
 
 /// Detect file type from extension string
@@ -53,6 +56,9 @@ pub fn get_file_type(extension: &str) -> Option<FileType> {
     if MIDI_EXTENSIONS.contains(&ext.as_str()) {
         return Some(FileType::Midi);
     }
+    if VECTOR_EXTENSIONS.contains(&ext.as_str()) {
+        return Some(FileType::Vector);
+    }
     None
 }
 
@@ -65,6 +71,7 @@ pub fn all_supported_extensions() -> Vec<&'static str> {
     all.extend_from_slice(AUDIO_EXTENSIONS);
     all.extend_from_slice(VIDEO_EXTENSIONS);
     all.extend_from_slice(MIDI_EXTENSIONS);
+    all.extend_from_slice(VECTOR_EXTENSIONS);
     all
 }
 
@@ -90,7 +97,8 @@ mod tests {
         assert_eq!(get_file_type("midi"), Some(FileType::Midi));
 
         assert_eq!(get_file_type("unknown"), None);
-        assert_eq!(get_file_type("svg"), None); // SVG deferred
+        assert_eq!(get_file_type("svg"), Some(FileType::Vector));
+        assert_eq!(get_file_type("SVG"), Some(FileType::Vector));
     }
 
     #[test]

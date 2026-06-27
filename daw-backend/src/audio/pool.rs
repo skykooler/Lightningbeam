@@ -582,8 +582,21 @@ impl AudioClipPool {
                     // or a container without exact stream duration). They will never
                     // arrive — stop waiting and let the render fill silence, instead of
                     // burning the 10s safety valve on every remaining chunk.
+                    //
+                    // BUT `finished` may be stale: we just moved the target with
+                    // `set_target_frame`, and on a forward jump past the buffer the reader
+                    // will reset()+seek() (clearing `finished`) on its next poll. The reader
+                    // re-seeks when `target < buf_start || target > buf_end + sample_rate`
+                    // (see disk_reader.rs), so only trust EOF when the target is inside the
+                    // current window — otherwise a stale flag from the previous region would
+                    // make us render silence over audio that's about to be decoded.
                     if ra.is_finished() {
-                        break;
+                        let (buf_start, buf_end) = ra.snapshot();
+                        let sr = audio_file.sample_rate as u64;
+                        let seek_pending = src_start < buf_start || src_start > buf_end + sr;
+                        if !seek_pending {
+                            break;
+                        }
                     }
                     std::thread::sleep(std::time::Duration::from_micros(100));
                     wait_iters += 1;

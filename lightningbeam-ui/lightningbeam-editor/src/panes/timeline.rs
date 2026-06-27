@@ -6151,20 +6151,11 @@ impl PaneRenderer for TimelinePane {
                                     let mut clip_instance = ClipInstance::new(dragging.clip_id)
                                         .with_timeline_start(drop_time);
 
-                                    // For video clips, scale to fill document dimensions
+                                    // For video clips, fit uniformly + centered (preserve aspect).
+                                    // Shared with the direct-import path via Transform::fit_centered.
                                     if dragging.clip_type == DragClipType::Video {
                                         if let Some((video_width, video_height)) = dragging.dimensions {
-                                            // Calculate scale to fill document
-                                            let scale_x = doc.width / video_width;
-                                            let scale_y = doc.height / video_height;
-
-                                            clip_instance.transform.scale_x = scale_x;
-                                            clip_instance.transform.scale_y = scale_y;
-
-                                            // Position at (0, 0) to center the scaled video
-                                            // (scaled dimensions = document dimensions, so top-left at origin centers it)
-                                            clip_instance.transform.x = 0.0;
-                                            clip_instance.transform.y = 0.0;
+                                            clip_instance.transform.fit_centered(video_width, video_height, doc.width, doc.height);
                                         } else {
                                             // No dimensions available, use document center
                                             clip_instance.transform.x = center_x;

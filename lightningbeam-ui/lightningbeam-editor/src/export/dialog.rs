@@ -6,7 +6,7 @@ use eframe::egui;
 use lightningbeam_core::export::{
     AudioExportSettings, AudioFormat,
     ImageExportSettings, ImageFormat,
-    VideoExportSettings, VideoCodec, VideoQuality,
+    VideoExportSettings, VideoCodec, VideoQuality, ColorRange,
 };
 use std::path::PathBuf;
 
@@ -25,6 +25,8 @@ pub enum ExportType {
     Audio,
     Image,
     Video,
+    /// Vector-only SVG of the current frame (lossless; raster/video layers skipped).
+    Svg,
 }
 
 /// Export result from dialog
@@ -34,6 +36,8 @@ pub enum ExportResult {
     Image(ImageExportSettings, PathBuf),
     VideoOnly(VideoExportSettings, PathBuf),
     VideoWithAudio(VideoExportSettings, AudioExportSettings, PathBuf),
+    /// SVG of vector layers at the given document time.
+    Svg(f64, PathBuf),
 }
 
 /// Export dialog state
@@ -156,6 +160,7 @@ impl ExportDialog {
             ExportType::Audio => self.audio_settings.format.extension(),
             ExportType::Image => self.image_settings.format.extension(),
             ExportType::Video => self.video_settings.codec.container_format(),
+            ExportType::Svg => "svg",
         }
     }
 
@@ -198,6 +203,7 @@ impl ExportDialog {
             ExportType::Audio => "Export Audio",
             ExportType::Image => "Export Image",
             ExportType::Video => "Export Video",
+            ExportType::Svg => "Export SVG",
         };
 
         let modal_response = egui::Modal::new(egui::Id::new("export_dialog_modal"))
@@ -219,6 +225,7 @@ impl ExportDialog {
                         (ExportType::Audio, "Audio"),
                         (ExportType::Image, "Image"),
                         (ExportType::Video, "Video"),
+                        (ExportType::Svg, "SVG"),
                     ] {
                         if ui.selectable_value(&mut self.export_type, variant, label).clicked() {
                             self.update_filename_extension();
@@ -235,6 +242,7 @@ impl ExportDialog {
                     ExportType::Audio => self.render_audio_basic(ui),
                     ExportType::Image => self.render_image_settings(ui),
                     ExportType::Video => self.render_video_basic(ui),
+                    ExportType::Svg => self.render_svg_settings(ui),
                 }
 
                 ui.add_space(12.0);
@@ -253,6 +261,7 @@ impl ExportDialog {
                         ExportType::Audio => self.render_audio_advanced(ui),
                         ExportType::Image => self.render_image_advanced(ui),
                         ExportType::Video => self.render_video_advanced(ui),
+                        ExportType::Svg => {} // SVG has no advanced settings
                     }
                 }
 
@@ -356,6 +365,20 @@ impl ExportDialog {
         }
     }
 
+    /// Render SVG export settings — just the frame time (reuses the image time field).
+    fn render_svg_settings(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Time:");
+            ui.add(egui::DragValue::new(&mut self.image_settings.time)
+                .speed(0.01)
+                .range(0.0..=f64::MAX)
+                .suffix(" s"));
+        });
+        ui.add_space(4.0);
+        ui.weak("Exports vector layers losslessly at this frame. Raster, video, and");
+        ui.weak("effect layers are not included.");
+    }
+
     /// Render advanced image export settings (time, resolution override).
     fn render_image_advanced(&mut self, ui: &mut egui::Ui) {
         // Time (which frame to export)
@@ -377,6 +400,19 @@ impl ExportDialog {
             if changed_w { self.image_settings.width  = if w == 0 { None } else { Some(w) }; }
             if changed_h { self.image_settings.height = if h == 0 { None } else { Some(h) }; }
             ui.weak("(0 = document size)");
+        });
+
+        // Fit mode — how the document maps into the output frame when aspect ratios differ.
+        ui.horizontal(|ui| {
+            use lightningbeam_core::export::ExportFitMode;
+            ui.label("Fit:");
+            egui::ComboBox::from_id_salt("image_fit_mode")
+                .selected_text(self.image_settings.fit.name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.image_settings.fit, ExportFitMode::Letterbox, ExportFitMode::Letterbox.name());
+                    ui.selectable_value(&mut self.image_settings.fit, ExportFitMode::Crop, ExportFitMode::Crop.name());
+                    ui.selectable_value(&mut self.image_settings.fit, ExportFitMode::Stretch, ExportFitMode::Stretch.name());
+                });
         });
     }
 
@@ -504,6 +540,19 @@ impl ExportDialog {
             }
         });
 
+        // Fit mode — how the document maps into the export frame when the aspect ratios differ.
+        ui.horizontal(|ui| {
+            use lightningbeam_core::export::ExportFitMode;
+            ui.label("Fit:");
+            egui::ComboBox::from_id_salt("video_fit_mode")
+                .selected_text(self.video_settings.fit.name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.video_settings.fit, ExportFitMode::Letterbox, ExportFitMode::Letterbox.name());
+                    ui.selectable_value(&mut self.video_settings.fit, ExportFitMode::Crop, ExportFitMode::Crop.name());
+                    ui.selectable_value(&mut self.video_settings.fit, ExportFitMode::Stretch, ExportFitMode::Stretch.name());
+                });
+        });
+
         ui.horizontal(|ui| {
             ui.label("FPS:");
             egui::ComboBox::from_id_salt("framerate")
@@ -527,6 +576,36 @@ impl ExportDialog {
                 });
         });
 
+        // Color range applies to H.264 (the VAAPI zero-copy encoder honors it). Limited/TV is the
+        // compatible default; Full/PC only looks right in players that read the full-range tag.
+        if matches!(self.video_settings.codec, VideoCodec::H264) {
+            ui.horizontal(|ui| {
+                ui.label("Color range:");
+                egui::ComboBox::from_id_salt("video_color_range")
+                    .selected_text(self.video_settings.color_range.name())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.video_settings.color_range, ColorRange::Limited, ColorRange::Limited.name());
+                        ui.selectable_value(&mut self.video_settings.color_range, ColorRange::Full, ColorRange::Full.name());
+                    });
+            });
+        }
+
+        // HDR output: 10-bit BT.2020 PQ/HLG (HEVC). Forces H.265; software path (no zero-copy).
+        ui.horizontal(|ui| {
+            use lightningbeam_core::export::HdrExportMode;
+            ui.label("Dynamic range:");
+            egui::ComboBox::from_id_salt("video_hdr_mode")
+                .selected_text(self.video_settings.hdr.name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.video_settings.hdr, HdrExportMode::Sdr, HdrExportMode::Sdr.name());
+                    ui.selectable_value(&mut self.video_settings.hdr, HdrExportMode::Pq, HdrExportMode::Pq.name());
+                    ui.selectable_value(&mut self.video_settings.hdr, HdrExportMode::Hlg, HdrExportMode::Hlg.name());
+                });
+        });
+        if self.video_settings.hdr.is_hdr() {
+            ui.label(egui::RichText::new("HDR exports as 10-bit HEVC (H.265), BT.2020.").weak().small());
+        }
+
         ui.checkbox(&mut self.include_audio, "Include Audio");
 
         ui.add_space(8.0);
@@ -539,7 +618,7 @@ impl ExportDialog {
     fn render_time_range(&mut self, ui: &mut egui::Ui) {
         let (start_time, end_time) = match self.export_type {
             ExportType::Audio => (&mut self.audio_settings.start_time, &mut self.audio_settings.end_time),
-            ExportType::Image => return, // image uses a single time field, not a range
+            ExportType::Image | ExportType::Svg => return, // single time field, not a range
             ExportType::Video => (&mut self.video_settings.start_time, &mut self.video_settings.end_time),
         };
 
@@ -613,6 +692,7 @@ impl ExportDialog {
                 }
                 Some(ExportResult::Image(self.image_settings.clone(), output_path))
             }
+            ExportType::Svg => Some(ExportResult::Svg(self.image_settings.time, output_path)),
             ExportType::Audio => {
                 // Validate audio settings
                 if let Err(err) = self.audio_settings.validate() {

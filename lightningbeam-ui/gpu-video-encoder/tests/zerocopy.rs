@@ -54,7 +54,7 @@ fn zerocopy_real_frame_render() {
         wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
     );
 
-    let conv = render_nv12::Rgba2Nv12::new(&drm.device);
+    let conv = render_nv12::Rgba2Nv12::new(&drm.device, true);
     let src_view = src.create_view(&Default::default());
     let y_view = imported.y().create_view(&Default::default());
     let uv_view = imported.uv().create_view(&Default::default());

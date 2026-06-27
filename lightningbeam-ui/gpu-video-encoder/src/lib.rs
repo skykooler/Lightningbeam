@@ -30,6 +30,10 @@ pub mod dmabuf;
 #[cfg(target_os = "linux")]
 pub mod encoder;
 
+/// VAAPI hardware decode → wgpu textures (Linux).
+#[cfg(target_os = "linux")]
+pub mod decoder;
+
 #[cfg(test)]
 mod probe_tests {
     /// Confirm a headless GPU adapter is reachable (Vulkan on Linux/Intel). This gates

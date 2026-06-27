@@ -135,6 +135,8 @@ struct SharedVelloResources {
     blit_bind_group_layout: wgpu::BindGroupLayout,
     /// HDR to sRGB blit pipeline (linear→sRGB conversion for display)
     hdr_blit_pipeline: wgpu::RenderPipeline,
+    /// Variant of `hdr_blit_pipeline` with highlight rolloff (document HDR output mode).
+    hdr_blit_pipeline_rolloff: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     /// Shared image cache for avoiding re-decoding images every frame
     image_cache: Mutex<lightningbeam_core::renderer::ImageCache>,
@@ -152,6 +154,8 @@ struct SharedVelloResources {
     gpu_brush: Mutex<crate::gpu_brush::GpuBrushEngine>,
     /// Canvas blit pipeline (renders GPU canvas to layer sRGB buffer)
     canvas_blit: crate::gpu_brush::CanvasBlitPipeline,
+    /// NV12→linear blit for hardware-decoded video frames (GPU plane textures → HDR layer).
+    nv12_blit: crate::nv12_blit::Nv12BlitPipeline,
     /// True when Vello is running its CPU software renderer (either forced or GPU fallback).
     /// Used to select cheaper antialiasing — Msaa16 on CPU costs 16× as much as Area.
     is_cpu_renderer: bool,
@@ -344,6 +348,41 @@ impl SharedVelloResources {
             cache: None,
         });
 
+        // Variant with highlight rolloff (document HDR output mode); identical but `fs_main_rolloff`.
+        let hdr_blit_pipeline_rolloff = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("hdr_blit_pipeline_rolloff"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &hdr_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &hdr_shader,
+                entry_point: Some("fs_main_rolloff"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         // Create sampler
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("vello_blit_sampler"),
@@ -372,6 +411,7 @@ impl SharedVelloResources {
         // Initialize GPU raster brush engine
         let gpu_brush = crate::gpu_brush::GpuBrushEngine::new(device);
         let canvas_blit = crate::gpu_brush::CanvasBlitPipeline::new(device);
+        let nv12_blit = crate::nv12_blit::Nv12BlitPipeline::new(device);
 
         println!("✅ Vello shared resources initialized (renderer, shaders, HDR compositor, effect processor, color converter, and GPU brush engine)");
 
@@ -380,6 +420,7 @@ impl SharedVelloResources {
             blit_pipeline,
             blit_bind_group_layout,
             hdr_blit_pipeline,
+            hdr_blit_pipeline_rolloff,
             sampler,
             image_cache: Mutex::new(lightningbeam_core::renderer::ImageCache::new()),
             video_manager,
@@ -389,6 +430,7 @@ impl SharedVelloResources {
             srgb_to_linear,
             gpu_brush: Mutex::new(gpu_brush),
             canvas_blit,
+            nv12_blit,
             is_cpu_renderer: use_cpu || is_cpu_renderer,
             gpu_timer: Mutex::new(None),
             video_frame_cache: Mutex::new(VideoFrameTexCache::new()),
@@ -1062,6 +1104,12 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             // Let the cache page image bytes from the project container on a decode miss.
             image_cache.set_container_path(self.ctx.container_path.clone());
 
+            // Preview composites on the shared device, so it can consume hardware-decoded GPU
+            // frames — but only the GPU renderer; the CPU fallback needs software frames.
+            if let Ok(mut vm) = shared.video_manager.lock() {
+                vm.set_render_hardware_ok(!shared.is_cpu_renderer);
+            }
+
             let composite_result = if shared.is_cpu_renderer {
                 lightningbeam_core::renderer::render_document_for_compositing_cpu(
                     &self.ctx.document,
@@ -1678,25 +1726,34 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                     RenderedLayerType::Video { instances } => {
                         // Video layer — per-instance: (cached) frame texture → blit → composite.
                         for inst in instances {
-                            if inst.rgba_data.is_empty() { continue; }
+                            if inst.gpu.is_none() && inst.rgba_data.is_empty() { continue; }
                             let hdr_layer_handle = buffer_pool.acquire(device, hdr_spec);
                             if let (Some(hdr_layer_view), Some(hdr_view)) = (
                                 buffer_pool.get_view(hdr_layer_handle),
                                 &instance_resources.hdr_texture_view,
                             ) {
-                                // Reuse the GPU texture for this frame if it's unchanged (a
-                                // static/paused video → no CPU conversion, alloc, or upload).
-                                // Timed into `blit_ms` (incl the cache lookup + per-frame view).
                                 let _t = std::time::Instant::now();
-                                let tex_view = shared
-                                    .video_frame_cache
-                                    .lock()
-                                    .unwrap()
-                                    .texture_view(device, queue, &inst.rgba_data, inst.width, inst.height);
                                 let bt = crate::gpu_brush::BlitTransform::new(
                                     inst.transform, inst.width, inst.height, width, height,
                                 );
-                                shared.canvas_blit.blit_straight(device, queue, &tex_view, hdr_layer_view, &bt, None);
+                                if let Some(gpu) = &inst.gpu {
+                                    // Hardware-decoded NV12 plane textures → linear RGB, no CPU upload.
+                                    let y_view = gpu.y.create_view(&Default::default());
+                                    let uv_view = gpu.uv.create_view(&Default::default());
+                                    shared.nv12_blit.blit(
+                                        device, queue, &y_view, &uv_view, hdr_layer_view, &bt,
+                                        gpu.full_range, gpu.coeffs, gpu.transfer, gpu.primaries,
+                                    );
+                                } else {
+                                    // Reuse the GPU texture for this frame if it's unchanged (a
+                                    // static/paused video → no CPU conversion, alloc, or upload).
+                                    let tex_view = shared
+                                        .video_frame_cache
+                                        .lock()
+                                        .unwrap()
+                                        .texture_view(device, queue, &inst.rgba_data, inst.width, inst.height);
+                                    shared.canvas_blit.blit_straight(device, queue, &tex_view, hdr_layer_view, &bt, None);
+                                }
                                 cput.blit_ms += _t.elapsed().as_secs_f64() * 1000.0;
 
                                 let compositor_layer = lightningbeam_core::gpu::CompositorLayer::new(
@@ -2016,6 +2073,41 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
             drop(image_cache);
             scene
         };
+
+        // Active raster-layer border: a black+yellow dashed outline of the layer's canvas bounds (in
+        // document space) so its size is visible — especially when it differs from the document (e.g.
+        // after a doc resize). Two strokes sharing one dash pattern, offset by a dash so the yellow
+        // fills the black's gaps → interlocking black/yellow marching-ants.
+        if let Some(active_id) = self.ctx.active_layer_id {
+            if let Some(lightningbeam_core::layer::AnyLayer::Raster(rl)) = self.ctx.document.get_layer(&active_id) {
+                // Use playback_time (clip-local when editing a movie clip) like every other
+                // keyframe lookup in prepare(), and overlay_transform so the outline tracks the
+                // layer's pixels through any clip-instance affine (it equals camera_transform
+                // outside clip-edit mode).
+                if let Some(kf) = rl.keyframe_at(self.ctx.playback_time) {
+                    let rect = vello::kurbo::Rect::new(0.0, 0.0, kf.width as f64, kf.height as f64);
+                    // Sizes are in document space; divide by zoom so they're ~constant on screen.
+                    let inv_zoom = 1.0 / (self.ctx.zoom as f64).max(1e-3);
+                    let stroke_w = 1.5 * inv_zoom;
+                    let dash = 6.0 * inv_zoom;
+                    let pattern = [dash, dash];
+                    scene.stroke(
+                        &vello::kurbo::Stroke::new(stroke_w).with_dashes(0.0, pattern),
+                        overlay_transform,
+                        vello::peniko::Color::new([0.0, 0.0, 0.0, 1.0]),
+                        None,
+                        &rect,
+                    );
+                    scene.stroke(
+                        &vello::kurbo::Stroke::new(stroke_w).with_dashes(dash, pattern),
+                        overlay_transform,
+                        vello::peniko::Color::new([1.0, 0.85, 0.0, 1.0]),
+                        None,
+                        &rect,
+                    );
+                }
+            }
+        }
 
         // Render drag preview objects with transparency
         if let (Some(delta), Some(active_layer_id)) = (self.ctx.drag_delta, self.ctx.active_layer_id) {
@@ -2928,7 +3020,11 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             occlusion_query_set: None,
                         });
 
-                        render_pass.set_pipeline(&shared.hdr_blit_pipeline);
+                        let hdr_pipeline = match self.ctx.document.hdr_output_mode {
+                            lightningbeam_core::document::HdrOutputMode::HighlightRolloff => &shared.hdr_blit_pipeline_rolloff,
+                            lightningbeam_core::document::HdrOutputMode::Clip => &shared.hdr_blit_pipeline,
+                        };
+                        render_pass.set_pipeline(hdr_pipeline);
                         render_pass.set_bind_group(0, hdr_bind_group, &[]);
                         render_pass.draw(0..3, 0..1); // Full-screen triangle (3 vertices)
                     }

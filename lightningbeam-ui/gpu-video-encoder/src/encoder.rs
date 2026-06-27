@@ -6,7 +6,7 @@
 
 use crate::dmabuf::{self, ImportedNv12, Nv12DmaBuf};
 use crate::render_nv12::Rgba2Nv12;
-use crate::vk_device::{self, DrmDevice};
+use crate::vk_device;
 use ffmpeg_sys_next as ff;
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -19,7 +19,11 @@ fn averror(e: i32) -> i32 {
 }
 
 pub struct ZeroCopyEncoder {
-    drm: DrmDevice,
+    /// wgpu handles the NV12 render runs on — either an own `DrmDevice`'s (via `new`) or the
+    /// editor's shared device (via `new_on_device`). Cloned (Arc-backed) so the source can drop.
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    adapter: wgpu::Adapter,
     renderer: Rgba2Nv12,
     hw_device: *mut ff::AVBufferRef,
     frames_ref: *mut ff::AVBufferRef,
@@ -42,15 +46,39 @@ unsafe impl Send for ZeroCopyEncoder {}
 impl ZeroCopyEncoder {
     /// Build a zero-copy `h264_vaapi` encoder writing to `output_path` (container inferred
     /// from the extension, e.g. `.mp4`). `Err` if VAAPI/the device is unavailable.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         width: u32,
         height: u32,
         framerate: i32,
         bitrate_kbps: u32,
         output_path: &Path,
+        full_range: bool,
     ) -> Result<Self, String> {
+        // Build a dedicated DMA-BUF-import device and run the encoder on it.
         let drm = vk_device::create()?;
-        let renderer = Rgba2Nv12::new(&drm.device);
+        Self::new_on_device(
+            drm.device, drm.queue, drm.adapter,
+            width, height, framerate, bitrate_kbps, output_path, full_range,
+        )
+    }
+
+    /// Build the encoder running its NV12 render + DMA-BUF import on an existing wgpu device (the
+    /// editor's shared device), so decode→composite→encode stay GPU-resident on one device. The
+    /// device must have the DMA-BUF import extensions (a `DrmDevice` / `vk_device::create_windowed`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_on_device(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        adapter: wgpu::Adapter,
+        width: u32,
+        height: u32,
+        framerate: i32,
+        bitrate_kbps: u32,
+        output_path: &Path,
+        full_range: bool,
+    ) -> Result<Self, String> {
+        let renderer = Rgba2Nv12::new(&device, full_range);
         unsafe {
             let mut hw_device = crate::vaapi::create_device()?;
             let name = CString::new("h264_vaapi").unwrap();
@@ -66,6 +94,17 @@ impl ZeroCopyEncoder {
             (*enc).framerate = ff::AVRational { num: framerate, den: 1 };
             (*enc).pix_fmt = ff::AVPixelFormat::AV_PIX_FMT_VAAPI;
             (*enc).bit_rate = (bitrate_kbps as i64) * 1000;
+            // Color signalling for the H.264 VUI. The Rgba2Nv12 shader produces BT.709 luma/chroma
+            // in the matching range; without these tags players assume limited range and a
+            // full-range stream looks dark + oversaturated.
+            (*enc).color_range = if full_range {
+                ff::AVColorRange::AVCOL_RANGE_JPEG
+            } else {
+                ff::AVColorRange::AVCOL_RANGE_MPEG
+            };
+            (*enc).colorspace = ff::AVColorSpace::AVCOL_SPC_BT709;
+            (*enc).color_primaries = ff::AVColorPrimaries::AVCOL_PRI_BT709;
+            (*enc).color_trc = ff::AVColorTransferCharacteristic::AVCOL_TRC_BT709;
 
             let frames_ref = ff::av_hwframe_ctx_alloc(hw_device);
             {
@@ -140,7 +179,9 @@ impl ZeroCopyEncoder {
             let stream_tb = (*stream).time_base;
 
             Ok(Self {
-                drm,
+                device,
+                queue,
+                adapter,
                 renderer,
                 hw_device,
                 frames_ref,
@@ -159,10 +200,10 @@ impl ZeroCopyEncoder {
 
     /// The wgpu device frames must be rendered on (so the RGBA texture is importable).
     pub fn device(&self) -> &wgpu::Device {
-        &self.drm.device
+        &self.device
     }
     pub fn queue(&self) -> &wgpu::Queue {
-        &self.drm.queue
+        &self.queue
     }
 
     /// Render `rgba` (an `Rgba8Unorm` texture on [`Self::device`], `TEXTURE_BINDING`)
@@ -201,8 +242,9 @@ impl ZeroCopyEncoder {
                     y_pitch: y.pitch as u64,
                     uv_offset: uv.offset as u64,
                     uv_pitch: uv.pitch as u64,
+                    ten_bit: false,
                 };
-                let imported = match dmabuf::import_raw(&self.drm, &buf) {
+                let imported = match dmabuf::import_raw(&self.device, &self.adapter, &buf) {
                     Ok(i) => i,
                     Err(e) => {
                         ff::av_frame_free(&mut (drm_f as *mut _));
@@ -219,10 +261,10 @@ impl ZeroCopyEncoder {
             let rgba_view = rgba.create_view(&Default::default());
             let y_view = imp.y().create_view(&Default::default());
             let uv_view = imp.uv().create_view(&Default::default());
-            let mut cmd = self.drm.device.create_command_encoder(&Default::default());
-            self.renderer.convert(&self.drm.device, &mut cmd, &rgba_view, &y_view, &uv_view);
-            self.drm.queue.submit(Some(cmd.finish()));
-            let _ = self.drm.device.poll(wgpu::PollType::wait_indefinitely());
+            let mut cmd = self.device.create_command_encoder(&Default::default());
+            self.renderer.convert(&self.device, &mut cmd, &rgba_view, &y_view, &uv_view);
+            self.queue.submit(Some(cmd.finish()));
+            let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
             // Encode the surface.
             (*surf).pts = self.pts;

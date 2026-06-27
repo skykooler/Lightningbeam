@@ -11,6 +11,7 @@ pub mod readback_pipeline;
 pub mod perf_metrics;
 pub mod cpu_yuv_converter;
 pub mod gpu_yuv;
+pub mod hdr_frame;
 
 use lightningbeam_core::export::{AudioExportSettings, ImageExportSettings, VideoExportSettings, ExportProgress};
 use lightningbeam_core::document::Document;
@@ -52,6 +53,13 @@ pub struct VideoExportState {
     width: u32,
     /// Export height in pixels
     height: u32,
+    /// HDR output mode — HDR uses a synchronous 10-bit path instead of the async RGBA pipeline.
+    hdr: lightningbeam_core::export::HdrExportMode,
+    /// How the document is fit into the export frame (stretch/letterbox/crop).
+    fit: lightningbeam_core::export::ExportFitMode,
+    /// SDR color range: true = full (PC, 0–255), false = limited (TV, 16–235). The YUV
+    /// converters and the encoder color tag must agree on this.
+    full_range: bool,
     /// Channel to send rendered frames to encoder thread
     frame_tx: Option<Sender<VideoFrameMessage>>,
     /// HDR GPU resources for compositing pipeline (effects, color conversion)
@@ -79,6 +87,10 @@ struct ZeroCopyVideo {
     gpu_resources: video_exporter::ExportGpuResources,
     /// Reused RGBA target (RENDER_ATTACHMENT | TEXTURE_BINDING) on the encoder's device.
     rgba: wgpu::Texture,
+    /// True when running on the shared device → compositing can consume hardware-decoded GPU frames.
+    on_shared_device: bool,
+    /// How the document is fit into the export frame (stretch/letterbox/crop).
+    fit: lightningbeam_core::export::ExportFitMode,
 }
 
 /// State for a single-frame image export (runs on the GPU render thread, one frame per update).
@@ -589,6 +601,7 @@ impl ExportOrchestrator {
             // ── First call: render the frame to the GPU output texture ────────
             let w = state.width;
             let h = state.height;
+            let fit = state.settings.fit;
 
             if state.gpu_resources.is_none() {
                 state.gpu_resources = Some(video_exporter::ExportGpuResources::new(device, w, h));
@@ -622,6 +635,8 @@ impl ExportOrchestrator {
                 floating_selection,
                 state.settings.allow_transparency,
                 raster_store,
+                true, // image export composites on the shared device
+                fit,
             )?;
             queue.submit(Some(encoder.finish()));
 
@@ -854,6 +869,9 @@ impl ExportOrchestrator {
         width: u32,
         height: u32,
     ) -> (std::thread::JoinHandle<()>, VideoExportState) {
+        let hdr = settings.hdr;
+        let fit = settings.fit;
+        let full_range = settings.color_range.is_full();
         let handle = std::thread::spawn(move || {
             Self::run_video_encoder(settings, output_path, frame_rx, progress_tx, cancel_flag, total_frames);
         });
@@ -866,6 +884,9 @@ impl ExportOrchestrator {
             framerate,
             width,
             height,
+            hdr,
+            fit,
+            full_range,
             frame_tx: Some(frame_tx),
             gpu_resources: None,
             readback_pipeline: None,
@@ -889,17 +910,35 @@ impl ExportOrchestrator {
         height: u32,
         framerate: f64,
         output_path: &std::path::Path,
+        shared_device: Option<(wgpu::Device, wgpu::Queue, wgpu::Adapter)>,
     ) -> Option<ZeroCopyVideo> {
-        if !matches!(settings.codec, lightningbeam_core::export::VideoCodec::H264) {
+        // Zero-copy is 8-bit H.264 only; HDR needs the 10-bit HEVC software path.
+        if settings.hdr.is_hdr()
+            || !matches!(settings.codec, lightningbeam_core::export::VideoCodec::H264)
+        {
             return None;
         }
-        let encoder = match gpu_video_encoder::encoder::ZeroCopyEncoder::new(
-            width,
-            height,
-            framerate.round() as i32,
-            settings.quality.bitrate_kbps(),
-            output_path,
-        ) {
+        let bitrate = settings.quality.bitrate_kbps();
+        let fr = framerate.round() as i32;
+        let full = settings.color_range.is_full();
+        println!("🎬 [EXPORT] zero-copy H.264 color range: {} (full_range={})",
+            settings.color_range.name(), full);
+        let on_shared_device = shared_device.is_some();
+        // Prefer the shared device → decode→composite→encode stay GPU-resident on one device.
+        // Without it, the encoder builds its own device (decode still downloads to CPU per Step 1's
+        // hardware_ok=false on this path).
+        let encoder_result = match shared_device {
+            Some((device, queue, adapter)) => {
+                println!("🎬 [EXPORT] zero-copy on shared device (GPU-resident decode)");
+                gpu_video_encoder::encoder::ZeroCopyEncoder::new_on_device(
+                    device, queue, adapter, width, height, fr, bitrate, output_path, full,
+                )
+            }
+            None => gpu_video_encoder::encoder::ZeroCopyEncoder::new(
+                width, height, fr, bitrate, output_path, full,
+            ),
+        };
+        let encoder = match encoder_result {
             Ok(e) => e,
             Err(e) => {
                 println!("🎬 [EXPORT] zero-copy unavailable ({e}); software path");
@@ -935,7 +974,7 @@ impl ExportOrchestrator {
             view_formats: &[],
         });
         println!("🎬 [EXPORT] zero-copy VAAPI H.264 enabled");
-        Some(ZeroCopyVideo { encoder, renderer, gpu_resources, rgba })
+        Some(ZeroCopyVideo { encoder, renderer, gpu_resources, rgba, on_shared_device, fit: settings.fit })
     }
 
     /// Start a video export in the background.
@@ -953,6 +992,7 @@ impl ExportOrchestrator {
     /// # Returns
     /// Ok(()) on success, Err on failure
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn start_video_export(
         &mut self,
         settings: VideoExportSettings,
@@ -961,6 +1001,8 @@ impl ExportOrchestrator {
         video_manager: Arc<std::sync::Mutex<VideoManager>>,
         raster_store: lightningbeam_core::raster_store::RasterStore,
         container_path: Option<PathBuf>,
+        // The shared VAAPI device, `Some` only when active → zero-copy encode runs on it.
+        shared_device: Option<(wgpu::Device, wgpu::Queue, wgpu::Adapter)>,
     ) -> Result<(), String> {
         println!("🎬 [VIDEO EXPORT] Starting video export");
 
@@ -988,7 +1030,7 @@ impl ExportOrchestrator {
         // success it returns here; otherwise we fall through to the software encoder thread.
         #[cfg(target_os = "linux")]
         {
-            if let Some(zc) = Self::try_build_zero_copy(&settings, width, height, framerate, &output_path) {
+            if let Some(zc) = Self::try_build_zero_copy(&settings, width, height, framerate, &output_path, shared_device) {
                 drop(frame_rx);
                 let document_snapshot = document.clone();
                 let mut image_cache = ImageCache::new();
@@ -1052,6 +1094,8 @@ impl ExportOrchestrator {
         video_manager: Arc<std::sync::Mutex<VideoManager>>,
         raster_store: lightningbeam_core::raster_store::RasterStore,
         container_path: Option<PathBuf>,
+        // The shared VAAPI device, `Some` only when active → zero-copy encode runs on it.
+        shared_device: Option<(wgpu::Device, wgpu::Queue, wgpu::Adapter)>,
     ) -> Result<(), String> {
         println!("🎬🎵 [PARALLEL EXPORT] Starting parallel video+audio export");
 
@@ -1118,7 +1162,7 @@ impl ExportOrchestrator {
         // by `render_next_video_frame` on the UI thread.
         #[cfg(target_os = "linux")]
         let (video_thread, video_state) = match Self::try_build_zero_copy(
-            &video_settings, video_width, video_height, video_framerate, &temp_video_path,
+            &video_settings, video_width, video_height, video_framerate, &temp_video_path, shared_device,
         ) {
             Some(zc) => {
                 drop(frame_rx); // the zero-copy path renders internally, no frame channel
@@ -1241,6 +1285,44 @@ impl ExportOrchestrator {
 
         let width = state.width;
         let height = state.height;
+        let fit = state.fit;
+
+        // HDR path: synchronous 10-bit render (composite → PQ/HLG → readback → 10-bit YUV), one
+        // frame per call. Bypasses the SDR async RGBA pipeline (which is 8-bit only).
+        if state.hdr.is_hdr() {
+            if state.gpu_resources.is_none() {
+                println!("🎬 [VIDEO EXPORT] Initializing HDR GPU resources {}x{} ({})", width, height, state.hdr.name());
+                state.gpu_resources = Some(video_exporter::ExportGpuResources::new(device, width, height));
+            }
+            if state.current_frame < state.total_frames {
+                let timestamp = state.start_time + (state.current_frame as f64 / state.framerate);
+                let gpu_resources = state.gpu_resources.as_mut().unwrap();
+                let (y, u, v) = video_exporter::render_frame_to_yuv10_hdr(
+                    document, timestamp, width, height,
+                    device, queue, renderer, image_cache, video_manager,
+                    gpu_resources, state.hdr, fit, raster_store,
+                )?;
+                if let Some(tx) = &state.frame_tx {
+                    tx.send(VideoFrameMessage::Frame {
+                        frame_num: state.current_frame,
+                        timestamp,
+                        y_plane: y,
+                        u_plane: u,
+                        v_plane: v,
+                    }).map_err(|_| "Failed to send HDR frame")?;
+                }
+                state.current_frame += 1;
+            }
+            if state.current_frame >= state.total_frames {
+                println!("🎬 [VIDEO EXPORT] HDR complete: {} frames", state.total_frames);
+                if let Some(tx) = state.frame_tx.take() {
+                    tx.send(VideoFrameMessage::Done).ok();
+                }
+                state.gpu_resources = None;
+                return Ok(false);
+            }
+            return Ok(true);
+        }
 
         // Initialize GPU resources and readback pipeline on first frame
         if state.gpu_resources.is_none() {
@@ -1258,8 +1340,8 @@ impl ExportOrchestrator {
             if !gpu_yuv_tight {
                 println!("🎬 [VIDEO EXPORT] YUV planes are padded at {width}x{height}; using CPU YUV path");
             }
-            state.readback_pipeline = Some(readback_pipeline::ReadbackPipeline::new(device, queue, width, height, gpu_yuv_tight));
-            state.cpu_yuv_converter = Some(cpu_yuv_converter::CpuYuvConverter::new(width, height)?);
+            state.readback_pipeline = Some(readback_pipeline::ReadbackPipeline::new(device, queue, width, height, gpu_yuv_tight, state.full_range));
+            state.cpu_yuv_converter = Some(cpu_yuv_converter::CpuYuvConverter::new(width, height, state.full_range)?);
             println!("🚀 [ASYNC PIPELINE] Triple-buffered pipeline initialized");
             println!("🚀 [CPU YUV] swscale converter initialized");
         }
@@ -1347,6 +1429,8 @@ impl ExportOrchestrator {
                     None,  // No floating selection during video export
                     false, // Video export is never transparent
                     raster_store,
+                    true,  // software export composites on the shared device → may use HW frames
+                    fit,
                 )?;
                 let render_end = Instant::now();
 
@@ -1437,6 +1521,7 @@ impl ExportOrchestrator {
             let rgba_view = zc.rgba.create_view(&Default::default());
 
             let t0 = std::time::Instant::now();
+            let fit = zc.fit;
             let cmd = match video_exporter::render_frame_to_gpu_rgba(
                 &mut document,
                 timestamp,
@@ -1452,6 +1537,8 @@ impl ExportOrchestrator {
                 None,
                 false,
                 Some(&raster_store),
+                zc.on_shared_device, // GPU-resident decode only when on the shared device
+                fit,
             ) {
                 Ok(cmd) => cmd,
                 Err(e) => {
@@ -1555,13 +1642,33 @@ impl ExportOrchestrator {
         // Initialize FFmpeg
         ffmpeg_next::init().map_err(|e| format!("Failed to initialize FFmpeg: {}", e))?;
 
-        // Convert codec enum to FFmpeg codec ID
-        let codec_id = match settings.codec {
-            VideoCodec::H264 => ffmpeg_next::codec::Id::H264,
-            VideoCodec::H265 => ffmpeg_next::codec::Id::HEVC,
-            VideoCodec::VP8 => ffmpeg_next::codec::Id::VP8,
-            VideoCodec::VP9 => ffmpeg_next::codec::Id::VP9,
-            VideoCodec::ProRes422 => ffmpeg_next::codec::Id::PRORES,
+        // Convert codec enum to FFmpeg codec ID. HDR requires 10-bit HEVC (Main10), so force HEVC
+        // regardless of the chosen codec when an HDR mode is selected.
+        let codec_id = if settings.hdr.is_hdr() {
+            // HEVC can only be muxed into MP4/MOV, not WebM — reject the incompatible combo up
+            // front with a clear message instead of letting the muxer fail cryptically.
+            if settings.codec.container_format() == "webm" {
+                return Err(format!(
+                    "HDR export needs H.265/HEVC in an MP4 container, but {} uses WebM. \
+                     Pick H.265 (or H.264) for HDR.",
+                    settings.codec.name()
+                ));
+            }
+            if !matches!(settings.codec, VideoCodec::H265) {
+                println!(
+                    "⚠️  [ENCODER] HDR selected: overriding codec {} → H.265/HEVC (Main10)",
+                    settings.codec.name()
+                );
+            }
+            ffmpeg_next::codec::Id::HEVC
+        } else {
+            match settings.codec {
+                VideoCodec::H264 => ffmpeg_next::codec::Id::H264,
+                VideoCodec::H265 => ffmpeg_next::codec::Id::HEVC,
+                VideoCodec::VP8 => ffmpeg_next::codec::Id::VP8,
+                VideoCodec::VP9 => ffmpeg_next::codec::Id::VP9,
+                VideoCodec::ProRes422 => ffmpeg_next::codec::Id::PRORES,
+            }
         };
 
         // Get bitrate from quality settings
@@ -1604,7 +1711,16 @@ impl ExportOrchestrator {
             height,
             framerate,
             bitrate_kbps,
+            settings.hdr,
+            settings.color_range.is_full(),
         )?;
+
+        // Pixel format the encoder frames are built in (matches setup_video_encoder).
+        let pixel_format = if settings.hdr.is_hdr() {
+            ffmpeg_next::format::Pixel::YUV420P10LE
+        } else {
+            ffmpeg_next::format::Pixel::YUV420P
+        };
 
         // Create output file
         let mut output = ffmpeg_next::format::output(&output_path)
@@ -1634,6 +1750,7 @@ impl ExportOrchestrator {
                 width,
                 height,
                 timestamp,
+                pixel_format,
             )?;
 
             // Send progress update for first frame
@@ -1661,6 +1778,7 @@ impl ExportOrchestrator {
                         width,
                         height,
                         timestamp,
+                        pixel_format,
                     )?;
 
                     frames_encoded += 1;
@@ -1705,29 +1823,33 @@ impl ExportOrchestrator {
         width: u32,
         height: u32,
         timestamp: f64,
+        pixel_format: ffmpeg_next::format::Pixel,
     ) -> Result<(), String> {
-        // YUV planes already converted by GPU (no CPU conversion needed)
+        // YUV planes already converted (8-bit YUV420P, or 10-bit YUV420P10LE for HDR).
 
-        // Create FFmpeg video frame
-        let mut video_frame = ffmpeg_next::frame::Video::new(
-            ffmpeg_next::format::Pixel::YUV420P,
-            width,
-            height,
-        );
+        // Create FFmpeg video frame in the encoder's pixel format.
+        let mut video_frame = ffmpeg_next::frame::Video::new(pixel_format, width, height);
 
-        // Copy YUV planes to frame
-        // Use safe slice copy - LLVM optimizes this to memcpy, same performance as copy_nonoverlapping
-        let y_dest = video_frame.data_mut(0);
-        let y_len = y_plane.len().min(y_dest.len());
-        y_dest[..y_len].copy_from_slice(&y_plane[..y_len]);
-
-        let u_dest = video_frame.data_mut(1);
-        let u_len = u_plane.len().min(u_dest.len());
-        u_dest[..u_len].copy_from_slice(&u_plane[..u_len]);
-
-        let v_dest = video_frame.data_mut(2);
-        let v_len = v_plane.len().min(v_dest.len());
-        v_dest[..v_len].copy_from_slice(&v_plane[..v_len]);
+        // Copy each plane row-by-row honoring the frame's stride (10-bit / arbitrary widths can have
+        // row padding that a flat copy would misalign). `bytes_per_row` = samples × sample size.
+        let ten_bit = matches!(pixel_format, ffmpeg_next::format::Pixel::YUV420P10LE);
+        let sample_bytes = if ten_bit { 2usize } else { 1usize };
+        let copy_plane = |frame: &mut ffmpeg_next::frame::Video, idx: usize, src: &[u8], w: usize, h: usize| {
+            let bytes_per_row = w * sample_bytes;
+            let stride = frame.stride(idx);
+            let dst = frame.data_mut(idx);
+            for row in 0..h {
+                let s = row * bytes_per_row;
+                let d = row * stride;
+                let n = bytes_per_row.min(src.len().saturating_sub(s)).min(dst.len().saturating_sub(d));
+                if n == 0 { break; }
+                dst[d..d + n].copy_from_slice(&src[s..s + n]);
+            }
+        };
+        let (w, h) = (width as usize, height as usize);
+        copy_plane(&mut video_frame, 0, y_plane, w, h);
+        copy_plane(&mut video_frame, 1, u_plane, w / 2, h / 2);
+        copy_plane(&mut video_frame, 2, v_plane, w / 2, h / 2);
 
         // Set PTS (presentation timestamp) in encoder's time base
         // Encoder time base is 1/(framerate * 1000), so PTS = timestamp * (framerate * 1000)

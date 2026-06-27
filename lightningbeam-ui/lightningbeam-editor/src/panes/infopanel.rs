@@ -44,6 +44,8 @@ pub struct InfopanelPane {
     selected_tool_gradient_stop: Option<usize>,
     /// FPS value captured when a drag/focus-in starts (for single-undo-action on commit)
     fps_drag_start: Option<f64>,
+    /// Resize mode for the active raster layer's "to document size" action (scale vs canvas).
+    raster_resize_mode: lightningbeam_core::raster_layer::RasterResizeMode,
 }
 
 impl InfopanelPane {
@@ -61,6 +63,7 @@ impl InfopanelPane {
             selected_shape_gradient_stop: None,
             selected_tool_gradient_stop: None,
             fps_drag_start: None,
+            raster_resize_mode: lightningbeam_core::raster_layer::RasterResizeMode::Scale,
         }
     }
 }
@@ -980,10 +983,10 @@ impl InfopanelPane {
 
                 // Extract all needed values up front, then drop the borrow before closures
                 // that need mutable access to shared or self.
-                let (mut width, mut height, mut duration, mut framerate, layer_count, background_color) = {
+                let (mut width, mut height, mut duration, mut framerate, layer_count, background_color, mut hdr_mode) = {
                     let document = shared.action_executor.document();
                     (document.width, document.height, document.duration, document.framerate,
-                     document.root.children.len(), document.background_color)
+                     document.root.children.len(), document.background_color, document.hdr_output_mode)
                 };
 
                 // Canvas width
@@ -1087,6 +1090,23 @@ impl InfopanelPane {
                     }
                 });
 
+                // HDR output mode (how super-white video highlights map to SDR output)
+                ui.horizontal(|ui| {
+                    use lightningbeam_core::document::HdrOutputMode;
+                    ui.label("HDR output:");
+                    egui::ComboBox::from_id_salt(("hdr_output_mode", path))
+                        .selected_text(hdr_mode.name())
+                        .show_ui(ui, |ui| {
+                            let mut changed = false;
+                            changed |= ui.selectable_value(&mut hdr_mode, HdrOutputMode::Clip, HdrOutputMode::Clip.name()).changed();
+                            changed |= ui.selectable_value(&mut hdr_mode, HdrOutputMode::HighlightRolloff, HdrOutputMode::HighlightRolloff.name()).changed();
+                            if changed {
+                                let action = SetDocumentPropertiesAction::set_hdr_output_mode(hdr_mode);
+                                shared.pending_actions.push(Box::new(action));
+                            }
+                        });
+                });
+
                 // Layer count (read-only)
                 ui.horizontal(|ui| {
                     ui.label("Layers:");
@@ -1176,6 +1196,53 @@ impl InfopanelPane {
                     ui.label(format!("{} layers selected", layer_ids.len()));
                 }
 
+                ui.add_space(4.0);
+            });
+    }
+
+    /// Render a raster-layer section: shows the active keyframe's canvas dimensions and, when they
+    /// differ from the document, a Scale/Expand-Crop mode toggle + a "Layer to document size" button.
+    /// Driven by the *active* layer (not selection focus), since painting doesn't focus the layer.
+    fn render_raster_layer_section(&mut self, ui: &mut Ui, path: &NodePath, shared: &mut SharedPaneState, layer_id: Uuid) {
+        use lightningbeam_core::raster_layer::RasterResizeMode;
+
+        // Pull the values, then drop the document borrow before mutating `shared`.
+        let time = *shared.playback_time;
+        let dims = {
+            let document = shared.action_executor.document();
+            match document.get_layer(&layer_id) {
+                Some(AnyLayer::Raster(rl)) => rl
+                    .keyframe_at(time)
+                    .map(|kf| (kf.width, kf.height, document.width as u32, document.height as u32)),
+                _ => None,
+            }
+        };
+        let Some((kf_w, kf_h, doc_w, doc_h)) = dims else { return };
+
+        egui::CollapsingHeader::new("Raster Layer")
+            .id_salt(("raster_layer", path))
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label("Size:");
+                    ui.label(format!("{} × {}", kf_w, kf_h));
+                });
+
+                if kf_w != doc_w || kf_h != doc_h {
+                    ui.horizontal(|ui| {
+                        ui.label("Mode:");
+                        ui.selectable_value(&mut self.raster_resize_mode, RasterResizeMode::Scale, "Scale");
+                        ui.selectable_value(&mut self.raster_resize_mode, RasterResizeMode::Canvas, "Expand/Crop");
+                    });
+                    if ui.button(format!("Layer to document size ({} × {})", doc_w, doc_h)).clicked() {
+                        let store = lightningbeam_core::raster_store::RasterStore::new(shared.container_path.clone());
+                        let action = lightningbeam_core::actions::ResizeRasterLayerAction::new(
+                            layer_id, doc_w, doc_h, self.raster_resize_mode, store,
+                        );
+                        shared.pending_actions.push(Box::new(action));
+                    }
+                }
                 ui.add_space(4.0);
             });
     }
@@ -1528,6 +1595,12 @@ impl PaneRenderer for InfopanelPane {
                             self.render_document_section(ui, path, shared);
                         }
                     }
+                }
+
+                // Active raster layer's size + "to document size" — shown whenever a raster layer is
+                // active (independent of selection focus, since painting doesn't focus the layer).
+                if let Some(active_id) = *shared.active_layer_id {
+                    self.render_raster_layer_section(ui, path, shared, active_id);
                 }
 
                 // Onion-skinning view settings — always available, regardless of selection.

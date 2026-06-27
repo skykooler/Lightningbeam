@@ -157,10 +157,18 @@ impl MappedSurface {
             let desc = (*drm).data[0] as *const ff::AVDRMFrameDescriptor;
             // Expect 1 object, 2 layers (Y=R8, UV=GR88).
             if (*desc).nb_objects != 1 || (*desc).nb_layers != 2 {
-                return Err(format!(
+                let msg = format!(
                     "unexpected DRM layout: {} objects, {} layers",
                     (*desc).nb_objects, (*desc).nb_layers
-                ));
+                );
+                // Free everything mapped/allocated above (this path was leaking the device,
+                // frames context, and both AVFrames on every odd-layout surface).
+                ff::av_frame_free(&mut (drm as *mut _));
+                ff::av_frame_free(&mut (surf as *mut _));
+                let mut fr = frames_ref;
+                ff::av_buffer_unref(&mut fr);
+                ff::av_buffer_unref(&mut hw_device);
+                return Err(msg);
             }
             let obj = &(*desc).objects[0];
             let y = &(*desc).layers[0].planes[0];

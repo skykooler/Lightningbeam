@@ -169,6 +169,57 @@ impl RasterKeyframe {
             proxy: None,
         }
     }
+
+    /// Change the canvas to `(new_w, new_h)`. `Scale` resamples the content (Lanczos3) to fill the
+    /// new size; `Canvas` keeps the content at native resolution anchored top-left, padding with
+    /// transparent (expand) or trimming (crop). No-op if the size is unchanged. If pixels aren't
+    /// resident the buffer is left empty and only the declared size changes — the caller must fault
+    /// pixels in first (a later load would otherwise mismatch the new size).
+    pub fn resize_to(&mut self, new_w: u32, new_h: u32, mode: RasterResizeMode) {
+        if new_w == 0 || new_h == 0 || (self.width == new_w && self.height == new_h) {
+            return;
+        }
+        // Resample/recanvas the buffer only when pixels are resident. A blank keyframe (no content
+        // and no store row) just takes the new declared size — there's nothing to corrupt. Paged-out
+        // keyframes are loaded by the caller (ResizeRasterLayerAction) before this runs.
+        if !self.raw_pixels.is_empty() {
+            let old = std::mem::take(&mut self.raw_pixels);
+            self.raw_pixels = match mode {
+                RasterResizeMode::Scale => match image::RgbaImage::from_raw(self.width, self.height, old) {
+                    Some(img) => image::imageops::resize(&img, new_w, new_h, image::imageops::FilterType::Lanczos3).into_raw(),
+                    None => vec![0u8; (new_w as usize) * (new_h as usize) * 4],
+                },
+                RasterResizeMode::Canvas => {
+                    // Copy the old pixels into a transparent new buffer, anchored top-left (matching
+                    // the raster's (0,0) document anchor); right/bottom is padded or trimmed.
+                    let mut buf = vec![0u8; (new_w as usize) * (new_h as usize) * 4];
+                    let copy_w = self.width.min(new_w) as usize;
+                    let copy_h = self.height.min(new_h) as usize;
+                    let (ow, nw) = (self.width as usize, new_w as usize);
+                    for y in 0..copy_h {
+                        let src = y * ow * 4;
+                        let dst = y * nw * 4;
+                        buf[dst..dst + copy_w * 4].copy_from_slice(&old[src..src + copy_w * 4]);
+                    }
+                    buf
+                }
+            };
+            self.proxy = None; // invalidate any downsampled proxy
+        }
+        self.width = new_w;
+        self.height = new_h;
+        self.texture_dirty = true;
+        self.dirty = true;
+    }
+}
+
+/// How a raster canvas resize treats existing pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RasterResizeMode {
+    /// Resample the content to fill the new size (changes pixel resolution).
+    Scale,
+    /// Keep content at native resolution, anchored top-left; pad/trim the canvas.
+    Canvas,
 }
 
 /// A pixel-buffer painting layer

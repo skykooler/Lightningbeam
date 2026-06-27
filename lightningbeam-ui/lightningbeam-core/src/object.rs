@@ -47,6 +47,21 @@ impl Transform {
         Self::default()
     }
 
+    /// Set scale + position so `content_w × content_h` is fit **uniformly and centered** within
+    /// `doc_w × doc_h`, preserving aspect ratio (letterbox/pillarbox). The single shared way to
+    /// place a media clip (video/image) on the document — both import paths use this so a clip
+    /// looks identical however it was added. No-op for non-positive content dimensions.
+    pub fn fit_centered(&mut self, content_w: f64, content_h: f64, doc_w: f64, doc_h: f64) {
+        if content_w <= 0.0 || content_h <= 0.0 {
+            return;
+        }
+        let scale = (doc_w / content_w).min(doc_h / content_h);
+        self.scale_x = scale;
+        self.scale_y = scale;
+        self.x = (doc_w - content_w * scale) / 2.0;
+        self.y = (doc_h - content_h * scale) / 2.0;
+    }
+
     /// Create a transform with position
     pub fn with_position(x: f64, y: f64) -> Self {
         Self {

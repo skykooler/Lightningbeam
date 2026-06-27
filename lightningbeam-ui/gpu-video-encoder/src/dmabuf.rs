@@ -6,7 +6,7 @@ use crate::vaapi::MappedSurface;
 use crate::vk_device::DrmDevice;
 use ash::vk;
 
-/// Plane layout for a single-object NV12 DMA-BUF (the common VAAPI case).
+/// Plane layout for a single-object NV12/P010 DMA-BUF (the common VAAPI case).
 #[derive(Clone, Copy)]
 pub struct Nv12DmaBuf {
     pub fd: i32,
@@ -18,6 +18,9 @@ pub struct Nv12DmaBuf {
     pub y_pitch: u64,
     pub uv_offset: u64,
     pub uv_pitch: u64,
+    /// True for 10/12/16-bit content (P010 etc.): planes are 16-bit (R16/Rg16) rather than 8-bit
+    /// (R8/Rg8). The sampled float is normalized either way, so the consumer needs no change.
+    pub ten_bit: bool,
 }
 
 /// Frees the shared imported `VkDeviceMemory` once both plane images are gone. Held by
@@ -30,6 +33,47 @@ struct MemoryGuard {
 impl Drop for MemoryGuard {
     fn drop(&mut self) {
         unsafe { self.device.free_memory(self.memory, None) };
+    }
+}
+
+/// Frees the duplicated dma-buf fd and any partially-created Vulkan objects when an import
+/// errors out before ownership has been handed to wgpu/`MemoryGuard`. `commit()` disarms it on
+/// the success path; `fd_consumed()` is called once `vkAllocateMemory` has taken the fd.
+struct ImportGuard {
+    device: ash::Device,
+    fd: libc::c_int,
+    img_y: vk::Image,
+    img_uv: vk::Image,
+    memory: vk::DeviceMemory,
+    armed: bool,
+}
+impl ImportGuard {
+    fn fd_consumed(&mut self) {
+        self.fd = -1; // vkAllocateMemory owns the fd now; don't close it ourselves
+    }
+    fn commit(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for ImportGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        unsafe {
+            if self.img_uv != vk::Image::null() {
+                self.device.destroy_image(self.img_uv, None);
+            }
+            if self.img_y != vk::Image::null() {
+                self.device.destroy_image(self.img_y, None);
+            }
+            if self.memory != vk::DeviceMemory::null() {
+                self.device.free_memory(self.memory, None);
+            }
+            if self.fd >= 0 {
+                libc::close(self.fd);
+            }
+        }
     }
 }
 
@@ -47,12 +91,17 @@ impl ImportedNv12 {
     pub fn uv(&self) -> &wgpu::Texture {
         &self.uv
     }
+    /// Consume into the `(Y, UV)` plane textures (for handing to a longer-lived owner).
+    pub fn into_planes(self) -> (wgpu::Texture, wgpu::Texture) {
+        (self.y, self.uv)
+    }
 }
 
-/// Convenience: map a freshly-allocated `MappedSurface` and import it.
+/// Convenience: map a freshly-allocated `MappedSurface` and import it onto `drm`.
 pub fn import(drm: &DrmDevice, surf: &MappedSurface) -> Result<ImportedNv12, String> {
     import_raw(
-        drm,
+        &drm.device,
+        &drm.adapter,
         &Nv12DmaBuf {
             fd: surf.fd,
             size: surf.size,
@@ -63,22 +112,61 @@ pub fn import(drm: &DrmDevice, surf: &MappedSurface) -> Result<ImportedNv12, Str
             y_pitch: surf.y_pitch,
             uv_offset: surf.uv_offset,
             uv_pitch: surf.uv_pitch,
+            ten_bit: false,
         },
     )
 }
 
-/// Import an NV12 DMA-BUF (described by `buf`) as two wgpu plane textures. The fd is
-/// duplicated, so the caller keeps ownership of theirs.
-pub fn import_raw(drm: &DrmDevice, buf: &Nv12DmaBuf) -> Result<ImportedNv12, String> {
+/// Import an NV12 DMA-BUF (described by `buf`) as two wgpu plane textures **on `device`**. The raw
+/// Vulkan handles are extracted from `device`/`adapter` via `as_hal`, so this works with any
+/// DMA-BUF-import-capable wgpu device — the encoder/decoder's own `DrmDevice` *or* the editor's
+/// shared device. The fd is duplicated, so the caller keeps ownership of theirs.
+pub fn import_raw(
+    device: &wgpu::Device,
+    adapter: &wgpu::Adapter,
+    buf: &Nv12DmaBuf,
+) -> Result<ImportedNv12, String> {
+    use wgpu_hal::vulkan::Api as Vk;
     unsafe {
-        let device = drm.raw_device.clone();
-        let instance = &drm.raw_instance;
+        let hal_device = device
+            .as_hal::<Vk>()
+            .ok_or("device is not Vulkan")?;
+        let raw_device = hal_device.raw_device().clone();
+        let raw_instance = adapter
+            .as_hal::<Vk>()
+            .ok_or("adapter is not Vulkan")?
+            .shared_instance()
+            .raw_instance()
+            .clone();
+        let instance = &raw_instance;
 
         let dup_fd = libc::dup(buf.fd);
         if dup_fd < 0 {
             return Err("dup(dma-buf fd) failed".into());
         }
+        // Owns the fd + any Vk objects created below until ownership transfers to wgpu; on any
+        // early `?`/return before that, its Drop frees them (was leaking on every failed import).
+        let mut guard = ImportGuard {
+            device: raw_device.clone(),
+            fd: dup_fd,
+            img_y: vk::Image::null(),
+            img_uv: vk::Image::null(),
+            memory: vk::DeviceMemory::null(),
+            armed: true,
+        };
 
+        // 16-bit-norm plane formats (P010) are NOT renderable, so the import is sample-only for
+        // those (decode path). 8-bit planes keep COLOR_ATTACHMENT for the encoder's RGBA→NV12 write.
+        let vk_usage = if buf.ten_bit {
+            vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST
+        } else {
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST
+        };
         let make_image = |format: vk::Format, w: u32, h: u32, pitch: u64| -> Result<vk::Image, String> {
             let mut ext = vk::ExternalMemoryImageCreateInfo::default()
                 .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
@@ -94,30 +182,41 @@ pub fn import_raw(drm: &DrmDevice, buf: &Nv12DmaBuf) -> Result<ImportedNv12, Str
                 .array_layers(1)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-                .usage(
-                    vk::ImageUsageFlags::COLOR_ATTACHMENT
-                        | vk::ImageUsageFlags::TRANSFER_SRC
-                        | vk::ImageUsageFlags::TRANSFER_DST,
-                )
+                .usage(vk_usage)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .push_next(&mut ext)
                 .push_next(&mut drm_info);
-            device
+            raw_device
                 .create_image(&info, None)
                 .map_err(|e| format!("vkCreateImage(modifier) failed: {e:?}"))
         };
 
-        let img_y = make_image(vk::Format::R8_UNORM, buf.width, buf.height, buf.y_pitch)?;
-        let img_uv = make_image(vk::Format::R8G8_UNORM, buf.width / 2, buf.height / 2, buf.uv_pitch)?;
+        // 8-bit NV12 → R8/Rg8 planes; 10/12/16-bit P010-style → R16/Rg16 (sampled value is
+        // normalized either way, so the NV12→RGB consumer is unchanged).
+        let (vk_y, vk_uv) = if buf.ten_bit {
+            (vk::Format::R16_UNORM, vk::Format::R16G16_UNORM)
+        } else {
+            (vk::Format::R8_UNORM, vk::Format::R8G8_UNORM)
+        };
+        let (wgpu_y, wgpu_uv) = if buf.ten_bit {
+            (wgpu::TextureFormat::R16Unorm, wgpu::TextureFormat::Rg16Unorm)
+        } else {
+            (wgpu::TextureFormat::R8Unorm, wgpu::TextureFormat::Rg8Unorm)
+        };
 
-        let fd_dev = ash::khr::external_memory_fd::Device::new(instance, &device);
+        let img_y = make_image(vk_y, buf.width, buf.height, buf.y_pitch)?;
+        guard.img_y = img_y;
+        let img_uv = make_image(vk_uv, buf.width / 2, buf.height / 2, buf.uv_pitch)?;
+        guard.img_uv = img_uv;
+
+        let fd_dev = ash::khr::external_memory_fd::Device::new(instance, &raw_device);
         let mut fd_props = vk::MemoryFdPropertiesKHR::default();
         fd_dev
             .get_memory_fd_properties(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT, dup_fd, &mut fd_props)
             .map_err(|e| format!("vkGetMemoryFdPropertiesKHR failed: {e:?}"))?;
-        let req_y = device.get_image_memory_requirements(img_y);
-        let req_uv = device.get_image_memory_requirements(img_uv);
+        let req_y = raw_device.get_image_memory_requirements(img_y);
+        let req_uv = raw_device.get_image_memory_requirements(img_uv);
         let type_bits = fd_props.memory_type_bits & req_y.memory_type_bits & req_uv.memory_type_bits;
         if type_bits == 0 {
             return Err("no memory type compatible with dma-buf + both plane images".into());
@@ -131,28 +230,42 @@ pub fn import_raw(drm: &DrmDevice, buf: &Nv12DmaBuf) -> Result<ImportedNv12, Str
             .allocation_size(buf.size)
             .memory_type_index(mem_type)
             .push_next(&mut import_info);
-        let memory = device
+        let memory = raw_device
             .allocate_memory(&alloc, None)
             .map_err(|e| format!("vkAllocateMemory(import dma-buf) failed: {e:?}"))?;
+        guard.fd_consumed(); // the import transferred fd ownership to Vulkan
+        guard.memory = memory;
 
-        device
+        raw_device
             .bind_image_memory(img_y, memory, buf.y_offset)
             .map_err(|e| format!("bind Y plane: {e:?}"))?;
-        device
+        raw_device
             .bind_image_memory(img_uv, memory, buf.uv_offset)
             .map_err(|e| format!("bind UV plane: {e:?}"))?;
 
         // Shared guard: frees `memory` once both images' drop callbacks have run.
-        let mem_guard = std::sync::Arc::new(MemoryGuard { device: device.clone(), memory });
+        let mem_guard = std::sync::Arc::new(MemoryGuard { device: raw_device.clone(), memory });
 
-        let hal_device = drm
-            .device
-            .as_hal::<wgpu_hal::vulkan::Api>()
-            .ok_or("device is not Vulkan")?;
+        // Match the Vulkan usage: 16-bit-norm planes (P010) are sample-only (not renderable).
+        let (hal_usage, wgpu_usage) = if buf.ten_bit {
+            (
+                wgpu_types::TextureUses::RESOURCE | wgpu_types::TextureUses::COPY_SRC,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            )
+        } else {
+            (
+                wgpu_types::TextureUses::COLOR_TARGET
+                    | wgpu_types::TextureUses::RESOURCE
+                    | wgpu_types::TextureUses::COPY_SRC,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+            )
+        };
         let wrap = |img: vk::Image, format: wgpu::TextureFormat, w: u32, h: u32| -> wgpu::Texture {
             // wgpu destroys the image (after wait-idle) when the texture drops; the
             // captured Arc<MemoryGuard> frees the shared memory once both have run.
-            let dev = device.clone();
+            let dev = raw_device.clone();
             let guard = mem_guard.clone();
             let cb: wgpu_hal::DropCallback = Box::new(move || {
                 dev.destroy_image(img, None);
@@ -165,12 +278,12 @@ pub fn import_raw(drm: &DrmDevice, buf: &Nv12DmaBuf) -> Result<ImportedNv12, Str
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu_types::TextureUses::COLOR_TARGET | wgpu_types::TextureUses::COPY_SRC,
+                usage: hal_usage,
                 memory_flags: wgpu_hal::MemoryFlags::empty(),
                 view_formats: vec![],
             };
             let hal_tex = hal_device.texture_from_raw(img, &hal_desc, Some(cb));
-            drm.device.create_texture_from_hal::<wgpu_hal::vulkan::Api>(
+            device.create_texture_from_hal::<wgpu_hal::vulkan::Api>(
                 hal_tex,
                 &wgpu::TextureDescriptor {
                     label: Some("vaapi-plane"),
@@ -179,13 +292,16 @@ pub fn import_raw(drm: &DrmDevice, buf: &Nv12DmaBuf) -> Result<ImportedNv12, Str
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    usage: wgpu_usage,
                     view_formats: &[],
                 },
             )
         };
-        let y = wrap(img_y, wgpu::TextureFormat::R8Unorm, buf.width, buf.height);
-        let uv = wrap(img_uv, wgpu::TextureFormat::Rg8Unorm, buf.width / 2, buf.height / 2);
+        // Ownership of the images (→ texture drop callbacks) and memory (→ MemoryGuard) has now
+        // transferred to wgpu; disarm the cleanup guard so it doesn't double-free them.
+        guard.commit();
+        let y = wrap(img_y, wgpu_y, buf.width, buf.height);
+        let uv = wrap(img_uv, wgpu_uv, buf.width / 2, buf.height / 2);
         drop(hal_device);
 
         Ok(ImportedNv12 { y, uv })

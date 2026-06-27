@@ -50,3 +50,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         a
     );
 }
+
+// Highlight rolloff: identity below the knee, then a smooth C1 rolloff that maps [knee, ∞) → [knee, 1)
+// so super-white (HDR) detail is recovered instead of hard-clipped. SDR below the knee is untouched.
+fn highlight_rolloff(x: f32) -> f32 {
+    let knee = 0.8;
+    if x <= knee {
+        return x;
+    }
+    let headroom = 1.0 - knee;
+    return knee + headroom * (1.0 - exp(-(x - knee) / headroom));
+}
+
+// Variant of fs_main with highlight rolloff (document HDR output mode = Highlight rolloff).
+@fragment
+fn fs_main_rolloff(in: VertexOutput) -> @location(0) vec4<f32> {
+    let linear = textureSample(input_tex, input_sampler, in.uv);
+    let a = linear.a;
+    let straight = select(linear.rgb / a, vec3<f32>(0.0), a <= 0.0);
+    let rolled = vec3<f32>(
+        highlight_rolloff(straight.r),
+        highlight_rolloff(straight.g),
+        highlight_rolloff(straight.b),
+    );
+
+    return vec4<f32>(
+        linear_to_srgb_channel(rolled.r),
+        linear_to_srgb_channel(rolled.g),
+        linear_to_srgb_channel(rolled.b),
+        a
+    );
+}

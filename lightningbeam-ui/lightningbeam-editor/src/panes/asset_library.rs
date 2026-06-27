@@ -316,7 +316,10 @@ fn generate_video_thumbnail(
 
     let frame = {
         let mut video_mgr = video_manager.lock().ok()?;
-        video_mgr.get_frame(clip_id, timestamp)?
+        // Small CPU frame for the asset thumbnail (capped to native, aspect preserved). Force CPU:
+        // the render-pass hardware flag may be on, but the thumbnail needs RGBA bytes (a GPU frame
+        // has empty rgba_data → an all-black thumbnail).
+        video_mgr.get_frame_cpu(clip_id, timestamp, THUMBNAIL_SIZE, THUMBNAIL_SIZE)?
     };
 
     let src_width = frame.width as usize;

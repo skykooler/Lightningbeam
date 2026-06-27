@@ -26,9 +26,9 @@ impl CpuYuvConverter {
     /// # Arguments
     /// * `width` - Frame width in pixels
     /// * `height` - Frame height in pixels
-    pub fn new(width: u32, height: u32) -> Result<Self, String> {
+    pub fn new(width: u32, height: u32, full_range: bool) -> Result<Self, String> {
         // BT.709 (HD) RGBA→YUV420p context, created once.
-        let scaler = ffmpeg::software::scaling::Context::get(
+        let mut scaler = ffmpeg::software::scaling::Context::get(
             ffmpeg::format::Pixel::RGBA,
             width,
             height,
@@ -38,6 +38,23 @@ impl CpuYuvConverter {
             ffmpeg::software::scaling::Flags::BILINEAR,
         )
         .map_err(|e| format!("Failed to create swscale context: {}", e))?;
+
+        // swscale defaults to BT.601 + limited range; force BT.709 with the requested output
+        // range so this fallback matches the GPU path and the encoder's color tags
+        // (otherwise non-%8-width exports come out with shifted hue / wrong levels). There is
+        // no safe ffmpeg-next wrapper for sws_setColorspaceDetails, so this is the raw call.
+        unsafe {
+            let coeffs = ffmpeg::ffi::sws_getCoefficients(ffmpeg::ffi::SWS_CS_ITU709 as i32);
+            let dst_range = if full_range { 1 } else { 0 };
+            let one = 1 << 16; // 16.16 fixed-point 1.0
+            ffmpeg::ffi::sws_setColorspaceDetails(
+                scaler.as_mut_ptr(),
+                coeffs, 1,          // source table (RGB input is full-range)
+                coeffs, dst_range,  // dest table = BT.709, dest range = requested
+                0, one, one,        // brightness, contrast, saturation (neutral)
+            );
+        }
+
         let rgba_frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA, width, height);
         let yuv_frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV420P, width, height);
         Ok(Self { width, height, scaler, rgba_frame, yuv_frame })
@@ -90,13 +107,13 @@ mod tests {
 
     #[test]
     fn test_converter_creation() {
-        let converter = CpuYuvConverter::new(1920, 1080);
+        let converter = CpuYuvConverter::new(1920, 1080, true);
         assert!(converter.is_ok());
     }
 
     #[test]
     fn test_conversion_output_sizes() {
-        let mut converter = CpuYuvConverter::new(1920, 1080).unwrap();
+        let mut converter = CpuYuvConverter::new(1920, 1080, true).unwrap();
 
         // Create dummy RGBA data (all black)
         let rgba_data = vec![0u8; 1920 * 1080 * 4];
@@ -117,7 +134,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "RGBA data size mismatch")]
     fn test_wrong_input_size_panics() {
-        let mut converter = CpuYuvConverter::new(1920, 1080).unwrap();
+        let mut converter = CpuYuvConverter::new(1920, 1080, true).unwrap();
 
         // Wrong size input
         let rgba_data = vec![0u8; 1000];
