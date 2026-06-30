@@ -18,7 +18,7 @@
 
 use eframe::egui;
 
-use super::{icons, slot_path, MobileState, StackDrag, StackPane, STACK};
+use super::{icons, slot_path, MobileState, SnapAnim, StackDrag, StackPane, STACK};
 use crate::RenderContext;
 
 const N: usize = STACK.len();
@@ -120,6 +120,12 @@ const COLLAPSE_LO: f32 = 0.12;
 const COLLAPSE_HI: f32 = 0.88;
 /// Minimum normalized size a pane may be squeezed to during a live divider drag.
 const MIN_FRAC: f32 = 0.05;
+/// Duration (seconds) of the ease into a snapped divider position.
+const SNAP_ANIM_SECS: f64 = 0.10;
+
+fn ease_out(p: f32) -> f32 {
+    1.0 - (1.0 - p).powi(3)
+}
 
 /// Normalized pane weights (the first `count` stored weights, summing to 1).
 fn nweights(weights: &[f32; 3], count: usize) -> Vec<f32> {
@@ -243,7 +249,22 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
     let trigger = pane_h.min(TRIGGER_MAX);
 
     // Resting band rects (weighted; used for interaction so drags don't chase the animated layout).
-    let nw = nweights(&state.weights, count);
+    // While a snap ease is in flight (and we're not dragging), override the weights with the eased
+    // values so the boundary glides into place.
+    let now = ui.input(|i| i.time);
+    let mut nw = nweights(&state.weights, count);
+    if state.drag.is_none() {
+        if let Some(a) = state.snap_anim {
+            let p = ((now - a.start) / SNAP_ANIM_SECS).clamp(0.0, 1.0) as f32;
+            if p >= 1.0 {
+                state.snap_anim = None;
+            } else {
+                let e = ease_out(p);
+                nw = (0..count).map(|i| lerp_f(a.from[i], a.to[i], e)).collect();
+                ui.ctx().request_repaint();
+            }
+        }
+    }
     let rest_bands = config_rects(top, count, content_area, &nw);
 
     // The draw layout. A divider drag resizes its two panes live; an edge drag animates toward the
@@ -300,7 +321,7 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
     draw_footer(ui, footer_rect, top + count >= N);
 
     // 3) Interactions on the resting header/footer rects (added last → they win the press).
-    handle_interactions(ui, &rest_bands, content_area, footer_rect, trigger, state);
+    handle_interactions(ui, &rest_bands, content_area, footer_rect, trigger, now, state);
 }
 
 fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: bool, fullscreen: bool) {
@@ -398,6 +419,7 @@ fn handle_interactions(
     content_area: egui::Rect,
     footer_rect: egui::Rect,
     trigger: f32,
+    now: f64,
     state: &mut MobileState,
 ) {
     // (handle, header_rect, slot) — slot is Some for band headers, None for the footer.
@@ -441,6 +463,7 @@ fn handle_interactions(
 
         if resp.drag_started() {
             state.drag = Some(StackDrag { handle, offset: 0.0 });
+            state.snap_anim = None; // a fresh drag cancels any in-flight snap ease
         }
         if resp.dragged() {
             if let Some(d) = &mut state.drag {
@@ -451,7 +474,7 @@ fn handle_interactions(
         }
         if resp.drag_stopped() {
             if let Some(d) = state.drag.take() {
-                commit_drag(d, state, content_area, trigger);
+                commit_drag(d, state, content_area, trigger, now);
             }
         }
         if resp.hovered() || state.drag.map(|d| d.handle == handle).unwrap_or(false) {
@@ -460,10 +483,10 @@ fn handle_interactions(
     }
 }
 
-fn commit_drag(d: StackDrag, state: &mut MobileState, content_area: egui::Rect, trigger: f32) {
+fn commit_drag(d: StackDrag, state: &mut MobileState, content_area: egui::Rect, trigger: f32, now: f64) {
     match d.handle {
         Handle::Divider(k) if k + 1 < state.window_count => {
-            commit_divider(state, k, d.offset / content_area.height().max(1.0));
+            commit_divider(state, k, d.offset / content_area.height().max(1.0), now);
         }
         _ => {
             // Edges (and degenerate dividers): membership transition, then reset to even sizing.
@@ -480,7 +503,7 @@ fn commit_drag(d: StackDrag, state: &mut MobileState, content_area: egui::Rect, 
 
 /// Apply a divider release: collapse a pane (→ membership change) past the thresholds, otherwise
 /// snap the boundary to the nearest intermediate fraction.
-fn commit_divider(state: &mut MobileState, k: usize, offset_frac: f32) {
+fn commit_divider(state: &mut MobileState, k: usize, offset_frac: f32, now: f64) {
     let top = state.window_top;
     let count = state.window_count;
     let nw = nweights(&state.weights, count);
@@ -500,18 +523,27 @@ fn commit_divider(state: &mut MobileState, k: usize, offset_frac: f32) {
         }
     } else {
         // Snap the boundary to the nearest intermediate fraction, preserving the {k, k+1} span and
-        // the other panes' sizes.
+        // the other panes' sizes — and ease into it.
         let sf = *SNAP_FRACS
             .iter()
             .min_by(|a, b| (**a - f).abs().total_cmp(&(**b - f).abs()))
             .unwrap();
         let span = nw[k] + nw[k + 1];
-        let mut w = nw;
-        w[k] = sf * span;
-        w[k + 1] = (1.0 - sf) * span;
+
+        // `from` = where the finger released; `to` = the snapped target.
+        let mut from = [0.0_f32; 3];
+        let mut to = [0.0_f32; 3];
         for i in 0..count {
-            state.weights[i] = w[i];
+            from[i] = nw[i];
+            to[i] = nw[i];
         }
+        from[k] = f * span;
+        from[k + 1] = (1.0 - f) * span;
+        to[k] = sf * span;
+        to[k + 1] = (1.0 - sf) * span;
+
+        state.weights = to;
+        state.snap_anim = Some(SnapAnim { from, to, start: now });
     }
 }
 
@@ -520,4 +552,5 @@ fn set_window(state: &mut MobileState, top: usize, count: usize) {
     state.window_top = top;
     state.window_count = count;
     state.weights = [1.0, 1.0, 1.0];
+    state.snap_anim = None;
 }

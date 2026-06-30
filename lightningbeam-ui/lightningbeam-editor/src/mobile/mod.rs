@@ -118,6 +118,15 @@ pub struct StackDrag {
     pub offset: f32,
 }
 
+/// A short ease of the visible pane weights toward their snapped values after a divider release.
+#[derive(Debug, Clone, Copy)]
+pub struct SnapAnim {
+    pub from: [f32; 3],
+    pub to: [f32; 3],
+    /// egui time (seconds) when the animation started.
+    pub start: f64,
+}
+
 /// Persistent mobile-shell state, cached on `EditorApp`.
 pub struct MobileState {
     /// Index into `STACK` of the topmost visible pane.
@@ -131,6 +140,8 @@ pub struct MobileState {
     pub show_instruments: bool,
     /// Active handle drag (transient).
     pub drag: Option<StackDrag>,
+    /// In-flight snap ease after a divider release (transient).
+    pub snap_anim: Option<SnapAnim>,
 }
 
 impl Default for MobileState {
@@ -142,6 +153,7 @@ impl Default for MobileState {
             weights: [1.0, 1.0, 1.0],
             show_instruments: false,
             drag: None,
+            snap_anim: None,
         }
     }
 }
