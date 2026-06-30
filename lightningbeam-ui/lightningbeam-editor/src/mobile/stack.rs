@@ -25,14 +25,18 @@ const N: usize = STACK.len();
 
 /// Height of each band's drag header (and the bottom-edge footer). The whole header is the grab
 /// target — there's no thin divider bar.
-const HEADER_H: f32 = 26.0;
+const HEADER_H: f32 = 52.0;
+const FOOTER_H: f32 = 28.0;
+/// Width of a header right-side button (fullscreen, node toggle).
+const BTN_W: f32 = 44.0;
+/// Max pixels of drag to complete a window transition (so you don't drag half the screen).
+const TRIGGER_MAX: f32 = 150.0;
 
 const C_LINE: egui::Color32 = egui::Color32::from_rgb(0x36, 0x3d, 0x49);
 const C_AMBER: egui::Color32 = egui::Color32::from_rgb(0xf4, 0xa3, 0x40);
 const C_DIM: egui::Color32 = egui::Color32::from_rgb(0x7c, 0x86, 0x93);
 const C_BRIGHT: egui::Color32 = egui::Color32::from_rgb(0xea, 0xee, 0xf3);
 const C_HEADER: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x24, 0x2c);
-const C_HEADER_HOT: egui::Color32 = egui::Color32::from_rgb(0x27, 0x2d, 0x37);
 
 /// A draggable boundary of the stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,10 +87,10 @@ fn resolve(
     offset: f32,
     top: usize,
     count: usize,
-    pane_h: f32,
+    trigger: f32,
 ) -> Option<(usize, usize, f32)> {
     let going_up = offset < 0.0;
-    let t = (offset.abs() / pane_h.max(1.0)).clamp(0.0, 1.0);
+    let t = (offset.abs() / trigger.max(1.0)).clamp(0.0, 1.0);
     let target = match handle {
         Handle::TopEdge => (!going_up).then(|| op_r6(top, count)).flatten(),
         Handle::BottomEdge => going_up.then(|| op_r5(top, count)).flatten(),
@@ -176,7 +180,7 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
 
     // Reserve a footer bar at the very bottom for the BottomEdge handle.
     let footer_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), rect.bottom() - HEADER_H),
+        egui::pos2(rect.left(), rect.bottom() - FOOTER_H),
         rect.max,
     );
     let content_area = egui::Rect::from_min_max(
@@ -184,13 +188,14 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
         egui::pos2(rect.right(), footer_rect.top()),
     );
     let pane_h = content_area.height() / count as f32;
+    let trigger = pane_h.min(TRIGGER_MAX);
 
     // Resting band rects (used for interaction so drags don't chase the animated layout) and the
     // possibly-animated draw layout.
     let rest_bands = config_rects(top, count, content_area);
     let draw_layout = state
         .drag
-        .and_then(|d| resolve(d.handle, d.offset, top, count, pane_h))
+        .and_then(|d| resolve(d.handle, d.offset, top, count, trigger))
         .map(|(tt, tc, t)| interp_rects((top, count), (tt, tc), t, content_area))
         .unwrap_or_else(|| rest_bands.clone());
 
@@ -213,7 +218,9 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
         }
     }
 
-    // 2) Header visuals (animated positions).
+    // 2) Header visuals (animated positions). The fullscreen icon shows "restore" when a single
+    // pane fills the stack.
+    let fullscreen = count == 1;
     for (slot, brect) in &draw_layout {
         if brect.height() < 6.0 {
             continue;
@@ -222,38 +229,46 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
             brect.left_top(),
             egui::pos2(brect.right(), brect.top() + HEADER_H.min(brect.height())),
         );
-        draw_header(ui, hr, STACK[*slot], state.show_instruments, false);
+        draw_header(ui, hr, STACK[*slot], state.show_instruments, fullscreen);
     }
     draw_footer(ui, footer_rect, top + count >= N);
 
     // 3) Interactions on the resting header/footer rects (added last → they win the press).
-    handle_interactions(ui, &rest_bands, footer_rect, state);
+    handle_interactions(ui, &rest_bands, footer_rect, trigger, state);
 }
 
-fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: bool, hot: bool) {
+fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: bool, fullscreen: bool) {
     let p = ui.painter();
-    p.rect_filled(hr, 0.0, if hot { C_HEADER_HOT } else { C_HEADER });
+    p.rect_filled(hr, 0.0, C_HEADER);
     p.hline(hr.x_range(), hr.bottom(), egui::Stroke::new(1.0, C_LINE));
-    // Grip dots on the left.
     let cy = hr.center().y;
+    // Grip dots on the left.
     for i in 0..2 {
-        let x = hr.left() + 9.0 + i as f32 * 4.0;
-        p.circle_filled(egui::pos2(x, cy), 1.3, C_DIM);
+        let x = hr.left() + 11.0 + i as f32 * 4.0;
+        p.circle_filled(egui::pos2(x, cy), 1.5, C_DIM);
     }
     p.text(
-        egui::pos2(hr.left() + 22.0, cy),
+        egui::pos2(hr.left() + 26.0, cy),
         egui::Align2::LEFT_CENTER,
         sp.label(show_instruments),
-        egui::FontId::proportional(12.0),
+        egui::FontId::proportional(15.0),
         C_BRIGHT,
     );
-    // Node/Instrument toggle marker (its hit area is wired in handle_interactions).
+    // Right-side buttons: fullscreen / restore rightmost, Node/Instrument toggle just left of it.
+    // These glyphs are covered by egui's bundled emoji-icon-font (⛶ ▣ ⇄).
+    p.text(
+        egui::pos2(hr.right() - BTN_W * 0.5, cy),
+        egui::Align2::CENTER_CENTER,
+        if fullscreen { "▣" } else { "⛶" },
+        egui::FontId::proportional(18.0),
+        C_DIM,
+    );
     if sp == StackPane::NodeInstrument {
         p.text(
-            egui::pos2(hr.right() - 14.0, cy),
+            egui::pos2(hr.right() - BTN_W * 1.5, cy),
             egui::Align2::CENTER_CENTER,
             "⇄",
-            egui::FontId::proportional(14.0),
+            egui::FontId::proportional(17.0),
             C_AMBER,
         );
     }
@@ -281,41 +296,63 @@ fn handle_key(h: Handle) -> (usize, usize) {
     }
 }
 
+/// Toggle a slot between filling the stack (count==1) and a 2-pane split with an adjacent pane.
+fn toggle_fullscreen(state: &mut MobileState, slot: usize) {
+    if state.window_count == 1 && state.window_top == slot {
+        // Restore: split with the pane below if possible, else above.
+        if let Some((t, c)) = op_r5(slot, 1).or_else(|| op_r6(slot, 1)) {
+            state.window_top = t;
+            state.window_count = c;
+        }
+    } else {
+        state.window_top = slot;
+        state.window_count = 1;
+    }
+}
+
 fn handle_interactions(
     ui: &mut egui::Ui,
     rest_bands: &[(usize, egui::Rect)],
     footer_rect: egui::Rect,
+    trigger: f32,
     state: &mut MobileState,
 ) {
-    let pane_h = rest_bands.first().map(|(_, r)| r.height()).unwrap_or(1.0);
-
-    // (handle, header_rect, optional node-toggle slot)
-    let mut handles: Vec<(Handle, egui::Rect, bool)> = Vec::new();
+    // (handle, header_rect, slot) — slot is Some for band headers, None for the footer.
+    let mut handles: Vec<(Handle, egui::Rect, Option<usize>)> = Vec::new();
     for (i, (slot, brect)) in rest_bands.iter().enumerate() {
         let hr = egui::Rect::from_min_max(
             brect.left_top(),
             egui::pos2(brect.right(), brect.top() + HEADER_H.min(brect.height())),
         );
         let handle = if i == 0 { Handle::TopEdge } else { Handle::Divider(i - 1) };
-        let is_node = STACK[*slot] == StackPane::NodeInstrument;
-        handles.push((handle, hr, is_node));
+        handles.push((handle, hr, Some(*slot)));
     }
-    handles.push((Handle::BottomEdge, footer_rect, false));
+    handles.push((Handle::BottomEdge, footer_rect, None));
 
-    for (handle, hrect, is_node) in handles {
+    for (handle, hrect, slot_opt) in handles {
         let id = ui.id().with(("mobile_stack_handle", handle_key(handle)));
         let resp = ui.interact(hrect, id, egui::Sense::click_and_drag());
 
-        // Node/Instrument toggle: a small hit area on the right of the header, interacted AFTER the
-        // header (so it's on top and wins clicks there); the rest of the header drives the drag.
-        if is_node {
-            let tog = egui::Rect::from_min_max(
-                egui::pos2(hrect.right() - 28.0, hrect.top()),
+        // Right-side header buttons are interacted AFTER the header (so they're on top and win the
+        // press there); the rest of the header drives the drag.
+        if let Some(slot) = slot_opt {
+            let fs = egui::Rect::from_min_max(
+                egui::pos2(hrect.right() - BTN_W, hrect.top()),
                 hrect.max,
             );
-            let tresp = ui.interact(tog, ui.id().with("mobile_node_toggle"), egui::Sense::click());
-            if tresp.clicked() {
-                state.show_instruments = !state.show_instruments;
+            let fsresp = ui.interact(fs, ui.id().with(("mobile_fs", slot)), egui::Sense::click());
+            if fsresp.clicked() {
+                toggle_fullscreen(state, slot);
+            }
+            if STACK[slot] == StackPane::NodeInstrument {
+                let nt = egui::Rect::from_min_max(
+                    egui::pos2(hrect.right() - 2.0 * BTN_W, hrect.top()),
+                    egui::pos2(hrect.right() - BTN_W, hrect.bottom()),
+                );
+                let ntresp = ui.interact(nt, ui.id().with("mobile_node_toggle"), egui::Sense::click());
+                if ntresp.clicked() {
+                    state.show_instruments = !state.show_instruments;
+                }
             }
         }
 
@@ -331,7 +368,7 @@ fn handle_interactions(
         }
         if resp.drag_stopped() {
             if let Some(d) = state.drag.take() {
-                commit_drag(d, state, pane_h);
+                commit_drag(d, state, trigger);
             }
         }
         if resp.hovered() || state.drag.map(|d| d.handle == handle).unwrap_or(false) {
@@ -340,8 +377,8 @@ fn handle_interactions(
     }
 }
 
-fn commit_drag(d: StackDrag, state: &mut MobileState, pane_h: f32) {
-    if let Some((tt, tc, t)) = resolve(d.handle, d.offset, state.window_top, state.window_count, pane_h) {
+fn commit_drag(d: StackDrag, state: &mut MobileState, trigger: f32) {
+    if let Some((tt, tc, t)) = resolve(d.handle, d.offset, state.window_top, state.window_count, trigger) {
         if t >= 0.5 {
             state.window_top = tt;
             state.window_count = tc;
