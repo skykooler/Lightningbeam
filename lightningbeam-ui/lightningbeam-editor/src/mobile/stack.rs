@@ -26,6 +26,8 @@ const N: usize = STACK.len();
 /// Height of each band's drag header (and the bottom-edge footer). The whole header is the grab
 /// target — there's no thin divider bar.
 const HEADER_H: f32 = 52.0;
+/// Corner radius (px) for the rounded top of each header.
+const HEADER_RADIUS: u8 = 9;
 const FOOTER_H: f32 = 28.0;
 /// Width of a header right-side button (fullscreen, node toggle).
 const BTN_W: f32 = 44.0;
@@ -239,7 +241,13 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
 
 fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: bool, fullscreen: bool) {
     let p = ui.painter();
-    p.rect_filled(hr, 0.0, C_HEADER);
+    // Rounded top corners so the header reads as a tab atop the pane; square at the bottom where
+    // it meets the pane content.
+    p.rect_filled(
+        hr,
+        egui::CornerRadius { nw: HEADER_RADIUS, ne: HEADER_RADIUS, sw: 0, se: 0 },
+        C_HEADER,
+    );
     p.hline(hr.x_range(), hr.bottom(), egui::Stroke::new(1.0, C_LINE));
     let cy = hr.center().y;
     // Grip glyph on the left (Lucide).
