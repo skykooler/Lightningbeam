@@ -23,13 +23,16 @@ use crate::RenderContext;
 
 const N: usize = STACK.len();
 
-const EDGE_GRAB_H: f32 = 16.0;
-const DIV_GRAB_H: f32 = 18.0;
+/// Height of each band's drag header (and the bottom-edge footer). The whole header is the grab
+/// target — there's no thin divider bar.
+const HEADER_H: f32 = 26.0;
 
 const C_LINE: egui::Color32 = egui::Color32::from_rgb(0x36, 0x3d, 0x49);
 const C_AMBER: egui::Color32 = egui::Color32::from_rgb(0xf4, 0xa3, 0x40);
 const C_DIM: egui::Color32 = egui::Color32::from_rgb(0x7c, 0x86, 0x93);
-const C_CHIP_BG: egui::Color32 = egui::Color32::from_rgba_premultiplied(0x1b, 0x1f, 0x27, 0xcc);
+const C_BRIGHT: egui::Color32 = egui::Color32::from_rgb(0xea, 0xee, 0xf3);
+const C_HEADER: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x24, 0x2c);
+const C_HEADER_HOT: egui::Color32 = egui::Color32::from_rgb(0x27, 0x2d, 0x37);
 
 /// A draggable boundary of the stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,16 +46,16 @@ pub enum Handle {
 // --- R1..R6 as pure ops on (top, count) -> Option<(top, count)> ---
 
 fn op_r1(top: usize, count: usize) -> Option<(usize, usize)> {
-    (top + count < N).then_some((top + 1, count)) // slide down
+    (top + count < N).then(|| (top + 1, count)) // slide down
 }
 fn op_r2(top: usize, count: usize) -> Option<(usize, usize)> {
-    (top > 0).then_some((top - 1, count)) // slide up
+    (top > 0).then(|| (top - 1, count)) // slide up
 }
 fn op_r3(top: usize, count: usize) -> Option<(usize, usize)> {
-    (count == 3).then_some((top + 1, 2)) // drop top
+    (count == 3).then(|| (top + 1, 2)) // drop top
 }
 fn op_r4(top: usize, count: usize) -> Option<(usize, usize)> {
-    (count == 3).then_some((top, 2)) // drop bottom
+    (count == 3).then(|| (top, 2)) // drop bottom
 }
 fn op_r5(top: usize, count: usize) -> Option<(usize, usize)> {
     if count < 3 && top + count < N {
@@ -164,77 +167,110 @@ fn interp_rects(
 
 // --- rendering ---
 
+/// The interaction (drag) target for a band's boundary is its full-width header bar. Bands are
+/// laid out in the area above a reserved bottom footer (the BottomEdge handle). Band 0's header is
+/// the TopEdge handle; band i's header (i≥1) is the divider above it; the footer is the BottomEdge.
 pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state: &mut MobileState) {
     let top = state.window_top;
     let count = state.window_count;
-    let pane_h = rect.height() / count as f32;
 
-    // Layout from the (previous frame's) drag, if any has a valid op; else the resting config.
-    let layout = state
+    // Reserve a footer bar at the very bottom for the BottomEdge handle.
+    let footer_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.bottom() - HEADER_H),
+        rect.max,
+    );
+    let content_area = egui::Rect::from_min_max(
+        rect.min,
+        egui::pos2(rect.right(), footer_rect.top()),
+    );
+    let pane_h = content_area.height() / count as f32;
+
+    // Resting band rects (used for interaction so drags don't chase the animated layout) and the
+    // possibly-animated draw layout.
+    let rest_bands = config_rects(top, count, content_area);
+    let draw_layout = state
         .drag
         .and_then(|d| resolve(d.handle, d.offset, top, count, pane_h))
-        .map(|(tt, tc, t)| interp_rects((top, count), (tt, tc), t, rect))
-        .unwrap_or_else(|| config_rects(top, count, rect));
+        .map(|(tt, tc, t)| interp_rects((top, count), (tt, tc), t, content_area))
+        .unwrap_or_else(|| rest_bands.clone());
 
-    // 1) Pane content (top to bottom).
-    for (slot, prect) in &layout {
-        if prect.height() < 1.0 {
-            continue;
-        }
-        let sp = STACK[*slot];
-        super::surface::render_surface_fullbleed(
-            ui,
-            *prect,
-            &slot_path(*slot),
-            sp.pane_type(state.show_instruments),
-            rc,
+    // 1) Pane content, carving the header off the top of each band.
+    for (slot, brect) in &draw_layout {
+        let header_h = HEADER_H.min(brect.height());
+        let content_rect = egui::Rect::from_min_max(
+            egui::pos2(brect.left(), brect.top() + header_h),
+            brect.max,
         );
+        if content_rect.height() > 1.0 {
+            let sp = STACK[*slot];
+            super::surface::render_surface_fullbleed(
+                ui,
+                content_rect,
+                &slot_path(*slot),
+                sp.pane_type(state.show_instruments),
+                rc,
+            );
+        }
     }
 
-    // 2) Per-band label chips + the Node/Instrument toggle (drawn over content).
-    for (slot, prect) in &layout {
-        if prect.height() < 24.0 {
+    // 2) Header visuals (animated positions).
+    for (slot, brect) in &draw_layout {
+        if brect.height() < 6.0 {
             continue;
         }
-        draw_band_chip(ui, *prect, STACK[*slot], state);
+        let hr = egui::Rect::from_min_max(
+            brect.left_top(),
+            egui::pos2(brect.right(), brect.top() + HEADER_H.min(brect.height())),
+        );
+        draw_header(ui, hr, STACK[*slot], state.show_instruments, false);
     }
+    draw_footer(ui, footer_rect, top + count >= N);
 
-    // 3) Handles (interacted last so they win the initial press on their thin strips).
-    handle_interactions(ui, rect, state);
+    // 3) Interactions on the resting header/footer rects (added last → they win the press).
+    handle_interactions(ui, &rest_bands, footer_rect, state);
 }
 
-fn draw_band_chip(ui: &mut egui::Ui, prect: egui::Rect, sp: StackPane, state: &mut MobileState) {
-    let label = sp.label(state.show_instruments);
-    let pos = prect.left_top() + egui::vec2(8.0, 6.0);
-    let galley = ui.painter().layout_no_wrap(
-        label.to_string(),
-        egui::FontId::proportional(11.0),
-        C_DIM,
+fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: bool, hot: bool) {
+    let p = ui.painter();
+    p.rect_filled(hr, 0.0, if hot { C_HEADER_HOT } else { C_HEADER });
+    p.hline(hr.x_range(), hr.bottom(), egui::Stroke::new(1.0, C_LINE));
+    // Grip dots on the left.
+    let cy = hr.center().y;
+    for i in 0..2 {
+        let x = hr.left() + 9.0 + i as f32 * 4.0;
+        p.circle_filled(egui::pos2(x, cy), 1.3, C_DIM);
+    }
+    p.text(
+        egui::pos2(hr.left() + 22.0, cy),
+        egui::Align2::LEFT_CENTER,
+        sp.label(show_instruments),
+        egui::FontId::proportional(12.0),
+        C_BRIGHT,
     );
-    let chip = egui::Rect::from_min_size(pos, galley.size() + egui::vec2(12.0, 5.0));
-    ui.painter().rect_filled(chip, 4.0, C_CHIP_BG);
-    ui.painter()
-        .galley(chip.min + egui::vec2(6.0, 2.0), galley, C_DIM);
-
-    // Node/Instrument toggle sits just to the right of the label chip.
+    // Node/Instrument toggle marker (its hit area is wired in handle_interactions).
     if sp == StackPane::NodeInstrument {
-        let tog = egui::Rect::from_min_size(
-            egui::pos2(chip.right() + 6.0, chip.top()),
-            egui::vec2(24.0, chip.height()),
-        );
-        let resp = ui.interact(tog, ui.id().with("mobile_node_toggle"), egui::Sense::click());
-        ui.painter().rect_filled(tog, 4.0, C_CHIP_BG);
-        ui.painter().text(
-            tog.center(),
+        p.text(
+            egui::pos2(hr.right() - 14.0, cy),
             egui::Align2::CENTER_CENTER,
             "⇄",
-            egui::FontId::proportional(13.0),
-            if resp.hovered() { C_AMBER } else { C_DIM },
+            egui::FontId::proportional(14.0),
+            C_AMBER,
         );
-        if resp.clicked() {
-            state.show_instruments = !state.show_instruments;
-        }
     }
+}
+
+fn draw_footer(ui: &egui::Ui, fr: egui::Rect, at_end: bool) {
+    let p = ui.painter();
+    p.rect_filled(fr, 0.0, C_HEADER);
+    p.hline(fr.x_range(), fr.top(), egui::Stroke::new(1.0, C_LINE));
+    let col = if at_end { C_LINE } else { C_DIM };
+    p.text(
+        fr.center(),
+        egui::Align2::CENTER_CENTER,
+        "▲  pull up for more",
+        egui::FontId::proportional(11.0),
+        col,
+    );
 }
 
 fn handle_key(h: Handle) -> (usize, usize) {
@@ -245,39 +281,43 @@ fn handle_key(h: Handle) -> (usize, usize) {
     }
 }
 
-fn handle_interactions(ui: &mut egui::Ui, rect: egui::Rect, state: &mut MobileState) {
-    let count = state.window_count;
-    let pane_h = rect.height() / count as f32;
+fn handle_interactions(
+    ui: &mut egui::Ui,
+    rest_bands: &[(usize, egui::Rect)],
+    footer_rect: egui::Rect,
+    state: &mut MobileState,
+) {
+    let pane_h = rest_bands.first().map(|(_, r)| r.height()).unwrap_or(1.0);
 
-    let mut handles: Vec<(Handle, egui::Rect)> = Vec::new();
-    handles.push((
-        Handle::TopEdge,
-        egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.top() + EDGE_GRAB_H)),
-    ));
-    for k in 0..count.saturating_sub(1) {
-        let y = rect.top() + (k + 1) as f32 * pane_h;
-        handles.push((
-            Handle::Divider(k),
-            egui::Rect::from_min_max(
-                egui::pos2(rect.left(), y - DIV_GRAB_H * 0.5),
-                egui::pos2(rect.right(), y + DIV_GRAB_H * 0.5),
-            ),
-        ));
+    // (handle, header_rect, optional node-toggle slot)
+    let mut handles: Vec<(Handle, egui::Rect, bool)> = Vec::new();
+    for (i, (slot, brect)) in rest_bands.iter().enumerate() {
+        let hr = egui::Rect::from_min_max(
+            brect.left_top(),
+            egui::pos2(brect.right(), brect.top() + HEADER_H.min(brect.height())),
+        );
+        let handle = if i == 0 { Handle::TopEdge } else { Handle::Divider(i - 1) };
+        let is_node = STACK[*slot] == StackPane::NodeInstrument;
+        handles.push((handle, hr, is_node));
     }
-    handles.push((
-        Handle::BottomEdge,
-        egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - EDGE_GRAB_H), rect.max),
-    ));
+    handles.push((Handle::BottomEdge, footer_rect, false));
 
-    for (handle, hrect) in handles {
+    for (handle, hrect, is_node) in handles {
         let id = ui.id().with(("mobile_stack_handle", handle_key(handle)));
-        let resp = ui.interact(hrect, id, egui::Sense::drag());
+        let resp = ui.interact(hrect, id, egui::Sense::click_and_drag());
 
-        let active = state.drag.map(|d| d.handle == handle).unwrap_or(false);
-        // Grab pill.
-        let pill = egui::Rect::from_center_size(hrect.center(), egui::vec2(40.0, 4.0));
-        let pill_col = if resp.hovered() || active { C_AMBER } else { C_LINE };
-        ui.painter().rect_filled(pill, 2.0, pill_col);
+        // Node/Instrument toggle: a small hit area on the right of the header, interacted AFTER the
+        // header (so it's on top and wins clicks there); the rest of the header drives the drag.
+        if is_node {
+            let tog = egui::Rect::from_min_max(
+                egui::pos2(hrect.right() - 28.0, hrect.top()),
+                hrect.max,
+            );
+            let tresp = ui.interact(tog, ui.id().with("mobile_node_toggle"), egui::Sense::click());
+            if tresp.clicked() {
+                state.show_instruments = !state.show_instruments;
+            }
+        }
 
         if resp.drag_started() {
             state.drag = Some(StackDrag { handle, offset: 0.0 });
@@ -294,7 +334,7 @@ fn handle_interactions(ui: &mut egui::Ui, rect: egui::Rect, state: &mut MobileSt
                 commit_drag(d, state, pane_h);
             }
         }
-        if resp.hovered() || active {
+        if resp.hovered() || state.drag.map(|d| d.handle == handle).unwrap_or(false) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
     }
