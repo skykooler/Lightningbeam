@@ -122,8 +122,11 @@ pub struct StackDrag {
 pub struct MobileState {
     /// Index into `STACK` of the topmost visible pane.
     pub window_top: usize,
-    /// Number of visible panes (2 or 3).
+    /// Number of visible panes (1, 2, or 3; 1 = a single pane filling the stack).
     pub window_count: usize,
+    /// Relative heights of the visible panes (first `window_count` entries are used; normalized on
+    /// use). Reset to even on any membership change; adjusted by intermediate divider snapping.
+    pub weights: [f32; 3],
     /// Node/Instrument band: false = node editor, true = instrument/preset browser.
     pub show_instruments: bool,
     /// Active handle drag (transient).
@@ -136,6 +139,7 @@ impl Default for MobileState {
             // Launch on {Stage, Timeline}.
             window_top: 2,
             window_count: 2,
+            weights: [1.0, 1.0, 1.0],
             show_instruments: false,
             drag: None,
         }

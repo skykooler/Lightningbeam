@@ -113,20 +113,43 @@ fn resolve(
 
 // --- rect layout ---
 
-fn config_rects(top: usize, count: usize, rect: egui::Rect) -> Vec<(usize, egui::Rect)> {
-    let h = rect.height() / count as f32;
-    (0..count)
-        .map(|i| {
-            let y0 = rect.top() + i as f32 * h;
-            (
-                top + i,
-                egui::Rect::from_min_max(
-                    egui::pos2(rect.left(), y0),
-                    egui::pos2(rect.right(), y0 + h),
-                ),
-            )
-        })
-        .collect()
+/// Intermediate divider snap fractions (pane k's share of the {k, k+1} span).
+const SNAP_FRACS: [f32; 5] = [0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 0.75];
+/// Below/above these local fractions, a divider release collapses a pane → membership change.
+const COLLAPSE_LO: f32 = 0.12;
+const COLLAPSE_HI: f32 = 0.88;
+/// Minimum normalized size a pane may be squeezed to during a live divider drag.
+const MIN_FRAC: f32 = 0.05;
+
+/// Normalized pane weights (the first `count` stored weights, summing to 1).
+fn nweights(weights: &[f32; 3], count: usize) -> Vec<f32> {
+    let mut w: Vec<f32> = weights[..count].iter().map(|x| x.max(0.0001)).collect();
+    let s: f32 = w.iter().sum();
+    if s > 0.0 {
+        for x in &mut w {
+            *x /= s;
+        }
+    } else {
+        let e = 1.0 / count as f32;
+        w.iter_mut().for_each(|x| *x = e);
+    }
+    w
+}
+
+/// Lay out `count` panes in `rect` using normalized weights `nw`.
+fn config_rects(top: usize, count: usize, rect: egui::Rect, nw: &[f32]) -> Vec<(usize, egui::Rect)> {
+    let h = rect.height();
+    let mut out = Vec::with_capacity(count);
+    let mut y = rect.top();
+    for i in 0..count {
+        let ph = nw[i] * h;
+        out.push((
+            top + i,
+            egui::Rect::from_min_max(egui::pos2(rect.left(), y), egui::pos2(rect.right(), y + ph)),
+        ));
+        y += ph;
+    }
+    out
 }
 
 fn lerp_f(a: f32, b: f32, t: f32) -> f32 {
@@ -143,24 +166,51 @@ fn collapsed(rect: egui::Rect, at_top: bool) -> egui::Rect {
     egui::Rect::from_min_max(egui::pos2(rect.left(), y), egui::pos2(rect.right(), y))
 }
 
-/// Interpolate the visible-pane rects from config C toward config T by progress `t`.
-fn interp_rects(
-    (top_c, count_c): (usize, usize),
-    (top_t, count_t): (usize, usize),
+/// The local boundary fraction (pane k's share of the {k, k+1} span) after applying a normalized
+/// `offset_frac` to divider `k`, clamped so neither pane is squeezed past MIN_FRAC.
+fn divider_local(nw: &[f32], k: usize, offset_frac: f32) -> f32 {
+    let span_lo: f32 = nw[..k].iter().sum();
+    let span = nw[k] + nw[k + 1];
+    if span <= 0.0 {
+        return 0.5;
+    }
+    let base_b = span_lo + nw[k];
+    let b = (base_b + offset_frac).clamp(span_lo + MIN_FRAC * span, span_lo + span - MIN_FRAC * span);
+    ((b - span_lo) / span).clamp(0.0, 1.0)
+}
+
+/// Live pane rects while dragging divider `k` (resize-only; membership is unchanged until release).
+fn divider_live(
+    top: usize,
+    count: usize,
+    rect: egui::Rect,
+    nw: &[f32],
+    k: usize,
+    offset_frac: f32,
+) -> Vec<(usize, egui::Rect)> {
+    let f = divider_local(nw, k, offset_frac);
+    let span = nw[k] + nw[k + 1];
+    let mut w = nw.to_vec();
+    w[k] = f * span;
+    w[k + 1] = (1.0 - f) * span;
+    config_rects(top, count, rect, &w)
+}
+
+/// Interpolate between two precomputed rect lists by `t` (used for edge membership transitions).
+fn interp_layout(
+    c: &[(usize, egui::Rect)],
+    tt: &[(usize, egui::Rect)],
+    top_c: usize,
+    top_t: usize,
     t: f32,
     rect: egui::Rect,
 ) -> Vec<(usize, egui::Rect)> {
-    let c = config_rects(top_c, count_c, rect);
-    let tt = config_rects(top_t, count_t, rect);
     let find = |v: &[(usize, egui::Rect)], slot: usize| v.iter().find(|(s, _)| *s == slot).map(|(_, r)| *r);
-
-    let lo = top_c.min(top_t);
-    let hi = (top_c + count_c).max(top_t + count_t);
+    let lo = c.first().map(|(s, _)| *s).unwrap_or(0).min(tt.first().map(|(s, _)| *s).unwrap_or(0));
+    let hi = c.last().map(|(s, _)| *s + 1).unwrap_or(0).max(tt.last().map(|(s, _)| *s + 1).unwrap_or(0));
     let mut out = Vec::new();
     for slot in lo..hi {
-        let in_c = find(&c, slot);
-        let in_t = find(&tt, slot);
-        let r = match (in_c, in_t) {
+        let r = match (find(c, slot), find(tt, slot)) {
             (Some(rc), Some(rt)) => lerp_rect(rc, rt, t),
             (Some(rc), None) => lerp_rect(rc, collapsed(rect, slot < top_t), t), // exiting
             (None, Some(rt)) => lerp_rect(collapsed(rect, slot < top_c), rt, t), // entering
@@ -192,14 +242,28 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
     let pane_h = content_area.height() / count as f32;
     let trigger = pane_h.min(TRIGGER_MAX);
 
-    // Resting band rects (used for interaction so drags don't chase the animated layout) and the
-    // possibly-animated draw layout.
-    let rest_bands = config_rects(top, count, content_area);
-    let draw_layout = state
-        .drag
-        .and_then(|d| resolve(d.handle, d.offset, top, count, trigger))
-        .map(|(tt, tc, t)| interp_rects((top, count), (tt, tc), t, content_area))
-        .unwrap_or_else(|| rest_bands.clone());
+    // Resting band rects (weighted; used for interaction so drags don't chase the animated layout).
+    let nw = nweights(&state.weights, count);
+    let rest_bands = config_rects(top, count, content_area, &nw);
+
+    // The draw layout. A divider drag resizes its two panes live; an edge drag animates toward the
+    // membership transition.
+    let draw_layout = match state.drag {
+        Some(d) => match d.handle {
+            Handle::Divider(k) if k + 1 < count => {
+                let off_frac = d.offset / content_area.height().max(1.0);
+                divider_live(top, count, content_area, &nw, k, off_frac)
+            }
+            _ => resolve(d.handle, d.offset, top, count, trigger)
+                .map(|(tt, tc, t)| {
+                    let even = vec![1.0 / tc as f32; tc];
+                    let target = config_rects(tt, tc, content_area, &even);
+                    interp_layout(&rest_bands, &target, top, tt, t, content_area)
+                })
+                .unwrap_or_else(|| rest_bands.clone()),
+        },
+        None => rest_bands.clone(),
+    };
 
     // 1) Pane content, carving the header off the top of each band.
     for (slot, brect) in &draw_layout {
@@ -236,7 +300,7 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
     draw_footer(ui, footer_rect, top + count >= N);
 
     // 3) Interactions on the resting header/footer rects (added last → they win the press).
-    handle_interactions(ui, &rest_bands, footer_rect, trigger, state);
+    handle_interactions(ui, &rest_bands, content_area, footer_rect, trigger, state);
 }
 
 fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: bool, fullscreen: bool) {
@@ -321,18 +385,17 @@ fn toggle_fullscreen(state: &mut MobileState, slot: usize) {
     if state.window_count == 1 && state.window_top == slot {
         // Restore: split with the pane below if possible, else above.
         if let Some((t, c)) = op_r5(slot, 1).or_else(|| op_r6(slot, 1)) {
-            state.window_top = t;
-            state.window_count = c;
+            set_window(state, t, c);
         }
     } else {
-        state.window_top = slot;
-        state.window_count = 1;
+        set_window(state, slot, 1);
     }
 }
 
 fn handle_interactions(
     ui: &mut egui::Ui,
     rest_bands: &[(usize, egui::Rect)],
+    content_area: egui::Rect,
     footer_rect: egui::Rect,
     trigger: f32,
     state: &mut MobileState,
@@ -388,7 +451,7 @@ fn handle_interactions(
         }
         if resp.drag_stopped() {
             if let Some(d) = state.drag.take() {
-                commit_drag(d, state, trigger);
+                commit_drag(d, state, content_area, trigger);
             }
         }
         if resp.hovered() || state.drag.map(|d| d.handle == handle).unwrap_or(false) {
@@ -397,11 +460,64 @@ fn handle_interactions(
     }
 }
 
-fn commit_drag(d: StackDrag, state: &mut MobileState, trigger: f32) {
-    if let Some((tt, tc, t)) = resolve(d.handle, d.offset, state.window_top, state.window_count, trigger) {
-        if t >= 0.5 {
-            state.window_top = tt;
-            state.window_count = tc;
+fn commit_drag(d: StackDrag, state: &mut MobileState, content_area: egui::Rect, trigger: f32) {
+    match d.handle {
+        Handle::Divider(k) if k + 1 < state.window_count => {
+            commit_divider(state, k, d.offset / content_area.height().max(1.0));
+        }
+        _ => {
+            // Edges (and degenerate dividers): membership transition, then reset to even sizing.
+            if let Some((tt, tc, t)) =
+                resolve(d.handle, d.offset, state.window_top, state.window_count, trigger)
+            {
+                if t >= 0.5 {
+                    set_window(state, tt, tc);
+                }
+            }
         }
     }
+}
+
+/// Apply a divider release: collapse a pane (→ membership change) past the thresholds, otherwise
+/// snap the boundary to the nearest intermediate fraction.
+fn commit_divider(state: &mut MobileState, k: usize, offset_frac: f32) {
+    let top = state.window_top;
+    let count = state.window_count;
+    let nw = nweights(&state.weights, count);
+    let f = divider_local(&nw, k, offset_frac);
+
+    if f <= COLLAPSE_LO {
+        // Pane k squeezed out at the top.
+        let op = if k == 0 { op_r1(top, count) } else { op_r3(top, count) };
+        if let Some((tt, tc)) = op {
+            set_window(state, tt, tc);
+        }
+    } else if f >= COLLAPSE_HI {
+        // Pane k+1 squeezed out at the bottom.
+        let op = if k == count - 2 { op_r2(top, count) } else { op_r4(top, count) };
+        if let Some((tt, tc)) = op {
+            set_window(state, tt, tc);
+        }
+    } else {
+        // Snap the boundary to the nearest intermediate fraction, preserving the {k, k+1} span and
+        // the other panes' sizes.
+        let sf = *SNAP_FRACS
+            .iter()
+            .min_by(|a, b| (**a - f).abs().total_cmp(&(**b - f).abs()))
+            .unwrap();
+        let span = nw[k] + nw[k + 1];
+        let mut w = nw;
+        w[k] = sf * span;
+        w[k + 1] = (1.0 - sf) * span;
+        for i in 0..count {
+            state.weights[i] = w[i];
+        }
+    }
+}
+
+/// Switch the visible window and reset to even pane sizing.
+fn set_window(state: &mut MobileState, top: usize, count: usize) {
+    state.window_top = top;
+    state.window_count = count;
+    state.weights = [1.0, 1.0, 1.0];
 }
