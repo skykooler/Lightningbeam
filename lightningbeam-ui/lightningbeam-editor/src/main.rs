@@ -6535,37 +6535,19 @@ impl eframe::App for EditorApp {
 
         // Main pane area (editor mode)
         let mut layout_action: Option<LayoutAction> = None;
-        let mut clipboard_consumed = false;
+        // Per-frame scratch consumed by the post-render drain (see FrameScratch).
+        // Declared outside the closure because some of it (clipboard_consumed) is read
+        // after the panel closes.
+        let mut scratch = FrameScratch::default();
+        #[cfg(debug_assertions)]
+        {
+            scratch.synthetic_input = test_mode_replay.synthetic_input;
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             let available_rect = ui.available_rect_before_wrap();
 
             // Reset hovered divider each frame
             self.hovered_divider = None;
-
-            // Track fallback pane priority for view actions (reset each frame)
-            let mut fallback_pane_priority: Option<u32> = None;
-
-            // Registry for view action handlers (two-phase dispatch)
-            let mut pending_handlers: Vec<panes::ViewActionHandler> = Vec::new();
-
-            // Registry for actions to execute after rendering (two-phase dispatch)
-            let mut pending_actions: Vec<Box<dyn lightningbeam_core::action::Action>> = Vec::new();
-
-            // Menu actions queued by pane context menus
-            let mut pending_menu_actions: Vec<MenuAction> = Vec::new();
-
-            // Editing context navigation requests from stage pane
-            let mut pending_enter_clip: Option<(Uuid, Uuid, Uuid)> = None;
-            let mut pending_exit_clip = false;
-
-            // Synthetic input from test mode replay (debug builds only)
-            #[cfg(debug_assertions)]
-            let mut synthetic_input_storage: Option<test_mode::SyntheticInput> = test_mode_replay.synthetic_input;
-
-            // Queue for effect thumbnail requests (collected during rendering)
-            let mut effect_thumbnail_requests: Vec<Uuid> = Vec::new();
-            // Empty cache fallback if generator not initialized
-            let empty_thumbnail_cache: HashMap<Uuid, Vec<u8>> = HashMap::new();
 
             // Sync clip instance transforms from animation data at current playback time.
             // This ensures selection boxes, hit testing, and interactive editing see the
@@ -6601,133 +6583,36 @@ impl eframe::App for EditorApp {
                 }
             }
 
-            // Create render context
-            let mut ctx = RenderContext {
-                shared: panes::SharedPaneState {
-                    container_path: self.current_file_path.clone(),
-                    onion: {
-                        // Onion skinning is disabled during playback.
-                        let mut o = self.onion_skin;
-                        o.enabled = o.enabled && !self.is_playing;
-                        o
-                    },
-                    onion_skin: &mut self.onion_skin,
-                    tool_icon_cache: &mut self.tool_icon_cache,
-                    icon_cache: &mut self.icon_cache,
-                    selected_tool: &mut self.selected_tool,
-                    fill_color: &mut self.fill_color,
-                    stroke_color: &mut self.stroke_color,
-                    active_color_mode: &mut self.active_color_mode,
-                    pending_view_action: &mut self.pending_view_action,
-                    fallback_pane_priority: &mut fallback_pane_priority,
-                    pending_handlers: &mut pending_handlers,
-                    theme: &self.theme,
-                    action_executor: &mut self.action_executor,
-                    selection: &mut self.selection,
-                    focus: &mut self.focus,
-                    editing_clip_id: self.editing_context.current_clip_id(),
-                    editing_instance_id: self.editing_context.current_instance_id(),
-                    editing_parent_layer_id: self.editing_context.current_parent_layer_id(),
-                    pending_enter_clip: &mut pending_enter_clip,
-                    pending_exit_clip: &mut pending_exit_clip,
-                    active_layer_id: &mut self.active_layer_id,
-                    tool_state: &mut self.tool_state,
-                    pending_actions: &mut pending_actions,
-                    draw_simplify_mode: &mut self.draw_simplify_mode,
-                    rdp_tolerance: &mut self.rdp_tolerance,
-                    schneider_max_error: &mut self.schneider_max_error,
-                    raster_settings: &mut self.raster_settings,
-                    audio_controller: self.audio_controller.as_ref(),
-                    clip_snapshot: self.audio_controller.as_ref().map(|arc| {
-                        arc.lock().unwrap().clip_snapshot()
-                    }),
-                    audio_input_opener: &mut self.audio_input,
-                    audio_input_stream: &mut self.audio_input_stream,
-                    audio_buffer_size: self.audio_buffer_size,
-                    video_manager: &self.video_manager,
-                    playback_time: &mut self.playback_time,
-                    is_playing: &mut self.is_playing,
-                    is_recording: &mut self.is_recording,
-                    metronome_enabled: &mut self.metronome_enabled,
-                    count_in_enabled: &mut self.count_in_enabled,
-                    recording_clips: &mut self.recording_clips,
-                    recording_start_time: &mut self.recording_start_time,
-                    recording_layer_ids: &mut self.recording_layer_ids,
-                    dragging_asset: &mut self.dragging_asset,
-                    stroke_width: &mut self.stroke_width,
-                    fill_enabled: &mut self.fill_enabled,
-                    snap_enabled: &mut self.snap_enabled,
-                    paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
-                    polygon_sides: &mut self.polygon_sides,
-                    layer_to_track_map: &self.layer_to_track_map,
-                    clip_instance_to_backend_map: &self.clip_instance_to_backend_map,
-                    midi_event_cache: &mut self.midi_event_cache,
-                    audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
-                    raw_audio_cache: &self.raw_audio_cache,
-                    waveform_gpu_dirty: &mut self.waveform_gpu_dirty,
-                    waveform_minmax_pools: &self.waveform_minmax_pools,
-                    raster_fault_requests: &self.raster_fault_requests,
-                    effect_to_load: &mut self.effect_to_load,
-                    effect_thumbnail_requests: &mut effect_thumbnail_requests,
-                    effect_thumbnail_cache: self.effect_thumbnail_generator.as_ref()
-                        .map(|g| g.thumbnail_cache())
-                        .unwrap_or(&empty_thumbnail_cache),
-                    effect_thumbnails_to_invalidate: &mut self.effect_thumbnails_to_invalidate,
-                    webcam_frame: self.webcam_frame.clone(),
-                    webcam_record_command: &mut self.webcam_record_command,
-                    target_format: self.target_format,
-                    pending_menu_actions: &mut pending_menu_actions,
-                    clipboard_manager: &mut self.clipboard_manager,
-                    input_level: self.input_level,
-                    output_level: self.output_level,
-                    track_levels: &self.track_levels,
-                    track_to_layer_map: &self.track_to_layer_map,
-                    waveform_stereo: self.config.waveform_stereo,
-                    project_generation: &mut self.project_generation,
-                    graph_topology_generation: &mut self.graph_topology_generation,
-                    script_to_edit: &mut self.script_to_edit,
-                    script_saved: &mut self.script_saved,
-                    pending_region_cut_base: &mut self.pending_region_cut_base,
-                    region_select_mode: &mut self.region_select_mode,
-                    lasso_mode: &mut self.lasso_mode,
-                    pending_graph_loads: &self.pending_graph_loads,
-                    clipboard_consumed: &mut clipboard_consumed,
-                    keymap: &self.keymap,
-                    pending_node_group: &mut self.pending_node_group,
-                    pending_node_ungroup: &mut self.pending_node_ungroup,
-                    #[cfg(debug_assertions)]
-                    test_mode: &mut self.test_mode,
-                    #[cfg(debug_assertions)]
-                    synthetic_input: &mut synthetic_input_storage,
-                    brush_preview_pixels: &self.brush_preview_pixels,
-                },
-                pane_instances: &mut self.pane_instances,
-            };
+            // Build the per-frame context (single source of truth for SharedPaneState,
+            // shared with the mobile path). The bundle borrows `self` + `scratch`; it
+            // is dropped before the post-render drain below re-touches them.
+            let mut bundle = self.build_frame(&mut scratch);
 
             render_layout_node(
                 ui,
-                &mut self.current_layout,
+                bundle.current_layout,
                 available_rect,
-                &mut self.drag_state,
-                &mut self.hovered_divider,
-                &mut self.selected_pane,
+                bundle.drag_state,
+                bundle.hovered_divider,
+                bundle.selected_pane,
                 &mut layout_action,
-                &mut self.split_preview_mode,
+                bundle.split_preview_mode,
                 &Vec::new(), // Root path
-                &mut ctx,
+                &mut bundle.rc,
             );
+            drop(bundle);
 
             // Process collected effect thumbnail requests
-            if !effect_thumbnail_requests.is_empty() {
+            if !scratch.effect_thumbnail_requests.is_empty() {
                 if let Some(generator) = &mut self.effect_thumbnail_generator {
-                    generator.request_thumbnails(&effect_thumbnail_requests);
+                    generator.request_thumbnails(&scratch.effect_thumbnail_requests);
                 }
             }
 
 
             // Execute action on the best handler (two-phase dispatch)
             if let Some(action) = &self.pending_view_action {
-                if let Some(best_handler) = pending_handlers.iter().min_by_key(|h| h.priority) {
+                if let Some(best_handler) = scratch.pending_handlers.iter().min_by_key(|h| h.priority) {
                     // Look up the pane instance and execute the action
                     if let Some(pane_instance) = self.pane_instances.get_mut(&best_handler.pane_path) {
                         match pane_instance {
@@ -6748,7 +6633,7 @@ impl eframe::App for EditorApp {
             self.sync_audio_layers_to_backend();
 
             // Execute all pending actions (two-phase dispatch)
-            for action in pending_actions {
+            for action in std::mem::take(&mut scratch.pending_actions) {
                 // Record action for test mode (debug builds only)
                 #[cfg(debug_assertions)]
                 let action_desc = action.description();
@@ -6780,7 +6665,7 @@ impl eframe::App for EditorApp {
             }
 
             // Process menu actions queued by pane context menus
-            for action in pending_menu_actions {
+            for action in std::mem::take(&mut scratch.pending_menu_actions) {
                 self.handle_menu_action(action);
             }
 
@@ -6942,7 +6827,7 @@ impl eframe::App for EditorApp {
             }
 
             // Process editing context navigation (enter/exit movie clips)
-            if let Some((clip_id, instance_id, parent_layer_id)) = pending_enter_clip {
+            if let Some((clip_id, instance_id, parent_layer_id)) = scratch.pending_enter_clip {
                 let entry = EditingContextEntry {
                     clip_id,
                     instance_id,
@@ -6966,7 +6851,7 @@ impl eframe::App for EditorApp {
                 self.commit_raster_floating();
             }
 
-            if pending_exit_clip {
+            if scratch.pending_exit_clip {
                 if let Some(entry) = self.editing_context.pop() {
                     self.selection.clear();
                     self.active_layer_id = entry.saved_active_layer_id;
@@ -7030,8 +6915,8 @@ impl eframe::App for EditorApp {
             // Event::Copy/Cut/Paste instead of regular key events, so
             // check_shortcuts won't see them via key_pressed().
             // Skip if a pane (e.g. piano roll) already handled the clipboard event.
-            let mut clipboard_handled = clipboard_consumed;
-            if !clipboard_consumed {
+            let mut clipboard_handled = scratch.clipboard_consumed;
+            if !scratch.clipboard_consumed {
                 for event in &i.events {
                     match event {
                         egui::Event::Copy => {
@@ -7192,6 +7077,156 @@ impl eframe::App for EditorApp {
 struct RenderContext<'a> {
     shared: panes::SharedPaneState<'a>,
     pane_instances: &'a mut HashMap<NodePath, PaneInstance>,
+}
+
+/// Per-frame scratch state used to build the `RenderContext`. These values live only
+/// for the duration of one `update()` frame: panes write into them during rendering
+/// and the post-render drain consumes them. Grouping them lets [`EditorApp::build_frame`]
+/// hand back a context that borrows both `self` and this scratch, so the desktop and
+/// mobile render paths share one construction site for the ~80-field `SharedPaneState`.
+#[derive(Default)]
+struct FrameScratch {
+    fallback_pane_priority: Option<u32>,
+    pending_handlers: Vec<panes::ViewActionHandler>,
+    pending_enter_clip: Option<(Uuid, Uuid, Uuid)>,
+    pending_exit_clip: bool,
+    pending_actions: Vec<Box<dyn lightningbeam_core::action::Action>>,
+    pending_menu_actions: Vec<MenuAction>,
+    effect_thumbnail_requests: Vec<Uuid>,
+    clipboard_consumed: bool,
+    empty_thumbnail_cache: HashMap<Uuid, Vec<u8>>,
+    #[cfg(debug_assertions)]
+    synthetic_input: Option<test_mode::SyntheticInput>,
+}
+
+/// Everything `update()` hands to a per-frame layout renderer: the [`RenderContext`]
+/// plus the layout-editing borrows that ride alongside it (these are passed to
+/// `render_layout_node` as separate `&mut` args and are disjoint from `SharedPaneState`).
+/// Built by [`EditorApp::build_frame`] from a single `&mut self`, which is what lets the
+/// huge `SharedPaneState` literal have one home shared by the desktop and mobile paths.
+struct FrameBundle<'a> {
+    rc: RenderContext<'a>,
+    current_layout: &'a mut LayoutNode,
+    drag_state: &'a mut DragState,
+    hovered_divider: &'a mut Option<(NodePath, bool)>,
+    selected_pane: &'a mut Option<NodePath>,
+    split_preview_mode: &'a mut SplitPreviewMode,
+}
+
+impl EditorApp {
+    /// Build the per-frame [`FrameBundle`]. The returned bundle borrows `self` and
+    /// `scratch` for `'a`; it must be dropped before the post-render drain touches
+    /// `self`/`scratch` again. This is the single source of truth for `SharedPaneState`.
+    fn build_frame<'a>(&'a mut self, scratch: &'a mut FrameScratch) -> FrameBundle<'a> {
+        FrameBundle {
+            rc: RenderContext {
+                shared: panes::SharedPaneState {
+                    container_path: self.current_file_path.clone(),
+                    onion: {
+                        // Onion skinning is disabled during playback.
+                        let mut o = self.onion_skin;
+                        o.enabled = o.enabled && !self.is_playing;
+                        o
+                    },
+                    onion_skin: &mut self.onion_skin,
+                    tool_icon_cache: &mut self.tool_icon_cache,
+                    icon_cache: &mut self.icon_cache,
+                    selected_tool: &mut self.selected_tool,
+                    fill_color: &mut self.fill_color,
+                    stroke_color: &mut self.stroke_color,
+                    active_color_mode: &mut self.active_color_mode,
+                    pending_view_action: &mut self.pending_view_action,
+                    fallback_pane_priority: &mut scratch.fallback_pane_priority,
+                    pending_handlers: &mut scratch.pending_handlers,
+                    theme: &self.theme,
+                    action_executor: &mut self.action_executor,
+                    selection: &mut self.selection,
+                    focus: &mut self.focus,
+                    editing_clip_id: self.editing_context.current_clip_id(),
+                    editing_instance_id: self.editing_context.current_instance_id(),
+                    editing_parent_layer_id: self.editing_context.current_parent_layer_id(),
+                    pending_enter_clip: &mut scratch.pending_enter_clip,
+                    pending_exit_clip: &mut scratch.pending_exit_clip,
+                    active_layer_id: &mut self.active_layer_id,
+                    tool_state: &mut self.tool_state,
+                    pending_actions: &mut scratch.pending_actions,
+                    draw_simplify_mode: &mut self.draw_simplify_mode,
+                    rdp_tolerance: &mut self.rdp_tolerance,
+                    schneider_max_error: &mut self.schneider_max_error,
+                    raster_settings: &mut self.raster_settings,
+                    audio_controller: self.audio_controller.as_ref(),
+                    clip_snapshot: self.audio_controller.as_ref().map(|arc| {
+                        arc.lock().unwrap().clip_snapshot()
+                    }),
+                    audio_input_opener: &mut self.audio_input,
+                    audio_input_stream: &mut self.audio_input_stream,
+                    audio_buffer_size: self.audio_buffer_size,
+                    video_manager: &self.video_manager,
+                    playback_time: &mut self.playback_time,
+                    is_playing: &mut self.is_playing,
+                    is_recording: &mut self.is_recording,
+                    metronome_enabled: &mut self.metronome_enabled,
+                    count_in_enabled: &mut self.count_in_enabled,
+                    recording_clips: &mut self.recording_clips,
+                    recording_start_time: &mut self.recording_start_time,
+                    recording_layer_ids: &mut self.recording_layer_ids,
+                    dragging_asset: &mut self.dragging_asset,
+                    stroke_width: &mut self.stroke_width,
+                    fill_enabled: &mut self.fill_enabled,
+                    snap_enabled: &mut self.snap_enabled,
+                    paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
+                    polygon_sides: &mut self.polygon_sides,
+                    layer_to_track_map: &self.layer_to_track_map,
+                    clip_instance_to_backend_map: &self.clip_instance_to_backend_map,
+                    midi_event_cache: &mut self.midi_event_cache,
+                    audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
+                    raw_audio_cache: &self.raw_audio_cache,
+                    waveform_gpu_dirty: &mut self.waveform_gpu_dirty,
+                    waveform_minmax_pools: &self.waveform_minmax_pools,
+                    raster_fault_requests: &self.raster_fault_requests,
+                    effect_to_load: &mut self.effect_to_load,
+                    effect_thumbnail_requests: &mut scratch.effect_thumbnail_requests,
+                    effect_thumbnail_cache: self.effect_thumbnail_generator.as_ref()
+                        .map(|g| g.thumbnail_cache())
+                        .unwrap_or(&scratch.empty_thumbnail_cache),
+                    effect_thumbnails_to_invalidate: &mut self.effect_thumbnails_to_invalidate,
+                    webcam_frame: self.webcam_frame.clone(),
+                    webcam_record_command: &mut self.webcam_record_command,
+                    target_format: self.target_format,
+                    pending_menu_actions: &mut scratch.pending_menu_actions,
+                    clipboard_manager: &mut self.clipboard_manager,
+                    input_level: self.input_level,
+                    output_level: self.output_level,
+                    track_levels: &self.track_levels,
+                    track_to_layer_map: &self.track_to_layer_map,
+                    waveform_stereo: self.config.waveform_stereo,
+                    project_generation: &mut self.project_generation,
+                    graph_topology_generation: &mut self.graph_topology_generation,
+                    script_to_edit: &mut self.script_to_edit,
+                    script_saved: &mut self.script_saved,
+                    pending_region_cut_base: &mut self.pending_region_cut_base,
+                    region_select_mode: &mut self.region_select_mode,
+                    lasso_mode: &mut self.lasso_mode,
+                    pending_graph_loads: &self.pending_graph_loads,
+                    clipboard_consumed: &mut scratch.clipboard_consumed,
+                    keymap: &self.keymap,
+                    pending_node_group: &mut self.pending_node_group,
+                    pending_node_ungroup: &mut self.pending_node_ungroup,
+                    #[cfg(debug_assertions)]
+                    test_mode: &mut self.test_mode,
+                    #[cfg(debug_assertions)]
+                    synthetic_input: &mut scratch.synthetic_input,
+                    brush_preview_pixels: &self.brush_preview_pixels,
+                },
+                pane_instances: &mut self.pane_instances,
+            },
+            current_layout: &mut self.current_layout,
+            drag_state: &mut self.drag_state,
+            hovered_divider: &mut self.hovered_divider,
+            selected_pane: &mut self.selected_pane,
+            split_preview_mode: &mut self.split_preview_mode,
+        }
+    }
 }
 
 /// Find which GroupLayer (if any) contains the given layer as a direct child.
