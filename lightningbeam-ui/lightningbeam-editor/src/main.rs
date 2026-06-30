@@ -10,6 +10,7 @@ use std::sync::Arc;
 use clap::Parser;
 use uuid::Uuid;
 
+mod mobile;
 mod panes;
 use panes::{PaneInstance, PaneRenderer};
 
@@ -197,8 +198,17 @@ fn main() -> eframe::Result {
         }
     };
 
+    // When developing the mobile UI on desktop (LB_MOBILE_UI), open a phone-aspect window so
+    // the shell can be exercised at a realistic size. Gating the shell itself is done at
+    // render time on the flag, not on window aspect.
+    let initial_size = if mobile::is_mobile_env() {
+        [402.0, 874.0] // iPhone-ish portrait
+    } else {
+        [1920.0, 1080.0]
+    };
+
     let mut viewport_builder = egui::ViewportBuilder::default()
-        .with_inner_size([1920.0, 1080.0])
+        .with_inner_size(initial_size)
         .with_title("Lightningbeam Editor")
         .with_app_id("lightningbeam-editor"); // Set app_id for Wayland
 
@@ -942,6 +952,13 @@ struct EditorApp {
     hovered_divider: Option<(NodePath, bool)>, // (path, is_horizontal)
     selected_pane: Option<NodePath>, // Currently selected pane for editing
     split_preview_mode: SplitPreviewMode,
+    // === Mobile / phone UI (developed on desktop behind LB_MOBILE_UI) ===
+    /// True if the mobile shell is requested via the env var (read once at startup).
+    mobile_ui: bool,
+    /// Runtime override of the mobile flag (None = follow `mobile_ui`).
+    mobile_ui_override: Option<bool>,
+    /// Persistent state for the mobile shell (active surface, ribbon tier).
+    mobile_state: mobile::MobileState,
     icon_cache: IconCache,
     tool_icon_cache: ToolIconCache,
     focus_icon_cache: FocusIconCache, // Focus card icons (start screen)
@@ -1297,6 +1314,9 @@ impl EditorApp {
             hovered_divider: None,
             selected_pane: None,
             split_preview_mode: SplitPreviewMode::default(),
+            mobile_ui: mobile::is_mobile_env(),
+            mobile_ui_override: None,
+            mobile_state: mobile::MobileState::default(),
             icon_cache: IconCache::new(),
             tool_icon_cache: ToolIconCache::new(),
             focus_icon_cache: FocusIconCache::new(),
@@ -6584,22 +6604,34 @@ impl eframe::App for EditorApp {
             }
 
             // Build the per-frame context (single source of truth for SharedPaneState,
-            // shared with the mobile path). The bundle borrows `self` + `scratch`; it
-            // is dropped before the post-render drain below re-touches them.
+            // shared by the desktop and mobile paths). The bundle borrows `self` + `scratch`;
+            // it is dropped before the post-render drain below re-touches them.
+            let is_mobile = self.mobile_active();
             let mut bundle = self.build_frame(&mut scratch);
 
-            render_layout_node(
-                ui,
-                bundle.current_layout,
-                available_rect,
-                bundle.drag_state,
-                bundle.hovered_divider,
-                bundle.selected_pane,
-                &mut layout_action,
-                bundle.split_preview_mode,
-                &Vec::new(), // Root path
-                &mut bundle.rc,
-            );
+            if is_mobile {
+                // Phone shell: a single hero surface + top tabs + resizable timeline ribbon
+                // + a fixed transport floor, reusing the same panes the desktop layout uses.
+                mobile::render_mobile_shell(
+                    ui,
+                    available_rect,
+                    &mut bundle.rc,
+                    bundle.mobile_state,
+                );
+            } else {
+                render_layout_node(
+                    ui,
+                    bundle.current_layout,
+                    available_rect,
+                    bundle.drag_state,
+                    bundle.hovered_divider,
+                    bundle.selected_pane,
+                    &mut layout_action,
+                    bundle.split_preview_mode,
+                    &Vec::new(), // Root path
+                    &mut bundle.rc,
+                );
+            }
             drop(bundle);
 
             // Process collected effect thumbnail requests
@@ -7111,9 +7143,15 @@ struct FrameBundle<'a> {
     hovered_divider: &'a mut Option<(NodePath, bool)>,
     selected_pane: &'a mut Option<NodePath>,
     split_preview_mode: &'a mut SplitPreviewMode,
+    mobile_state: &'a mut mobile::MobileState,
 }
 
 impl EditorApp {
+    /// Whether the mobile shell is active this frame (runtime override wins over the env flag).
+    fn mobile_active(&self) -> bool {
+        self.mobile_ui_override.unwrap_or(self.mobile_ui)
+    }
+
     /// Build the per-frame [`FrameBundle`]. The returned bundle borrows `self` and
     /// `scratch` for `'a`; it must be dropped before the post-render drain touches
     /// `self`/`scratch` again. This is the single source of truth for `SharedPaneState`.
@@ -7225,6 +7263,7 @@ impl EditorApp {
             hovered_divider: &mut self.hovered_divider,
             selected_pane: &mut self.selected_pane,
             split_preview_mode: &mut self.split_preview_mode,
+            mobile_state: &mut self.mobile_state,
         }
     }
 }
