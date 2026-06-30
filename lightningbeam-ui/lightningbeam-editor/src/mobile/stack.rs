@@ -18,7 +18,7 @@
 
 use eframe::egui;
 
-use super::{icons, slot_path, MobileState, SnapAnim, StackDrag, StackPane, STACK};
+use super::{icons, slot_path, LayoutAnim, MobileState, StackDrag, StackPane, STACK};
 use crate::RenderContext;
 
 const N: usize = STACK.len();
@@ -113,11 +113,93 @@ fn resolve(
 
 // --- rect layout ---
 
-/// Intermediate divider snap fractions (pane k's share of the {k, k+1} span).
-const SNAP_FRACS: [f32; 5] = [0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 0.75];
-/// Below/above these local fractions, a divider release collapses a pane → membership change.
+/// Below/above these boundary positions, a divider release collapses a group → membership change.
 const COLLAPSE_LO: f32 = 0.12;
 const COLLAPSE_HI: f32 = 0.88;
+
+// The only allowed pane-weight distributions per window size. Snapping to these keeps the minimum
+// pane height manageable (no pane below ~1/4).
+const PRESETS_1: [[f32; 3]; 1] = [[1.0, 0.0, 0.0]];
+const PRESETS_2: [[f32; 3]; 3] = [[0.25, 0.75, 0.0], [0.5, 0.5, 0.0], [0.75, 0.25, 0.0]];
+const PRESETS_3: [[f32; 3]; 3] = [
+    [0.5, 0.25, 0.25],
+    [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+    [0.25, 0.25, 0.5],
+];
+
+fn presets(count: usize) -> &'static [[f32; 3]] {
+    match count {
+        2 => &PRESETS_2,
+        3 => &PRESETS_3,
+        _ => &PRESETS_1,
+    }
+}
+
+/// The allowed preset nearest (L2) to the current weights.
+fn nearest_preset(cur: &[f32], count: usize) -> [f32; 3] {
+    let dist = |p: &[f32; 3]| (0..count).map(|i| (p[i] - cur[i]).powi(2)).sum::<f32>();
+    presets(count)
+        .iter()
+        .min_by(|a, b| dist(a).total_cmp(&dist(b)))
+        .copied()
+        .unwrap_or([1.0, 0.0, 0.0])
+}
+
+// 3-pane snapping rides a single path parameter s in [0, 2] through the three presets, so the two
+// dividers move together and reach their snaps simultaneously. The dragged divider's boundary
+// position (pane0 for the upper divider; pane0+pane1 for the lower) maps onto s.
+const PATH3_UPPER: [f32; 3] = [0.5, 1.0 / 3.0, 0.25]; // pane0 at s = 0, 1, 2
+const PATH3_LOWER: [f32; 3] = [0.75, 2.0 / 3.0, 0.5]; // pane0+pane1 at s = 0, 1, 2
+/// A pane grown beyond this collapses the 3-pane window to 2 panes on release.
+const COLLAPSE_GROW: f32 = 0.66;
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        lerp_f(a[0], b[0], t),
+        lerp_f(a[1], b[1], t),
+        lerp_f(a[2], b[2], t),
+    ]
+}
+
+/// Weights along the 3-pane preset path at parameter `s` ∈ [0, 2].
+fn path3(s: f32) -> [f32; 3] {
+    let s = s.clamp(0.0, 2.0);
+    if s <= 1.0 {
+        lerp3(PRESETS_3[0], PRESETS_3[1], s)
+    } else {
+        lerp3(PRESETS_3[1], PRESETS_3[2], s - 1.0)
+    }
+}
+
+/// Path parameter for divider `k` whose boundary position is `b` (within the path's range).
+fn s_from_boundary(k: usize, b: f32) -> f32 {
+    let pts = if k == 0 { PATH3_UPPER } else { PATH3_LOWER };
+    if b >= pts[1] {
+        (pts[0] - b) / (pts[0] - pts[1]) // 0 at pts[0] … 1 at pts[1]
+    } else {
+        1.0 + (pts[1] - b) / (pts[1] - pts[2]) // 1 at pts[1] … 2 at pts[2]
+    }
+}
+
+/// The 3-pane path boundary range for divider `k`: (min, max) of its position across the presets.
+fn path3_range(k: usize) -> (f32, f32) {
+    let pts = if k == 0 { PATH3_UPPER } else { PATH3_LOWER };
+    (pts[2], pts[0])
+}
+
+/// Live weights while dragging divider `k` to boundary `b` in a 3-pane window: follow the linked
+/// path within range, and beyond it group-resize from the nearer path endpoint (so the motion is
+/// continuous across the extreme presets — no jump in the other divider).
+fn live_weights3(k: usize, b_unclamped: f32) -> [f32; 3] {
+    let (lo, hi) = path3_range(k);
+    if b_unclamped >= lo && b_unclamped <= hi {
+        path3(s_from_boundary(k, b_unclamped))
+    } else {
+        let anchor = if b_unclamped > hi { path3(0.0) } else { path3(2.0) };
+        let (bmin, bmax) = boundary_bounds(3, k);
+        to_arr(&weights_for_boundary(&anchor, k, b_unclamped.clamp(bmin, bmax)))
+    }
+}
 /// Minimum normalized size a pane may be squeezed to during a live divider drag.
 const MIN_FRAC: f32 = 0.05;
 /// Duration (seconds) of the ease into a snapped divider position.
@@ -172,34 +254,52 @@ fn collapsed(rect: egui::Rect, at_top: bool) -> egui::Rect {
     egui::Rect::from_min_max(egui::pos2(rect.left(), y), egui::pos2(rect.right(), y))
 }
 
-/// The local boundary fraction (pane k's share of the {k, k+1} span) after applying a normalized
-/// `offset_frac` to divider `k`, clamped so neither pane is squeezed past MIN_FRAC.
-fn divider_local(nw: &[f32], k: usize, offset_frac: f32) -> f32 {
-    let span_lo: f32 = nw[..k].iter().sum();
-    let span = nw[k] + nw[k + 1];
-    if span <= 0.0 {
-        return 0.5;
-    }
-    let base_b = span_lo + nw[k];
-    let b = (base_b + offset_frac).clamp(span_lo + MIN_FRAC * span, span_lo + span - MIN_FRAC * span);
-    ((b - span_lo) / span).clamp(0.0, 1.0)
+/// Allowed range of divider `k`'s boundary position (normalized) given MIN_FRAC per pane.
+/// The boundary splits the window into the group above (panes 0..=k) and below (panes k+1..).
+fn boundary_bounds(count: usize, k: usize) -> (f32, f32) {
+    let above = (k + 1) as f32;
+    let below = (count - 1 - k) as f32;
+    (above * MIN_FRAC, 1.0 - below * MIN_FRAC)
 }
 
-/// Live pane rects while dragging divider `k` (resize-only; membership is unchanged until release).
-fn divider_live(
-    top: usize,
-    count: usize,
-    rect: egui::Rect,
-    nw: &[f32],
-    k: usize,
-    offset_frac: f32,
-) -> Vec<(usize, egui::Rect)> {
-    let f = divider_local(nw, k, offset_frac);
-    let span = nw[k] + nw[k + 1];
+/// New normalized weights when divider `k` is moved to boundary position `b`: the panes above the
+/// divider are scaled to fill `[0, b]` and those below to fill `[b, 1]`, each group keeping its
+/// internal proportions. This makes the *other* dividers in the group move with the dragged one.
+fn weights_for_boundary(nw: &[f32], k: usize, b: f32) -> Vec<f32> {
+    let count = nw.len();
+    let above_sum: f32 = nw[..=k].iter().sum();
+    let below_sum: f32 = nw[k + 1..].iter().sum();
     let mut w = nw.to_vec();
-    w[k] = f * span;
-    w[k + 1] = (1.0 - f) * span;
-    config_rects(top, count, rect, &w)
+    if above_sum > 0.0 {
+        let s = b / above_sum;
+        for x in &mut w[..=k] {
+            *x *= s;
+        }
+    }
+    if below_sum > 0.0 {
+        let s = (1.0 - b) / below_sum;
+        for x in &mut w[k + 1..count] {
+            *x *= s;
+        }
+    }
+    w
+}
+
+fn to_arr(v: &[f32]) -> [f32; 3] {
+    let mut a = [0.0; 3];
+    for (i, x) in v.iter().take(3).enumerate() {
+        a[i] = *x;
+    }
+    a
+}
+
+fn even_arr(count: usize) -> [f32; 3] {
+    let mut a = [0.0; 3];
+    let e = 1.0 / count as f32;
+    for x in a.iter_mut().take(count) {
+        *x = e;
+    }
+    a
 }
 
 /// Interpolate between two precomputed rect lists by `t` (used for edge membership transitions).
@@ -248,42 +348,50 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
     let pane_h = content_area.height() / count as f32;
     let trigger = pane_h.min(TRIGGER_MAX);
 
-    // Resting band rects (weighted; used for interaction so drags don't chase the animated layout).
-    // While a snap ease is in flight (and we're not dragging), override the weights with the eased
-    // values so the boundary glides into place.
     let now = ui.input(|i| i.time);
-    let mut nw = nweights(&state.weights, count);
-    if state.drag.is_none() {
-        if let Some(a) = state.snap_anim {
-            let p = ((now - a.start) / SNAP_ANIM_SECS).clamp(0.0, 1.0) as f32;
-            if p >= 1.0 {
-                state.snap_anim = None;
-            } else {
-                let e = ease_out(p);
-                nw = (0..count).map(|i| lerp_f(a.from[i], a.to[i], e)).collect();
-                ui.ctx().request_repaint();
-            }
-        }
-    }
+    // Resting band rects from the committed weights — used for interaction so handles sit at their
+    // final positions even while the visuals animate.
+    let nw = nweights(&state.weights, count);
     let rest_bands = config_rects(top, count, content_area, &nw);
 
-    // The draw layout. A divider drag resizes its two panes live; an edge drag animates toward the
-    // membership transition.
-    let draw_layout = match state.drag {
-        Some(d) => match d.handle {
+    // The draw layout: a live drag, an in-flight layout ease, or the resting config.
+    let draw_layout = if let Some(d) = state.drag {
+        match d.handle {
             Handle::Divider(k) if k + 1 < count => {
+                // Live resize: move divider k's boundary. In 3-pane the dividers are linked along the
+                // preset path; in 2-pane it's a simple group resize.
                 let off_frac = d.offset / content_area.height().max(1.0);
-                divider_live(top, count, content_area, &nw, k, off_frac)
+                let b0: f32 = nw[..=k].iter().sum();
+                let b = b0 + off_frac;
+                let w = if count == 3 {
+                    live_weights3(k, b)
+                } else {
+                    let (bmin, bmax) = boundary_bounds(count, k);
+                    to_arr(&weights_for_boundary(&nw, k, b.clamp(bmin, bmax)))
+                };
+                config_rects(top, count, content_area, &nweights(&w, count))
             }
             _ => resolve(d.handle, d.offset, top, count, trigger)
                 .map(|(tt, tc, t)| {
-                    let even = vec![1.0 / tc as f32; tc];
-                    let target = config_rects(tt, tc, content_area, &even);
+                    let target = config_rects(tt, tc, content_area, &nweights(&even_arr(tc), tc));
                     interp_layout(&rest_bands, &target, top, tt, t, content_area)
                 })
                 .unwrap_or_else(|| rest_bands.clone()),
-        },
-        None => rest_bands.clone(),
+        }
+    } else if let Some(a) = state.anim {
+        let p = (((now - a.start) / SNAP_ANIM_SECS) as f32).clamp(0.0, 1.0);
+        if p >= 1.0 {
+            state.anim = None;
+            rest_bands.clone()
+        } else {
+            ui.ctx().request_repaint();
+            let e = ease_out(p);
+            let from = config_rects(a.from_top, a.from_count, content_area, &nweights(&a.from_w, a.from_count));
+            let to = config_rects(a.to_top, a.to_count, content_area, &nweights(&a.to_w, a.to_count));
+            interp_layout(&from, &to, a.from_top, a.to_top, e, content_area)
+        }
+    } else {
+        rest_bands.clone()
     };
 
     // 1) Pane content, carving the header off the top of each band.
@@ -402,14 +510,14 @@ fn handle_key(h: Handle) -> (usize, usize) {
 }
 
 /// Toggle a slot between filling the stack (count==1) and a 2-pane split with an adjacent pane.
-fn toggle_fullscreen(state: &mut MobileState, slot: usize) {
+fn toggle_fullscreen(state: &mut MobileState, slot: usize, now: f64) {
     if state.window_count == 1 && state.window_top == slot {
         // Restore: split with the pane below if possible, else above.
         if let Some((t, c)) = op_r5(slot, 1).or_else(|| op_r6(slot, 1)) {
-            set_window(state, t, c);
+            set_window(state, t, c, now);
         }
     } else {
-        set_window(state, slot, 1);
+        set_window(state, slot, 1, now);
     }
 }
 
@@ -447,7 +555,7 @@ fn handle_interactions(
             );
             let fsresp = ui.interact(fs, ui.id().with(("mobile_fs", slot)), egui::Sense::click());
             if fsresp.clicked() {
-                toggle_fullscreen(state, slot);
+                toggle_fullscreen(state, slot, now);
             }
             if STACK[slot] == StackPane::NodeInstrument {
                 let nt = egui::Rect::from_min_max(
@@ -463,7 +571,7 @@ fn handle_interactions(
 
         if resp.drag_started() {
             state.drag = Some(StackDrag { handle, offset: 0.0 });
-            state.snap_anim = None; // a fresh drag cancels any in-flight snap ease
+            state.anim = None; // a fresh drag cancels any in-flight ease
         }
         if resp.dragged() {
             if let Some(d) = &mut state.drag {
@@ -484,73 +592,127 @@ fn handle_interactions(
 }
 
 fn commit_drag(d: StackDrag, state: &mut MobileState, content_area: egui::Rect, trigger: f32, now: f64) {
+    let h = content_area.height().max(1.0);
     match d.handle {
         Handle::Divider(k) if k + 1 < state.window_count => {
-            commit_divider(state, k, d.offset / content_area.height().max(1.0), now);
+            commit_divider(state, k, d.offset / h, now);
         }
         _ => {
-            // Edges (and degenerate dividers): membership transition, then reset to even sizing.
-            if let Some((tt, tc, t)) =
-                resolve(d.handle, d.offset, state.window_top, state.window_count, trigger)
-            {
+            // Edges (and degenerate dividers): membership transition. Animate from the current
+            // config to the new one, continuing from where the drag's interp left off (~progress t).
+            let top = state.window_top;
+            let count = state.window_count;
+            if let Some((tt, tc, t)) = resolve(d.handle, d.offset, top, count, trigger) {
                 if t >= 0.5 {
-                    set_window(state, tt, tc);
+                    let from_w = to_arr(&nweights(&state.weights, count));
+                    begin_anim(state, top, count, from_w, tt, tc, even_arr(tc), t, now);
                 }
             }
         }
     }
 }
 
-/// Apply a divider release: collapse a pane (→ membership change) past the thresholds, otherwise
-/// snap the boundary to the nearest intermediate fraction.
+/// Apply a divider release. 3-pane and 2-pane have different snap rules (see below). Either way the
+/// result is eased in from whatever was on screen at release.
 fn commit_divider(state: &mut MobileState, k: usize, offset_frac: f32, now: f64) {
     let top = state.window_top;
     let count = state.window_count;
     let nw = nweights(&state.weights, count);
-    let f = divider_local(&nw, k, offset_frac);
+    let b0: f32 = nw[..=k].iter().sum();
+    let b = b0 + offset_frac; // unclamped boundary position of divider k
 
-    if f <= COLLAPSE_LO {
-        // Pane k squeezed out at the top.
-        let op = if k == 0 { op_r1(top, count) } else { op_r3(top, count) };
-        if let Some((tt, tc)) = op {
-            set_window(state, tt, tc);
+    if count == 3 {
+        // `from` = what's on screen at release.
+        let from_w = live_weights3(k, b);
+        // Sizes of the two extreme panes after this drag, to test the "grown past 66%" rule.
+        let pane_top = from_w[0]; // grown when dragging the upper divider down
+        let pane_bot = from_w[2]; // grown when dragging the lower divider up
+
+        if k == 0 && pane_top >= COLLAPSE_GROW {
+            // Upper pane grown out → drop the bottom pane; the surviving {0,1} divider snaps to
+            // where it was dropped.
+            if let Some((tt, tc)) = op_r4(top, 3) {
+                let to_w = collapse_2pane(from_w[0], from_w[1]);
+                begin_anim(state, top, 3, from_w, tt, tc, to_w, 0.0, now);
+            }
+        } else if k == 1 && pane_bot >= COLLAPSE_GROW {
+            // Bottom pane grown out → drop the top pane; surviving {1,2} divider snaps to drop.
+            if let Some((tt, tc)) = op_r3(top, 3) {
+                let to_w = collapse_2pane(from_w[1], from_w[2]);
+                begin_anim(state, top, 3, from_w, tt, tc, to_w, 0.0, now);
+            }
+        } else if b <= COLLAPSE_LO {
+            if let Some((tt, tc)) = op_r1(top, 3) {
+                begin_anim(state, top, 3, from_w, tt, tc, even_arr(tc), 0.0, now);
+            }
+        } else if b >= COLLAPSE_HI {
+            if let Some((tt, tc)) = op_r2(top, 3) {
+                begin_anim(state, top, 3, from_w, tt, tc, even_arr(tc), 0.0, now);
+            }
+        } else {
+            // Snap both dividers together: round the path parameter to the nearest preset.
+            let (lo, hi) = path3_range(k);
+            let s = s_from_boundary(k, b.clamp(lo, hi)).round().clamp(0.0, 2.0);
+            let to_w = PRESETS_3[s as usize];
+            begin_anim(state, top, 3, from_w, top, 3, to_w, 0.0, now);
         }
-    } else if f >= COLLAPSE_HI {
-        // Pane k+1 squeezed out at the bottom.
-        let op = if k == count - 2 { op_r2(top, count) } else { op_r4(top, count) };
-        if let Some((tt, tc)) = op {
-            set_window(state, tt, tc);
+        return;
+    }
+
+    // 2-pane: group resize, snap to nearest 2-pane preset, slide off at the extremes.
+    let (bmin, bmax) = boundary_bounds(count, k);
+    let from_w = to_arr(&weights_for_boundary(&nw, k, b.clamp(bmin, bmax)));
+    if b <= COLLAPSE_LO {
+        if let Some((tt, tc)) = op_r1(top, count) {
+            begin_anim(state, top, count, from_w, tt, tc, even_arr(tc), 0.0, now);
+        }
+    } else if b >= COLLAPSE_HI {
+        if let Some((tt, tc)) = op_r2(top, count) {
+            begin_anim(state, top, count, from_w, tt, tc, even_arr(tc), 0.0, now);
         }
     } else {
-        // Snap the boundary to the nearest intermediate fraction, preserving the {k, k+1} span and
-        // the other panes' sizes — and ease into it.
-        let sf = *SNAP_FRACS
-            .iter()
-            .min_by(|a, b| (**a - f).abs().total_cmp(&(**b - f).abs()))
-            .unwrap();
-        let span = nw[k] + nw[k + 1];
-
-        // `from` = where the finger released; `to` = the snapped target.
-        let mut from = [0.0_f32; 3];
-        let mut to = [0.0_f32; 3];
-        for i in 0..count {
-            from[i] = nw[i];
-            to[i] = nw[i];
-        }
-        from[k] = f * span;
-        from[k + 1] = (1.0 - f) * span;
-        to[k] = sf * span;
-        to[k + 1] = (1.0 - sf) * span;
-
-        state.weights = to;
-        state.snap_anim = Some(SnapAnim { from, to, start: now });
+        let to_w = nearest_preset(&from_w, count);
+        begin_anim(state, top, count, from_w, top, count, to_w, 0.0, now);
     }
 }
 
-/// Switch the visible window and reset to even pane sizing.
-fn set_window(state: &mut MobileState, top: usize, count: usize) {
-    state.window_top = top;
-    state.window_count = count;
-    state.weights = [1.0, 1.0, 1.0];
-    state.snap_anim = None;
+/// Given the two surviving panes' (unnormalized) sizes after a 3→2 collapse, snap to the nearest
+/// 2-pane preset by the first pane's proportion.
+fn collapse_2pane(a: f32, b: f32) -> [f32; 3] {
+    let total = (a + b).max(1e-4);
+    let p0 = a / total;
+    nearest_preset(&[p0, 1.0 - p0, 0.0], 2)
+}
+
+/// Switch to a new window config, easing from `from_*` to the new state over the snap duration.
+/// `start_p` back-dates the animation so it can continue an in-progress drag.
+fn begin_anim(
+    state: &mut MobileState,
+    from_top: usize,
+    from_count: usize,
+    from_w: [f32; 3],
+    to_top: usize,
+    to_count: usize,
+    to_w: [f32; 3],
+    start_p: f32,
+    now: f64,
+) {
+    state.window_top = to_top;
+    state.window_count = to_count;
+    state.weights = to_w;
+    state.anim = Some(LayoutAnim {
+        from_top,
+        from_count,
+        from_w,
+        to_top,
+        to_count,
+        to_w,
+        start: now - start_p as f64 * SNAP_ANIM_SECS,
+    });
+}
+
+/// Switch the visible window and reset to even pane sizing, easing the transition.
+fn set_window(state: &mut MobileState, top: usize, count: usize, now: f64) {
+    let from_w = to_arr(&nweights(&state.weights, state.window_count));
+    begin_anim(state, state.window_top, state.window_count, from_w, top, count, even_arr(count), 0.0, now);
 }

@@ -118,12 +118,18 @@ pub struct StackDrag {
     pub offset: f32,
 }
 
-/// A short ease of the visible pane weights toward their snapped values after a divider release.
+/// A short ease between two stack layouts (resize snap, membership change, or fullscreen toggle).
+/// Both endpoints are full configs so the same animation covers panes resizing AND panes
+/// entering/leaving the window.
 #[derive(Debug, Clone, Copy)]
-pub struct SnapAnim {
-    pub from: [f32; 3],
-    pub to: [f32; 3],
-    /// egui time (seconds) when the animation started.
+pub struct LayoutAnim {
+    pub from_top: usize,
+    pub from_count: usize,
+    pub from_w: [f32; 3],
+    pub to_top: usize,
+    pub to_count: usize,
+    pub to_w: [f32; 3],
+    /// egui time (seconds) when the animation started (may be back-dated to continue a drag).
     pub start: f64,
 }
 
@@ -140,8 +146,8 @@ pub struct MobileState {
     pub show_instruments: bool,
     /// Active handle drag (transient).
     pub drag: Option<StackDrag>,
-    /// In-flight snap ease after a divider release (transient).
-    pub snap_anim: Option<SnapAnim>,
+    /// In-flight layout ease (transient).
+    pub anim: Option<LayoutAnim>,
 }
 
 impl Default for MobileState {
@@ -153,7 +159,7 @@ impl Default for MobileState {
             weights: [1.0, 1.0, 1.0],
             show_instruments: false,
             drag: None,
-            snap_anim: None,
+            anim: None,
         }
     }
 }
