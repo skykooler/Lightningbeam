@@ -3,6 +3,7 @@
 
 use eframe::egui;
 
+use super::icons;
 use crate::panes::SharedPaneState;
 
 const C_PANEL: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x24, 0x2c);
@@ -24,12 +25,12 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState)
     let btn_rect = egui::Rect::from_center_size(btn_center, egui::vec2(btn_r * 2.0, btn_r * 2.0));
     let btn_resp = ui.interact(btn_rect, ui.id().with("mobile_transport_play"), egui::Sense::click());
     painter.circle_filled(btn_center, btn_r, C_AMBER);
-    let glyph = if *shared.is_playing { "⏸" } else { "▶" };
+    let glyph = if *shared.is_playing { icons::PAUSE } else { icons::PLAY };
     painter.text(
         btn_center,
         egui::Align2::CENTER_CENTER,
         glyph,
-        egui::FontId::proportional(16.0),
+        icons::font(16.0),
         C_DARK,
     );
     if btn_resp.clicked() {

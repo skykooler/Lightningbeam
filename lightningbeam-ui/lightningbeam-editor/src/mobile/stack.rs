@@ -18,7 +18,7 @@
 
 use eframe::egui;
 
-use super::{slot_path, MobileState, StackDrag, StackPane, STACK};
+use super::{icons, slot_path, MobileState, StackDrag, StackPane, STACK};
 use crate::RenderContext;
 
 const N: usize = STACK.len();
@@ -242,33 +242,35 @@ fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: b
     p.rect_filled(hr, 0.0, C_HEADER);
     p.hline(hr.x_range(), hr.bottom(), egui::Stroke::new(1.0, C_LINE));
     let cy = hr.center().y;
-    // Grip dots on the left.
-    for i in 0..2 {
-        let x = hr.left() + 11.0 + i as f32 * 4.0;
-        p.circle_filled(egui::pos2(x, cy), 1.5, C_DIM);
-    }
+    // Grip glyph on the left (Lucide).
     p.text(
-        egui::pos2(hr.left() + 26.0, cy),
+        egui::pos2(hr.left() + 15.0, cy),
+        egui::Align2::CENTER_CENTER,
+        icons::GRIP_HORIZONTAL,
+        icons::font(16.0),
+        C_DIM,
+    );
+    p.text(
+        egui::pos2(hr.left() + 32.0, cy),
         egui::Align2::LEFT_CENTER,
         sp.label(show_instruments),
         egui::FontId::proportional(15.0),
         C_BRIGHT,
     );
     // Right-side buttons: fullscreen / restore rightmost, Node/Instrument toggle just left of it.
-    // These glyphs are covered by egui's bundled emoji-icon-font (⛶ ▣ ⇄).
     p.text(
         egui::pos2(hr.right() - BTN_W * 0.5, cy),
         egui::Align2::CENTER_CENTER,
-        if fullscreen { "▣" } else { "⛶" },
-        egui::FontId::proportional(18.0),
+        if fullscreen { icons::MINIMIZE } else { icons::MAXIMIZE },
+        icons::font(17.0),
         C_DIM,
     );
     if sp == StackPane::NodeInstrument {
         p.text(
             egui::pos2(hr.right() - BTN_W * 1.5, cy),
             egui::Align2::CENTER_CENTER,
-            "⇄",
-            egui::FontId::proportional(17.0),
+            icons::ARROW_LEFT_RIGHT,
+            icons::font(17.0),
             C_AMBER,
         );
     }
@@ -279,13 +281,23 @@ fn draw_footer(ui: &egui::Ui, fr: egui::Rect, at_end: bool) {
     p.rect_filled(fr, 0.0, C_HEADER);
     p.hline(fr.x_range(), fr.top(), egui::Stroke::new(1.0, C_LINE));
     let col = if at_end { C_LINE } else { C_DIM };
-    p.text(
-        fr.center(),
-        egui::Align2::CENTER_CENTER,
-        "▲  pull up for more",
+    let cy = fr.center().y;
+    let galley = p.layout_no_wrap(
+        "pull up for more".to_string(),
         egui::FontId::proportional(11.0),
         col,
     );
+    let total_w = 22.0 + galley.size().x;
+    let start_x = fr.center().x - total_w * 0.5;
+    p.text(
+        egui::pos2(start_x + 8.0, cy),
+        egui::Align2::CENTER_CENTER,
+        icons::CHEVRONS_UP,
+        icons::font(14.0),
+        col,
+    );
+    let gy = cy - galley.size().y * 0.5;
+    p.galley(egui::pos2(start_x + 22.0, gy), galley, col);
 }
 
 fn handle_key(h: Handle) -> (usize, usize) {

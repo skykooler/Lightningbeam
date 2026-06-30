@@ -1207,6 +1207,9 @@ impl EditorApp {
     ) -> Self {
         let current_layout = layouts[0].layout.clone();
 
+        // Register the bundled Lucide icon font (used by the mobile UI; harmless on desktop).
+        mobile::icons::install(&cc.egui_ctx);
+
         // Disable egui's "Unaligned" debug overlay (on by default in debug builds)
         #[cfg(debug_assertions)]
         cc.egui_ctx.style_mut(|style| style.debug.show_unaligned = false);

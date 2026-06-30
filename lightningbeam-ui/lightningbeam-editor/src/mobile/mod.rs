@@ -17,6 +17,7 @@ use lightningbeam_core::pane::PaneType;
 use crate::panes::NodePath;
 use crate::RenderContext;
 
+pub mod icons;
 mod stack;
 mod surface;
 mod transport;
