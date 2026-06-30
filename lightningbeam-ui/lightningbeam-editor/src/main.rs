@@ -6533,7 +6533,11 @@ impl eframe::App for EditorApp {
 
         // Render start screen or editor based on app mode
         if self.app_mode == AppMode::StartScreen {
-            self.render_start_screen(ctx);
+            if self.mobile_active() {
+                mobile::intent::render(self, ctx);
+            } else {
+                self.render_start_screen(ctx);
+            }
             return; // Skip editor rendering
         }
 

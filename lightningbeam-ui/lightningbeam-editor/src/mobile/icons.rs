@@ -45,3 +45,11 @@ pub const SEARCH: &str = "\u{e151}";
 pub const PLUS: &str = "\u{e13d}";
 pub const X: &str = "\u{e1b2}";
 pub const MENU: &str = "\u{e115}";
+// Intent-picker icons.
+pub const BRUSH: &str = "\u{e1d3}";
+pub const FILM: &str = "\u{e0d0}";
+pub const MUSIC: &str = "\u{e122}";
+pub const MIC: &str = "\u{e118}";
+pub const CLAPPERBOARD: &str = "\u{e29b}";
+pub const SQUARE_DASHED: &str = "\u{e1cb}";
+pub const FOLDER_OPEN: &str = "\u{e247}";

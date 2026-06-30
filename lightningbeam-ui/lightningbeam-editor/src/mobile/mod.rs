@@ -18,6 +18,7 @@ use crate::panes::NodePath;
 use crate::RenderContext;
 
 pub mod icons;
+pub mod intent;
 mod stack;
 mod surface;
 mod transport;
