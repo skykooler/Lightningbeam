@@ -3,19 +3,13 @@
 
 use eframe::egui;
 
-use super::icons;
+use super::{icons, Palette};
 use crate::panes::SharedPaneState;
 
-const C_PANEL: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x24, 0x2c);
-const C_LINE: egui::Color32 = egui::Color32::from_rgb(0x36, 0x3d, 0x49);
-const C_AMBER: egui::Color32 = egui::Color32::from_rgb(0xf4, 0xa3, 0x40);
-const C_BRIGHT: egui::Color32 = egui::Color32::from_rgb(0xea, 0xee, 0xf3);
-const C_DARK: egui::Color32 = egui::Color32::from_rgb(0x1b, 0x13, 0x0a);
-
-pub fn render(ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState) {
+pub fn render(ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState, pal: &Palette) {
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, C_PANEL);
-    painter.hline(rect.x_range(), rect.top(), egui::Stroke::new(1.0, C_LINE));
+    painter.rect_filled(rect, 0.0, pal.surface);
+    painter.hline(rect.x_range(), rect.top(), egui::Stroke::new(1.0, pal.line));
 
     let cy = rect.center().y;
 
@@ -24,14 +18,14 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState)
     let btn_center = egui::pos2(rect.left() + 20.0 + btn_r, cy);
     let btn_rect = egui::Rect::from_center_size(btn_center, egui::vec2(btn_r * 2.0, btn_r * 2.0));
     let btn_resp = ui.interact(btn_rect, ui.id().with("mobile_transport_play"), egui::Sense::click());
-    painter.circle_filled(btn_center, btn_r, C_AMBER);
+    painter.circle_filled(btn_center, btn_r, pal.accent);
     let glyph = if *shared.is_playing { icons::PAUSE } else { icons::PLAY };
     painter.text(
         btn_center,
         egui::Align2::CENTER_CENTER,
         glyph,
         icons::font(16.0),
-        C_DARK,
+        pal.on_accent,
     );
     if btn_resp.clicked() {
         *shared.is_playing = !*shared.is_playing;
@@ -55,7 +49,7 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState)
         egui::Align2::LEFT_CENTER,
         &tc,
         egui::FontId::monospace(13.0),
-        C_BRIGHT,
+        pal.text,
     );
     let tc_width = 78.0;
 
@@ -71,18 +65,18 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState)
         ui.id().with("mobile_transport_scrub"),
         egui::Sense::click_and_drag(),
     );
-    painter.rect_filled(scrub_rect, 3.0, C_LINE);
+    painter.rect_filled(scrub_rect, 3.0, pal.line);
     let frac = (*shared.playback_time / duration).clamp(0.0, 1.0) as f32;
     let filled = egui::Rect::from_min_max(
         scrub_rect.min,
         egui::pos2(scrub_rect.left() + scrub_rect.width() * frac, scrub_rect.bottom()),
     );
-    painter.rect_filled(filled, 3.0, C_AMBER.gamma_multiply(0.5));
+    painter.rect_filled(filled, 3.0, pal.accent.gamma_multiply(0.5));
     let head_x = scrub_rect.left() + scrub_rect.width() * frac;
     painter.vline(
         head_x,
         (scrub_rect.top() - 4.0)..=(scrub_rect.bottom() + 4.0),
-        egui::Stroke::new(2.0, C_AMBER),
+        egui::Stroke::new(2.0, pal.accent),
     );
 
     if (scrub_resp.dragged() || scrub_resp.clicked()) && scrub_rect.width() > 0.0 {

@@ -6,15 +6,9 @@ use eframe::egui;
 use lightningbeam_core::pane::PaneType;
 use lightningbeam_core::selection::FocusSelection;
 
-use super::{surface, MobileState, MOBILE_NS};
+use super::{surface, MobileState, Palette, MOBILE_NS};
 use crate::panes::{NodePath, SharedPaneState};
 use crate::RenderContext;
-
-const C_SHEET: egui::Color32 = egui::Color32::from_rgb(0x27, 0x2d, 0x37);
-const C_LINE: egui::Color32 = egui::Color32::from_rgb(0x36, 0x3d, 0x49);
-const C_DIM: egui::Color32 = egui::Color32::from_rgb(0x8b, 0x95, 0xa1);
-const C_BRIGHT: egui::Color32 = egui::Color32::from_rgb(0xea, 0xee, 0xf3);
-const C_CYAN: egui::Color32 = egui::Color32::from_rgb(0x54, 0xc3, 0xe8);
 
 const GRAB_H: f32 = 16.0;
 const HEAD_H: f32 = 30.0;
@@ -104,14 +98,15 @@ pub fn render(
     region_h: f32,
     rc: &mut RenderContext,
     state: &mut MobileState,
+    pal: &Palette,
 ) {
     // Sheet background with rounded top.
     ui.painter().rect_filled(
         rect,
         egui::CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 },
-        C_SHEET,
+        pal.surface_alt,
     );
-    ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(1.0, C_LINE));
+    ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(1.0, pal.line));
 
     // Grab handle — drag to resize the sheet.
     let grab = egui::Rect::from_min_max(
@@ -120,7 +115,7 @@ pub fn render(
     );
     let gresp = ui.interact(grab, ui.id().with("mobile_inspector_grab"), egui::Sense::drag());
     let pill = egui::Rect::from_center_size(grab.center(), egui::vec2(34.0, 4.0));
-    ui.painter().rect_filled(pill, 2.0, if gresp.hovered() || gresp.dragged() { C_CYAN } else { C_LINE });
+    ui.painter().rect_filled(pill, 2.0, if gresp.hovered() || gresp.dragged() { pal.accent } else { pal.line });
     if gresp.dragged() && region_h > 1.0 {
         state.inspector_frac = (state.inspector_frac - gresp.drag_delta().y / region_h).clamp(0.2, 0.85);
     }
@@ -139,7 +134,7 @@ pub fn render(
         egui::Align2::LEFT_CENTER,
         title(&rc.shared),
         egui::FontId::proportional(13.0),
-        C_BRIGHT,
+        pal.text,
     );
     let close = egui::Rect::from_min_size(egui::pos2(head.right() - 36.0, head.top()), egui::vec2(36.0, HEAD_H));
     let cresp = ui.interact(close, ui.id().with("mobile_inspector_close"), egui::Sense::click());
@@ -148,7 +143,7 @@ pub fn render(
         egui::Align2::CENTER_CENTER,
         super::icons::X,
         super::icons::font(16.0),
-        if cresp.hovered() { C_BRIGHT } else { C_DIM },
+        if cresp.hovered() { pal.text } else { pal.text_dim },
     );
     if cresp.clicked() {
         rc.shared.selection.clear();
@@ -162,14 +157,14 @@ pub fn render(
         let galley = ui.painter().layout_no_wrap(
             chip.label.to_string(),
             egui::FontId::proportional(11.0),
-            C_BRIGHT,
+            pal.text,
         );
         let w = galley.size().x + 18.0;
         let chip_rect = egui::Rect::from_min_size(egui::pos2(cx, chip_y + 4.0), egui::vec2(w, CHIP_H - 8.0));
         let resp = ui.interact(chip_rect, ui.id().with(("mobile_inspector_chip", i)), egui::Sense::click());
-        ui.painter().rect_filled(chip_rect, 11.0, if resp.hovered() { C_LINE } else { C_SHEET });
-        ui.painter().rect_stroke(chip_rect, 11.0, egui::Stroke::new(1.0, C_LINE), egui::StrokeKind::Inside);
-        ui.painter().galley(chip_rect.center() - galley.size() * 0.5, galley, C_BRIGHT);
+        ui.painter().rect_filled(chip_rect, 11.0, if resp.hovered() { pal.line } else { pal.surface_alt });
+        ui.painter().rect_stroke(chip_rect, 11.0, egui::Stroke::new(1.0, pal.line), egui::StrokeKind::Inside);
+        ui.painter().galley(chip_rect.center() - galley.size() * 0.5, galley, pal.text);
         if resp.clicked() {
             let (top, count) = chip.window;
             state.window_top = top;

@@ -7,15 +7,8 @@
 
 use eframe::egui;
 
-use super::icons;
+use super::{icons, Palette};
 use crate::EditorApp;
-
-const C_DEVICE: egui::Color32 = egui::Color32::from_rgb(0x14, 0x16, 0x1b);
-const C_CARD: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x24, 0x2c);
-const C_CARD_HOT: egui::Color32 = egui::Color32::from_rgb(0x27, 0x2d, 0x37);
-const C_LINE: egui::Color32 = egui::Color32::from_rgb(0x36, 0x3d, 0x49);
-const C_BRIGHT: egui::Color32 = egui::Color32::from_rgb(0xea, 0xee, 0xf3);
-const C_DIM: egui::Color32 = egui::Color32::from_rgb(0x8b, 0x95, 0xa1);
 
 /// One intent card.
 struct Intent {
@@ -28,12 +21,8 @@ struct Intent {
     window: (usize, usize),
 }
 
-fn intents() -> [Intent; 6] {
-    let coral = egui::Color32::from_rgb(0xe8, 0x82, 0x6b);
-    let cyan = egui::Color32::from_rgb(0x54, 0xc3, 0xe8);
-    let amber = egui::Color32::from_rgb(0xf4, 0xa3, 0x40);
-    let pink = egui::Color32::from_rgb(0xc7, 0x5b, 0x8a);
-    let violet = egui::Color32::from_rgb(0x6a, 0x46, 0x90);
+fn intents(pal: &Palette) -> [Intent; 6] {
+    let [coral, cyan, amber, pink, violet] = pal.accents;
     [
         // Stage indices (see super::STACK): Stage=2, Timeline=3, PianoRoll=4, VirtualPiano=5.
         Intent { label: "Draw", icon: icons::BRUSH, accent: coral, focus: 5, window: (2, 1) },
@@ -41,13 +30,14 @@ fn intents() -> [Intent; 6] {
         Intent { label: "Compose", icon: icons::MUSIC, accent: amber, focus: 2, window: (3, 3) },
         Intent { label: "Record", icon: icons::MIC, accent: pink, focus: 2, window: (3, 3) },
         Intent { label: "Edit video", icon: icons::CLAPPERBOARD, accent: violet, focus: 1, window: (2, 2) },
-        Intent { label: "Blank", icon: icons::SQUARE_DASHED, accent: C_DIM, focus: 0, window: (2, 2) },
+        Intent { label: "Blank", icon: icons::SQUARE_DASHED, accent: pal.text_dim, focus: 0, window: (2, 2) },
     ]
 }
 
 pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
+    let pal = Palette::from_theme(&app.theme, ctx);
     egui::CentralPanel::default()
-        .frame(egui::Frame::NONE.fill(C_DEVICE))
+        .frame(egui::Frame::NONE.fill(pal.bg))
         .show(ctx, |ui| {
             let rect = ui.available_rect_before_wrap();
             let margin = 16.0;
@@ -60,7 +50,7 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
                 egui::Align2::LEFT_TOP,
                 "Start something",
                 egui::FontId::proportional(22.0),
-                C_BRIGHT,
+                pal.text,
             );
 
             // Vertical budget: ~2/3 for the intent grid, ~1/3 for the recent list.
@@ -72,7 +62,7 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
             // 2×3 grid of intent cards filling the grid budget.
             let col_w = (right - left - gap) / 2.0;
             let card_h = (grid_h - 2.0 * gap) / 3.0;
-            for (i, intent) in intents().iter().enumerate() {
+            for (i, intent) in intents(&pal).iter().enumerate() {
                 let col = (i % 2) as f32;
                 let row = (i / 2) as f32;
                 let cx = left + col * (col_w + gap);
@@ -81,8 +71,8 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
 
                 let resp = ui.interact(card, ui.id().with(("mobile_intent", i)), egui::Sense::click());
                 let p = ui.painter();
-                p.rect_filled(card, 12.0, if resp.hovered() { C_CARD_HOT } else { C_CARD });
-                p.rect_stroke(card, 12.0, egui::Stroke::new(1.0, C_LINE), egui::StrokeKind::Inside);
+                p.rect_filled(card, 12.0, if resp.hovered() { pal.surface_alt } else { pal.surface });
+                p.rect_stroke(card, 12.0, egui::Stroke::new(1.0, pal.line), egui::StrokeKind::Inside);
                 p.text(
                     egui::pos2(card.center().x, card.top() + card.height() * 0.40),
                     egui::Align2::CENTER_CENTER,
@@ -95,7 +85,7 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
                     egui::Align2::CENTER_CENTER,
                     intent.label,
                     egui::FontId::proportional(15.0),
-                    C_BRIGHT,
+                    pal.text,
                 );
 
                 if resp.clicked() {
@@ -113,7 +103,7 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
                 egui::Align2::LEFT_TOP,
                 "Recent",
                 egui::FontId::proportional(13.0),
-                C_DIM,
+                pal.text_dim,
             );
             let list_top = recent_top + 22.0;
             let recents = app.config.get_recent_files();
@@ -123,7 +113,7 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
                     egui::Align2::LEFT_TOP,
                     "No recent projects",
                     egui::FontId::proportional(12.0),
-                    C_DIM,
+                    pal.text_dim,
                 );
             } else {
                 let row_h = 38.0;
@@ -138,14 +128,14 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
                     let resp =
                         ui.interact(row_rect, ui.id().with(("mobile_recent", j)), egui::Sense::click());
                     let p = ui.painter();
-                    p.rect_filled(row_rect, 8.0, if resp.hovered() { C_CARD_HOT } else { C_CARD });
-                    p.rect_stroke(row_rect, 8.0, egui::Stroke::new(1.0, C_LINE), egui::StrokeKind::Inside);
+                    p.rect_filled(row_rect, 8.0, if resp.hovered() { pal.surface_alt } else { pal.surface });
+                    p.rect_stroke(row_rect, 8.0, egui::Stroke::new(1.0, pal.line), egui::StrokeKind::Inside);
                     p.text(
                         egui::pos2(row_rect.left() + 12.0, row_rect.center().y),
                         egui::Align2::LEFT_CENTER,
                         icons::FOLDER_OPEN,
                         icons::font(15.0),
-                        C_DIM,
+                        pal.text_dim,
                     );
                     let name = path
                         .file_name()
@@ -156,7 +146,7 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
                         egui::Align2::LEFT_CENTER,
                         &name,
                         egui::FontId::proportional(13.0),
-                        C_BRIGHT,
+                        pal.text,
                     );
                     if resp.clicked() {
                         chosen = Some(path.clone());

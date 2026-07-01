@@ -18,7 +18,7 @@
 
 use eframe::egui;
 
-use super::{icons, slot_path, LayoutAnim, MobileState, StackDrag, StackPane, STACK};
+use super::{icons, slot_path, LayoutAnim, MobileState, Palette, StackDrag, StackPane, STACK};
 use crate::RenderContext;
 
 const N: usize = STACK.len();
@@ -33,12 +33,6 @@ const FOOTER_H: f32 = 28.0;
 const BTN_W: f32 = 44.0;
 /// Max pixels of drag to complete a window transition (so you don't drag half the screen).
 const TRIGGER_MAX: f32 = 150.0;
-
-const C_LINE: egui::Color32 = egui::Color32::from_rgb(0x36, 0x3d, 0x49);
-const C_AMBER: egui::Color32 = egui::Color32::from_rgb(0xf4, 0xa3, 0x40);
-const C_DIM: egui::Color32 = egui::Color32::from_rgb(0x7c, 0x86, 0x93);
-const C_BRIGHT: egui::Color32 = egui::Color32::from_rgb(0xea, 0xee, 0xf3);
-const C_HEADER: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x24, 0x2c);
 
 /// A draggable boundary of the stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,7 +339,7 @@ fn interp_layout(
 /// The interaction (drag) target for a band's boundary is its full-width header bar. Bands are
 /// laid out in the area above a reserved bottom footer (the BottomEdge handle). Band 0's header is
 /// the TopEdge handle; band i's header (i≥1) is the divider above it; the footer is the BottomEdge.
-pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state: &mut MobileState) {
+pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state: &mut MobileState, pal: &Palette) {
     let top = state.window_top;
     let count = state.window_count;
 
@@ -437,24 +431,24 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
             brect.left_top(),
             egui::pos2(brect.right(), brect.top() + HEADER_H.min(brect.height())),
         );
-        draw_header(ui, hr, STACK[*slot], state.show_instruments, fullscreen);
+        draw_header(ui, hr, STACK[*slot], state.show_instruments, fullscreen, pal);
     }
-    draw_footer(ui, footer_rect, top + count >= N);
+    draw_footer(ui, footer_rect, top + count >= N, pal);
 
     // 3) Interactions on the resting header/footer rects (added last → they win the press).
     handle_interactions(ui, &rest_bands, content_area, footer_rect, trigger, now, state);
 }
 
-fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: bool, fullscreen: bool) {
+fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: bool, fullscreen: bool, pal: &Palette) {
     let p = ui.painter();
     // Rounded top corners so the header reads as a tab atop the pane; square at the bottom where
     // it meets the pane content.
     p.rect_filled(
         hr,
         egui::CornerRadius { nw: HEADER_RADIUS, ne: HEADER_RADIUS, sw: 0, se: 0 },
-        C_HEADER,
+        pal.header,
     );
-    p.hline(hr.x_range(), hr.bottom(), egui::Stroke::new(1.0, C_LINE));
+    p.hline(hr.x_range(), hr.bottom(), egui::Stroke::new(1.0, pal.line));
     let cy = hr.center().y;
     // Grip glyph on the left (Lucide).
     p.text(
@@ -462,14 +456,14 @@ fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: b
         egui::Align2::CENTER_CENTER,
         icons::GRIP_HORIZONTAL,
         icons::font(16.0),
-        C_DIM,
+        pal.text_dim,
     );
     p.text(
         egui::pos2(hr.left() + 32.0, cy),
         egui::Align2::LEFT_CENTER,
         sp.label(show_instruments),
         egui::FontId::proportional(15.0),
-        C_BRIGHT,
+        pal.text,
     );
     // Right-side buttons: fullscreen / restore rightmost, Node/Instrument toggle just left of it.
     p.text(
@@ -477,7 +471,7 @@ fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: b
         egui::Align2::CENTER_CENTER,
         if fullscreen { icons::MINIMIZE } else { icons::MAXIMIZE },
         icons::font(17.0),
-        C_DIM,
+        pal.text_dim,
     );
     if sp == StackPane::NodeInstrument {
         p.text(
@@ -485,16 +479,16 @@ fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: b
             egui::Align2::CENTER_CENTER,
             icons::ARROW_LEFT_RIGHT,
             icons::font(17.0),
-            C_AMBER,
+            pal.accent,
         );
     }
 }
 
-fn draw_footer(ui: &egui::Ui, fr: egui::Rect, at_end: bool) {
+fn draw_footer(ui: &egui::Ui, fr: egui::Rect, at_end: bool, pal: &Palette) {
     let p = ui.painter();
-    p.rect_filled(fr, 0.0, C_HEADER);
-    p.hline(fr.x_range(), fr.top(), egui::Stroke::new(1.0, C_LINE));
-    let col = if at_end { C_LINE } else { C_DIM };
+    p.rect_filled(fr, 0.0, pal.header);
+    p.hline(fr.x_range(), fr.top(), egui::Stroke::new(1.0, pal.line));
+    let col = if at_end { pal.line } else { pal.text_dim };
     let cy = fr.center().y;
     let galley = p.layout_no_wrap(
         "pull up for more".to_string(),

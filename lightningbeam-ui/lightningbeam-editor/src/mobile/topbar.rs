@@ -5,15 +5,10 @@
 
 use eframe::egui;
 
-use super::{icons, MobileState};
+use super::{icons, MobileState, Palette};
 use crate::menu::{MenuAction, MenuDef, MenuItemDef};
 use crate::RenderContext;
 
-const C_PANEL: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x24, 0x2c);
-const C_PANEL2: egui::Color32 = egui::Color32::from_rgb(0x27, 0x2d, 0x37);
-const C_LINE: egui::Color32 = egui::Color32::from_rgb(0x36, 0x3d, 0x49);
-const C_BRIGHT: egui::Color32 = egui::Color32::from_rgb(0xea, 0xee, 0xf3);
-const C_DIM: egui::Color32 = egui::Color32::from_rgb(0x8b, 0x95, 0xa1);
 const BTN: f32 = 40.0;
 
 /// Curated overflow (⋯) commands.
@@ -56,9 +51,10 @@ pub fn render(
     full: egui::Rect,
     rc: &mut RenderContext,
     state: &mut MobileState,
+    pal: &Palette,
 ) {
-    ui.painter().rect_filled(bar, 0.0, C_PANEL);
-    ui.painter().hline(bar.x_range(), bar.bottom(), egui::Stroke::new(1.0, C_LINE));
+    ui.painter().rect_filled(bar, 0.0, pal.header);
+    ui.painter().hline(bar.x_range(), bar.bottom(), egui::Stroke::new(1.0, pal.line));
 
     // Filename (or app name when unsaved).
     let name = rc
@@ -73,7 +69,7 @@ pub fn render(
         egui::Align2::LEFT_CENTER,
         name,
         egui::FontId::proportional(14.0),
-        C_BRIGHT,
+        pal.text,
     );
 
     // Right cluster: ⌕ (palette) then ⋯ (overflow).
@@ -82,7 +78,7 @@ pub fn render(
 
     let sresp = ui.interact(palette_rect, ui.id().with("mobile_topbar_search"), egui::Sense::click());
     ui.painter().text(palette_rect.center(), egui::Align2::CENTER_CENTER, icons::SEARCH, icons::font(17.0),
-        if sresp.hovered() || state.palette_open { C_BRIGHT } else { C_DIM });
+        if sresp.hovered() || state.palette_open { pal.text } else { pal.text_dim });
     if sresp.clicked() {
         state.palette_open = !state.palette_open;
         state.overflow_open = false;
@@ -91,48 +87,48 @@ pub fn render(
 
     let oresp = ui.interact(overflow_rect, ui.id().with("mobile_topbar_overflow"), egui::Sense::click());
     ui.painter().text(overflow_rect.center(), egui::Align2::CENTER_CENTER, icons::ELLIPSIS, icons::font(18.0),
-        if oresp.hovered() || state.overflow_open { C_BRIGHT } else { C_DIM });
+        if oresp.hovered() || state.overflow_open { pal.text } else { pal.text_dim });
     if oresp.clicked() {
         state.overflow_open = !state.overflow_open;
         state.palette_open = false;
     }
 
     if state.overflow_open {
-        render_overflow(ui, full, rc, state);
+        render_overflow(ui, full, rc, state, pal);
     } else if state.palette_open {
-        render_palette(ui, full, rc, state);
+        render_palette(ui, full, rc, state, pal);
     }
 }
 
 /// Common modal scrim + panel. Returns (backdrop-tapped, panel inner rect).
-fn open_panel(ui: &mut egui::Ui, full: egui::Rect, id: &str) -> (bool, egui::Rect) {
+fn open_panel(ui: &mut egui::Ui, full: egui::Rect, id: &str, pal: &Palette) -> (bool, egui::Rect) {
     let scrim = ui.interact(full, ui.id().with(("mobile_topbar_scrim", id)), egui::Sense::click());
-    ui.painter().rect_filled(full, 0.0, egui::Color32::from_rgba_premultiplied(8, 10, 14, 170));
+    ui.painter().rect_filled(full, 0.0, pal.scrim);
     let panel = egui::Rect::from_min_max(
         egui::pos2(full.left() + 16.0, full.top() + 44.0),
         egui::pos2(full.right() - 16.0, full.bottom() - 60.0),
     );
-    ui.painter().rect_filled(panel, 14.0, C_PANEL);
-    ui.painter().rect_stroke(panel, 14.0, egui::Stroke::new(1.0, C_LINE), egui::StrokeKind::Inside);
+    ui.painter().rect_filled(panel, 14.0, pal.surface);
+    ui.painter().rect_stroke(panel, 14.0, egui::Stroke::new(1.0, pal.line), egui::StrokeKind::Inside);
     (scrim.clicked(), panel)
 }
 
-fn command_button(ui: &mut egui::Ui, r: egui::Rect, label: &str, key: (&str, usize)) -> bool {
+fn command_button(ui: &mut egui::Ui, r: egui::Rect, label: &str, key: (&str, usize), pal: &Palette) -> bool {
     let resp = ui.interact(r, ui.id().with(("mobile_cmd", key.0, key.1)), egui::Sense::click());
-    ui.painter().rect_filled(r, 8.0, if resp.hovered() { C_PANEL2 } else { C_PANEL });
-    ui.painter().hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, C_LINE));
+    ui.painter().rect_filled(r, 8.0, if resp.hovered() { pal.surface_alt } else { pal.surface });
+    ui.painter().hline(r.x_range(), r.bottom(), egui::Stroke::new(1.0, pal.line));
     ui.painter().text(
         egui::pos2(r.left() + 14.0, r.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(13.0),
-        C_BRIGHT,
+        pal.text,
     );
     resp.clicked()
 }
 
-fn render_overflow(ui: &mut egui::Ui, full: egui::Rect, rc: &mut RenderContext, state: &mut MobileState) {
-    let (backdrop, panel) = open_panel(ui, full, "overflow");
+fn render_overflow(ui: &mut egui::Ui, full: egui::Rect, rc: &mut RenderContext, state: &mut MobileState, pal: &Palette) {
+    let (backdrop, panel) = open_panel(ui, full, "overflow", pal);
     let mut close = backdrop;
     let items = overflow_items();
     let row_h = 44.0;
@@ -145,7 +141,7 @@ fn render_overflow(ui: &mut egui::Ui, full: egui::Rect, rc: &mut RenderContext, 
         if r.bottom() > inner.bottom() {
             break;
         }
-        if command_button(ui, r, label, ("of", i)) {
+        if command_button(ui, r, label, ("of", i), pal) {
             rc.shared.pending_menu_actions.push(*action);
             close = true;
         }
@@ -155,8 +151,8 @@ fn render_overflow(ui: &mut egui::Ui, full: egui::Rect, rc: &mut RenderContext, 
     }
 }
 
-fn render_palette(ui: &mut egui::Ui, full: egui::Rect, rc: &mut RenderContext, state: &mut MobileState) {
-    let (backdrop, panel) = open_panel(ui, full, "palette");
+fn render_palette(ui: &mut egui::Ui, full: egui::Rect, rc: &mut RenderContext, state: &mut MobileState, pal: &Palette) {
+    let (backdrop, panel) = open_panel(ui, full, "palette", pal);
     let mut close = backdrop;
     let inner = panel.shrink(8.0);
 
@@ -184,7 +180,7 @@ fn render_palette(ui: &mut egui::Ui, full: egui::Rect, rc: &mut RenderContext, s
         if r.bottom() > inner.bottom() {
             break;
         }
-        if command_button(ui, r, label, ("pal", i)) {
+        if command_button(ui, r, label, ("pal", i), pal) {
             rc.shared.pending_menu_actions.push(*action);
             close = true;
         }

@@ -9,17 +9,9 @@ use lightningbeam_core::layer::{AnyLayer, LayerType};
 use lightningbeam_core::selection::FocusSelection;
 use lightningbeam_core::tool::Tool;
 
-use super::{icons, MobileState};
+use super::{icons, MobileState, Palette};
 use crate::menu::MenuAction;
 use crate::RenderContext;
-
-const C_AMBER: egui::Color32 = egui::Color32::from_rgb(0xf4, 0xa3, 0x40);
-const C_DARK: egui::Color32 = egui::Color32::from_rgb(0x1b, 0x13, 0x0a);
-const C_PANEL: egui::Color32 = egui::Color32::from_rgb(0x1f, 0x24, 0x2c);
-const C_PANEL2: egui::Color32 = egui::Color32::from_rgb(0x27, 0x2d, 0x37);
-const C_LINE: egui::Color32 = egui::Color32::from_rgb(0x36, 0x3d, 0x49);
-const C_BRIGHT: egui::Color32 = egui::Color32::from_rgb(0xea, 0xee, 0xf3);
-const C_DIM: egui::Color32 = egui::Color32::from_rgb(0x8b, 0x95, 0xa1);
 
 const FAB_R: f32 = 26.0;
 const IR: f32 = 20.0;
@@ -106,7 +98,7 @@ fn close_all(state: &mut MobileState) {
     state.omni_create_open = false;
 }
 
-pub fn render(ui: &mut egui::Ui, region: egui::Rect, rc: &mut RenderContext, state: &mut MobileState) {
+pub fn render(ui: &mut egui::Ui, region: egui::Rect, rc: &mut RenderContext, state: &mut MobileState, pal: &Palette) {
     let ctx_tools: Vec<Tool> = Tool::for_layer_type(active_layer_type(rc)).to_vec();
     let primary: Vec<Tool> = PRIMARY
         .iter()
@@ -140,7 +132,7 @@ pub fn render(ui: &mut egui::Ui, region: egui::Rect, rc: &mut RenderContext, sta
                 enabled: true,
             })
             .collect();
-        let (close, clicked) = draw_grid(ui, region, "Tools", &cells);
+        let (close, clicked) = draw_grid(ui, region, "Tools", &cells, pal);
         if let Some(i) = clicked {
             *rc.shared.selected_tool = ctx_tools[i];
             close_all(state);
@@ -159,7 +151,7 @@ pub fn render(ui: &mut egui::Ui, region: egui::Rect, rc: &mut RenderContext, sta
                 enabled: it.3,
             })
             .collect();
-        let (close, clicked) = draw_grid(ui, region, "New", &cells);
+        let (close, clicked) = draw_grid(ui, region, "New", &cells, pal);
         if let Some(i) = clicked {
             rc.shared.pending_menu_actions.push(items[i].2);
             close_all(state);
@@ -169,8 +161,7 @@ pub fn render(ui: &mut egui::Ui, region: egui::Rect, rc: &mut RenderContext, sta
     } else if state.omni_open {
         // Radial: scrim, then tool petals + special petals (more / new).
         let scrim = ui.interact(region, ui.id().with("mobile_omni_scrim"), egui::Sense::click());
-        ui.painter()
-            .rect_filled(region, 0.0, egui::Color32::from_rgba_premultiplied(8, 10, 14, 140));
+        ui.painter().rect_filled(region, 0.0, pal.scrim);
         if scrim.clicked() {
             state.omni_open = false;
         }
@@ -194,7 +185,7 @@ pub fn render(ui: &mut egui::Ui, region: egui::Rect, rc: &mut RenderContext, sta
                 let t = primary[k];
                 let resp = ui.interact(rect, ui.id().with(("mobile_omni_tool", k)), egui::Sense::click());
                 let selected = *rc.shared.selected_tool == t;
-                petal(ui, c, if selected { C_AMBER } else { petal_bg(&resp) }, tool_icon(t), if selected { C_DARK } else { C_BRIGHT });
+                petal(ui, c, if selected { pal.accent } else { petal_bg(&resp, pal) }, tool_icon(t), if selected { pal.on_accent } else { pal.text }, pal);
                 if resp.clicked() {
                     *rc.shared.selected_tool = t;
                     state.omni_open = false;
@@ -203,16 +194,16 @@ pub fn render(ui: &mut egui::Ui, region: egui::Rect, rc: &mut RenderContext, sta
                 match specials[k - primary.len()] {
                     Special::More => {
                         let resp = ui.interact(rect, ui.id().with("mobile_omni_more"), egui::Sense::click());
-                        petal(ui, c, petal_bg(&resp), icons::MENU, C_BRIGHT);
+                        petal(ui, c, petal_bg(&resp, pal), icons::MENU, pal.text, pal);
                         if resp.clicked() {
                             state.omni_grid_open = true;
                         }
                     }
                     Special::New => {
                         let resp = ui.interact(rect, ui.id().with("mobile_omni_new"), egui::Sense::click());
-                        petal(ui, c, C_AMBER, icons::PLUS, C_DARK);
+                        petal(ui, c, pal.accent, icons::PLUS, pal.on_accent, pal);
                         if resp.hovered() {
-                            ui.painter().circle_stroke(c, IR, egui::Stroke::new(1.5, C_BRIGHT));
+                            ui.painter().circle_stroke(c, IR, egui::Stroke::new(1.5, pal.text));
                         }
                         if resp.clicked() {
                             state.omni_create_open = true;
@@ -226,7 +217,7 @@ pub fn render(ui: &mut egui::Ui, region: egui::Rect, rc: &mut RenderContext, sta
     // The FAB itself (on top). Closed → current tool icon; open → ✕.
     let fab_rect = egui::Rect::from_center_size(fab_center, egui::vec2(FAB_R * 2.0, FAB_R * 2.0));
     let fresp = ui.interact(fab_rect, ui.id().with("mobile_omni_fab"), egui::Sense::click());
-    ui.painter().circle_filled(fab_center, FAB_R, C_AMBER);
+    ui.painter().circle_filled(fab_center, FAB_R, pal.accent);
     let open = state.omni_open || state.omni_grid_open || state.omni_create_open;
     let glyph = if open {
         icons::X
@@ -236,7 +227,7 @@ pub fn render(ui: &mut egui::Ui, region: egui::Rect, rc: &mut RenderContext, sta
         icons::PLUS // off-Stage: a create button
     };
     ui.painter()
-        .text(fab_center, egui::Align2::CENTER_CENTER, glyph, icons::font(22.0), C_DARK);
+        .text(fab_center, egui::Align2::CENTER_CENTER, glyph, icons::font(22.0), pal.on_accent);
     if fresp.clicked() {
         if open {
             close_all(state);
@@ -248,17 +239,17 @@ pub fn render(ui: &mut egui::Ui, region: egui::Rect, rc: &mut RenderContext, sta
     }
 }
 
-fn petal_bg(resp: &egui::Response) -> egui::Color32 {
+fn petal_bg(resp: &egui::Response, pal: &Palette) -> egui::Color32 {
     if resp.hovered() {
-        C_LINE
+        pal.line
     } else {
-        C_PANEL2
+        pal.surface_alt
     }
 }
 
-fn petal(ui: &egui::Ui, c: egui::Pos2, bg: egui::Color32, glyph: &str, fg: egui::Color32) {
+fn petal(ui: &egui::Ui, c: egui::Pos2, bg: egui::Color32, glyph: &str, fg: egui::Color32, pal: &Palette) {
     ui.painter().circle_filled(c, IR, bg);
-    ui.painter().circle_stroke(c, IR, egui::Stroke::new(1.0, C_LINE));
+    ui.painter().circle_stroke(c, IR, egui::Stroke::new(1.0, pal.line));
     ui.painter().text(c, egui::Align2::CENTER_CENTER, glyph, icons::font(18.0), fg);
 }
 
@@ -270,20 +261,19 @@ struct Cell {
 }
 
 /// A modal grid sheet of icon+label cells. Returns (backdrop-tapped, Some(clicked-enabled-index)).
-fn draw_grid(ui: &mut egui::Ui, region: egui::Rect, title: &str, cells: &[Cell]) -> (bool, Option<usize>) {
+fn draw_grid(ui: &mut egui::Ui, region: egui::Rect, title: &str, cells: &[Cell], pal: &Palette) -> (bool, Option<usize>) {
     let scrim = ui.interact(region, ui.id().with(("mobile_omni_gridscrim", title)), egui::Sense::click());
-    ui.painter()
-        .rect_filled(region, 0.0, egui::Color32::from_rgba_premultiplied(8, 10, 14, 170));
+    ui.painter().rect_filled(region, 0.0, pal.scrim);
 
     let panel = region.shrink2(egui::vec2(16.0, 40.0));
-    ui.painter().rect_filled(panel, 14.0, C_PANEL);
-    ui.painter().rect_stroke(panel, 14.0, egui::Stroke::new(1.0, C_LINE), egui::StrokeKind::Inside);
+    ui.painter().rect_filled(panel, 14.0, pal.surface);
+    ui.painter().rect_stroke(panel, 14.0, egui::Stroke::new(1.0, pal.line), egui::StrokeKind::Inside);
     ui.painter().text(
         egui::pos2(panel.left() + 16.0, panel.top() + 18.0),
         egui::Align2::LEFT_CENTER,
         title,
         egui::FontId::proportional(14.0),
-        C_BRIGHT,
+        pal.text,
     );
 
     let cols = 4usize;
@@ -310,20 +300,20 @@ fn draw_grid(ui: &mut egui::Ui, region: egui::Rect, title: &str, cells: &[Cell])
             ui.interact(r, ui.id().with(("mobile_omni_cell_off", title, i)), egui::Sense::hover())
         };
         let bg = if cell.selected {
-            C_AMBER
+            pal.accent
         } else if cell.enabled && resp.hovered() {
-            C_PANEL2
+            pal.surface_alt
         } else {
-            C_PANEL
+            pal.surface
         };
         ui.painter().rect_filled(r, 10.0, bg);
-        ui.painter().rect_stroke(r, 10.0, egui::Stroke::new(1.0, C_LINE), egui::StrokeKind::Inside);
+        ui.painter().rect_stroke(r, 10.0, egui::Stroke::new(1.0, pal.line), egui::StrokeKind::Inside);
         let fg = if cell.selected {
-            C_DARK
+            pal.on_accent
         } else if cell.enabled {
-            C_BRIGHT
+            pal.text
         } else {
-            C_LINE
+            pal.line
         };
         ui.painter().text(
             egui::pos2(r.center().x, r.top() + r.height() * 0.38),
@@ -337,7 +327,7 @@ fn draw_grid(ui: &mut egui::Ui, region: egui::Rect, title: &str, cells: &[Cell])
             egui::Align2::CENTER_CENTER,
             cell.label,
             egui::FontId::proportional(9.5),
-            if cell.selected { C_DARK } else if cell.enabled { C_DIM } else { C_LINE },
+            if cell.selected { pal.on_accent } else if cell.enabled { pal.text_dim } else { pal.line },
         );
         if cell.enabled && resp.clicked() {
             clicked = Some(i);

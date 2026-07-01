@@ -99,6 +99,14 @@
   --font-size-small: 11px;
   --font-size-default: 13px;
   --pane-border-width: 1px;
+
+  /* Modal backdrop (translucent) + intent/category accents (shared by light & dark) */
+  --scrim: #10141ab0;
+  --accent-coral: #e8826b;
+  --accent-cyan: #54c3e8;
+  --accent-amber: #f4a340;
+  --accent-pink: #c75b8a;
+  --accent-violet: #8a6ec0;
 }
 
 /* ============================================

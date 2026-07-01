@@ -21,10 +21,13 @@ pub mod icons;
 mod inspector;
 pub mod intent;
 mod omni;
+mod palette;
 mod stack;
 mod surface;
 mod topbar;
 mod transport;
+
+use palette::Palette;
 
 /// Reserved sentinel namespace for mobile pane-instance paths. Desktop layout paths are built
 /// from small child indices, so prefixing with `usize::MAX` guarantees mobile slots never alias a
@@ -203,9 +206,10 @@ pub fn render_mobile_shell(
     rc: &mut RenderContext,
     state: &mut MobileState,
 ) {
-    // Background (wireframe device color; bands paint over most of it).
-    ui.painter()
-        .rect_filled(available_rect, 0.0, egui::Color32::from_rgb(0x14, 0x16, 0x1b));
+    let pal = Palette::from_theme(rc.shared.theme, ui.ctx());
+
+    // Background (device color; bands paint over most of it).
+    ui.painter().rect_filled(available_rect, 0.0, pal.bg);
 
     let topbar_rect = egui::Rect::from_min_max(
         available_rect.min,
@@ -243,19 +247,19 @@ pub fn render_mobile_shell(
         region
     };
 
-    stack::render(ui, stack_rect, rc, state);
+    stack::render(ui, stack_rect, rc, state, &pal);
 
     if inspector_shown {
         let sheet_rect = egui::Rect::from_min_max(egui::pos2(region.left(), sheet_top), region.max);
-        inspector::render(ui, sheet_rect, region.height(), rc, state);
+        inspector::render(ui, sheet_rect, region.height(), rc, state, &pal);
     }
 
     // Transport floor: drawn last = always on top, the persistent spine.
-    transport::render(ui, transport_rect, &mut rc.shared);
+    transport::render(ui, transport_rect, &mut rc.shared, &pal);
 
     // Omnibutton FAB (radial tool menu) — drawn above the stack region, on top of everything else.
-    omni::render(ui, region, rc, state);
+    omni::render(ui, region, rc, state, &pal);
 
     // Top bar (filename + ⌕ palette + ⋯ commands). Its menus overlay the whole shell, so it's last.
-    topbar::render(ui, topbar_rect, available_rect, rc, state);
+    topbar::render(ui, topbar_rect, available_rect, rc, state, &pal);
 }

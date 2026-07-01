@@ -5343,6 +5343,10 @@ impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _frame_start = std::time::Instant::now();
 
+        // Apply the theme's palette to egui's global visuals so the standard widgets (dialogs, pane
+        // chrome, text) share the same colors as the mobile UI and respond to light/dark/user themes.
+        self.theme.apply_to_egui(ctx);
+
         // === Raster fault-in (Phase 3 paging) ===
         // The canvas records raster keyframe ids whose `raw_pixels` weren't resident
         // (it can't mutate the document while rendering). Drain that sink here, BEFORE
