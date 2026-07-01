@@ -78,3 +78,4 @@ pub const FOLDER: &str = "\u{e0d7}";
 pub const FILE_PLUS: &str = "\u{e0c9}";
 pub const COPY: &str = "\u{e09e}";
 pub const LAYERS: &str = "\u{e529}";
+pub const ELLIPSIS: &str = "\u{e0b6}";

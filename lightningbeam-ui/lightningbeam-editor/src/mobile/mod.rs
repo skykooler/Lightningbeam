@@ -23,6 +23,7 @@ pub mod intent;
 mod omni;
 mod stack;
 mod surface;
+mod topbar;
 mod transport;
 
 /// Reserved sentinel namespace for mobile pane-instance paths. Desktop layout paths are built
@@ -31,6 +32,7 @@ mod transport;
 pub const MOBILE_NS: usize = usize::MAX;
 
 const TRANSPORT_H: f32 = 60.0;
+const TOPBAR_H: f32 = 40.0;
 
 /// Returns true if the mobile UI is requested via the `LB_MOBILE_UI` env var.
 /// Any non-empty value other than "0" enables it.
@@ -155,6 +157,11 @@ pub struct MobileState {
     pub omni_grid_open: bool,
     /// Whether the omnibutton "+New" create grid is open.
     pub omni_create_open: bool,
+    /// Top-bar overflow (⋯ commands) sheet open.
+    pub overflow_open: bool,
+    /// Top-bar command palette (⌕) open, and its search query.
+    pub palette_open: bool,
+    pub palette_query: String,
     /// Active handle drag (transient).
     pub drag: Option<StackDrag>,
     /// In-flight layout ease (transient).
@@ -173,6 +180,9 @@ impl Default for MobileState {
             omni_open: false,
             omni_grid_open: false,
             omni_create_open: false,
+            overflow_open: false,
+            palette_open: false,
+            palette_query: String::new(),
             drag: None,
             anim: None,
         }
@@ -190,14 +200,18 @@ pub fn render_mobile_shell(
     ui.painter()
         .rect_filled(available_rect, 0.0, egui::Color32::from_rgb(0x14, 0x16, 0x1b));
 
+    let topbar_rect = egui::Rect::from_min_max(
+        available_rect.min,
+        egui::pos2(available_rect.right(), available_rect.top() + TOPBAR_H),
+    );
     let transport_rect = egui::Rect::from_min_max(
         egui::pos2(available_rect.left(), available_rect.bottom() - TRANSPORT_H),
         available_rect.max,
     );
-    // Region above the transport, shared between the stack and (when something is selected) the
-    // inspector sheet that rises above the transport.
+    // Region between the top bar and the transport, shared between the stack and (when something is
+    // selected) the inspector sheet that rises above the transport.
     let region = egui::Rect::from_min_max(
-        available_rect.min,
+        egui::pos2(available_rect.left(), topbar_rect.bottom()),
         egui::pos2(available_rect.right(), transport_rect.top()),
     );
     // When the inspector is up, the sheet overlays the lower part of the stack. If the selected
@@ -234,4 +248,7 @@ pub fn render_mobile_shell(
 
     // Omnibutton FAB (radial tool menu) — drawn above the stack region, on top of everything else.
     omni::render(ui, region, rc, state);
+
+    // Top bar (filename + ⌕ palette + ⋯ commands). Its menus overlay the whole shell, so it's last.
+    topbar::render(ui, topbar_rect, available_rect, rc, state);
 }
