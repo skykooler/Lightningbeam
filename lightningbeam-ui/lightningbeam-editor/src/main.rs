@@ -6329,7 +6329,8 @@ impl eframe::App for EditorApp {
         }
 
         // Render preferences dialog
-        if let Some(result) = self.preferences_dialog.render(ctx, &mut self.config, &mut self.theme) {
+        let mobile = self.mobile_active();
+        if let Some(result) = self.preferences_dialog.render(ctx, &mut self.config, &mut self.theme, mobile) {
             if result.buffer_size_changed {
                 println!("⚠️  Audio buffer size will be applied on next app restart");
             }

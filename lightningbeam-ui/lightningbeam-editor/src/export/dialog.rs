@@ -208,7 +208,7 @@ impl ExportDialog {
 
         let modal_response = egui::Modal::new(egui::Id::new("export_dialog_modal"))
             .show(ctx, |ui| {
-                ui.set_width(500.0);
+                ui.set_width(crate::mobile::dialog_width(ctx, 500.0));
 
                 ui.heading(window_title);
                 ui.add_space(8.0);
@@ -801,7 +801,7 @@ impl ExportProgressDialog {
 
         egui::Modal::new(egui::Id::new("export_progress_modal"))
             .show(ctx, |ui| {
-                ui.set_width(400.0);
+                ui.set_width(crate::mobile::dialog_width(ctx, 400.0));
 
                 ui.heading("Exporting...");
                 ui.add_space(8.0);

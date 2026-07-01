@@ -151,6 +151,7 @@ impl PreferencesDialog {
         ctx: &egui::Context,
         config: &mut AppConfig,
         theme: &mut Theme,
+        mobile: bool,
     ) -> Option<PreferencesSaveResult> {
         if !self.open {
             return None;
@@ -160,68 +161,32 @@ impl PreferencesDialog {
         let mut should_cancel = false;
         let mut open = self.open;
 
-        egui::Window::new("Preferences")
-            .open(&mut open)
-            .resizable(false)
-            .collapsible(false)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.set_width(550.0);
+        // On mobile, render as a screen-fitting modal sheet (dim backdrop, centered) like the other
+        // mobile modals; on desktop, the familiar draggable window.
+        let width = crate::mobile::dialog_width(ctx, 550.0);
+        let scroll_h = if mobile {
+            (ctx.screen_rect().height() - 220.0).clamp(160.0, 400.0)
+        } else {
+            400.0
+        };
 
-                // Error message
-                if let Some(error) = &self.error_message {
-                    ui.colored_label(egui::Color32::from_rgb(255, 100, 100), error);
-                    ui.add_space(8.0);
-                }
-
-                // Tab bar
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.tab, PreferencesTab::General, "General");
-                    ui.selectable_value(&mut self.tab, PreferencesTab::Shortcuts, "Keyboard Shortcuts");
-                });
-                ui.separator();
-
-                // Tab content
-                match self.tab {
-                    PreferencesTab::General => {
-                        egui::ScrollArea::vertical()
-                            .max_height(400.0)
-                            .show(ui, |ui| {
-                                self.render_general_section(ui);
-                                ui.add_space(8.0);
-                                self.render_audio_section(ui);
-                                ui.add_space(8.0);
-                                self.render_appearance_section(ui);
-                                ui.add_space(8.0);
-                                self.render_startup_section(ui);
-                                ui.add_space(8.0);
-                                self.render_advanced_section(ui);
-                            });
-                    }
-                    PreferencesTab::Shortcuts => {
-                        self.render_shortcuts_tab(ui);
-                    }
-                }
-
-                ui.add_space(16.0);
-
-                // Buttons
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        should_cancel = true;
-                    }
-
-                    if ui.button("Reset to Defaults").clicked() {
-                        self.reset_to_defaults();
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Save").clicked() {
-                            should_save = true;
-                        }
-                    });
-                });
+        if mobile {
+            let resp = egui::Modal::new(egui::Id::new("preferences_modal")).show(ctx, |ui| {
+                self.render_body(ui, width, scroll_h, &mut should_save, &mut should_cancel);
             });
+            if resp.backdrop_response.clicked() {
+                should_cancel = true;
+            }
+        } else {
+            egui::Window::new("Preferences")
+                .open(&mut open)
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
+                    self.render_body(ui, width, scroll_h, &mut should_save, &mut should_cancel);
+                });
+        }
 
         // Update open state
         self.open = open;
@@ -236,6 +201,70 @@ impl PreferencesDialog {
         }
 
         None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        width: f32,
+        scroll_h: f32,
+        should_save: &mut bool,
+        should_cancel: &mut bool,
+    ) {
+        ui.set_width(width);
+
+        // Error message
+        if let Some(error) = &self.error_message {
+            ui.colored_label(egui::Color32::from_rgb(255, 100, 100), error);
+            ui.add_space(8.0);
+        }
+
+        // Tab bar
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.tab, PreferencesTab::General, "General");
+            ui.selectable_value(&mut self.tab, PreferencesTab::Shortcuts, "Keyboard Shortcuts");
+        });
+        ui.separator();
+
+        // Tab content
+        match self.tab {
+            PreferencesTab::General => {
+                egui::ScrollArea::vertical().max_height(scroll_h).show(ui, |ui| {
+                    self.render_general_section(ui);
+                    ui.add_space(8.0);
+                    self.render_audio_section(ui);
+                    ui.add_space(8.0);
+                    self.render_appearance_section(ui);
+                    ui.add_space(8.0);
+                    self.render_startup_section(ui);
+                    ui.add_space(8.0);
+                    self.render_advanced_section(ui);
+                });
+            }
+            PreferencesTab::Shortcuts => {
+                self.render_shortcuts_tab(ui);
+            }
+        }
+
+        ui.add_space(16.0);
+
+        // Buttons
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() {
+                *should_cancel = true;
+            }
+
+            if ui.button("Reset to Defaults").clicked() {
+                self.reset_to_defaults();
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Save").clicked() {
+                    *should_save = true;
+                }
+            });
+        });
     }
 
     fn render_shortcuts_tab(&mut self, ui: &mut egui::Ui) {

@@ -34,6 +34,13 @@ pub const MOBILE_NS: usize = usize::MAX;
 const TRANSPORT_H: f32 = 60.0;
 const TOPBAR_H: f32 = 40.0;
 
+/// Clamp a desktop dialog width to fit the current screen (with side margins). A no-op on wide
+/// desktop screens (`min` keeps the desired width); on a phone-aspect window it shrinks to fit.
+pub fn dialog_width(ctx: &egui::Context, desired: f32) -> f32 {
+    let avail = ctx.screen_rect().width() - 24.0;
+    desired.min(avail.max(200.0))
+}
+
 /// Returns true if the mobile UI is requested via the `LB_MOBILE_UI` env var.
 /// Any non-empty value other than "0" enables it.
 pub fn is_mobile_env() -> bool {
