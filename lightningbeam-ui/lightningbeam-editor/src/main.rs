@@ -7163,9 +7163,11 @@ impl EditorApp {
     /// `scratch` for `'a`; it must be dropped before the post-render drain touches
     /// `self`/`scratch` again. This is the single source of truth for `SharedPaneState`.
     fn build_frame<'a>(&'a mut self, scratch: &'a mut FrameScratch) -> FrameBundle<'a> {
+        let is_mobile = self.mobile_active();
         FrameBundle {
             rc: RenderContext {
                 shared: panes::SharedPaneState {
+                    is_mobile,
                     container_path: self.current_file_path.clone(),
                     onion: {
                         // Onion skinning is disabled during playback.

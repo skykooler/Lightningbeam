@@ -190,15 +190,32 @@ pub fn render_mobile_shell(
         available_rect.min,
         egui::pos2(available_rect.right(), transport_rect.top()),
     );
-    // The stack always fills the region; the inspector sheet overlays its lower part (no reflow).
-    stack::render(ui, region, rc, state);
+    // When the inspector is up, the sheet overlays the lower part of the stack. If the selected
+    // pane would be *covered* by the sheet, reflow (shrink the stack above the sheet) so it stays
+    // visible; otherwise leave the stack full-height and just overlay. Restoring on dismiss is
+    // automatic — reflow only changes the render rect, not the window state.
+    let inspector_shown = inspector::is_active(&rc.shared);
+    let sheet_h = if inspector_shown {
+        (region.height() * state.inspector_frac).clamp(120.0, region.height() - 60.0)
+    } else {
+        0.0
+    };
+    let sheet_top = region.bottom() - sheet_h;
 
-    if inspector::is_active(&rc.shared) {
-        let sheet_h = (region.height() * state.inspector_frac).clamp(120.0, region.height() - 60.0);
-        let sheet_rect = egui::Rect::from_min_max(
-            egui::pos2(region.left(), region.bottom() - sheet_h),
-            region.max,
-        );
+    let covered = inspector_shown
+        && stack::pane_bottom_in(state, region, inspector::target_slot(&rc.shared))
+            .map(|bottom| bottom > sheet_top + 1.0)
+            .unwrap_or(false);
+    let stack_rect = if covered {
+        egui::Rect::from_min_max(region.min, egui::pos2(region.right(), sheet_top))
+    } else {
+        region
+    };
+
+    stack::render(ui, stack_rect, rc, state);
+
+    if inspector_shown {
+        let sheet_rect = egui::Rect::from_min_max(egui::pos2(region.left(), sheet_top), region.max);
         inspector::render(ui, sheet_rect, region.height(), rc, state);
     }
 

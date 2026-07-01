@@ -29,6 +29,18 @@ pub fn is_active(shared: &SharedPaneState) -> bool {
     !shared.focus.is_none() || !shared.selection.is_empty()
 }
 
+/// The stack slot (see `super::STACK`) where the current selection lives, so we can tell if the
+/// sheet would cover it. Geometry/selection lives on the Stage; clips/layers on the Timeline; etc.
+pub fn target_slot(shared: &SharedPaneState) -> usize {
+    match &*shared.focus {
+        FocusSelection::Notes { .. } => 4,          // PianoRoll
+        FocusSelection::Nodes(_) => 6,              // Node/Instrument
+        FocusSelection::Assets(_) => 1,             // Asset Library
+        FocusSelection::ClipInstances(_) | FocusSelection::Layers(_) => 3, // Timeline
+        FocusSelection::Geometry { .. } | FocusSelection::None => 2,       // Stage
+    }
+}
+
 /// A short title describing what's selected.
 fn title(shared: &SharedPaneState) -> String {
     use lightningbeam_core::layer::{AnyLayer, AudioLayerType};

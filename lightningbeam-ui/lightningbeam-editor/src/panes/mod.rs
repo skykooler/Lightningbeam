@@ -356,6 +356,8 @@ pub struct SharedPaneState<'a> {
     /// on the first frame; panes (e.g. infopanel) convert the pixel data to egui
     /// TextureHandles.  Each entry is `(width, height, sRGB-premultiplied RGBA bytes)`.
     pub brush_preview_pixels: &'a std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
+    /// True when rendering the phone/mobile shell (panes can render more compactly).
+    pub is_mobile: bool,
 }
 
 /// Trait for pane rendering

@@ -17,6 +17,8 @@ use std::collections::HashMap;
 const RULER_HEIGHT: f32 = 30.0;
 const LAYER_HEIGHT: f32 = 60.0;
 const LAYER_HEADER_WIDTH: f32 = 200.0;
+/// On mobile the header collapses to a minimal color swatch with a 1:2 width:height aspect.
+const MOBILE_LAYER_HEADER_WIDTH: f32 = LAYER_HEIGHT * 0.5;
 const MIN_PIXELS_PER_SECOND: f32 = 1.0;  // Allow zooming out to see 10+ minutes
 const MAX_PIXELS_PER_SECOND: f32 = 500.0;
 const EDGE_DETECTION_PIXELS: f32 = 8.0; // Distance from edge to detect trim handles
@@ -1937,6 +1939,8 @@ impl TimelinePane {
         track_levels: &std::collections::HashMap<daw_backend::TrackId, f32>,
         input_level: f32,
         playback_time: f64,
+        header_width: f32,
+        is_mobile: bool,
     ) {
         // Background for header column
         let header_style = theme.style(".timeline-header", ui.ctx());
@@ -1999,7 +2003,7 @@ impl TimelinePane {
 
             let header_rect = egui::Rect::from_min_size(
                 egui::pos2(rect.min.x, y),
-                egui::vec2(LAYER_HEADER_WIDTH, LAYER_HEIGHT),
+                egui::vec2(header_width, LAYER_HEIGHT),
             );
 
             // Determine the AnyLayer or GroupLayer for this row
@@ -2032,6 +2036,27 @@ impl TimelinePane {
             };
 
             ui.painter().rect_filled(header_rect, 0.0, bg_color);
+
+            // Mobile: collapse the header to a minimal color swatch (1:2 w:h). Selection is handled
+            // by handle_input via the (narrow) header rect, so we only draw here.
+            if is_mobile {
+                let sw = header_rect.shrink(2.0);
+                let col = if is_active || is_selected {
+                    type_color
+                } else {
+                    type_color.gamma_multiply(0.55)
+                };
+                ui.painter().rect_filled(sw, 3.0, col);
+                if is_active || is_selected {
+                    ui.painter().rect_stroke(
+                        sw,
+                        3.0,
+                        egui::Stroke::new(1.5, egui::Color32::WHITE),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                continue;
+            }
 
             // Gutter area (left of indicator) — solid group color, with collapse chevron
             if indent > 0.0 {
@@ -5456,15 +5481,21 @@ impl PaneRenderer for TimelinePane {
         }
         self.duration = max_endpoint;
 
-        // Split into layer header column (left) and timeline content (right)
+        // Split into layer header column (left) and timeline content (right). On mobile the header
+        // column collapses to a minimal color-swatch width.
+        let header_width = if shared.is_mobile {
+            MOBILE_LAYER_HEADER_WIDTH
+        } else {
+            LAYER_HEADER_WIDTH
+        };
         let header_column_rect = egui::Rect::from_min_size(
             rect.min,
-            egui::vec2(LAYER_HEADER_WIDTH, rect.height()),
+            egui::vec2(header_width, rect.height()),
         );
 
         let timeline_rect = egui::Rect::from_min_size(
-            rect.min + egui::vec2(LAYER_HEADER_WIDTH, 0.0),
-            egui::vec2(rect.width() - LAYER_HEADER_WIDTH, rect.height()),
+            rect.min + egui::vec2(header_width, 0.0),
+            egui::vec2(rect.width() - header_width, rect.height()),
         );
 
         // Split timeline into ruler and content areas
@@ -5481,12 +5512,12 @@ impl PaneRenderer for TimelinePane {
         // Split header column into ruler area (top) and layer headers (bottom)
         let header_ruler_spacer = egui::Rect::from_min_size(
             header_column_rect.min,
-            egui::vec2(LAYER_HEADER_WIDTH, RULER_HEIGHT),
+            egui::vec2(header_width, RULER_HEIGHT),
         );
 
         let layer_headers_rect = egui::Rect::from_min_size(
             header_column_rect.min + egui::vec2(0.0, RULER_HEIGHT),
-            egui::vec2(LAYER_HEADER_WIDTH, header_column_rect.height() - RULER_HEIGHT),
+            egui::vec2(header_width, header_column_rect.height() - RULER_HEIGHT),
         );
 
         // Save original clip rect to restore at the end
@@ -5503,7 +5534,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer header column with clipping
         ui.set_clip_rect(layer_headers_rect.intersect(original_clip_rect));
-        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers, shared.layer_to_track_map, shared.track_levels, shared.input_level, *shared.playback_time);
+        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers, shared.layer_to_track_map, shared.track_levels, shared.input_level, *shared.playback_time, header_width, shared.is_mobile);
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));

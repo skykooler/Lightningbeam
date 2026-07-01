@@ -224,6 +224,19 @@ fn nweights(weights: &[f32; 3], count: usize) -> Vec<f32> {
     w
 }
 
+/// The bottom Y of the given stack slot's band within `region` (using the current window +
+/// weights), or None if that slot isn't in the visible window. Used to decide whether the
+/// inspector sheet would cover the selected pane.
+pub fn pane_bottom_in(state: &MobileState, region: egui::Rect, slot: usize) -> Option<f32> {
+    let (top, count) = (state.window_top, state.window_count);
+    if slot < top || slot >= top + count {
+        return None;
+    }
+    let nw = nweights(&state.weights, count);
+    let cum: f32 = nw[..=(slot - top)].iter().sum();
+    Some(region.top() + cum * region.height())
+}
+
 /// Lay out `count` panes in `rect` using normalized weights `nw`.
 fn config_rects(top: usize, count: usize, rect: egui::Rect, nw: &[f32]) -> Vec<(usize, egui::Rect)> {
     let h = rect.height();
