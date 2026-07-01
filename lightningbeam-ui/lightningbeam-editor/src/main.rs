@@ -5346,6 +5346,10 @@ impl eframe::App for EditorApp {
         // Apply the theme's palette to egui's global visuals so the standard widgets (dialogs, pane
         // chrome, text) share the same colors as the mobile UI and respond to light/dark/user themes.
         self.theme.apply_to_egui(ctx);
+        // On mobile, enlarge egui spacing/sizing so widgets in panes/dialogs are touch-friendly.
+        if self.mobile_active() {
+            mobile::apply_touch_style(ctx);
+        }
 
         // === Raster fault-in (Phase 3 paging) ===
         // The canvas records raster keyframe ids whose `raw_pixels` weren't resident

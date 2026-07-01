@@ -11,8 +11,7 @@ use crate::panes::{NodePath, SharedPaneState};
 use crate::RenderContext;
 
 const GRAB_H: f32 = 16.0;
-const HEAD_H: f32 = 30.0;
-const CHIP_H: f32 = 30.0;
+const HEAD_H: f32 = 44.0;
 
 fn inspector_path() -> NodePath {
     vec![MOBILE_NS, 200]
@@ -123,61 +122,54 @@ pub fn render(
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
 
-    // Header row: title + close.
+    // Single header row (egui widgets — they inherit the mobile touch sizing + theme visuals):
+    // title on the left, [Timeline] [Nodes] jump buttons + ✕ close on the right.
     let head_y = rect.top() + GRAB_H;
     let head = egui::Rect::from_min_max(
         egui::pos2(rect.left(), head_y),
         egui::pos2(rect.right(), head_y + HEAD_H),
     );
-    ui.painter().text(
-        egui::pos2(head.left() + 14.0, head.center().y),
-        egui::Align2::LEFT_CENTER,
-        title(&rc.shared),
-        egui::FontId::proportional(13.0),
-        pal.text,
+    let title_text = title(&rc.shared);
+    let mut jump: Option<(usize, usize)> = None;
+    let mut do_close = false;
+    let mut hui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(head.shrink2(egui::vec2(12.0, 5.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
     );
-    let close = egui::Rect::from_min_size(egui::pos2(head.right() - 36.0, head.top()), egui::vec2(36.0, HEAD_H));
-    let cresp = ui.interact(close, ui.id().with("mobile_inspector_close"), egui::Sense::click());
-    ui.painter().text(
-        close.center(),
-        egui::Align2::CENTER_CENTER,
-        super::icons::X,
-        super::icons::font(16.0),
-        if cresp.hovered() { pal.text } else { pal.text_dim },
-    );
-    if cresp.clicked() {
+    hui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        if ui
+            .add(egui::Button::new(egui::RichText::new(super::icons::X).font(super::icons::font(18.0))).frame(false))
+            .clicked()
+        {
+            do_close = true;
+        }
+        ui.add_space(4.0);
+        // Reversed so the visual order stays Timeline, then Nodes.
+        for chip in CHIPS.iter().rev() {
+            if ui.button(chip.label).clicked() {
+                jump = Some(chip.window);
+            }
+        }
+        // Title fills the remaining space on the left.
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(title_text).color(pal.text)).truncate());
+        });
+    });
+    if do_close {
         rc.shared.selection.clear();
         *rc.shared.focus = FocusSelection::None;
     }
-
-    // Jump-to chips (reframe to a related surface, keeping the selection).
-    let chip_y = head.bottom();
-    let mut cx = rect.left() + 12.0;
-    for (i, chip) in CHIPS.iter().enumerate() {
-        let galley = ui.painter().layout_no_wrap(
-            chip.label.to_string(),
-            egui::FontId::proportional(11.0),
-            pal.text,
-        );
-        let w = galley.size().x + 18.0;
-        let chip_rect = egui::Rect::from_min_size(egui::pos2(cx, chip_y + 4.0), egui::vec2(w, CHIP_H - 8.0));
-        let resp = ui.interact(chip_rect, ui.id().with(("mobile_inspector_chip", i)), egui::Sense::click());
-        ui.painter().rect_filled(chip_rect, 11.0, if resp.hovered() { pal.line } else { pal.surface_alt });
-        ui.painter().rect_stroke(chip_rect, 11.0, egui::Stroke::new(1.0, pal.line), egui::StrokeKind::Inside);
-        ui.painter().galley(chip_rect.center() - galley.size() * 0.5, galley, pal.text);
-        if resp.clicked() {
-            let (top, count) = chip.window;
-            state.window_top = top;
-            state.window_count = count;
-            state.weights = [1.0, 1.0, 1.0];
-            state.anim = None;
-        }
-        cx += w + 6.0;
+    if let Some((top, count)) = jump {
+        state.window_top = top;
+        state.window_count = count;
+        state.weights = [1.0, 1.0, 1.0];
+        state.anim = None;
     }
 
     // Properties content — reuse the Infopanel full-bleed.
     let content = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), chip_y + CHIP_H),
+        egui::pos2(rect.left(), head.bottom()),
         rect.max,
     );
     if content.height() > 1.0 {

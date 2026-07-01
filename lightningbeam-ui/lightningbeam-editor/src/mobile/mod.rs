@@ -44,6 +44,36 @@ pub fn dialog_width(ctx: &egui::Context, desired: f32) -> f32 {
     desired.min(avail.max(200.0))
 }
 
+/// Enlarge egui's spacing/sizing so the standard widgets (buttons, dropdowns, sliders, text fields)
+/// in panes and dialogs are touch-friendly. Applied every frame after the theme visuals when the
+/// mobile shell is active. The mobile chrome (transport, omnibutton, headers) is hand-sized already;
+/// this targets the egui-widget content inside panes.
+pub fn apply_touch_style(ctx: &egui::Context) {
+    use egui::{FontId, TextStyle};
+    ctx.style_mut(|s| {
+        let sp = &mut s.spacing;
+        // Minimum touch target height for buttons/sliders/checkboxes.
+        sp.interact_size = egui::vec2(sp.interact_size.x.max(44.0), 38.0);
+        sp.button_padding = egui::vec2(12.0, 9.0);
+        sp.item_spacing = egui::vec2(10.0, 10.0);
+        sp.slider_width = 200.0;
+        sp.slider_rail_height = 10.0;
+        sp.combo_width = 200.0;
+        sp.combo_height = 360.0;
+        sp.text_edit_width = 220.0;
+        sp.icon_width = 24.0;
+        sp.icon_width_inner = 14.0;
+        sp.icon_spacing = 8.0;
+        sp.scroll.bar_width = 16.0;
+        sp.menu_margin = egui::Margin::same(8);
+        // Larger text for touch legibility.
+        s.text_styles.insert(TextStyle::Body, FontId::proportional(15.0));
+        s.text_styles.insert(TextStyle::Button, FontId::proportional(15.0));
+        s.text_styles.insert(TextStyle::Monospace, FontId::monospace(13.0));
+        s.text_styles.insert(TextStyle::Small, FontId::proportional(12.0));
+    });
+}
+
 /// Returns true if the mobile UI is requested via the `LB_MOBILE_UI` env var.
 /// Any non-empty value other than "0" enables it.
 pub fn is_mobile_env() -> bool {
