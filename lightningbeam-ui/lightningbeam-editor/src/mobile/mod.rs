@@ -18,6 +18,7 @@ use crate::panes::NodePath;
 use crate::RenderContext;
 
 pub mod icons;
+mod inspector;
 pub mod intent;
 mod stack;
 mod surface;
@@ -145,6 +146,8 @@ pub struct MobileState {
     pub weights: [f32; 3],
     /// Node/Instrument band: false = node editor, true = instrument/preset browser.
     pub show_instruments: bool,
+    /// Inspector sheet height as a fraction of the region above the transport.
+    pub inspector_frac: f32,
     /// Active handle drag (transient).
     pub drag: Option<StackDrag>,
     /// In-flight layout ease (transient).
@@ -159,6 +162,7 @@ impl Default for MobileState {
             window_count: 2,
             weights: [1.0, 1.0, 1.0],
             show_instruments: false,
+            inspector_frac: 0.45,
             drag: None,
             anim: None,
         }
@@ -180,12 +184,23 @@ pub fn render_mobile_shell(
         egui::pos2(available_rect.left(), available_rect.bottom() - TRANSPORT_H),
         available_rect.max,
     );
-    let stack_rect = egui::Rect::from_min_max(
+    // Region above the transport, shared between the stack and (when something is selected) the
+    // inspector sheet that rises above the transport.
+    let region = egui::Rect::from_min_max(
         available_rect.min,
         egui::pos2(available_rect.right(), transport_rect.top()),
     );
+    // The stack always fills the region; the inspector sheet overlays its lower part (no reflow).
+    stack::render(ui, region, rc, state);
 
-    stack::render(ui, stack_rect, rc, state);
+    if inspector::is_active(&rc.shared) {
+        let sheet_h = (region.height() * state.inspector_frac).clamp(120.0, region.height() - 60.0);
+        let sheet_rect = egui::Rect::from_min_max(
+            egui::pos2(region.left(), region.bottom() - sheet_h),
+            region.max,
+        );
+        inspector::render(ui, sheet_rect, region.height(), rc, state);
+    }
 
     // Transport floor: drawn last = always on top, the persistent spine.
     transport::render(ui, transport_rect, &mut rc.shared);

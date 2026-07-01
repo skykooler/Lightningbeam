@@ -1,0 +1,179 @@
+//! Selection inspector bottom sheet. When something is selected/focused it rises above the
+//! transport, showing the focused object's properties by reusing `InfopanelPane` full-bleed.
+//! Jump-to chips slide the stack window to the related surface; the ✕ deselects.
+
+use eframe::egui;
+use lightningbeam_core::pane::PaneType;
+use lightningbeam_core::selection::FocusSelection;
+
+use super::{surface, MobileState, MOBILE_NS};
+use crate::panes::{NodePath, SharedPaneState};
+use crate::RenderContext;
+
+const C_SHEET: egui::Color32 = egui::Color32::from_rgb(0x27, 0x2d, 0x37);
+const C_LINE: egui::Color32 = egui::Color32::from_rgb(0x36, 0x3d, 0x49);
+const C_DIM: egui::Color32 = egui::Color32::from_rgb(0x8b, 0x95, 0xa1);
+const C_BRIGHT: egui::Color32 = egui::Color32::from_rgb(0xea, 0xee, 0xf3);
+const C_CYAN: egui::Color32 = egui::Color32::from_rgb(0x54, 0xc3, 0xe8);
+
+const GRAB_H: f32 = 16.0;
+const HEAD_H: f32 = 30.0;
+const CHIP_H: f32 = 30.0;
+
+fn inspector_path() -> NodePath {
+    vec![MOBILE_NS, 200]
+}
+
+/// Whether anything is selected/focused (i.e. the inspector should be shown).
+pub fn is_active(shared: &SharedPaneState) -> bool {
+    !shared.focus.is_none() || !shared.selection.is_empty()
+}
+
+/// A short title describing what's selected.
+fn title(shared: &SharedPaneState) -> String {
+    use lightningbeam_core::layer::{AnyLayer, AudioLayerType};
+    let plural = |n: usize, s: &str| {
+        if n == 1 {
+            format!("1 {s}")
+        } else {
+            format!("{n} {s}s")
+        }
+    };
+    match &*shared.focus {
+        FocusSelection::Layers(ids) => {
+            let doc = shared.action_executor.document();
+            match ids.len() {
+                0 => "Layer".to_string(),
+                1 => {
+                    if let Some(l) = doc.get_layer(&ids[0]) {
+                        let ty = match l {
+                            AnyLayer::Vector(_) => "Vector",
+                            AnyLayer::Audio(a) => match a.audio_layer_type {
+                                AudioLayerType::Midi => "MIDI",
+                                AudioLayerType::Sampled => "Audio",
+                            },
+                            AnyLayer::Video(_) => "Video",
+                            AnyLayer::Effect(_) => "Effect",
+                            AnyLayer::Group(_) => "Group",
+                            AnyLayer::Raster(_) => "Raster",
+                            AnyLayer::Text(_) => "Text",
+                        };
+                        format!("{} · {} layer", l.name(), ty)
+                    } else {
+                        "Layer".to_string()
+                    }
+                }
+                n => plural(n, "layer"),
+            }
+        }
+        FocusSelection::ClipInstances(ids) => plural(ids.len(), "clip"),
+        FocusSelection::Notes { indices, .. } => plural(indices.len().max(1), "note"),
+        FocusSelection::Nodes(ids) => plural(ids.len(), "node"),
+        FocusSelection::Assets(ids) => plural(ids.len(), "asset"),
+        FocusSelection::Geometry { .. } | FocusSelection::None => "Selection".to_string(),
+    }
+}
+
+/// A jump-to chip: its label and the stack window it brings into view (top, count). These reframe
+/// to a related surface with the object still selected.
+struct Chip {
+    label: &'static str,
+    window: (usize, usize),
+}
+
+const CHIPS: [Chip; 2] = [
+    Chip { label: "Timeline", window: (3, 1) }, // Timeline = STACK index 3
+    Chip { label: "Nodes", window: (6, 1) },    // Node/Instrument = STACK index 6
+];
+
+pub fn render(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    region_h: f32,
+    rc: &mut RenderContext,
+    state: &mut MobileState,
+) {
+    // Sheet background with rounded top.
+    ui.painter().rect_filled(
+        rect,
+        egui::CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 },
+        C_SHEET,
+    );
+    ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(1.0, C_LINE));
+
+    // Grab handle — drag to resize the sheet.
+    let grab = egui::Rect::from_min_max(
+        rect.left_top(),
+        egui::pos2(rect.right(), rect.top() + GRAB_H),
+    );
+    let gresp = ui.interact(grab, ui.id().with("mobile_inspector_grab"), egui::Sense::drag());
+    let pill = egui::Rect::from_center_size(grab.center(), egui::vec2(34.0, 4.0));
+    ui.painter().rect_filled(pill, 2.0, if gresp.hovered() || gresp.dragged() { C_CYAN } else { C_LINE });
+    if gresp.dragged() && region_h > 1.0 {
+        state.inspector_frac = (state.inspector_frac - gresp.drag_delta().y / region_h).clamp(0.2, 0.85);
+    }
+    if gresp.hovered() || gresp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+
+    // Header row: title + close.
+    let head_y = rect.top() + GRAB_H;
+    let head = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), head_y),
+        egui::pos2(rect.right(), head_y + HEAD_H),
+    );
+    ui.painter().text(
+        egui::pos2(head.left() + 14.0, head.center().y),
+        egui::Align2::LEFT_CENTER,
+        title(&rc.shared),
+        egui::FontId::proportional(13.0),
+        C_BRIGHT,
+    );
+    let close = egui::Rect::from_min_size(egui::pos2(head.right() - 36.0, head.top()), egui::vec2(36.0, HEAD_H));
+    let cresp = ui.interact(close, ui.id().with("mobile_inspector_close"), egui::Sense::click());
+    ui.painter().text(
+        close.center(),
+        egui::Align2::CENTER_CENTER,
+        super::icons::X,
+        super::icons::font(16.0),
+        if cresp.hovered() { C_BRIGHT } else { C_DIM },
+    );
+    if cresp.clicked() {
+        rc.shared.selection.clear();
+        *rc.shared.focus = FocusSelection::None;
+    }
+
+    // Jump-to chips (reframe to a related surface, keeping the selection).
+    let chip_y = head.bottom();
+    let mut cx = rect.left() + 12.0;
+    for (i, chip) in CHIPS.iter().enumerate() {
+        let galley = ui.painter().layout_no_wrap(
+            chip.label.to_string(),
+            egui::FontId::proportional(11.0),
+            C_BRIGHT,
+        );
+        let w = galley.size().x + 18.0;
+        let chip_rect = egui::Rect::from_min_size(egui::pos2(cx, chip_y + 4.0), egui::vec2(w, CHIP_H - 8.0));
+        let resp = ui.interact(chip_rect, ui.id().with(("mobile_inspector_chip", i)), egui::Sense::click());
+        ui.painter().rect_filled(chip_rect, 11.0, if resp.hovered() { C_LINE } else { C_SHEET });
+        ui.painter().rect_stroke(chip_rect, 11.0, egui::Stroke::new(1.0, C_LINE), egui::StrokeKind::Inside);
+        ui.painter().galley(chip_rect.center() - galley.size() * 0.5, galley, C_BRIGHT);
+        if resp.clicked() {
+            let (top, count) = chip.window;
+            state.window_top = top;
+            state.window_count = count;
+            state.weights = [1.0, 1.0, 1.0];
+            state.anim = None;
+        }
+        cx += w + 6.0;
+    }
+
+    // Properties content — reuse the Infopanel full-bleed.
+    let content = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), chip_y + CHIP_H),
+        rect.max,
+    );
+    if content.height() > 1.0 {
+        surface::render_surface_fullbleed(ui, content, &inspector_path(), PaneType::Infopanel, rc);
+    }
+}

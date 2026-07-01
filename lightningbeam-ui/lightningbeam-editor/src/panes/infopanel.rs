@@ -44,6 +44,11 @@ pub struct InfopanelPane {
     selected_tool_gradient_stop: Option<usize>,
     /// FPS value captured when a drag/focus-in starts (for single-undo-action on commit)
     fps_drag_start: Option<f64>,
+    /// In-progress layer-name edit buffer, keyed by the layer being edited.
+    layer_name_edit: Option<(Uuid, String)>,
+    /// Layer opacity/volume captured when a slider drag starts (single-undo on commit).
+    layer_opacity_drag_start: Option<f64>,
+    layer_volume_drag_start: Option<f64>,
     /// Resize mode for the active raster layer's "to document size" action (scale vs canvas).
     raster_resize_mode: lightningbeam_core::raster_layer::RasterResizeMode,
     /// Font families already registered into egui for the family-picker previews
@@ -69,6 +74,9 @@ impl InfopanelPane {
             selected_shape_gradient_stop: None,
             selected_tool_gradient_stop: None,
             fps_drag_start: None,
+            layer_name_edit: None,
+            layer_opacity_drag_start: None,
+            layer_volume_drag_start: None,
             raster_resize_mode: lightningbeam_core::raster_layer::RasterResizeMode::Scale,
             registered_preview_fonts: std::collections::HashSet::new(),
         }
@@ -1165,8 +1173,9 @@ impl InfopanelPane {
     }
 
     /// Render layer info section
-    fn render_layer_section(&self, ui: &mut Ui, path: &NodePath, shared: &SharedPaneState, layer_ids: &[Uuid]) {
-        let document = shared.action_executor.document();
+    fn render_layer_section(&mut self, ui: &mut Ui, path: &NodePath, shared: &mut SharedPaneState, layer_ids: &[Uuid]) {
+        use lightningbeam_core::actions::{set_layer_properties::LayerProperty, SetLayerPropertiesAction};
+        use lightningbeam_core::layer::AudioLayerType;
 
         egui::CollapsingHeader::new("Layer")
             .id_salt(("layer_info", path))
@@ -1174,18 +1183,22 @@ impl InfopanelPane {
             .show(ui, |ui| {
                 ui.add_space(4.0);
 
-                if layer_ids.len() == 1 {
-                    if let Some(layer) = document.get_layer(&layer_ids[0]) {
-                        ui.horizontal(|ui| {
-                            ui.label("Name:");
-                            ui.label(layer.name());
-                        });
+                if layer_ids.len() != 1 {
+                    ui.label(format!("{} layers selected", layer_ids.len()));
+                    ui.add_space(4.0);
+                    return;
+                }
+                let layer_id = layer_ids[0];
 
+                // Snapshot the current values, then drop the document borrow before mutating shared.
+                let Some((type_name, is_audio, name, opacity, volume, muted, soloed, locked)) = ({
+                    let document = shared.action_executor.document();
+                    document.get_layer(&layer_id).map(|layer| {
                         let type_name = match layer {
                             AnyLayer::Vector(_) => "Vector",
                             AnyLayer::Audio(a) => match a.audio_layer_type {
-                                lightningbeam_core::layer::AudioLayerType::Midi => "MIDI",
-                                lightningbeam_core::layer::AudioLayerType::Sampled => "Audio",
+                                AudioLayerType::Midi => "MIDI",
+                                AudioLayerType::Sampled => "Audio",
                             },
                             AnyLayer::Video(_) => "Video",
                             AnyLayer::Effect(_) => "Effect",
@@ -1193,33 +1206,129 @@ impl InfopanelPane {
                             AnyLayer::Raster(_) => "Raster",
                             AnyLayer::Text(_) => "Text",
                         };
-                        ui.horizontal(|ui| {
-                            ui.label("Type:");
-                            ui.label(type_name);
-                        });
+                        (
+                            type_name,
+                            matches!(layer, AnyLayer::Audio(_)),
+                            layer.name().to_string(),
+                            layer.opacity(),
+                            layer.volume(),
+                            layer.muted(),
+                            layer.soloed(),
+                            layer.locked(),
+                        )
+                    })
+                }) else {
+                    return;
+                };
 
-                        ui.horizontal(|ui| {
-                            ui.label("Opacity:");
-                            ui.label(format!("{:.0}%", layer.opacity() * 100.0));
-                        });
-
-                        if matches!(layer, AnyLayer::Audio(_)) {
-                            ui.horizontal(|ui| {
-                                ui.label("Volume:");
-                                ui.label(format!("{:.0}%", layer.volume() * 100.0));
-                            });
-                        }
-
-                        if layer.muted() {
-                            ui.label("Muted");
-                        }
-                        if layer.locked() {
-                            ui.label("Locked");
+                // Name (editable; commits on Enter / focus loss).
+                if self.layer_name_edit.as_ref().map(|(id, _)| *id) != Some(layer_id) {
+                    self.layer_name_edit = Some((layer_id, name.clone()));
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    let buf = &mut self.layer_name_edit.as_mut().unwrap().1;
+                    let resp = ui.text_edit_singleline(buf);
+                    let commit = resp.lost_focus()
+                        && (ui.input(|i| i.key_pressed(egui::Key::Enter)) || !resp.has_focus());
+                    if commit {
+                        let new_name = buf.trim().to_string();
+                        if !new_name.is_empty() && new_name != name {
+                            shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                                layer_id,
+                                LayerProperty::Name(new_name),
+                            )));
                         }
                     }
-                } else {
-                    ui.label(format!("{} layers selected", layer_ids.len()));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Type:");
+                    ui.label(type_name);
+                });
+
+                // Opacity slider (single-undo: live-preview while dragging, commit on release).
+                ui.horizontal(|ui| {
+                    ui.label("Opacity:");
+                    let mut op = opacity;
+                    let r = ui.add(egui::Slider::new(&mut op, 0.0..=1.0).show_value(false));
+                    ui.label(format!("{:.0}%", op * 100.0));
+                    if (r.drag_started() || r.gained_focus()) && self.layer_opacity_drag_start.is_none() {
+                        self.layer_opacity_drag_start = Some(opacity);
+                    }
+                    if r.changed() {
+                        if let Some(l) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
+                            l.set_opacity(op);
+                        }
+                    }
+                    if r.drag_stopped() || r.lost_focus() {
+                        if let Some(start) = self.layer_opacity_drag_start.take() {
+                            if (start - op).abs() > 1e-6 {
+                                if let Some(l) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
+                                    l.set_opacity(start); // revert so the action owns the change
+                                }
+                                shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                                    layer_id,
+                                    LayerProperty::Opacity(op),
+                                )));
+                            }
+                        }
+                    }
+                });
+
+                if is_audio {
+                    ui.horizontal(|ui| {
+                        ui.label("Volume:");
+                        let mut vol = volume;
+                        let r = ui.add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false));
+                        ui.label(format!("{:.0}%", vol * 100.0));
+                        if (r.drag_started() || r.gained_focus()) && self.layer_volume_drag_start.is_none() {
+                            self.layer_volume_drag_start = Some(volume);
+                        }
+                        if r.changed() {
+                            if let Some(l) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
+                                l.set_volume(vol);
+                            }
+                        }
+                        if r.drag_stopped() || r.lost_focus() {
+                            if let Some(start) = self.layer_volume_drag_start.take() {
+                                if (start - vol).abs() > 1e-6 {
+                                    if let Some(l) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
+                                        l.set_volume(start);
+                                    }
+                                    shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                                        layer_id,
+                                        LayerProperty::Volume(vol),
+                                    )));
+                                }
+                            }
+                        }
+                    });
                 }
+
+                // Toggles: mute / solo (audio) / lock.
+                ui.horizontal(|ui| {
+                    if is_audio {
+                        if ui.selectable_label(muted, "Mute").clicked() {
+                            shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                                layer_id,
+                                LayerProperty::Muted(!muted),
+                            )));
+                        }
+                        if ui.selectable_label(soloed, "Solo").clicked() {
+                            shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                                layer_id,
+                                LayerProperty::Soloed(!soloed),
+                            )));
+                        }
+                    }
+                    if ui.selectable_label(locked, "Lock").clicked() {
+                        shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                            layer_id,
+                            LayerProperty::Locked(!locked),
+                        )));
+                    }
+                });
 
                 ui.add_space(4.0);
             });
