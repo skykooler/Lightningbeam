@@ -6582,6 +6582,11 @@ impl eframe::App for EditorApp {
             {
                 let time = self.playback_time;
                 let document = self.action_executor.document_mut();
+                // Keep document.current_time synced from the audio playback position every frame.
+                // The renderer reads current_time for animation eval + video-frame decode, so this
+                // must not depend on any particular pane (e.g. the timeline) being rendered —
+                // otherwise the Stage freezes during playback when that pane is off-screen.
+                document.current_time = time;
                 // Bake animation transforms for root layers
                 for layer in document.root.children.iter_mut() {
                     if let lightningbeam_core::layer::AnyLayer::Vector(vl) = layer {

@@ -20,6 +20,7 @@ use crate::RenderContext;
 pub mod icons;
 mod inspector;
 pub mod intent;
+mod omni;
 mod stack;
 mod surface;
 mod transport;
@@ -148,6 +149,12 @@ pub struct MobileState {
     pub show_instruments: bool,
     /// Inspector sheet height as a fraction of the region above the transport.
     pub inspector_frac: f32,
+    /// Whether the omnibutton radial tool menu is open.
+    pub omni_open: bool,
+    /// Whether the omnibutton "more" grid (all tools) is open.
+    pub omni_grid_open: bool,
+    /// Whether the omnibutton "+New" create grid is open.
+    pub omni_create_open: bool,
     /// Active handle drag (transient).
     pub drag: Option<StackDrag>,
     /// In-flight layout ease (transient).
@@ -163,6 +170,9 @@ impl Default for MobileState {
             weights: [1.0, 1.0, 1.0],
             show_instruments: false,
             inspector_frac: 0.45,
+            omni_open: false,
+            omni_grid_open: false,
+            omni_create_open: false,
             drag: None,
             anim: None,
         }
@@ -221,4 +231,7 @@ pub fn render_mobile_shell(
 
     // Transport floor: drawn last = always on top, the persistent spine.
     transport::render(ui, transport_rect, &mut rc.shared);
+
+    // Omnibutton FAB (radial tool menu) — drawn above the stack region, on top of everything else.
+    omni::render(ui, region, rc, state);
 }
