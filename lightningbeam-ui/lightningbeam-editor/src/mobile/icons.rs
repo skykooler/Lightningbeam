@@ -36,6 +36,8 @@ pub fn font(size: f32) -> egui::FontId {
 pub const MAXIMIZE: &str = "\u{e112}";
 pub const MINIMIZE: &str = "\u{e11a}";
 pub const ARROW_LEFT_RIGHT: &str = "\u{e24a}";
+pub const ARROW_RIGHT_FROM_LINE: &str = "\u{e458}"; // output port
+pub const ARROW_RIGHT_TO_LINE: &str = "\u{e459}"; // input port
 pub const GRIP_HORIZONTAL: &str = "\u{e0ea}";
 pub const CHEVRONS_UP: &str = "\u{e074}";
 pub const PLAY: &str = "\u{e13c}";

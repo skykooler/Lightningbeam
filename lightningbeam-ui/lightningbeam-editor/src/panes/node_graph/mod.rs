@@ -6,6 +6,7 @@ pub mod actions;
 pub mod audio_backend;
 pub mod backend;
 pub mod graph_data;
+mod mobile;
 
 use backend::{BackendNodeId, GraphBackend};
 use graph_data::{AllNodeTemplates, SubgraphNodeTemplates, VoiceAllocatorNodeTemplates, DataType, GraphState, NamModelInfo, NodeData, NodeTemplate, PendingAmpSimLoad, ValueType};
@@ -142,6 +143,9 @@ pub struct NodeGraphPane {
     last_oscilloscope_poll: std::time::Instant,
     /// Backend track ID (u32) for oscilloscope queries
     backend_track_id: Option<u32>,
+
+    /// Mobile (touch) Focus/Patch view state.
+    mobile: mobile::MobileNodeState,
 }
 
 impl NodeGraphPane {
@@ -171,6 +175,7 @@ impl NodeGraphPane {
             pending_script_resolutions: Vec::new(),
             last_oscilloscope_poll: std::time::Instant::now(),
             backend_track_id: None,
+            mobile: mobile::MobileNodeState::default(),
         }
     }
 
@@ -2365,6 +2370,13 @@ impl crate::panes::PaneRenderer for NodeGraphPane {
             painter.galley(text_pos, galley, text_color);
             return;
         }
+
+        // Mobile: touch-native Focus/Patch views instead of the desktop canvas.
+        if shared.is_mobile {
+            self.render_mobile(ui, rect, shared);
+            return;
+        }
+
         // Poll oscilloscope data at ~20 FPS
         let has_oscilloscopes;
         if self.last_oscilloscope_poll.elapsed() >= std::time::Duration::from_millis(50) {
