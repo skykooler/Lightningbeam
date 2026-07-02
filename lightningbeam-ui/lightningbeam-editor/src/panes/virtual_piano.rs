@@ -33,6 +33,8 @@ pub struct VirtualPianoPane {
     sustain_active: bool,
     /// Notes being held by sustain pedal (not by active key/mouse press)
     sustained_notes: HashSet<u8>,
+    /// Externally-driven highlights (e.g. notes sounding during playback), colored like pressed keys.
+    pub playback_notes: HashSet<u8>,
 }
 
 impl Default for VirtualPianoPane {
@@ -83,6 +85,7 @@ impl VirtualPianoPane {
             note_to_key_map,
             sustain_active: false,
             sustained_notes: HashSet::new(),
+            playback_notes: HashSet::new(),
         }
     }
 
@@ -216,9 +219,17 @@ impl VirtualPianoPane {
 
     /// Render the piano keyboard
     fn render_keyboard(&mut self, ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState) {
-        // Calculate visible range and key dimensions based on pane size
-        let (visible_start, visible_end, white_key_width, offset_x) =
-            self.calculate_visible_range(rect.width(), rect.height());
+        // Calculate visible range and key dimensions based on pane size. On mobile use the shared
+        // width-driven layout (so the portrait Piano Roll's columns line up with these keys).
+        let (visible_start, visible_end, white_key_width, offset_x) = if shared.is_mobile {
+            let layout = super::keyboard_layout::KeyboardLayout::from_width(
+                rect.min.x, rect.width(), self.octave_offset, *shared.keyboard_pan_x,
+            );
+            let vs = layout.first_visible_white();
+            (vs, layout.last_visible_note(), layout.white_key_width, layout.note_x(vs) - rect.min.x)
+        } else {
+            self.calculate_visible_range(rect.width(), rect.height())
+        };
 
         let white_key_height = rect.height();
         let black_key_width = white_key_width * self.black_key_width_ratio;
@@ -237,6 +248,11 @@ impl VirtualPianoPane {
             self.render_keyboard_visual_only(ui, rect, shared, visible_start, visible_end, white_key_width, offset_x, white_key_height, black_key_width, black_key_height);
             return;
         }
+
+        // Only play notes when the press STARTED on the keyboard, so dragging in from the roll above
+        // (mobile) doesn't trigger notes. On desktop the whole pane is the keyboard, so a click here
+        // always qualifies.
+        let started_here = ui.input(|i| i.pointer.press_origin().map_or(false, |p| rect.contains(p)));
 
         // Count white keys before each note for positioning
         let mut white_key_positions: std::collections::HashMap<u8, f32> = std::collections::HashMap::new();
@@ -303,7 +319,8 @@ impl VirtualPianoPane {
             });
             let pointer_down = ui.input(|i| i.pointer.primary_down());
             let is_pressed = self.pressed_notes.contains(&note) ||
-                             (!black_key_interacted && pointer_over_key && pointer_down);
+                             self.playback_notes.contains(&note) ||
+                             (started_here && !black_key_interacted && pointer_over_key && pointer_down);
             let color = if is_pressed {
                 shared.theme.bg_color(&[".piano-white-key", ".pressed"], ui.ctx(), egui::Color32::from_rgb(100, 150, 255))
             } else {
@@ -320,8 +337,9 @@ impl VirtualPianoPane {
             );
 
             if !black_key_interacted {
-                // Mouse down starts note (detect primary button pressed on this key)
-                if pointer_over_key && ui.input(|i| i.pointer.primary_pressed()) {
+                // Mouse down starts note (detect primary button pressed on this key). Gated on
+                // `started_here` so a drag that began on the roll above doesn't start notes.
+                if started_here && pointer_over_key && ui.input(|i| i.pointer.primary_pressed()) {
                     // Calculate velocity based on mouse Y position
                     let mouse_y = ui.input(|i| i.pointer.hover_pos()).unwrap().y;
                     let velocity = self.calculate_velocity_from_mouse_y(mouse_y, key_rect);
@@ -330,7 +348,8 @@ impl VirtualPianoPane {
                     self.dragging_note = Some(note);
                 }
 
-                // Mouse up stops note (detect primary button released)
+                // Mouse up stops note (detect primary button released). NEVER gated — a held note
+                // must always release.
                 if ui.input(|i| i.pointer.primary_released()) {
                     if self.dragging_note == Some(note) {
                         self.send_note_off(note, shared);
@@ -339,7 +358,7 @@ impl VirtualPianoPane {
                 }
 
                 // Dragging over a new key (pointer is down and over a different key)
-                if pointer_over_key && pointer_down {
+                if started_here && pointer_over_key && pointer_down {
                     if self.dragging_note != Some(note) {
                         // Stop previous note
                         if let Some(prev_note) = self.dragging_note {
@@ -387,7 +406,8 @@ impl VirtualPianoPane {
             });
             let pointer_down = ui.input(|i| i.pointer.primary_down());
             let is_pressed = self.pressed_notes.contains(&note) ||
-                             (pointer_over_key && pointer_down);
+                             self.playback_notes.contains(&note) ||
+                             (started_here && pointer_over_key && pointer_down);
             let color = if is_pressed {
                 shared.theme.bg_color(&[".piano-black-key", ".pressed"], ui.ctx(), egui::Color32::from_rgb(50, 100, 200))
             } else {
@@ -397,7 +417,7 @@ impl VirtualPianoPane {
             ui.painter().rect_filled(key_rect, 2.0, color);
 
             // Mouse down starts note
-            if pointer_over_key && ui.input(|i| i.pointer.primary_pressed()) {
+            if started_here && pointer_over_key && ui.input(|i| i.pointer.primary_pressed()) {
                 // Calculate velocity based on mouse Y position
                 let mouse_y = ui.input(|i| i.pointer.hover_pos()).unwrap().y;
                 let velocity = self.calculate_velocity_from_mouse_y(mouse_y, key_rect);
@@ -415,7 +435,7 @@ impl VirtualPianoPane {
             }
 
             // Dragging over a new key
-            if pointer_over_key && pointer_down {
+            if started_here && pointer_over_key && pointer_down {
                 if self.dragging_note != Some(note) {
                     if let Some(prev_note) = self.dragging_note {
                         self.send_note_off(prev_note, shared);
@@ -824,6 +844,11 @@ impl PaneRenderer for VirtualPianoPane {
         _path: &NodePath,
         shared: &mut SharedPaneState,
     ) {
+        // On mobile, the octave is shared with the Piano Roll so they stay aligned.
+        if shared.is_mobile {
+            self.octave_offset = *shared.keyboard_octave;
+        }
+
         // Check if there's an active MIDI layer
         let has_active_midi_layer = if let Some(active_layer_id) = *shared.active_layer_id {
             shared.layer_to_track_map.contains_key(&active_layer_id)
@@ -869,14 +894,28 @@ impl PaneRenderer for VirtualPianoPane {
         }
 
         // Calculate visible range (needed for both rendering and labels)
-        let (visible_start, visible_end, white_key_width, offset_x) =
-            self.calculate_visible_range(rect.width(), rect.height());
+        let (visible_start, visible_end, white_key_width, offset_x) = if shared.is_mobile {
+            let layout = super::keyboard_layout::KeyboardLayout::from_width(
+                rect.min.x, rect.width(), self.octave_offset, *shared.keyboard_pan_x,
+            );
+            let vs = layout.first_visible_white();
+            (vs, layout.last_visible_note(), layout.white_key_width, layout.note_x(vs) - rect.min.x)
+        } else {
+            self.calculate_visible_range(rect.width(), rect.height())
+        };
 
         // Render the keyboard
         self.render_keyboard(ui, rect, shared);
 
-        // Render keyboard labels on top
-        self.render_key_labels(ui, rect, shared, visible_start, visible_end, white_key_width, offset_x);
+        // Render keyboard labels on top — but not on mobile (no physical keyboard to hint at).
+        if !shared.is_mobile {
+            self.render_key_labels(ui, rect, shared, visible_start, visible_end, white_key_width, offset_x);
+        }
+
+        // Publish the octave so the portrait Piano Roll aligns to these keys.
+        if shared.is_mobile {
+            *shared.keyboard_octave = self.octave_offset;
+        }
     }
 
     fn name(&self) -> &str {

@@ -951,7 +951,7 @@ impl TimelinePane {
 
     /// Toggle recording on/off
     /// In Auto mode, records to the active layer (audio or video with camera)
-    fn toggle_recording(&mut self, shared: &mut SharedPaneState) {
+    pub(crate) fn toggle_recording(&mut self, shared: &mut SharedPaneState) {
         if *shared.is_recording {
             // Stop recording
             self.stop_recording(shared);
@@ -1212,7 +1212,7 @@ impl TimelinePane {
 
     /// Stop all active recordings
     /// Called every frame; fires deferred recording commands once the count-in pre-roll ends.
-    fn check_pending_recording_start(&mut self, shared: &mut SharedPaneState) {
+    pub(crate) fn check_pending_recording_start(&mut self, shared: &mut SharedPaneState) {
         let Some(ref pending) = self.pending_recording_start else { return };
         if !*shared.is_playing || *shared.playback_time < pending.trigger_time {
             return;
@@ -1232,7 +1232,7 @@ impl TimelinePane {
         *shared.count_in_enabled = saved_count_in;
     }
 
-    fn stop_recording(&mut self, shared: &mut SharedPaneState) {
+    pub(crate) fn stop_recording(&mut self, shared: &mut SharedPaneState) {
         // Cancel any in-progress count-in
         self.pending_recording_start = None;
 

@@ -19,18 +19,24 @@ struct Intent {
     focus: usize,
     /// Initial mobile stack window: (window_top, window_count).
     window: (usize, usize),
+    /// Initial pane weights (relative heights) for the window.
+    weights: [f32; 3],
 }
 
 fn intents(pal: &Palette) -> [Intent; 6] {
     let [coral, cyan, amber, pink, violet] = pal.accents;
+    let even = [1.0, 1.0, 1.0];
+    // Compose/Record: compressed Timeline ribbon on top; the tall Piano Roll (which now hosts the
+    // instrument header + keyboard as one surface) fills the rest.
+    let music = [0.4, 1.6, 1.0];
     [
         // Stage indices (see super::STACK): Stage=2, Timeline=3, PianoRoll=4, VirtualPiano=5.
-        Intent { label: "Draw", icon: icons::BRUSH, accent: coral, focus: 5, window: (2, 1) },
-        Intent { label: "Animate", icon: icons::FILM, accent: cyan, focus: 0, window: (2, 2) },
-        Intent { label: "Compose", icon: icons::MUSIC, accent: amber, focus: 2, window: (3, 3) },
-        Intent { label: "Record", icon: icons::MIC, accent: pink, focus: 2, window: (3, 3) },
-        Intent { label: "Edit video", icon: icons::CLAPPERBOARD, accent: violet, focus: 1, window: (2, 2) },
-        Intent { label: "Blank", icon: icons::SQUARE_DASHED, accent: pal.text_dim, focus: 0, window: (2, 2) },
+        Intent { label: "Draw", icon: icons::BRUSH, accent: coral, focus: 5, window: (2, 1), weights: even },
+        Intent { label: "Animate", icon: icons::FILM, accent: cyan, focus: 0, window: (2, 2), weights: even },
+        Intent { label: "Compose", icon: icons::MUSIC, accent: amber, focus: 2, window: (3, 2), weights: music },
+        Intent { label: "Record", icon: icons::MIC, accent: pink, focus: 2, window: (3, 2), weights: music },
+        Intent { label: "Edit video", icon: icons::CLAPPERBOARD, accent: violet, focus: 1, window: (2, 2), weights: even },
+        Intent { label: "Blank", icon: icons::SQUARE_DASHED, accent: pal.text_dim, focus: 0, window: (2, 2), weights: even },
     ]
 }
 
@@ -92,7 +98,7 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
                     app.create_new_project_with_focus(intent.focus);
                     app.mobile_state.window_top = intent.window.0;
                     app.mobile_state.window_count = intent.window.1;
-                    app.mobile_state.weights = [1.0, 1.0, 1.0];
+                    app.mobile_state.weights = intent.weights;
                 }
             }
 

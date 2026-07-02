@@ -89,21 +89,21 @@ pub enum StackPane {
     AssetLibrary,
     Stage,
     Timeline,
+    /// The instrument surface: keyboard-primary on mobile, hosting the falling-notes roll above the
+    /// keys (the standalone Virtual Piano is embedded here, so it isn't a separate stack slot).
     PianoRoll,
-    VirtualPiano,
     /// Node editor, or (toggled) the instrument/preset browser.
     NodeInstrument,
     ScriptEditor,
 }
 
 /// The stack order. Index into this is a pane's stable slot id.
-pub const STACK: [StackPane; 8] = [
+pub const STACK: [StackPane; 7] = [
     StackPane::Outliner,
     StackPane::AssetLibrary,
     StackPane::Stage,
     StackPane::Timeline,
     StackPane::PianoRoll,
-    StackPane::VirtualPiano,
     StackPane::NodeInstrument,
     StackPane::ScriptEditor,
 ];
@@ -118,7 +118,6 @@ impl StackPane {
             StackPane::Stage => PaneType::Stage,
             StackPane::Timeline => PaneType::Timeline,
             StackPane::PianoRoll => PaneType::PianoRoll,
-            StackPane::VirtualPiano => PaneType::VirtualPiano,
             StackPane::NodeInstrument => {
                 if show_instruments {
                     PaneType::PresetBrowser
@@ -136,8 +135,7 @@ impl StackPane {
             StackPane::AssetLibrary => "Assets",
             StackPane::Stage => "Stage",
             StackPane::Timeline => "Timeline",
-            StackPane::PianoRoll => "Piano Roll",
-            StackPane::VirtualPiano => "Keys",
+            StackPane::PianoRoll => "Instrument",
             StackPane::NodeInstrument => {
                 if show_instruments {
                     "Instruments"
@@ -332,6 +330,20 @@ pub fn render_mobile_shell(
         region
     };
 
+    // Decide whether the instrument pane (PianoRoll = STACK index 4) reveals the roll, from the
+    // *committed* (snapped) window weights — so the keyboard↔roll transition lands on a stack snap
+    // rather than at an arbitrary mid-drag height. Roll shows once the pane is past the smallest snap.
+    rc.shared.instrument_show_roll = {
+        let idx = 4i32 - state.window_top as i32;
+        if idx >= 0 && (idx as usize) < state.window_count {
+            let sum: f32 = state.weights[..state.window_count].iter().map(|w| w.max(0.0)).sum();
+            let w = if sum > 0.0 { state.weights[idx as usize].max(0.0) / sum } else { 0.0 };
+            w > 0.30 // 0.25 preset ⇒ keyboard only; 0.33/0.5/0.75 ⇒ keyboard + roll
+        } else {
+            true
+        }
+    };
+
     stack::render(ui, stack_rect, rc, state, &pal);
 
     if inspector_shown {
@@ -344,6 +356,16 @@ pub fn render_mobile_shell(
 
     // Omnibutton FAB (radial tool menu) — drawn above the stack region, on top of everything else.
     omni::render(ui, region, rc, state, &pal);
+
+    // Instrument-browser request from the music pane's header → show the Preset Browser fullscreen.
+    if *rc.shared.open_instrument_browser {
+        *rc.shared.open_instrument_browser = false;
+        state.show_instruments = true;
+        state.window_top = 5; // Node/Instrument band (PresetBrowser when show_instruments)
+        state.window_count = 1;
+        state.weights = [1.0, 1.0, 1.0];
+        state.anim = None;
+    }
 
     // Top bar (filename + ⌕ palette + ⋯ commands). Its menus overlay the whole shell, so it's last.
     topbar::render(ui, topbar_rect, available_rect, rc, state, &pal);

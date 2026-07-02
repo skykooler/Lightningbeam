@@ -72,6 +72,7 @@ pub mod gradient_editor;
 pub mod timeline;
 pub mod infopanel;
 pub mod outliner;
+pub mod keyboard_layout;
 pub mod piano_roll;
 pub mod virtual_piano;
 pub mod node_editor;
@@ -363,6 +364,19 @@ pub struct SharedPaneState<'a> {
     pub brush_preview_pixels: &'a std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
     /// True when rendering the phone/mobile shell (panes can render more compactly).
     pub is_mobile: bool,
+    /// Shared keyboard octave offset (C4-relative), so the mobile Virtual Piano and the portrait
+    /// Piano Roll agree on which keys are visible and stay column-aligned.
+    pub keyboard_octave: &'a mut i8,
+    /// Shared horizontal keyboard pan (px) for smooth left/right scroll of the mobile keyboard+roll.
+    pub keyboard_pan_x: &'a mut f32,
+    /// Whether the mobile instrument pane should show the falling-notes roll above the keys. Driven
+    /// by the shell from the *snapped* pane size-class so the reveal happens at a stack snap point.
+    pub instrument_show_roll: bool,
+    /// Set by the mobile instrument header's "Presets" button; the shell opens the Preset Browser.
+    pub open_instrument_browser: &'a mut bool,
+    /// Set by the mobile instrument header's REC button; the Timeline pane picks it up and toggles
+    /// recording (reusing its full count-in / clip-creation flow).
+    pub pending_record_toggle: &'a mut bool,
     /// Mobile long-press context menu request. A pane sets this on `response.secondary_clicked()`
     /// (which fires on long-press) with the items relevant to what was pressed; the mobile shell
     /// renders one persistent popup and dispatches the chosen `MenuAction`. `None` = no menu.

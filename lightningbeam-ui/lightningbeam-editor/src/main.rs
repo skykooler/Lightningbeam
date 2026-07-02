@@ -976,6 +976,14 @@ struct EditorApp {
     mobile_state: mobile::MobileState,
     /// Active mobile long-press context menu (set by a pane, rendered by the shell).
     mobile_context_menu: Option<panes::MobileContextMenu>,
+    /// Shared keyboard octave offset (C4-relative) for the mobile Virtual Piano + Piano Roll.
+    keyboard_octave: i8,
+    /// Shared horizontal keyboard pan (px) for the mobile keyboard + roll.
+    keyboard_pan_x: f32,
+    /// Mobile: request to open the instrument Preset Browser (set by the music pane header).
+    open_instrument_browser: bool,
+    /// Mobile: request to toggle recording (set by the music pane REC button).
+    pending_record_toggle: bool,
     icon_cache: IconCache,
     tool_icon_cache: ToolIconCache,
     focus_icon_cache: FocusIconCache, // Focus card icons (start screen)
@@ -1338,6 +1346,10 @@ impl EditorApp {
             mobile_ui_override: None,
             mobile_state: mobile::MobileState::default(),
             mobile_context_menu: None,
+            keyboard_octave: 0,
+            keyboard_pan_x: 0.0,
+            open_instrument_browser: false,
+            pending_record_toggle: false,
             icon_cache: IconCache::new(),
             tool_icon_cache: ToolIconCache::new(),
             focus_icon_cache: FocusIconCache::new(),
@@ -6608,7 +6620,16 @@ impl eframe::App for EditorApp {
         {
             scratch.synthetic_input = test_mode_replay.synthetic_input;
         }
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // On mobile the shell is full-bleed to the window edges (it paints its own background), so
+        // drop the central panel's default inner margin — otherwise every pane is inset by it while
+        // the unclipped keyboard overdraws into it, leaving an inconsistent gutter.
+        let central = egui::CentralPanel::default();
+        let central = if self.mobile_active() {
+            central.frame(egui::Frame::default())
+        } else {
+            central
+        };
+        central.show(ctx, |ui| {
             let available_rect = ui.available_rect_before_wrap();
 
             // Reset hovered divider each frame
@@ -6668,6 +6689,27 @@ impl eframe::App for EditorApp {
                     &mut bundle.rc,
                     bundle.mobile_state,
                 );
+
+                // Drive recording from the application, not the Timeline pane's render pass, so a
+                // REC request (from the music pane header) and count-in progression work regardless
+                // of whether the Timeline is currently visible. The Timeline pane still owns the
+                // recording *state*; we just tick it here each frame.
+                let rc = &mut bundle.rc;
+                for pane in rc.pane_instances.values_mut() {
+                    if let PaneInstance::Timeline(t) = pane {
+                        t.check_pending_recording_start(&mut rc.shared);
+                        if *rc.shared.pending_record_toggle {
+                            *rc.shared.pending_record_toggle = false;
+                            t.toggle_recording(&mut rc.shared);
+                        }
+                        // Stopping playback stops recording (stop_recording clears is_recording,
+                        // so this fires once).
+                        if *rc.shared.is_recording && !*rc.shared.is_playing {
+                            t.stop_recording(&mut rc.shared);
+                        }
+                        break;
+                    }
+                }
             } else {
                 render_layout_node(
                     ui,
@@ -7221,6 +7263,11 @@ impl EditorApp {
             rc: RenderContext {
                 shared: panes::SharedPaneState {
                     is_mobile,
+                    keyboard_octave: &mut self.keyboard_octave,
+                    keyboard_pan_x: &mut self.keyboard_pan_x,
+                    instrument_show_roll: false,
+                    open_instrument_browser: &mut self.open_instrument_browser,
+                    pending_record_toggle: &mut self.pending_record_toggle,
                     mobile_context_menu: &mut self.mobile_context_menu,
                     container_path: self.current_file_path.clone(),
                     onion: {

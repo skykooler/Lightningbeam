@@ -169,6 +169,18 @@ pub struct PianoRollPane {
     snap_value: SnapValue,
     last_snap_selection: HashSet<usize>,
     snap_user_changed: bool, // set in render_header, consumed before handle_input
+
+    // Mobile portrait "Synthesia" mode: the playable keyboard is drawn as a strip at the bottom of
+    // this pane (one unified surface), reusing the Virtual Piano's rendering + MIDI logic.
+    keyboard: super::virtual_piano::VirtualPianoPane,
+    // Manual long-press detection for the vertical roll (works with mouse-hold and touch): time the
+    // press started, and where. `None` = disarmed (no fresh press, or the press became a pan).
+    lp_press_time: Option<f64>,
+    lp_press_pos: egui::Pos2,
+    // When the long-press landed on an existing note, we resize it instead of creating: its index in
+    // the resolved-note list and its original duration (to compute the resize delta on commit).
+    editing_index: Option<usize>,
+    editing_orig_dur: f64,
 }
 
 impl PianoRollPane {
@@ -205,6 +217,11 @@ impl PianoRollPane {
             snap_value: SnapValue::None,
             last_snap_selection: HashSet::new(),
             snap_user_changed: false,
+            keyboard: super::virtual_piano::VirtualPianoPane::new(),
+            lp_press_time: None,
+            lp_press_pos: egui::Pos2::ZERO,
+            editing_index: None,
+            editing_orig_dur: 0.0,
         }
     }
 
@@ -444,6 +461,13 @@ impl PianoRollPane {
             }
         }
 
+        // Mobile: keyboard-primary "Synthesia" instrument surface (keys + falling-notes roll). Always
+        // used on mobile (device is portrait; the landscape/conventional flip is P7).
+        if shared.is_mobile {
+            self.render_vertical_mode(ui, rect, shared, &clip_data);
+            return;
+        }
+
         // Apply quantize if the user changed the snap dropdown (must happen before handle_input
         // which may clear the selection when the ComboBox click propagates to the grid).
         if self.snap_user_changed {
@@ -554,6 +578,336 @@ impl PianoRollPane {
 
         // Render keyboard on top (so it overlaps grid content at boundary)
         self.render_keyboard(&painter, keyboard_rect);
+    }
+
+    /// Portrait mobile "Synthesia" view — ONE unified instrument surface: an instrument header on
+    /// top, then falling notes as vertical columns (pitch on X, aligned to the keys via the shared
+    /// `KeyboardLayout`, time falling toward the "now" line), then the playable keyboard strip at the
+    /// bottom (reusing the Virtual Piano). Tapping a column adds a note.
+    fn render_vertical_mode(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        shared: &mut SharedPaneState,
+        clip_data: &[(u32, f64, f64, f64, Uuid)],
+    ) {
+        use super::keyboard_layout::KeyboardLayout;
+
+        // Keyboard-primary layout (portrait, per wireframe Plate 08): the playable keyboard is the
+        // base surface, capped at an ergonomic height. Whether the falling-notes roll appears above
+        // is decided by the shell from the *snapped* pane size-class, so the reveal lands on a stack
+        // snap point (not mid-drag). Short/smallest snap ⇒ keyboard only.
+        const KEY_CAP: f32 = 170.0;
+        let header_h = 32.0;
+        let header_rect = Rect::from_min_max(rect.min, pos2(rect.right(), rect.top() + header_h));
+        let content_top = header_rect.bottom();
+        let content_h = (rect.bottom() - content_top).max(0.0);
+        let show_roll = shared.instrument_show_roll && content_h > KEY_CAP + 40.0;
+        let kb_h = if show_roll { content_h.min(KEY_CAP) } else { content_h };
+        let kb_rect = Rect::from_min_max(pos2(rect.left(), rect.bottom() - kb_h), rect.max);
+        let roll_rect = Rect::from_min_max(pos2(rect.left(), content_top), pos2(rect.right(), kb_rect.top()));
+
+        let pps = self.pixels_per_second; // pixels per second (vertical waterfall)
+        let now_y = roll_rect.bottom(); // a note reaches the keys at its onset time
+        let now = ui.input(|i| i.time);
+
+        // Auto-release a long-press-added preview note once its short audition elapses (the normal
+        // release check lives in handle_input, which the vertical mode bypasses).
+        if let Some(dur) = self.preview_duration {
+            if self.preview_note_sounding && now - self.preview_start_time >= dur {
+                self.preview_note_off(shared);
+            }
+        }
+
+        // Handle roll gestures BEFORE building the layout / drawing, so the roll and the keyboard both
+        // use the updated pan + playhead this same frame (no 1-frame follow lag between them).
+        let resp = if show_roll {
+            let r = ui.interact(roll_rect, ui.id().with("pr_vertical"), egui::Sense::click_and_drag());
+            if self.creating_note.is_none() && r.dragged() {
+                let d = r.drag_delta();
+                if d.y.abs() > 0.0 {
+                    // Drag down ⇒ advance time (content follows the finger).
+                    let nt = (*shared.playback_time + (d.y / pps) as f64).max(0.0);
+                    *shared.playback_time = nt;
+                    if let Some(ctrl) = shared.audio_controller.as_ref() {
+                        if let Ok(mut c) = ctrl.lock() {
+                            c.seek(nt);
+                        }
+                    }
+                }
+                *shared.keyboard_pan_x += d.x;
+            }
+            Some(r)
+        } else {
+            None
+        };
+
+        let layout = KeyboardLayout::from_width(rect.min.x, rect.width(), *shared.keyboard_octave, *shared.keyboard_pan_x);
+        // Note times are in beats; the playhead is in seconds — convert via the tempo map so the
+        // waterfall lines up with real playback (onset crosses the now line exactly when it sounds).
+        let tempo_map = shared.action_executor.document().tempo_map().clone();
+        let playhead = *shared.playback_time; // seconds
+
+        if let Some(resp) = resp {
+            let painter = ui.painter_at(roll_rect);
+            let bg = shared.theme.bg_color(&["#piano-roll", ".pane-content"], ui.ctx(), Color32::from_rgb(30, 30, 35));
+            painter.rect_filled(roll_rect, 0.0, bg);
+
+            // Column guides aligned to the keys: black-key columns tinted, white-key boundaries lined.
+            for note in layout.visible_notes() {
+                let x = layout.note_x(note);
+                if KeyboardLayout::is_black_key(note) {
+                    let w = layout.note_width(note);
+                    painter.rect_filled(
+                        Rect::from_min_size(pos2(x, roll_rect.min.y), vec2(w, roll_rect.height())),
+                        0.0,
+                        Color32::from_rgba_unmultiplied(0, 0, 0, 40),
+                    );
+                } else {
+                    painter.line_segment([pos2(x, roll_rect.min.y), pos2(x, roll_rect.max.y)], Stroke::new(1.0, Color32::from_gray(55)));
+                }
+            }
+
+            // Notes of the selected clip, falling toward the now line.
+            if let Some(clip_id) = self.selected_clip_id {
+                if let Some(&(_, timeline_start, trim_start, duration, _)) =
+                    clip_data.iter().find(|c| c.0 == clip_id)
+                {
+                    if let Some(events) = shared.midi_event_cache.get(&clip_id) {
+                        let resolved = Self::resolve_notes(events);
+                        for (ni, note) in resolved.iter().enumerate() {
+                            // The note being resized is drawn separately (live) as the temp note.
+                            if Some(ni) == self.editing_index {
+                                continue;
+                            }
+                            if note.start_time + note.duration <= trim_start
+                                || note.start_time >= trim_start + duration
+                            {
+                                continue;
+                            }
+                            let global = timeline_start + (note.start_time - trim_start);
+                            let y_on = now_y - ((tempo_map.transform(global) - playhead) as f32) * pps;
+                            let y_off = now_y - ((tempo_map.transform(global + note.duration) - playhead) as f32) * pps;
+                            let (top, bot) = (y_on.min(y_off), y_on.max(y_off));
+                            if bot < roll_rect.min.y || top > roll_rect.max.y {
+                                continue;
+                            }
+                            let x = layout.note_x(note.note);
+                            let w = layout.note_width(note.note).max(3.0);
+                            let bright = 0.35 + (note.velocity as f32 / 127.0) * 0.65;
+                            let col = Color32::from_rgb(
+                                (111.0 * bright) as u8,
+                                (220.0 * bright) as u8,
+                                (111.0 * bright) as u8,
+                            );
+                            painter.rect_filled(
+                                Rect::from_min_max(
+                                    pos2(x + 1.0, top.max(roll_rect.min.y)),
+                                    pos2(x + w - 1.0, bot.min(roll_rect.max.y)),
+                                ),
+                                2.0,
+                                col,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // The note currently being created (long-press to start, drag along Y to size).
+            if let Some(temp) = self.creating_note.as_ref() {
+                if let Some(&(_, ts, trim, _d, _)) =
+                    clip_data.iter().find(|c| Some(c.0) == self.selected_clip_id)
+                {
+                    let g = ts + (temp.start_time - trim);
+                    let y_on = now_y - ((tempo_map.transform(g) - playhead) as f32) * pps;
+                    let y_off = now_y - ((tempo_map.transform(g + temp.duration) - playhead) as f32) * pps;
+                    let x = layout.note_x(temp.note);
+                    let w = layout.note_width(temp.note).max(3.0);
+                    painter.rect_filled(
+                        Rect::from_min_max(pos2(x + 1.0, y_on.min(y_off)), pos2(x + w - 1.0, y_on.max(y_off))),
+                        2.0,
+                        Color32::from_rgb(150, 255, 150),
+                    );
+                }
+            }
+
+            // The amber "now" line at the boundary with the keyboard.
+            painter.line_segment(
+                [pos2(roll_rect.min.x, now_y), pos2(roll_rect.max.x, now_y)],
+                Stroke::new(2.0, Color32::from_rgb(0xf4, 0xa3, 0x40)),
+            );
+
+            const LONG_PRESS_SECS: f64 = 0.4;
+            let pressed = ui.input(|i| i.pointer.primary_pressed());
+            let down = ui.input(|i| i.pointer.any_down());
+            let ptr = ui.input(|i| i.pointer.latest_pos());
+
+            if self.creating_note.is_some() {
+                // Sizing the note (new or existing): drag along Y sets its duration; release commits.
+                if down {
+                    if let (Some(p), Some(&(_, ts, trim, _d, _))) = (
+                        ptr,
+                        clip_data.iter().find(|c| Some(c.0) == self.selected_clip_id),
+                    ) {
+                        let end_sec = playhead + ((now_y - p.y) / pps) as f64;
+                        let end_beats = tempo_map.inverse_transform(end_sec).max(0.0);
+                        let end_local = trim + (end_beats - ts);
+                        if let Some(t) = self.creating_note.as_mut() {
+                            t.duration = (end_local - t.start_time).max(0.25);
+                        }
+                    }
+                } else if let (Some(temp), Some(clip_id)) =
+                    (self.creating_note.take(), self.selected_clip_id)
+                {
+                    if let Some(idx) = self.editing_index.take() {
+                        let dt = temp.duration - self.editing_orig_dur;
+                        self.commit_resize_note(clip_id, idx, dt, shared, clip_data);
+                    } else {
+                        self.commit_create_note(clip_id, temp, shared, clip_data);
+                    }
+                }
+            } else {
+                // Snap the pan to the nearest key on release.
+                if resp.drag_stopped() {
+                    *shared.keyboard_pan_x = layout.snap_pan(*shared.keyboard_pan_x);
+                }
+                // Manual long-press (mouse-hold or touch): armed only on a *fresh* press, and cancelled
+                // for the rest of that press once it moves (→ pan), so pausing mid-pan won't fire.
+                if pressed {
+                    match ptr {
+                        Some(p) if roll_rect.contains(p) => {
+                            self.lp_press_time = Some(now);
+                            self.lp_press_pos = p;
+                        }
+                        _ => self.lp_press_time = None,
+                    }
+                }
+                if !down {
+                    self.lp_press_time = None;
+                }
+                if let Some(t0) = self.lp_press_time {
+                    let moved = ptr.map_or(0.0, |p| (p - self.lp_press_pos).length());
+                    if moved > 8.0 {
+                        self.lp_press_time = None; // became a pan → suppress for this press
+                    } else if now - t0 >= LONG_PRESS_SECS {
+                        self.lp_press_time = None;
+                        let pos = self.lp_press_pos;
+                        if let Some(clip_id) = self.selected_clip_id {
+                            if let Some(&(_, timeline_start, trim_start, clip_dur, _)) =
+                                clip_data.iter().find(|c| c.0 == clip_id)
+                            {
+                                let pitch = layout.x_to_note(pos.x);
+                                // Hit-test an existing note in this column → resize it; else create.
+                                let mut hit = None;
+                                if let Some(events) = shared.midi_event_cache.get(&clip_id) {
+                                    for (i, n) in Self::resolve_notes(events).iter().enumerate() {
+                                        if n.note != pitch
+                                            || n.start_time < trim_start
+                                            || n.start_time >= trim_start + clip_dur
+                                        {
+                                            continue;
+                                        }
+                                        let g = timeline_start + (n.start_time - trim_start);
+                                        let y_on = now_y - ((tempo_map.transform(g) - playhead) as f32) * pps;
+                                        let y_off = now_y - ((tempo_map.transform(g + n.duration) - playhead) as f32) * pps;
+                                        if pos.y >= y_on.min(y_off) && pos.y <= y_on.max(y_off) {
+                                            hit = Some((i, n.start_time, n.duration, n.velocity));
+                                            break;
+                                        }
+                                    }
+                                }
+                                if let Some((idx, onset, dur, vel)) = hit {
+                                    self.editing_index = Some(idx);
+                                    self.editing_orig_dur = dur;
+                                    self.creating_note = Some(TempNote { note: pitch, start_time: onset, duration: dur, velocity: vel });
+                                } else {
+                                    let onset_sec = playhead + ((now_y - pos.y) / pps) as f64;
+                                    let onset_beats = tempo_map.inverse_transform(onset_sec).max(0.0);
+                                    let onset_local = snap_to_value((trim_start + (onset_beats - timeline_start)).max(0.0), self.snap_value, &tempo_map);
+                                    self.editing_index = None;
+                                    self.creating_note = Some(TempNote { note: pitch, start_time: onset_local, duration: 0.5, velocity: DEFAULT_VELOCITY });
+                                }
+                                self.preview_note_on(pitch, DEFAULT_VELOCITY, Some(0.4), now, shared);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Notes sounding at the playhead → drive the keyboard's highlights so it colors them exactly
+        // like pressed keys (full key, correct white/black layering) rather than an after-overlay.
+        let mut sounding = std::collections::HashSet::new();
+        if let Some(clip_id) = self.selected_clip_id {
+            if let Some(&(_, timeline_start, trim_start, duration, _)) =
+                clip_data.iter().find(|c| c.0 == clip_id)
+            {
+                if let Some(events) = shared.midi_event_cache.get(&clip_id) {
+                    for note in Self::resolve_notes(events) {
+                        if note.start_time < trim_start || note.start_time >= trim_start + duration {
+                            continue;
+                        }
+                        let global = timeline_start + (note.start_time - trim_start);
+                        let s = tempo_map.transform(global);
+                        let e = tempo_map.transform(global + note.duration);
+                        if playhead >= s && playhead < e {
+                            sounding.insert(note.note);
+                        }
+                    }
+                }
+            }
+        }
+        self.keyboard.playback_notes = sounding;
+
+        // Instrument header (in this pane's own header) + the always-present playable keyboard strip.
+        self.render_instrument_header(ui, header_rect, shared);
+        let kb_path: NodePath = Vec::new();
+        self.keyboard.render_content(ui, kb_rect, &kb_path, shared);
+    }
+
+    /// The in-pane instrument header: active track name + Presets + REC.
+    fn render_instrument_header(&mut self, ui: &mut egui::Ui, rect: Rect, shared: &mut SharedPaneState) {
+        let painter = ui.painter_at(rect);
+        let hdr = shared.theme.bg_color(&[".pane-header"], ui.ctx(), Color32::from_rgb(24, 24, 28));
+        painter.rect_filled(rect, 0.0, hdr);
+        painter.line_segment(
+            [pos2(rect.left(), rect.bottom()), pos2(rect.right(), rect.bottom())],
+            Stroke::new(1.0, Color32::from_gray(60)),
+        );
+
+        let name = shared
+            .active_layer_id
+            .and_then(|id| shared.action_executor.document().get_layer(&id))
+            .map(|l| l.name().to_string())
+            .unwrap_or_else(|| "No instrument".to_string());
+        painter.text(
+            pos2(rect.left() + 12.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            name,
+            egui::FontId::proportional(14.0),
+            Color32::from_gray(220),
+        );
+
+        // REC (rightmost).
+        let rec = Rect::from_min_max(pos2(rect.right() - 64.0, rect.top() + 4.0), pos2(rect.right() - 8.0, rect.bottom() - 4.0));
+        let rec_resp = ui.interact(rec, ui.id().with("pr_rec"), egui::Sense::click());
+        let recording = *shared.is_recording;
+        let rec_bg = if recording { Color32::from_rgb(0xe0, 0x3a, 0x3a) } else { Color32::from_gray(66) };
+        painter.rect_filled(rec, 6.0, rec_bg);
+        painter.circle_filled(pos2(rec.left() + 13.0, rec.center().y), 4.0, Color32::from_rgb(255, 96, 96));
+        painter.text(pos2(rec.left() + 23.0, rec.center().y), egui::Align2::LEFT_CENTER, "REC", egui::FontId::proportional(12.0), Color32::WHITE);
+        if rec_resp.clicked() {
+            *shared.pending_record_toggle = true;
+        }
+
+        // Presets (left of REC).
+        let pre = Rect::from_min_max(pos2(rec.left() - 84.0, rect.top() + 4.0), pos2(rec.left() - 8.0, rect.bottom() - 4.0));
+        let pre_resp = ui.interact(pre, ui.id().with("pr_presets"), egui::Sense::click());
+        painter.rect_filled(pre, 6.0, if pre_resp.hovered() { Color32::from_gray(56) } else { Color32::from_gray(42) });
+        painter.text(pre.center(), egui::Align2::CENTER_CENTER, "Presets", egui::FontId::proportional(12.0), Color32::from_gray(220));
+        if pre_resp.clicked() {
+            *shared.open_instrument_browser = true;
+        }
     }
 
     fn render_keyboard(&self, painter: &egui::Painter, rect: Rect) {

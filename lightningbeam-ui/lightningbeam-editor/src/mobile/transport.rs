@@ -40,9 +40,24 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState,
         }
     }
 
-    // --- Timecode (MM:SS:FF) ---
-    let fps = shared.action_executor.document().framerate.max(1.0);
-    let tc = format_timecode(*shared.playback_time, fps);
+    // --- Playhead readout: format follows the project's TimelineMode (set at creation by type). ---
+    let t = *shared.playback_time;
+    let tc = {
+        use lightningbeam_core::document::TimelineMode;
+        let doc = shared.action_executor.document();
+        match doc.timeline_mode {
+            TimelineMode::Measures => {
+                let pos = lightningbeam_core::beat_time::time_to_measure(t, doc.tempo_map(), &doc.time_signature);
+                format!("{}.{}.{:02}", pos.measure, pos.beat, pos.tick / 10)
+            }
+            TimelineMode::Frames => format_timecode(t, doc.framerate.max(1.0)),
+            TimelineMode::Seconds => {
+                let total = t.max(0.0);
+                let m = (total / 60.0).floor() as u32;
+                format!("{:02}:{:06.3}", m, total % 60.0)
+            }
+        }
+    };
     let tc_left = btn_rect.right() + 12.0;
     painter.text(
         egui::pos2(tc_left, cy),
