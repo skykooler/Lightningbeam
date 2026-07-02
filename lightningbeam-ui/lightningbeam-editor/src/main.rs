@@ -2948,6 +2948,39 @@ impl EditorApp {
         }
     }
 
+    /// Send the selected clip/group instances to the back or front of their layer's stacking order.
+    fn reorder_selected_clips(&mut self, to_front: bool) {
+        use lightningbeam_core::layer::AnyLayer;
+        let Some(layer_id) = self.active_layer_id else {
+            return;
+        };
+        let ids: Vec<uuid::Uuid> = {
+            let document = self.action_executor.document();
+            let Some(layer) = document.get_layer(&layer_id) else {
+                return;
+            };
+            let instances: &[lightningbeam_core::clip::ClipInstance] = match layer {
+                AnyLayer::Vector(l) => &l.clip_instances,
+                AnyLayer::Audio(l) => &l.clip_instances,
+                AnyLayer::Video(l) => &l.clip_instances,
+                AnyLayer::Effect(l) => &l.clip_instances,
+                _ => &[],
+            };
+            instances
+                .iter()
+                .filter(|ci| self.selection.contains_clip_instance(&ci.id))
+                .map(|ci| ci.id)
+                .collect()
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let action = lightningbeam_core::actions::ReorderClipInstancesAction::new(layer_id, ids, to_front);
+        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+            eprintln!("Failed to reorder clip instances: {e}");
+        }
+    }
+
     /// Duplicate the selected clip instances on the active layer.
     /// Each duplicate is placed immediately after the original clip.
     fn duplicate_selected_clips(&mut self) {
@@ -3588,12 +3621,10 @@ impl EditorApp {
                 }
             }
             MenuAction::SendToBack => {
-                println!("Menu: Send to Back");
-                // TODO: Implement send to back
+                self.reorder_selected_clips(false);
             }
             MenuAction::BringToFront => {
-                println!("Menu: Bring to Front");
-                // TODO: Implement bring to front
+                self.reorder_selected_clips(true);
             }
             MenuAction::SplitClip => {
                 self.split_clips_at_playhead();

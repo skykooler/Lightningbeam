@@ -11537,14 +11537,23 @@ impl StagePane {
                     // A clip instance is already a clip — no "convert" here.
                     items.push(("Cut".into(), MenuAction::Cut));
                     items.push(("Copy".into(), MenuAction::Copy));
+                    items.push(("Paste".into(), MenuAction::Paste));
                     items.push(("Duplicate".into(), MenuAction::DuplicateClip));
                     items.push(("Delete".into(), MenuAction::Delete));
+                    items.push(("Send to back".into(), MenuAction::SendToBack));
+                    items.push(("Bring to front".into(), MenuAction::BringToFront));
                 } else if shared.selection.has_geometry_selection() {
                     // Geometry can be gathered up into a movie clip.
                     items.push(("Cut".into(), MenuAction::Cut));
                     items.push(("Copy".into(), MenuAction::Copy));
+                    items.push(("Paste".into(), MenuAction::Paste));
                     items.push(("Convert to movie clip".into(), MenuAction::ConvertToMovieClip));
                     items.push(("Delete".into(), MenuAction::Delete));
+                    items.push(("Send to back".into(), MenuAction::SendToBack));
+                    items.push(("Bring to front".into(), MenuAction::BringToFront));
+                } else {
+                    // Nothing selected — offer paste onto the stage.
+                    items.push(("Paste".into(), MenuAction::Paste));
                 }
                 if !items.is_empty() {
                     if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {

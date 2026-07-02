@@ -268,6 +268,9 @@ pub struct TimelinePane {
     /// Is the user panning the timeline?
     is_panning: bool,
     last_pan_pos: Option<egui::Pos2>,
+    /// Manual long-press tracking for the mobile context menu: press start time + position.
+    lp_time: Option<f64>,
+    lp_pos: egui::Pos2,
 
     /// Clip drag state (None if not dragging)
     clip_drag_state: Option<ClipDragType>,
@@ -788,6 +791,8 @@ impl TimelinePane {
             is_scrubbing: false,
             is_panning: false,
             last_pan_pos: None,
+            lp_time: None,
+            lp_pos: egui::Pos2::ZERO,
             clip_drag_state: None,
             drag_offset: 0.0,
             drag_anchor_start: 0.0,
@@ -5837,9 +5842,10 @@ impl PaneRenderer for TimelinePane {
         }
         ui.set_clip_rect(original_clip_rect);
 
-        // Context menu: detect right-click on clips or empty timeline space
+        // Context menu: detect right-click on clips or empty timeline space (desktop only — mobile
+        // uses the long-press menu below).
         let mut just_opened_menu = false;
-        let secondary_clicked = ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
+        let secondary_clicked = !shared.is_mobile && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
         if secondary_clicked {
             if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
                 if content_rect.contains(pos) {
@@ -5857,6 +5863,62 @@ impl PaneRenderer for TimelinePane {
                     just_opened_menu = true;
                 }
             }
+        }
+
+        // Mobile: a manual long-press (hold in place ~0.4s) builds a persistent context menu rendered
+        // by the shell — clip actions on a clip, animation (keyframe/tween) actions on an empty lane.
+        let mut long_press: Option<egui::Pos2> = None;
+        if shared.is_mobile {
+            let now = ui.input(|i| i.time);
+            let down = ui.input(|i| i.pointer.any_down());
+            let ptr = ui.input(|i| i.pointer.latest_pos());
+            if ui.input(|i| i.pointer.primary_pressed()) {
+                match ptr {
+                    Some(p) if content_rect.contains(p) => {
+                        self.lp_time = Some(now);
+                        self.lp_pos = p;
+                    }
+                    _ => self.lp_time = None,
+                }
+            }
+            if !down {
+                self.lp_time = None;
+            }
+            if let Some(t0) = self.lp_time {
+                let moved = ptr.map_or(0.0, |p| (p - self.lp_pos).length());
+                if moved > 8.0 {
+                    self.lp_time = None;
+                } else if now - t0 >= 0.4 {
+                    self.lp_time = None;
+                    long_press = Some(self.lp_pos);
+                }
+            }
+        }
+        if let Some(pos) = long_press {
+            use crate::menu::MenuAction;
+            let mut items: Vec<(String, MenuAction)> = Vec::new();
+                    if let Some((_drag_type, clip_id)) = self.detect_clip_at_pointer(pos, document, content_rect, layer_headers_rect, editing_clip_id.as_ref(), &audio_cache) {
+                        if !shared.selection.contains_clip_instance(&clip_id) {
+                            shared.selection.select_only_clip_instance(clip_id);
+                        }
+                        *shared.focus = lightningbeam_core::selection::FocusSelection::ClipInstances(shared.selection.clip_instances().to_vec());
+                        items.push(("Split clip".into(), MenuAction::SplitClip));
+                        items.push(("Duplicate clip".into(), MenuAction::DuplicateClip));
+                        items.push(("Cut".into(), MenuAction::Cut));
+                        items.push(("Copy".into(), MenuAction::Copy));
+                        items.push(("Paste".into(), MenuAction::Paste));
+                        items.push(("Delete".into(), MenuAction::Delete));
+                    } else {
+                        items.push(("New keyframe".into(), MenuAction::NewKeyframe));
+                        items.push(("New blank keyframe".into(), MenuAction::NewBlankKeyframe));
+                        items.push(("Add keyframe at playhead".into(), MenuAction::AddKeyframeAtPlayhead));
+                        items.push(("Duplicate keyframe".into(), MenuAction::DuplicateKeyframe));
+                        items.push(("Delete frame".into(), MenuAction::DeleteFrame));
+                        items.push(("Add motion tween".into(), MenuAction::AddMotionTween));
+                        items.push(("Add shape tween".into(), MenuAction::AddShapeTween));
+                        items.push(("Paste".into(), MenuAction::Paste));
+                    }
+            *shared.mobile_context_menu = Some(crate::panes::MobileContextMenu { pos, items });
         }
 
         // Render context menu
