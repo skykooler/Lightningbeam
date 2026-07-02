@@ -24,6 +24,7 @@ pub fn is_active(shared: &SharedPaneState) -> bool {
 
 /// The stack slot (see `super::STACK`) where the current selection lives, so we can tell if the
 /// sheet would cover it. Geometry/selection lives on the Stage; clips/layers on the Timeline; etc.
+#[allow(dead_code)] // selection→pane mapping; kept for reflow/jump heuristics
 pub fn target_slot(shared: &SharedPaneState) -> usize {
     match &*shared.focus {
         FocusSelection::Notes { .. } => 4,          // PianoRoll
@@ -99,13 +100,11 @@ pub fn render(
     state: &mut MobileState,
     pal: &Palette,
 ) {
-    // Sheet background with rounded top.
-    ui.painter().rect_filled(
-        rect,
-        egui::CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 },
-        pal.surface_alt,
-    );
-    ui.painter().hline(rect.x_range(), rect.top(), egui::Stroke::new(1.0, pal.line));
+    // Sheet background with rounded top + a border stroke that follows the rounded corners (a plain
+    // hline would overrun the rounded corners and detach from them).
+    let radius = egui::CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 };
+    ui.painter().rect_filled(rect, radius, pal.surface_alt);
+    ui.painter().rect_stroke(rect, radius, egui::Stroke::new(1.0, pal.line), egui::StrokeKind::Inside);
 
     // Grab handle — drag to resize the sheet.
     let grab = egui::Rect::from_min_max(

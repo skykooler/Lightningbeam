@@ -358,6 +358,18 @@ pub struct SharedPaneState<'a> {
     pub brush_preview_pixels: &'a std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
     /// True when rendering the phone/mobile shell (panes can render more compactly).
     pub is_mobile: bool,
+    /// Mobile long-press context menu request. A pane sets this on `response.secondary_clicked()`
+    /// (which fires on long-press) with the items relevant to what was pressed; the mobile shell
+    /// renders one persistent popup and dispatches the chosen `MenuAction`. `None` = no menu.
+    pub mobile_context_menu: &'a mut Option<MobileContextMenu>,
+}
+
+/// A mobile long-press context menu: a screen position and a list of `(label, action)` items.
+/// Rendered by the mobile shell; each item dispatches its `MenuAction` via `pending_menu_actions`.
+#[derive(Clone)]
+pub struct MobileContextMenu {
+    pub pos: egui::Pos2,
+    pub items: Vec<(String, crate::menu::MenuAction)>,
 }
 
 /// Trait for pane rendering

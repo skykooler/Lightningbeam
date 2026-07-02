@@ -1481,6 +1481,15 @@ impl TimelinePane {
         self.pixels_per_second = 100.0;
     }
 
+    /// Fit the whole project duration into the given content width, scrolled to the start.
+    /// (Gesture P5-2: double-tap empty → zoom-to-fit.)
+    pub fn fit_to_project(&mut self, viewport_width: f32) {
+        let dur = self.duration.max(0.01);
+        self.pixels_per_second =
+            (viewport_width / dur as f32).clamp(MIN_PIXELS_PER_SECOND, MAX_PIXELS_PER_SECOND);
+        self.viewport_start_time = 0.0;
+    }
+
     /// Apply zoom while keeping the time under the cursor stationary
     fn apply_zoom_at_point(&mut self, zoom_delta: f32, mouse_x: f32) {
         let old_zoom = self.pixels_per_second;
@@ -4964,29 +4973,40 @@ impl TimelinePane {
         // Only handle scroll when mouse is over the timeline area
         let mut handled = false;
         let pointer_over_timeline = response.hovered() || ui.rect_contains_pointer(header_rect);
+
+        // Unified pinch / Ctrl+scroll time-zoom: `zoom_delta()` folds in touch-pinch (on device) AND
+        // Ctrl+wheel/trackpad (on desktop). Multiplicative factor (1.0 = no change); apply_zoom_at_point
+        // wants an additive delta. This is the single path for factor-zoom — the raw MouseWheel branch
+        // below only handles plain (non-Ctrl) mouse-wheel zoom and non-Ctrl trackpad pan.
+        if pointer_over_timeline {
+            let zoom_factor = ui.input(|i| i.zoom_delta());
+            if (zoom_factor - 1.0).abs() > f32::EPSILON {
+                let center_x = ui
+                    .input(|i| i.multi_touch().map(|m| m.center_pos.x))
+                    .map(|x| x - content_rect.min.x)
+                    .unwrap_or(mouse_x);
+                self.apply_zoom_at_point(zoom_factor - 1.0, center_x);
+            }
+        }
+
         if pointer_over_timeline { ui.input(|i| {
             for event in &i.raw.events {
                 if let egui::Event::MouseWheel { unit, delta, modifiers, .. } = event {
                     match unit {
                         egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
-                            // Real mouse wheel (discrete clicks) -> always zoom horizontally
-                            let zoom_delta = if ctrl_held || modifiers.ctrl {
-                                delta.y * 0.01 // Ctrl+wheel: faster zoom
-                            } else {
-                                delta.y * 0.005 // Normal zoom
-                            };
-                            self.apply_zoom_at_point(zoom_delta, mouse_x);
+                            // Plain mouse wheel zooms; Ctrl+wheel handled above via zoom_delta().
+                            // Consume the event either way so the pan fallback doesn't also fire.
+                            if !(ctrl_held || modifiers.ctrl) {
+                                self.apply_zoom_at_point(delta.y * 0.005, mouse_x);
+                            }
                             handled = true;
                         }
                         egui::MouseWheelUnit::Point => {
-                            // Trackpad (smooth scrolling)
+                            // Trackpad: Ctrl-zoom handled above (consume it); non-Ctrl falls through
+                            // to scroll_delta panning below.
                             if ctrl_held || modifiers.ctrl {
-                                // Ctrl held: zoom
-                                let zoom_delta = delta.y * 0.005;
-                                self.apply_zoom_at_point(zoom_delta, mouse_x);
                                 handled = true;
                             }
-                            // Otherwise let scroll_delta handle panning (below)
                         }
                     }
                 }
@@ -5026,6 +5046,18 @@ impl TimelinePane {
             if !response.dragged() {
                 self.is_panning = false;
                 self.last_pan_pos = None;
+            }
+        }
+
+        // Double-tap / double-click on empty space → fit the whole project into view. (Gesture P5-2.)
+        if response.double_clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let over_clip = self
+                    .detect_clip_at_pointer(pos, document, content_rect, header_rect, editing_clip_id, &audio_cache)
+                    .is_some();
+                if !over_clip {
+                    self.fit_to_project(content_rect.width());
+                }
             }
         }
 

@@ -959,6 +959,8 @@ struct EditorApp {
     mobile_ui_override: Option<bool>,
     /// Persistent state for the mobile shell (active surface, ribbon tier).
     mobile_state: mobile::MobileState,
+    /// Active mobile long-press context menu (set by a pane, rendered by the shell).
+    mobile_context_menu: Option<panes::MobileContextMenu>,
     icon_cache: IconCache,
     tool_icon_cache: ToolIconCache,
     focus_icon_cache: FocusIconCache, // Focus card icons (start screen)
@@ -1320,6 +1322,7 @@ impl EditorApp {
             mobile_ui: mobile::is_mobile_env(),
             mobile_ui_override: None,
             mobile_state: mobile::MobileState::default(),
+            mobile_context_menu: None,
             icon_cache: IconCache::new(),
             tool_icon_cache: ToolIconCache::new(),
             focus_icon_cache: FocusIconCache::new(),
@@ -2681,45 +2684,56 @@ impl EditorApp {
             }
 
             self.selection.clear_clip_instances();
+            self.focus = lightningbeam_core::selection::FocusSelection::None;
         } else if self.selection.has_geometry_selection() {
             let active_layer_id = match self.active_layer_id {
                 Some(id) => id,
                 None => return,
             };
 
-            // Delete the selected edges (region/marquee/click all populate the same sets).
+            // Delete the selected geometry (region/marquee/click all populate the same sets).
+            // Selecting a fill also selects its boundary edges, so removing edges alone would leave
+            // the fill's face orphaned — free the fills too so the whole shape is removed.
             let edge_ids: Vec<lightningbeam_core::vector_graph::EdgeId> =
                 self.selection.selected_edges().iter().copied().collect();
+            let fill_ids: Vec<lightningbeam_core::vector_graph::FillId> =
+                self.selection.selected_fills().iter().copied().collect();
 
-            if !edge_ids.is_empty() {
+            if !edge_ids.is_empty() || !fill_ids.is_empty() {
                 let document = self.action_executor.document();
-                if let Some(layer) = document.get_layer(&active_layer_id) {
-                    if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
-                        if let Some(graph_before) = vector_layer.graph_at_time(self.playback_time) {
-                            let mut graph_after = graph_before.clone();
-                            for edge_id in &edge_ids {
-                                if !graph_after.edge(*edge_id).deleted {
-                                    graph_after.remove_edge(*edge_id);
-                                }
+                if let Some(lightningbeam_core::layer::AnyLayer::Vector(vector_layer)) = document.get_layer(&active_layer_id) {
+                    if let Some(graph_before) = vector_layer.graph_at_time(self.playback_time) {
+                        let mut graph_after = graph_before.clone();
+                        // Free fills first so their boundary edges become unreferenced and are GC'd.
+                        for fill_id in &fill_ids {
+                            if !graph_after.fill(*fill_id).deleted {
+                                graph_after.free_fill(*fill_id);
                             }
-
-                            let action = lightningbeam_core::actions::ModifyGraphAction::new(
-                                active_layer_id,
-                                self.playback_time,
-                                graph_before.clone(),
-                                graph_after,
-                                "Delete selected edges",
-                            );
-
-                            if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                                eprintln!("Delete DCEL edges failed: {}", e);
+                        }
+                        for edge_id in &edge_ids {
+                            if !graph_after.edge(*edge_id).deleted {
+                                graph_after.remove_edge(*edge_id);
                             }
+                        }
+                        graph_after.gc_isolated_vertices();
+
+                        let action = lightningbeam_core::actions::ModifyGraphAction::new(
+                            active_layer_id,
+                            self.playback_time,
+                            graph_before.clone(),
+                            graph_after,
+                            "Delete",
+                        );
+
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Delete geometry failed: {}", e);
                         }
                     }
                 }
             }
 
             self.selection.clear_geometry_selection();
+            self.focus = lightningbeam_core::selection::FocusSelection::None;
         }
     }
 
@@ -7182,6 +7196,7 @@ impl EditorApp {
             rc: RenderContext {
                 shared: panes::SharedPaneState {
                     is_mobile,
+                    mobile_context_menu: &mut self.mobile_context_menu,
                     container_path: self.current_file_path.clone(),
                     onion: {
                         // Onion skinning is disabled during playback.

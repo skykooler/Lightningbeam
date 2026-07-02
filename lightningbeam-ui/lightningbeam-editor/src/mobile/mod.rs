@@ -191,6 +191,12 @@ pub struct MobileState {
     pub show_instruments: bool,
     /// Inspector sheet height as a fraction of the region above the transport.
     pub inspector_frac: f32,
+    /// Whether the inspector sheet is currently shown. Gated to appear on pointer *release* (a tap),
+    /// not on press, so press+drag interactions aren't interrupted by the sheet popping up.
+    pub inspector_visible: bool,
+    /// Screen-y of the tap that opened the inspector — used to decide whether the tapped thing would
+    /// be hidden by the sheet (only then do we reflow the stack).
+    pub inspector_anchor_y: f32,
     /// Whether the omnibutton radial tool menu is open.
     pub omni_open: bool,
     /// Whether the omnibutton "more" grid (all tools) is open.
@@ -217,6 +223,8 @@ impl Default for MobileState {
             weights: [1.0, 1.0, 1.0],
             show_instruments: false,
             inspector_frac: 0.45,
+            inspector_visible: false,
+            inspector_anchor_y: 0.0,
             omni_open: false,
             omni_grid_open: false,
             omni_create_open: false,
@@ -255,22 +263,55 @@ pub fn render_mobile_shell(
         egui::pos2(available_rect.left(), topbar_rect.bottom()),
         egui::pos2(available_rect.right(), transport_rect.top()),
     );
-    // When the inspector is up, the sheet overlays the lower part of the stack. If the selected
-    // pane would be *covered* by the sheet, reflow (shrink the stack above the sheet) so it stays
-    // visible; otherwise leave the stack full-height and just overlay. Restoring on dismiss is
-    // automatic — reflow only changes the render rect, not the window state.
-    let inspector_shown = inspector::is_active(&rc.shared);
+    // The inspector sheet appears on pointer *release* (a tap), not on press — so press+drag on the
+    // canvas isn't interrupted by the sheet popping up. Track visibility: hide when nothing's
+    // selected; show once the pointer is up with a selection; keep it shown while it's being
+    // interacted with (pointer down but still selected).
+    let active = inspector::is_active(&rc.shared);
+    let any_down = ui.input(|i| i.pointer.any_down());
+    if !active {
+        state.inspector_visible = false;
+    } else if !any_down {
+        if !state.inspector_visible {
+            // Just opened (tap released): anchor to the release position for the reflow test below.
+            state.inspector_anchor_y = ui
+                .input(|i| i.pointer.interact_pos())
+                .map(|p| p.y)
+                .unwrap_or(region.bottom());
+        }
+        state.inspector_visible = true;
+    }
+    let mut inspector_shown = state.inspector_visible;
     let sheet_h = if inspector_shown {
         (region.height() * state.inspector_frac).clamp(120.0, region.height() - 60.0)
     } else {
         0.0
     };
-    let sheet_top = region.bottom() - sheet_h;
+    let mut sheet_top = region.bottom() - sheet_h;
 
-    let covered = inspector_shown
-        && stack::pane_bottom_in(state, region, inspector::target_slot(&rc.shared))
-            .map(|bottom| bottom > sheet_top + 1.0)
-            .unwrap_or(false);
+    // Tapping outside the sheet (but not on the transport) dismisses the inspector. The press still
+    // reaches the panes below via stack::render, so tapping another object reselects and reopens it.
+    if inspector_shown {
+        let sheet_rect = egui::Rect::from_min_max(egui::pos2(region.left(), sheet_top), region.max);
+        let dismiss = ui.input(|i| {
+            i.pointer.primary_pressed()
+                && i.pointer.press_origin().map_or(false, |p| {
+                    !sheet_rect.contains(p) && !transport_rect.contains(p)
+                })
+        });
+        if dismiss {
+            rc.shared.selection.clear();
+            *rc.shared.focus = lightningbeam_core::selection::FocusSelection::None;
+            state.inspector_visible = false;
+            inspector_shown = false;
+            sheet_top = region.bottom();
+        }
+    }
+
+    // Reflow (shrink the stack above the sheet) only when the thing that was tapped would actually be
+    // hidden by the sheet — i.e. the tap landed below where the sheet now sits. Otherwise just
+    // overlay. Restoring on dismiss is automatic — reflow only changes the render rect.
+    let covered = inspector_shown && state.inspector_anchor_y > sheet_top;
     let stack_rect = if covered {
         egui::Rect::from_min_max(region.min, egui::pos2(region.right(), sheet_top))
     } else {
@@ -292,4 +333,70 @@ pub fn render_mobile_shell(
 
     // Top bar (filename + ⌕ palette + ⋯ commands). Its menus overlay the whole shell, so it's last.
     topbar::render(ui, topbar_rect, available_rect, rc, state, &pal);
+
+    // Long-press context menu (populated by whichever pane was long-pressed). Persistent popup,
+    // dispatched via pending_menu_actions.
+    render_context_menu(ui, available_rect, rc);
+}
+
+/// Render the pane-populated long-press context menu (`shared.mobile_context_menu`) as a persistent
+/// popup: it stays open until an item is chosen or the user taps outside it. Styled to match the
+/// timeline's context menu (default themed popup frame + full-width, touch-height items).
+fn render_context_menu(ui: &mut egui::Ui, available: egui::Rect, rc: &mut RenderContext) {
+    let Some(menu) = rc.shared.mobile_context_menu.clone() else {
+        return;
+    };
+    // Keep the popup on screen (rough clamp against its estimated size).
+    let est = egui::vec2(200.0, menu.items.len() as f32 * ui.spacing().interact_size.y + 16.0);
+    let pos = egui::pos2(
+        menu.pos.x.min(available.right() - est.x - 8.0).max(available.left() + 8.0),
+        menu.pos.y.min(available.bottom() - est.y - 8.0).max(available.top() + 8.0),
+    );
+
+    let mut chosen: Option<crate::menu::MenuAction> = None;
+    let area = egui::Area::new(ui.id().with("mobile_ctx_menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .interactable(true)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(180.0);
+                for (label, action) in &menu.items {
+                    let w = ui.available_width();
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(w, ui.spacing().interact_size.y), egui::Sense::click());
+                    if ui.is_rect_visible(rect) {
+                        if resp.hovered() {
+                            ui.painter().rect_filled(rect, 2.0, ui.visuals().widgets.hovered.bg_fill);
+                        }
+                        let tc = if resp.hovered() {
+                            ui.visuals().widgets.hovered.text_color()
+                        } else {
+                            ui.visuals().widgets.inactive.text_color()
+                        };
+                        ui.painter().text(
+                            rect.min + egui::vec2(10.0, (rect.height() - 14.0) / 2.0),
+                            egui::Align2::LEFT_TOP,
+                            label,
+                            egui::FontId::proportional(14.0),
+                            tc,
+                        );
+                    }
+                    if resp.clicked() {
+                        chosen = Some(*action);
+                    }
+                }
+            });
+        });
+
+    // Dismiss on item choice or a primary click outside the popup. (The secondary click that opened
+    // it won't dismiss, so there's no just-opened race.)
+    let primary_click = ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
+    let dismiss = chosen.is_some() || (primary_click && !area.response.contains_pointer());
+    if let Some(action) = chosen {
+        rc.shared.pending_menu_actions.push(action);
+    }
+    if dismiss {
+        *rc.shared.mobile_context_menu = None;
+    }
 }

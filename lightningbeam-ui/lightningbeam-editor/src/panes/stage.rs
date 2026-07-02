@@ -3255,6 +3255,14 @@ pub struct StagePane {
     // Interaction state
     is_panning: bool,
     last_pan_pos: Option<egui::Pos2>,
+    // Gesture state (P5): double-tap-drag marquee. `last_tap` = (time, canvas pos) of the last
+    // primary press for double-tap detection; `marquee_gesture_armed` = a double-tap landed on empty
+    // space and a drag will start a transient marquee regardless of the active tool.
+    last_tap: Option<(f64, egui::Pos2)>,
+    marquee_gesture_armed: bool,
+    /// True once an armed double-tap has actually begun dragging (so we suppress the active tool for
+    /// the duration of the marquee but NOT for a plain double-tap, which still zooms-to-fit).
+    marquee_gesture_active: bool,
     // Unique ID for this stage instance (for Vello resources)
     instance_id: u64,
     // Eyedropper state
@@ -3743,6 +3751,9 @@ impl StagePane {
             needs_initial_center: true,
             is_panning: false,
             last_pan_pos: None,
+            last_tap: None,
+            marquee_gesture_armed: false,
+            marquee_gesture_active: false,
             instance_id,
             pending_eyedropper_sample: None,
             last_viewport_rect: None,
@@ -4030,6 +4041,18 @@ impl StagePane {
                 // Double-click on empty space while inside a clip: exit
                 *shared.pending_exit_clip = true;
                 return;
+            } else {
+                // Double-tap / double-click on truly empty space (no clip and no shape under the
+                // pointer, at the top level) → zoom to fit the artboard. (Gesture P5-2.)
+                let graph_hit = if inbetween {
+                    None
+                } else {
+                    hit_test::hit_test_layer(vector_layer, *shared.playback_time, point, 5.0, Affine::IDENTITY)
+                };
+                if graph_hit.is_none() {
+                    self.zoom_to_fit(shared);
+                    return;
+                }
             }
         }
 
@@ -11048,6 +11071,75 @@ impl StagePane {
         }
     }
 
+    /// True if a clip instance or vector geometry is under `point` (clip-local) on the active layer.
+    /// Used by the double-tap-drag marquee gesture to decide "empty vs object".
+    fn point_hits_object(&self, point: vello::kurbo::Point, shared: &SharedPaneState) -> bool {
+        use lightningbeam_core::hit_test;
+        use lightningbeam_core::layer::AnyLayer;
+        use vello::kurbo::Affine;
+        let Some(active_layer_id) = *shared.active_layer_id else {
+            return false;
+        };
+        let document = shared.action_executor.document();
+        let Some(AnyLayer::Vector(vl)) = document.get_layer(&active_layer_id) else {
+            return false;
+        };
+        if hit_test::hit_test_clip_instances(&vl.clip_instances, document, point, Affine::IDENTITY, *shared.playback_time).is_some() {
+            return true;
+        }
+        hit_test::hit_test_layer(vl, *shared.playback_time, point, 5.0, Affine::IDENTITY).is_some()
+    }
+
+    /// Delete the currently-selected DCEL edges on the active vector layer (snapshot-based undo).
+    /// Shared by the Delete/Backspace key and the long-press context menu.
+    fn delete_selected_geometry(&self, shared: &mut SharedPaneState) {
+        let Some(active_layer_id) = *shared.active_layer_id else {
+            return;
+        };
+        let time = *shared.playback_time;
+        let selected_edges: Vec<lightningbeam_core::vector_graph::EdgeId> =
+            shared.selection.selected_edges().iter().copied().collect();
+        let selected_fills: Vec<lightningbeam_core::vector_graph::FillId> =
+            shared.selection.selected_fills().iter().copied().collect();
+        if selected_edges.is_empty() && selected_fills.is_empty() {
+            return;
+        }
+        let graph_before = match shared.action_executor.document().get_layer(&active_layer_id) {
+            Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => vl.graph_at_time(time).cloned(),
+            _ => None,
+        };
+        let Some(graph_before) = graph_before else {
+            return;
+        };
+        {
+            let document = shared.action_executor.document_mut();
+            if let Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) = document.get_layer_mut(&active_layer_id) {
+                if let Some(graph) = vl.graph_at_time_mut(time) {
+                    // Free fills first so their boundary edges become unreferenced and are GC'd.
+                    for fid in &selected_fills {
+                        if !graph.fill(*fid).deleted {
+                            graph.free_fill(*fid);
+                        }
+                    }
+                    for eid in &selected_edges {
+                        graph.remove_edge(*eid);
+                    }
+                    graph.gc_isolated_vertices();
+                }
+            }
+        }
+        let graph_after = match shared.action_executor.document().get_layer(&active_layer_id) {
+            Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => vl.graph_at_time(time).cloned(),
+            _ => None,
+        };
+        if let Some(graph_after) = graph_after {
+            use lightningbeam_core::actions::ModifyGraphAction;
+            let action = ModifyGraphAction::new(active_layer_id, time, graph_before, graph_after, "Delete");
+            shared.pending_actions.push(Box::new(action));
+        }
+        shared.selection.clear_geometry_selection();
+    }
+
     fn handle_input(&mut self, ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState) {
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
 
@@ -11314,8 +11406,126 @@ impl StagePane {
             }
         }
 
-        // Handle tool input (only if not using Alt modifier for panning)
-        if !alt_held {
+        // P5 gesture: double-tap-drag on empty space → transient marquee, regardless of the active
+        // tool. The second tap arms it; a drag then drives ToolState::MarqueeSelecting (resolved by
+        // the release handler above). While armed we suppress the normal tool dispatch so a
+        // brush/etc. doesn't paint during the gesture. A double-tap without a drag falls through
+        // (Select tool handles zoom-to-fit).
+        if !is_replaying && !alt_held {
+            use vello::kurbo::Point;
+            let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+            let press_pos = mouse_canvas_pos.to_pos2();
+            if self.rsp_primary_pressed(ui) {
+                let now = ui.input(|i| i.time);
+                let is_double = self
+                    .last_tap
+                    .map_or(false, |(t, p)| now - t < 0.3 && p.distance(press_pos) < 12.0);
+                let hits = self.point_hits_object(point, shared);
+                self.marquee_gesture_armed = is_double && !hits;
+                self.last_tap = Some((now, press_pos));
+            }
+            if self.marquee_gesture_armed && self.rsp_dragged(&response) {
+                self.marquee_gesture_active = true;
+                match shared.tool_state {
+                    ToolState::MarqueeSelecting { start, .. } => {
+                        *shared.tool_state = ToolState::MarqueeSelecting { start: *start, current: point };
+                    }
+                    _ => {
+                        if !shift_held {
+                            shared.selection.clear();
+                            *shared.focus = lightningbeam_core::selection::FocusSelection::None;
+                        }
+                        *shared.tool_state = ToolState::MarqueeSelecting { start: point, current: point };
+                    }
+                }
+            }
+            if ui.input(|i| i.pointer.any_released()) {
+                self.marquee_gesture_armed = false;
+                self.marquee_gesture_active = false;
+            }
+        }
+
+        // P5 gesture (mobile only): long-press on an object opens its actions menu. In the egui fork
+        // `secondary_clicked()` fires on long-press (and right-click) and `context_menu()` opens on
+        // the same — so the menu must be attached UNCONDITIONALLY for egui to register it. Desktop
+        // (flag off) has no Stage context menu.
+        if shared.is_mobile {
+            use lightningbeam_core::layer::AnyLayer;
+            use lightningbeam_core::selection::FocusSelection;
+            use vello::kurbo::{Affine, Point};
+            // Long-press selects the object under the press (clip instance first, else geometry).
+            if response.secondary_clicked() {
+                if let Some(layer_id) = *shared.active_layer_id {
+                    let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+                    let time = *shared.playback_time;
+                    let clip_hit = {
+                        let document = shared.action_executor.document();
+                        if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+                            lightningbeam_core::hit_test::hit_test_clip_instances(&vl.clip_instances, document, point, Affine::IDENTITY, time)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(instance_id) = clip_hit {
+                        if !shared.selection.contains_clip_instance(&instance_id) {
+                            shared.selection.select_only_clip_instance(instance_id);
+                            *shared.focus = FocusSelection::ClipInstances(shared.selection.clip_instances().to_vec());
+                        }
+                    } else {
+                        // No clip — try vector geometry (edge/fill).
+                        let graph_hit = {
+                            let document = shared.action_executor.document();
+                            if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+                                lightningbeam_core::hit_test::hit_test_layer(vl, time, point, 5.0, Affine::IDENTITY)
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(gh) = graph_hit {
+                            if let Some(AnyLayer::Vector(vl)) = shared.action_executor.document().get_layer(&layer_id) {
+                                if let Some(graph) = vl.graph_at_time(time) {
+                                    shared.selection.clear_geometry_selection();
+                                    match gh {
+                                        lightningbeam_core::hit_test::GraphHitResult::Edge(eid) => shared.selection.select_edge(eid, graph),
+                                        lightningbeam_core::hit_test::GraphHitResult::Fill(fid) => shared.selection.select_fill(fid, graph),
+                                    }
+                                }
+                            }
+                            *shared.focus = FocusSelection::Geometry { layer_id, time };
+                        }
+                    }
+                }
+            }
+
+            // Build the menu items for the current selection and hand them to the shell to render
+            // as a persistent popup (stays open until an item or the backdrop is tapped).
+            if response.secondary_clicked() {
+                use crate::menu::MenuAction;
+                let mut items: Vec<(String, MenuAction)> = Vec::new();
+                if !shared.selection.clip_instances().is_empty() {
+                    // A clip instance is already a clip — no "convert" here.
+                    items.push(("Cut".into(), MenuAction::Cut));
+                    items.push(("Copy".into(), MenuAction::Copy));
+                    items.push(("Duplicate".into(), MenuAction::DuplicateClip));
+                    items.push(("Delete".into(), MenuAction::Delete));
+                } else if shared.selection.has_geometry_selection() {
+                    // Geometry can be gathered up into a movie clip.
+                    items.push(("Cut".into(), MenuAction::Cut));
+                    items.push(("Copy".into(), MenuAction::Copy));
+                    items.push(("Convert to movie clip".into(), MenuAction::ConvertToMovieClip));
+                    items.push(("Delete".into(), MenuAction::Delete));
+                }
+                if !items.is_empty() {
+                    if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+                        *shared.mobile_context_menu = Some(crate::panes::MobileContextMenu { pos, items });
+                    }
+                }
+            }
+        }
+
+        // Handle tool input (only if not using Alt modifier for panning, and not while a
+        // double-tap-drag marquee is actively dragging so the tool doesn't act during the gesture).
+        if !alt_held && !self.marquee_gesture_active {
             use lightningbeam_core::tool::Tool;
 
             // On a shape-tween in-between frame the active vector layer's geometry is an
@@ -11425,70 +11635,26 @@ impl StagePane {
         // Delete/Backspace: remove selected DCEL elements
         if ui.input(|i| shared.keymap.action_pressed_with_backspace(crate::keymap::AppAction::StageDelete, i)) {
             if shared.selection.has_geometry_selection() {
-                if let Some(active_layer_id) = *shared.active_layer_id {
-                    let time = *shared.playback_time;
-
-                    // Collect selected edge IDs before mutating
-                    let selected_edges: Vec<lightningbeam_core::vector_graph::EdgeId> =
-                        shared.selection.selected_edges().iter().copied().collect();
-
-                    if !selected_edges.is_empty() {
-                        // Snapshot before
-                        let graph_before = {
-                            let document = shared.action_executor.document();
-                            match document.get_layer(&active_layer_id) {
-                                Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => {
-                                    vl.graph_at_time(time).cloned()
-                                }
-                                _ => None,
-                            }
-                        };
-
-                        if let Some(graph_before) = graph_before {
-                            // Remove selected edges
-                            {
-                                let document = shared.action_executor.document_mut();
-                                if let Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) = document.get_layer_mut(&active_layer_id) {
-                                    if let Some(graph) = vl.graph_at_time_mut(time) {
-                                        for eid in &selected_edges {
-                                            graph.remove_edge(*eid);
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Snapshot after
-                            let graph_after = {
-                                let document = shared.action_executor.document();
-                                match document.get_layer(&active_layer_id) {
-                                    Some(lightningbeam_core::layer::AnyLayer::Vector(vl)) => {
-                                        vl.graph_at_time(time).cloned()
-                                    }
-                                    _ => None,
-                                }
-                            };
-
-                            if let Some(graph_after) = graph_after {
-                                use lightningbeam_core::actions::ModifyGraphAction;
-                                let action = ModifyGraphAction::new(
-                                    active_layer_id,
-                                    time,
-                                    graph_before,
-                                    graph_after,
-                                    "Delete",
-                                );
-                                shared.pending_actions.push(Box::new(action));
-                            }
-
-                            shared.selection.clear_geometry_selection();
-                        }
-                    }
-                }
+                self.delete_selected_geometry(shared);
             }
         }
 
         // Skip real scroll/zoom/pan input during replay
         if !is_replaying {
+            // Unified pinch / Ctrl+scroll zoom: `zoom_delta()` folds in touch-pinch (on device) AND
+            // Ctrl+wheel/trackpad (on desktop). It's a multiplicative factor (1.0 = no change);
+            // `apply_zoom_at_point` wants an additive delta (new = old * (1 + delta)). This is the
+            // single path for factor-zoom — the raw MouseWheel branch below only handles plain
+            // (non-Ctrl) mouse-wheel zoom and non-Ctrl trackpad pan.
+            let zoom_factor = ui.input(|i| i.zoom_delta());
+            if (zoom_factor - 1.0).abs() > f32::EPSILON {
+                let center = ui
+                    .input(|i| i.multi_touch().map(|m| m.center_pos))
+                    .map(|p| p - rect.min)
+                    .unwrap_or(mouse_canvas_pos);
+                self.apply_zoom_at_point(zoom_factor - 1.0, center);
+            }
+
             // Distinguish between mouse wheel (discrete) and trackpad (smooth)
             let mut handled = false;
             ui.input(|i| {
@@ -11496,23 +11662,20 @@ impl StagePane {
                     if let egui::Event::MouseWheel { unit, delta, modifiers, .. } = event {
                         match unit {
                             egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
-                                // Real mouse wheel (discrete clicks) -> always zoom
-                                let zoom_delta = if ctrl_held || modifiers.ctrl {
-                                    delta.y * 0.01 // Ctrl+wheel: faster zoom
-                                } else {
-                                    delta.y * 0.005 // Normal zoom
-                                };
-                                self.apply_zoom_at_point(zoom_delta, mouse_canvas_pos);
+                                // Plain mouse wheel zooms; Ctrl+wheel was already handled above via
+                                // zoom_delta(). Consume the event either way so the pan fallback
+                                // below doesn't also fire.
+                                if !(ctrl_held || modifiers.ctrl) {
+                                    self.apply_zoom_at_point(delta.y * 0.005, mouse_canvas_pos);
+                                }
                                 handled = true;
                             }
                             egui::MouseWheelUnit::Point => {
-                                // Trackpad (smooth scrolling) -> only zoom if Ctrl held
+                                // Trackpad: Ctrl-zoom handled above (consume it); non-Ctrl falls
+                                // through to scroll_delta panning.
                                 if ctrl_held || modifiers.ctrl {
-                                    let zoom_delta = delta.y * 0.005;
-                                    self.apply_zoom_at_point(zoom_delta, mouse_canvas_pos);
                                     handled = true;
                                 }
-                                // Otherwise let scroll_delta handle panning
                             }
                         }
                     }
