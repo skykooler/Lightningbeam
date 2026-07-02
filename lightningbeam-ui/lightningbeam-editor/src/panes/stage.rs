@@ -4009,8 +4009,9 @@ impl StagePane {
         // geometry selection/editing there; clip-instance interaction stays available.
         let inbetween = vector_layer.is_tween_inbetween(*shared.playback_time);
 
-        // Double-click: enter/exit movie clip editing
-        if response.double_clicked() {
+        // Double-click: enter/exit movie clip editing (desktop; mobile handles double-tap as a
+        // single tool-independent gesture in handle_input).
+        if !shared.is_mobile && response.double_clicked() {
             // Hit test clip instances at the click position
             let document = shared.action_executor.document();
             let clip_hit = hit_test::hit_test_clip_instances(
@@ -11445,6 +11446,36 @@ impl StagePane {
             }
         }
 
+        // P5 gesture (mobile): double-tap semantics, in priority order and regardless of the active
+        // tool. (double_clicked() fires on double-tap and, on desktop, double-click — so testable.)
+        //   1. object under the tap → enter it (movie clip or group — go a level deeper)
+        //   2. empty, inside a clip → exit one level
+        //   3. empty, at the top level → zoom to fit
+        // The desktop equivalent lives in handle_select_tool (gated to !is_mobile below).
+        if shared.is_mobile && response.double_clicked() {
+            use lightningbeam_core::layer::AnyLayer;
+            use vello::kurbo::{Affine, Point};
+            let point = Point::new(world_pos.x as f64, world_pos.y as f64);
+            let hit = (*shared.active_layer_id).and_then(|layer_id| {
+                let document = shared.action_executor.document();
+                if let Some(AnyLayer::Vector(vl)) = document.get_layer(&layer_id) {
+                    lightningbeam_core::hit_test::hit_test_clip_instances(
+                        &vl.clip_instances, document, point, Affine::IDENTITY, *shared.playback_time,
+                    )
+                    .and_then(|iid| vl.clip_instances.iter().find(|c| c.id == iid).map(|c| (c.clip_id, iid, layer_id)))
+                } else {
+                    None
+                }
+            });
+            if let Some((clip_id, instance_id, layer_id)) = hit {
+                *shared.pending_enter_clip = Some((clip_id, instance_id, layer_id));
+            } else if shared.editing_clip_id.is_some() {
+                *shared.pending_exit_clip = true;
+            } else {
+                self.zoom_to_fit(shared);
+            }
+        }
+
         // P5 gesture (mobile only): long-press on an object opens its actions menu. In the egui fork
         // `secondary_clicked()` fires on long-press (and right-click) and `context_menu()` opens on
         // the same — so the menu must be attached UNCONDITIONALLY for egui to register it. Desktop
@@ -12865,72 +12896,72 @@ impl PaneRenderer for StagePane {
             }
         }
 
-        // Show camera info overlay
-        let info_color = shared.theme.text_color(&["#stage", ".text-secondary"], ui.ctx(), egui::Color32::from_gray(200));
-        ui.painter().text(
-            rect.min + egui::vec2(10.0, 10.0),
-            egui::Align2::LEFT_TOP,
-            format!("Vello Stage (zoom: {:.2}, pan: {:.0},{:.0})",
-                self.zoom, self.pan_offset.x, self.pan_offset.y),
-            egui::FontId::proportional(14.0),
-            info_color,
-        );
-
-        // Render breadcrumb navigation when inside a movie clip
-        if shared.editing_clip_id.is_some() {
-            let document = shared.action_executor.document();
-            // Build breadcrumb names from the editing context
-            // We only have the current clip_id, so show "Scene 1 > ClipName"
-            let clip_name = shared.editing_clip_id
-                .and_then(|id| document.get_vector_clip(&id))
-                .map(|c| c.name.clone())
-                .unwrap_or_else(|| "Unknown".to_string());
-
-            let breadcrumb_y = rect.min.y + 30.0;
-            let breadcrumb_x = rect.min.x + 10.0;
-
-            // Background pill
-            let scene_text = "Scene 1";
-            let separator = " > ";
-            let full_text = format!("{}{}{}", scene_text, separator, clip_name);
+        // Render breadcrumb navigation showing the full editing path (root → … → current clip).
+        if !shared.editing_clip_path.is_empty() {
             let font = egui::FontId::proportional(13.0);
-            let galley = ui.painter().layout_no_wrap(full_text.clone(), font.clone(), egui::Color32::WHITE);
-            let text_rect = egui::Rect::from_min_size(
-                egui::pos2(breadcrumb_x, breadcrumb_y),
-                galley.size() + egui::vec2(16.0, 8.0),
-            );
-            ui.painter().rect_filled(
-                text_rect,
-                4.0,
-                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180),
-            );
+            let sep = " > ";
+            // Segments: "Scene 1" (root) + each clip name. `target` = depth to exit to when clicked
+            // (root → 0; clip at path index k → k+1); the current (last) level isn't clickable.
+            let segments: Vec<(String, Option<usize>)> = {
+                let document = shared.action_executor.document();
+                let n = shared.editing_clip_path.len();
+                let mut segs: Vec<(String, Option<usize>)> = vec![("Scene 1".to_string(), Some(0))];
+                for (k, cid) in shared.editing_clip_path.iter().enumerate() {
+                    let name = document
+                        .get_vector_clip(cid)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    segs.push((name, if k + 1 == n { None } else { Some(k + 1) }));
+                }
+                segs
+            };
 
-            // "Scene 1" as clickable (exit clip)
-            let scene_galley = ui.painter().layout_no_wrap(
-                scene_text.to_string(), font.clone(), egui::Color32::from_rgb(120, 180, 255),
-            );
-            let scene_rect = egui::Rect::from_min_size(
-                egui::pos2(breadcrumb_x + 8.0, breadcrumb_y + 4.0),
-                scene_galley.size(),
-            );
-            let scene_response = ui.allocate_rect(scene_rect, egui::Sense::click());
-            ui.painter().galley(scene_rect.min, scene_galley, egui::Color32::WHITE);
-            if scene_response.clicked() {
-                *shared.pending_exit_clip = true;
-            }
-            if scene_response.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
+            let bx = rect.min.x + 10.0;
+            let by = rect.min.y + 10.0;
 
-            // Separator + clip name (not clickable, it's the current level)
-            let rest_text = format!("{}{}", separator, clip_name);
-            ui.painter().text(
-                egui::pos2(scene_rect.max.x, breadcrumb_y + 4.0),
-                egui::Align2::LEFT_TOP,
-                rest_text,
-                font,
-                egui::Color32::WHITE,
-            );
+            // Background pill sized to the whole path.
+            let full: String = segments
+                .iter()
+                .enumerate()
+                .map(|(i, (s, _))| if i == 0 { s.clone() } else { format!("{sep}{s}") })
+                .collect();
+            let full_galley = ui.painter().layout_no_wrap(full, font.clone(), egui::Color32::WHITE);
+            let pill = egui::Rect::from_min_size(egui::pos2(bx, by), full_galley.size() + egui::vec2(16.0, 8.0));
+            ui.painter().rect_filled(pill, 4.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180));
+
+            // Draw segments left → right; clickable ancestors in blue.
+            let mut x = bx + 8.0;
+            let y = by + 4.0;
+            let mut clicked_target: Option<usize> = None;
+            for (i, (name, target)) in segments.iter().enumerate() {
+                if i > 0 {
+                    let sg = ui.painter().layout_no_wrap(sep.to_string(), font.clone(), egui::Color32::from_gray(160));
+                    let sw = sg.size().x;
+                    ui.painter().galley(egui::pos2(x, y), sg, egui::Color32::from_gray(160));
+                    x += sw;
+                }
+                let color = if target.is_some() {
+                    egui::Color32::from_rgb(120, 180, 255)
+                } else {
+                    egui::Color32::WHITE
+                };
+                let g = ui.painter().layout_no_wrap(name.clone(), font.clone(), color);
+                let seg_rect = egui::Rect::from_min_size(egui::pos2(x, y), g.size());
+                if let Some(depth) = target {
+                    let resp = ui.allocate_rect(seg_rect, egui::Sense::click());
+                    if resp.clicked() {
+                        clicked_target = Some(*depth);
+                    }
+                    if resp.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                }
+                ui.painter().galley(seg_rect.min, g, color);
+                x += seg_rect.width();
+            }
+            if let Some(depth) = clicked_target {
+                *shared.pending_exit_to_depth = Some(depth);
+            }
         }
 
         // Render vector editing overlays (vertices, control points, etc.)

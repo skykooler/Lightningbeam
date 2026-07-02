@@ -197,6 +197,11 @@ pub struct MobileState {
     /// Screen-y of the tap that opened the inspector — used to decide whether the tapped thing would
     /// be hidden by the sheet (only then do we reflow the stack).
     pub inspector_anchor_y: f32,
+    /// Set when the user taps outside the sheet to dismiss it; suppresses re-showing until the
+    /// selection changes. Reset when the selection signature below changes.
+    pub inspector_dismissed: bool,
+    /// Cheap signature of the current selection, to detect when it changes (re-show the inspector).
+    pub inspector_sel_sig: u64,
     /// Whether the omnibutton radial tool menu is open.
     pub omni_open: bool,
     /// Whether the omnibutton "more" grid (all tools) is open.
@@ -225,6 +230,8 @@ impl Default for MobileState {
             inspector_frac: 0.45,
             inspector_visible: false,
             inspector_anchor_y: 0.0,
+            inspector_dismissed: false,
+            inspector_sel_sig: 0,
             omni_open: false,
             omni_grid_open: false,
             omni_create_open: false,
@@ -269,9 +276,16 @@ pub fn render_mobile_shell(
     // interacted with (pointer down but still selected).
     let active = inspector::is_active(&rc.shared);
     let any_down = ui.input(|i| i.pointer.any_down());
+    let sel_sig = inspector::selection_sig(&rc.shared);
+    if sel_sig != state.inspector_sel_sig {
+        // Selection changed → a fresh thing to inspect; clear any prior manual dismissal.
+        state.inspector_dismissed = false;
+        state.inspector_sel_sig = sel_sig;
+    }
     if !active {
         state.inspector_visible = false;
-    } else if !any_down {
+        state.inspector_dismissed = false;
+    } else if !state.inspector_dismissed && !any_down {
         if !state.inspector_visible {
             // Just opened (tap released): anchor to the release position for the reflow test below.
             state.inspector_anchor_y = ui
@@ -289,8 +303,9 @@ pub fn render_mobile_shell(
     };
     let mut sheet_top = region.bottom() - sheet_h;
 
-    // Tapping outside the sheet (but not on the transport) dismisses the inspector. The press still
-    // reaches the panes below via stack::render, so tapping another object reselects and reopens it.
+    // Tapping outside the sheet (but not on the transport) dismisses (hides) the inspector. We only
+    // hide it — NOT clear the selection — so actions dispatched from overlays (context menu, "+New"
+    // grid) still see the selection. It stays dismissed until the selection changes (sig above).
     if inspector_shown {
         let sheet_rect = egui::Rect::from_min_max(egui::pos2(region.left(), sheet_top), region.max);
         let dismiss = ui.input(|i| {
@@ -300,9 +315,8 @@ pub fn render_mobile_shell(
                 })
         });
         if dismiss {
-            rc.shared.selection.clear();
-            *rc.shared.focus = lightningbeam_core::selection::FocusSelection::None;
             state.inspector_visible = false;
+            state.inspector_dismissed = true;
             inspector_shown = false;
             sheet_top = region.bottom();
         }

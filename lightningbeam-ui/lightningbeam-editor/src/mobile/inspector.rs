@@ -22,6 +22,22 @@ pub fn is_active(shared: &SharedPaneState) -> bool {
     !shared.focus.is_none() || !shared.selection.is_empty()
 }
 
+/// A cheap content-sensitive signature of the current selection, so the shell can detect when the
+/// selection *changes* (to re-show a manually-dismissed inspector for the new thing).
+pub fn selection_sig(shared: &SharedPaneState) -> u64 {
+    let mut h: u64 = 0;
+    for id in shared.selection.clip_instances() {
+        h ^= (id.as_u128() as u64).wrapping_mul(0x9E3779B97F4A7C15);
+    }
+    for f in shared.selection.selected_fills() {
+        h ^= (f.idx() as u64).wrapping_mul(0xD1B54A32D192ED03);
+    }
+    for e in shared.selection.selected_edges() {
+        h ^= (e.idx() as u64).wrapping_mul(0xA24BAED4963EE407);
+    }
+    h
+}
+
 /// The stack slot (see `super::STACK`) where the current selection lives, so we can tell if the
 /// sheet would cover it. Geometry/selection lives on the Stage; clips/layers on the Timeline; etc.
 #[allow(dead_code)] // selection→pane mapping; kept for reflow/jump heuristics

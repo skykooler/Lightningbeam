@@ -212,10 +212,15 @@ pub struct SharedPaneState<'a> {
     pub editing_instance_id: Option<uuid::Uuid>,
     /// The parent layer ID containing the clip instance being edited
     pub editing_parent_layer_id: Option<uuid::Uuid>,
+    /// The full clip_id path being edited, outermost → current (for breadcrumbs). Empty at root.
+    pub editing_clip_path: Vec<uuid::Uuid>,
     /// Request to enter a movie clip for editing: (clip_id, instance_id, parent_layer_id)
     pub pending_enter_clip: &'a mut Option<(uuid::Uuid, uuid::Uuid, uuid::Uuid)>,
     /// Request to exit the current movie clip
     pub pending_exit_clip: &'a mut bool,
+    /// Request to exit up to a specific editing depth (number of clips to keep); e.g. a breadcrumb
+    /// click. `Some(0)` exits all the way to the document root.
+    pub pending_exit_to_depth: &'a mut Option<usize>,
     /// Currently active layer ID
     pub active_layer_id: &'a mut Option<uuid::Uuid>,
     /// Current tool interaction state (mutable for tools to modify)

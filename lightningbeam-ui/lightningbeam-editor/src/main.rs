@@ -942,6 +942,21 @@ impl EditingContext {
         self.stack.pop()
     }
 
+    /// The clip_id path from outermost to the current level (for breadcrumbs).
+    fn clip_path(&self) -> Vec<Uuid> {
+        self.stack.iter().map(|e| e.clip_id).collect()
+    }
+
+    /// Pop down to `depth` entries, returning the entry at `depth` (whose saved state should be
+    /// restored). Returns None if already at or above that depth.
+    fn exit_to_depth(&mut self, depth: usize) -> Option<EditingContextEntry> {
+        if depth >= self.stack.len() {
+            return None;
+        }
+        let restore = self.stack[depth].clone();
+        self.stack.truncate(depth);
+        Some(restore)
+    }
 }
 
 struct EditorApp {
@@ -6926,6 +6941,15 @@ impl eframe::App for EditorApp {
                 }
             }
 
+            // Breadcrumb jump: exit up to a specific depth (restoring that level's saved context).
+            if let Some(depth) = scratch.pending_exit_to_depth.take() {
+                if let Some(entry) = self.editing_context.exit_to_depth(depth) {
+                    self.selection.clear();
+                    self.active_layer_id = entry.saved_active_layer_id;
+                    self.playback_time = entry.saved_playback_time;
+                }
+            }
+
             // Set cursor based on hover state
             if let Some((_, is_horizontal)) = self.hovered_divider {
                 if is_horizontal {
@@ -7157,6 +7181,7 @@ struct FrameScratch {
     pending_handlers: Vec<panes::ViewActionHandler>,
     pending_enter_clip: Option<(Uuid, Uuid, Uuid)>,
     pending_exit_clip: bool,
+    pending_exit_to_depth: Option<usize>,
     pending_actions: Vec<Box<dyn lightningbeam_core::action::Action>>,
     pending_menu_actions: Vec<MenuAction>,
     effect_thumbnail_requests: Vec<Uuid>,
@@ -7221,8 +7246,10 @@ impl EditorApp {
                     editing_clip_id: self.editing_context.current_clip_id(),
                     editing_instance_id: self.editing_context.current_instance_id(),
                     editing_parent_layer_id: self.editing_context.current_parent_layer_id(),
+                    editing_clip_path: self.editing_context.clip_path(),
                     pending_enter_clip: &mut scratch.pending_enter_clip,
                     pending_exit_clip: &mut scratch.pending_exit_clip,
+                    pending_exit_to_depth: &mut scratch.pending_exit_to_depth,
                     active_layer_id: &mut self.active_layer_id,
                     tool_state: &mut self.tool_state,
                     pending_actions: &mut scratch.pending_actions,
