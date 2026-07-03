@@ -59,20 +59,35 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
                 pal.text,
             );
 
-            // Vertical budget: ~2/3 for the intent grid, ~1/3 for the recent list.
+            let landscape = rect.width() > rect.height();
             let content_top = rect.top() + 62.0;
-            let content_h = (rect.bottom() - margin) - content_top;
+            let content_bottom = rect.bottom() - margin;
             let gap = 10.0;
-            let grid_h = content_h * 0.66;
 
-            // 2×3 grid of intent cards filling the grid budget.
-            let col_w = (right - left - gap) / 2.0;
-            let card_h = (grid_h - 2.0 * gap) / 3.0;
+            // Portrait: 3 rows × 2 cols of intent cards up top, recent list below.
+            // Landscape: 2 rows × 3 cols on the left, recent list to the right.
+            let (cols, rows) = if landscape { (3usize, 2usize) } else { (2usize, 3usize) };
+            let (grid_rect, recent_rect) = if landscape {
+                let split = left + (right - left) * 0.62;
+                (
+                    egui::Rect::from_min_max(egui::pos2(left, content_top), egui::pos2(split - gap, content_bottom)),
+                    egui::Rect::from_min_max(egui::pos2(split + gap, content_top), egui::pos2(right, content_bottom)),
+                )
+            } else {
+                let grid_h = (content_bottom - content_top) * 0.66;
+                (
+                    egui::Rect::from_min_max(egui::pos2(left, content_top), egui::pos2(right, content_top + grid_h)),
+                    egui::Rect::from_min_max(egui::pos2(left, content_top + grid_h + 14.0), egui::pos2(right, content_bottom)),
+                )
+            };
+
+            let col_w = (grid_rect.width() - (cols as f32 - 1.0) * gap) / cols as f32;
+            let card_h = (grid_rect.height() - (rows as f32 - 1.0) * gap) / rows as f32;
             for (i, intent) in intents(&pal).iter().enumerate() {
-                let col = (i % 2) as f32;
-                let row = (i / 2) as f32;
-                let cx = left + col * (col_w + gap);
-                let cy = content_top + row * (card_h + gap);
+                let col = (i % cols) as f32;
+                let row = (i / cols) as f32;
+                let cx = grid_rect.left() + col * (col_w + gap);
+                let cy = grid_rect.top() + row * (card_h + gap);
                 let card = egui::Rect::from_min_size(egui::pos2(cx, cy), egui::vec2(col_w, card_h));
 
                 let resp = ui.interact(card, ui.id().with(("mobile_intent", i)), egui::Sense::click());
@@ -102,20 +117,21 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
                 }
             }
 
-            // Recent projects list in the bottom third.
-            let recent_top = content_top + grid_h + 14.0;
+            // Recent projects list (below the grid in portrait, beside it in landscape).
+            let rleft = recent_rect.left();
+            let rright = recent_rect.right();
             ui.painter().text(
-                egui::pos2(left, recent_top),
+                egui::pos2(rleft, recent_rect.top()),
                 egui::Align2::LEFT_TOP,
                 "Recent",
                 egui::FontId::proportional(13.0),
                 pal.text_dim,
             );
-            let list_top = recent_top + 22.0;
+            let list_top = recent_rect.top() + 22.0;
             let recents = app.config.get_recent_files();
             if recents.is_empty() {
                 ui.painter().text(
-                    egui::pos2(left, list_top + 8.0),
+                    egui::pos2(rleft, list_top + 8.0),
                     egui::Align2::LEFT_TOP,
                     "No recent projects",
                     egui::FontId::proportional(12.0),
@@ -124,13 +140,13 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
             } else {
                 let row_h = 38.0;
                 let row_gap = 6.0;
-                let avail = rect.bottom() - margin - list_top;
+                let avail = recent_rect.bottom() - list_top;
                 let max_rows = ((avail + row_gap) / (row_h + row_gap)).floor().max(0.0) as usize;
                 let mut chosen: Option<std::path::PathBuf> = None;
                 for (j, path) in recents.iter().take(max_rows).enumerate() {
                     let ry = list_top + j as f32 * (row_h + row_gap);
                     let row_rect =
-                        egui::Rect::from_min_max(egui::pos2(left, ry), egui::pos2(right, ry + row_h));
+                        egui::Rect::from_min_max(egui::pos2(rleft, ry), egui::pos2(rright, ry + row_h));
                     let resp =
                         ui.interact(row_rect, ui.id().with(("mobile_recent", j)), egui::Sense::click());
                     let p = ui.painter();

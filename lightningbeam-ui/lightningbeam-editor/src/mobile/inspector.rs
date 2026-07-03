@@ -44,7 +44,7 @@ pub fn selection_sig(shared: &SharedPaneState) -> u64 {
 pub fn target_slot(shared: &SharedPaneState) -> usize {
     match &*shared.focus {
         FocusSelection::Notes { .. } => 4,          // PianoRoll
-        FocusSelection::Nodes(_) => 6,              // Node/Instrument
+        FocusSelection::Nodes(_) => 5,              // Node/Instrument
         FocusSelection::Assets(_) => 1,             // Asset Library
         FocusSelection::ClipInstances(_) | FocusSelection::Layers(_) => 3, // Timeline
         FocusSelection::Geometry { .. } | FocusSelection::None => 2,       // Stage
@@ -105,44 +105,61 @@ struct Chip {
 
 const CHIPS: [Chip; 2] = [
     Chip { label: "Timeline", window: (3, 1) }, // Timeline = STACK index 3
-    Chip { label: "Nodes", window: (6, 1) },    // Node/Instrument = STACK index 6
+    Chip { label: "Nodes", window: (5, 1) },    // Node/Instrument = STACK index 5
 ];
 
 pub fn render(
     ui: &mut egui::Ui,
     rect: egui::Rect,
-    region_h: f32,
+    region: egui::Rect,
     rc: &mut RenderContext,
     state: &mut MobileState,
     pal: &Palette,
+    landscape: bool,
 ) {
-    // Sheet background with rounded top + a border stroke that follows the rounded corners (a plain
-    // hline would overrun the rounded corners and detach from them).
-    let radius = egui::CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 };
+    // Panel background + border, with rounded corners on the edge that faces the content (top in
+    // portrait, left in landscape).
+    let radius = if landscape {
+        egui::CornerRadius { nw: 14, ne: 0, sw: 14, se: 0 }
+    } else {
+        egui::CornerRadius { nw: 14, ne: 14, sw: 0, se: 0 }
+    };
     ui.painter().rect_filled(rect, radius, pal.surface_alt);
     ui.painter().rect_stroke(rect, radius, egui::Stroke::new(1.0, pal.line), egui::StrokeKind::Inside);
 
-    // Grab handle — drag to resize the sheet.
-    let grab = egui::Rect::from_min_max(
-        rect.left_top(),
-        egui::pos2(rect.right(), rect.top() + GRAB_H),
-    );
-    let gresp = ui.interact(grab, ui.id().with("mobile_inspector_grab"), egui::Sense::drag());
-    let pill = egui::Rect::from_center_size(grab.center(), egui::vec2(34.0, 4.0));
-    ui.painter().rect_filled(pill, 2.0, if gresp.hovered() || gresp.dragged() { pal.accent } else { pal.line });
-    if gresp.dragged() && region_h > 1.0 {
-        state.inspector_frac = (state.inspector_frac - gresp.drag_delta().y / region_h).clamp(0.2, 0.85);
-    }
-    if gresp.hovered() || gresp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-    }
+    // Grab handle — top strip (portrait, drags height) or left strip (landscape, drags width).
+    // `content_area` is the panel minus the grab strip.
+    let content_area = if landscape {
+        let grab = egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.left() + GRAB_H, rect.bottom()));
+        let gresp = ui.interact(grab, ui.id().with("mobile_inspector_grab"), egui::Sense::drag());
+        let pill = egui::Rect::from_center_size(grab.center(), egui::vec2(4.0, 34.0));
+        ui.painter().rect_filled(pill, 2.0, if gresp.hovered() || gresp.dragged() { pal.accent } else { pal.line });
+        if gresp.dragged() && region.width() > 1.0 {
+            state.inspector_width_frac = (state.inspector_width_frac - gresp.drag_delta().x / region.width()).clamp(0.2, 0.7);
+        }
+        if gresp.hovered() || gresp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        egui::Rect::from_min_max(egui::pos2(grab.right(), rect.top()), rect.max)
+    } else {
+        let grab = egui::Rect::from_min_max(rect.left_top(), egui::pos2(rect.right(), rect.top() + GRAB_H));
+        let gresp = ui.interact(grab, ui.id().with("mobile_inspector_grab"), egui::Sense::drag());
+        let pill = egui::Rect::from_center_size(grab.center(), egui::vec2(34.0, 4.0));
+        ui.painter().rect_filled(pill, 2.0, if gresp.hovered() || gresp.dragged() { pal.accent } else { pal.line });
+        if gresp.dragged() && region.height() > 1.0 {
+            state.inspector_frac = (state.inspector_frac - gresp.drag_delta().y / region.height()).clamp(0.2, 0.85);
+        }
+        if gresp.hovered() || gresp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        egui::Rect::from_min_max(egui::pos2(rect.left(), grab.bottom()), rect.max)
+    };
 
     // Single header row (egui widgets — they inherit the mobile touch sizing + theme visuals):
     // title on the left, [Timeline] [Nodes] jump buttons + ✕ close on the right.
-    let head_y = rect.top() + GRAB_H;
     let head = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), head_y),
-        egui::pos2(rect.right(), head_y + HEAD_H),
+        content_area.min,
+        egui::pos2(content_area.right(), content_area.top() + HEAD_H),
     );
     let title_text = title(&rc.shared);
     let mut jump: Option<(usize, usize)> = None;
@@ -184,8 +201,8 @@ pub fn render(
 
     // Properties content — reuse the Infopanel full-bleed.
     let content = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), head.bottom()),
-        rect.max,
+        egui::pos2(content_area.left(), head.bottom()),
+        content_area.max,
     );
     if content.height() > 1.0 {
         surface::render_surface_fullbleed(ui, content, &inspector_path(), PaneType::Infopanel, rc);

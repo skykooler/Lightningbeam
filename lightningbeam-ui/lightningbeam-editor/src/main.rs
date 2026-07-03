@@ -201,7 +201,9 @@ fn main() -> eframe::Result {
     // When developing the mobile UI on desktop (LB_MOBILE_UI), open a phone-aspect window so
     // the shell can be exercised at a realistic size. Gating the shell itself is done at
     // render time on the flag, not on window aspect.
-    let initial_size = if mobile::is_mobile_env() {
+    let initial_size = if mobile::is_mobile_landscape_env() {
+        [874.0, 402.0] // iPhone-ish landscape (LB_MOBILE_UI=2)
+    } else if mobile::is_mobile_env() {
         [402.0, 874.0] // iPhone-ish portrait
     } else {
         [1920.0, 1080.0]
@@ -7294,6 +7296,7 @@ impl EditorApp {
             rc: RenderContext {
                 shared: panes::SharedPaneState {
                     is_mobile,
+                    is_portrait: true, // set by the mobile shell from the available rect
                     keyboard_octave: &mut self.keyboard_octave,
                     keyboard_pan_x: &mut self.keyboard_pan_x,
                     instrument_show_roll: false,

@@ -82,6 +82,12 @@ pub fn is_mobile_env() -> bool {
         .unwrap_or(false)
 }
 
+/// `LB_MOBILE_UI=2` develops the mobile shell in landscape (opens a landscape phone window).
+/// Orientation itself is aspect-based at render time; this only picks the initial window aspect.
+pub fn is_mobile_landscape_env() -> bool {
+    std::env::var("LB_MOBILE_UI").map(|v| v == "2").unwrap_or(false)
+}
+
 /// The panes that make up the vertical stack, in fixed top→bottom order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StackPane {
@@ -187,8 +193,10 @@ pub struct MobileState {
     pub weights: [f32; 3],
     /// Node/Instrument band: false = node editor, true = instrument/preset browser.
     pub show_instruments: bool,
-    /// Inspector sheet height as a fraction of the region above the transport.
+    /// Inspector sheet height as a fraction of the region above the transport (portrait).
     pub inspector_frac: f32,
+    /// Inspector side-panel width as a fraction of the region (landscape).
+    pub inspector_width_frac: f32,
     /// Whether the inspector sheet is currently shown. Gated to appear on pointer *release* (a tap),
     /// not on press, so press+drag interactions aren't interrupted by the sheet popping up.
     pub inspector_visible: bool,
@@ -226,6 +234,7 @@ impl Default for MobileState {
             weights: [1.0, 1.0, 1.0],
             show_instruments: false,
             inspector_frac: 0.45,
+            inspector_width_frac: 0.4,
             inspector_visible: false,
             inspector_anchor_y: 0.0,
             inspector_dismissed: false,
@@ -251,12 +260,24 @@ pub fn render_mobile_shell(
 ) {
     let pal = Palette::from_theme(rc.shared.theme, ui.ctx());
 
+    // Orientation (aspect-based; rotation = a resize). Published to panes before anything renders.
+    let landscape = available_rect.width() > available_rect.height();
+    rc.shared.is_portrait = !landscape;
+    // Rotating while 3 panes are open drops to 2 (landscape caps the stack at 2).
+    if landscape && state.window_count > 2 {
+        state.window_count = 2;
+        state.window_top = state.window_top.min(STACK.len().saturating_sub(2));
+    }
+
     // Background (device color; bands paint over most of it).
     ui.painter().rect_filled(available_rect, 0.0, pal.bg);
 
+    // In landscape the top bar is folded into the top pane header (no separate band), reclaiming its
+    // height for the stack.
+    let topbar_h = if landscape { 0.0 } else { TOPBAR_H };
     let topbar_rect = egui::Rect::from_min_max(
         available_rect.min,
-        egui::pos2(available_rect.right(), available_rect.top() + TOPBAR_H),
+        egui::pos2(available_rect.right(), available_rect.top() + topbar_h),
     );
     let transport_rect = egui::Rect::from_min_max(
         egui::pos2(available_rect.left(), available_rect.bottom() - TRANSPORT_H),
@@ -294,38 +315,42 @@ pub fn render_mobile_shell(
         state.inspector_visible = true;
     }
     let mut inspector_shown = state.inspector_visible;
-    let sheet_h = if inspector_shown {
-        (region.height() * state.inspector_frac).clamp(120.0, region.height() - 60.0)
-    } else {
-        0.0
-    };
-    let mut sheet_top = region.bottom() - sheet_h;
 
-    // Tapping outside the sheet (but not on the transport) dismisses (hides) the inspector. We only
-    // hide it — NOT clear the selection — so actions dispatched from overlays (context menu, "+New"
-    // grid) still see the selection. It stays dismissed until the selection changes (sig above).
+    // Inspector geometry: a bottom sheet in portrait, a right-side vertical column in landscape.
+    let inspector_rect = if landscape {
+        let w = (region.width() * state.inspector_width_frac).clamp(180.0, region.width() - 140.0);
+        egui::Rect::from_min_max(egui::pos2(region.right() - w, region.top()), region.max)
+    } else {
+        let h = (region.height() * state.inspector_frac).clamp(120.0, region.height() - 60.0);
+        egui::Rect::from_min_max(egui::pos2(region.left(), region.bottom() - h), region.max)
+    };
+
+    // Tapping outside the inspector (but not on the transport) dismisses (hides) it. We only hide —
+    // NOT clear the selection — so actions dispatched from overlays (context menu, "+New" grid) still
+    // see the selection. It stays dismissed until the selection changes (sig above).
     if inspector_shown {
-        let sheet_rect = egui::Rect::from_min_max(egui::pos2(region.left(), sheet_top), region.max);
         let dismiss = ui.input(|i| {
             i.pointer.primary_pressed()
                 && i.pointer.press_origin().map_or(false, |p| {
-                    !sheet_rect.contains(p) && !transport_rect.contains(p)
+                    !inspector_rect.contains(p) && !transport_rect.contains(p)
                 })
         });
         if dismiss {
             state.inspector_visible = false;
             state.inspector_dismissed = true;
             inspector_shown = false;
-            sheet_top = region.bottom();
         }
     }
 
-    // Reflow (shrink the stack above the sheet) only when the thing that was tapped would actually be
-    // hidden by the sheet — i.e. the tap landed below where the sheet now sits. Otherwise just
-    // overlay. Restoring on dismiss is automatic — reflow only changes the render rect.
-    let covered = inspector_shown && state.inspector_anchor_y > sheet_top;
-    let stack_rect = if covered {
-        egui::Rect::from_min_max(region.min, egui::pos2(region.right(), sheet_top))
+    // Reflow: shrink the stack to make room for the inspector. Landscape always carves horizontally
+    // (side-by-side); portrait only carves when the tapped thing sits below the sheet (else overlay).
+    // Restoring on dismiss is automatic — reflow only changes the render rect.
+    let stack_rect = if !inspector_shown {
+        region
+    } else if landscape {
+        egui::Rect::from_min_max(region.min, egui::pos2(inspector_rect.left(), region.bottom()))
+    } else if state.inspector_anchor_y > inspector_rect.top() {
+        egui::Rect::from_min_max(region.min, egui::pos2(region.right(), inspector_rect.top()))
     } else {
         region
     };
@@ -347,8 +372,7 @@ pub fn render_mobile_shell(
     stack::render(ui, stack_rect, rc, state, &pal);
 
     if inspector_shown {
-        let sheet_rect = egui::Rect::from_min_max(egui::pos2(region.left(), sheet_top), region.max);
-        inspector::render(ui, sheet_rect, region.height(), rc, state, &pal);
+        inspector::render(ui, inspector_rect, region, rc, state, &pal, landscape);
     }
 
     // Transport floor: drawn last = always on top, the persistent spine.
@@ -368,7 +392,17 @@ pub fn render_mobile_shell(
     }
 
     // Top bar (filename + ⌕ palette + ⋯ commands). Its menus overlay the whole shell, so it's last.
-    topbar::render(ui, topbar_rect, available_rect, rc, state, &pal);
+    // Portrait: its own band at the top. Landscape: folded into the middle of the top pane header.
+    if landscape {
+        let hh = stack::header_height(false);
+        let top_header = egui::Rect::from_min_max(
+            egui::pos2(stack_rect.left(), region.top()),
+            egui::pos2(stack_rect.right(), region.top() + hh),
+        );
+        topbar::render_inline(ui, top_header, available_rect, rc, state, &pal);
+    } else {
+        topbar::render(ui, topbar_rect, available_rect, rc, state, &pal);
+    }
 
     // Long-press context menu (populated by whichever pane was long-pressed). Persistent popup,
     // dispatched via pending_menu_actions.

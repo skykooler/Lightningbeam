@@ -173,6 +173,8 @@ pub struct PianoRollPane {
     // Mobile portrait "Synthesia" mode: the playable keyboard is drawn as a strip at the bottom of
     // this pane (one unified surface), reusing the Virtual Piano's rendering + MIDI logic.
     keyboard: super::virtual_piano::VirtualPianoPane,
+    // Landscape mobile: the Keys/Notes toggle — true shows the full keyboard, false the roll.
+    landscape_keys: bool,
     // Manual long-press detection for the vertical roll (works with mouse-hold and touch): time the
     // press started, and where. `None` = disarmed (no fresh press, or the press became a pan).
     lp_press_time: Option<f64>,
@@ -218,6 +220,7 @@ impl PianoRollPane {
             last_snap_selection: HashSet::new(),
             snap_user_changed: false,
             keyboard: super::virtual_piano::VirtualPianoPane::new(),
+            landscape_keys: false,
             lp_press_time: None,
             lp_press_pos: egui::Pos2::ZERO,
             editing_index: None,
@@ -385,6 +388,20 @@ impl PianoRollPane {
         rect: Rect,
         shared: &mut SharedPaneState,
     ) {
+        // Landscape mobile: a Keys/Notes toggle bar switches this pane between the full keyboard and
+        // the conventional piano roll. (Portrait uses the keyboard-primary "Synthesia" view below.)
+        let mut rect = rect;
+        if shared.is_mobile && !shared.is_portrait {
+            let bar = Rect::from_min_max(rect.min, pos2(rect.right(), rect.min.y + 30.0));
+            rect = Rect::from_min_max(pos2(rect.left(), bar.bottom()), rect.max);
+            self.render_keys_notes_toggle(ui, bar, shared);
+            if self.landscape_keys {
+                let kb_path: NodePath = Vec::new();
+                self.keyboard.render_content(ui, rect, &kb_path, shared);
+                return;
+            }
+        }
+
         let keyboard_rect = Rect::from_min_size(rect.min, vec2(KEYBOARD_WIDTH, rect.height()));
         let grid_rect = Rect::from_min_max(
             pos2(rect.min.x + KEYBOARD_WIDTH, rect.min.y),
@@ -461,9 +478,9 @@ impl PianoRollPane {
             }
         }
 
-        // Mobile: keyboard-primary "Synthesia" instrument surface (keys + falling-notes roll). Always
-        // used on mobile (device is portrait; the landscape/conventional flip is P7).
-        if shared.is_mobile {
+        // Mobile portrait: keyboard-primary "Synthesia" instrument surface (keys + falling-notes
+        // roll). Landscape falls through to the conventional horizontal roll (pitch↕ / time▸).
+        if shared.is_mobile && shared.is_portrait {
             self.render_vertical_mode(ui, rect, shared, &clip_data);
             return;
         }
@@ -907,6 +924,42 @@ impl PianoRollPane {
         painter.text(pre.center(), egui::Align2::CENTER_CENTER, "Presets", egui::FontId::proportional(12.0), Color32::from_gray(220));
         if pre_resp.clicked() {
             *shared.open_instrument_browser = true;
+        }
+    }
+
+    /// Landscape Keys/Notes segmented toggle drawn in `bar` (updates `self.landscape_keys`).
+    fn render_keys_notes_toggle(&mut self, ui: &mut egui::Ui, bar: Rect, shared: &mut SharedPaneState) {
+        let painter = ui.painter_at(bar);
+        let bg = shared.theme.bg_color(&[".pane-header"], ui.ctx(), Color32::from_rgb(24, 24, 28));
+        painter.rect_filled(bar, 0.0, bg);
+        painter.line_segment(
+            [pos2(bar.left(), bar.bottom()), pos2(bar.right(), bar.bottom())],
+            Stroke::new(1.0, Color32::from_gray(60)),
+        );
+
+        let seg_w = 74.0;
+        let x0 = bar.center().x - seg_w;
+        let keys_rect = Rect::from_min_size(pos2(x0, bar.top() + 4.0), vec2(seg_w, bar.height() - 8.0));
+        let notes_rect = Rect::from_min_size(pos2(x0 + seg_w, bar.top() + 4.0), vec2(seg_w, bar.height() - 8.0));
+        if ui.interact(keys_rect, ui.id().with("pr_kn_keys"), egui::Sense::click()).clicked() {
+            self.landscape_keys = true;
+        }
+        if ui.interact(notes_rect, ui.id().with("pr_kn_notes"), egui::Sense::click()).clicked() {
+            self.landscape_keys = false;
+        }
+        let accent = Color32::from_rgb(0x4a, 0xa3, 0xff);
+        for (r, label, on) in [
+            (keys_rect, "Keys", self.landscape_keys),
+            (notes_rect, "Notes", !self.landscape_keys),
+        ] {
+            painter.rect_filled(r, 6.0, if on { accent } else { Color32::from_gray(46) });
+            painter.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(13.0),
+                if on { Color32::WHITE } else { Color32::from_gray(200) },
+            );
         }
     }
 

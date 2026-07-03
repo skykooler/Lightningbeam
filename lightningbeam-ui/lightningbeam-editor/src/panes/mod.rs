@@ -364,6 +364,10 @@ pub struct SharedPaneState<'a> {
     pub brush_preview_pixels: &'a std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
     /// True when rendering the phone/mobile shell (panes can render more compactly).
     pub is_mobile: bool,
+    /// Device orientation for the mobile shell: portrait (tall) vs landscape (wide). Defaults to
+    /// `true`; the mobile shell sets it from the available rect. Panes that reflow (e.g. the Piano
+    /// Roll's vertical vs conventional layout) key off this.
+    pub is_portrait: bool,
     /// Shared keyboard octave offset (C4-relative), so the mobile Virtual Piano and the portrait
     /// Piano Roll agree on which keys are visible and stay column-aligned.
     pub keyboard_octave: &'a mut i8,

@@ -26,6 +26,12 @@ const N: usize = STACK.len();
 /// Height of each band's drag header (and the bottom-edge footer). The whole header is the grab
 /// target — there's no thin divider bar.
 const HEADER_H: f32 = 52.0;
+/// Landscape headers are shorter — vertical space is scarce, and the top one hosts the app bar.
+const HEADER_H_LANDSCAPE: f32 = 34.0;
+/// Header height for the current orientation.
+pub fn header_height(is_portrait: bool) -> f32 {
+    if is_portrait { HEADER_H } else { HEADER_H_LANDSCAPE }
+}
 /// Corner radius (px) for the rounded top of each header.
 const HEADER_RADIUS: u8 = 9;
 const FOOTER_H: f32 = 28.0;
@@ -57,19 +63,19 @@ fn op_r3(top: usize, count: usize) -> Option<(usize, usize)> {
 fn op_r4(top: usize, count: usize) -> Option<(usize, usize)> {
     (count == 3).then(|| (top, 2)) // drop bottom
 }
-fn op_r5(top: usize, count: usize) -> Option<(usize, usize)> {
-    if count < 3 && top + count < N {
+fn op_r5(top: usize, count: usize, max: usize) -> Option<(usize, usize)> {
+    if count < max && top + count < N {
         Some((top, count + 1)) // grow bottom
-    } else if count == 3 && top + count < N {
+    } else if count == max && top + count < N {
         Some((top + 1, count)) // slide down
     } else {
         None
     }
 }
-fn op_r6(top: usize, count: usize) -> Option<(usize, usize)> {
-    if count < 3 && top > 0 {
+fn op_r6(top: usize, count: usize, max: usize) -> Option<(usize, usize)> {
+    if count < max && top > 0 {
         Some((top - 1, count + 1)) // grow top
-    } else if count == 3 && top > 0 {
+    } else if count == max && top > 0 {
         Some((top - 1, count)) // slide up
     } else {
         None
@@ -84,12 +90,13 @@ fn resolve(
     top: usize,
     count: usize,
     trigger: f32,
+    max: usize,
 ) -> Option<(usize, usize, f32)> {
     let going_up = offset < 0.0;
     let t = (offset.abs() / trigger.max(1.0)).clamp(0.0, 1.0);
     let target = match handle {
-        Handle::TopEdge => (!going_up).then(|| op_r6(top, count)).flatten(),
-        Handle::BottomEdge => going_up.then(|| op_r5(top, count)).flatten(),
+        Handle::TopEdge => (!going_up).then(|| op_r6(top, count, max)).flatten(),
+        Handle::BottomEdge => going_up.then(|| op_r5(top, count, max)).flatten(),
         Handle::Divider(k) => {
             if count == 2 {
                 if going_up { op_r1(top, count) } else { op_r2(top, count) }
@@ -343,6 +350,9 @@ fn interp_layout(
 pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state: &mut MobileState, pal: &Palette) {
     let top = state.window_top;
     let count = state.window_count;
+    // Landscape caps the window at 2 panes; portrait allows 3.
+    let max_panes = if rc.shared.is_portrait { 3 } else { 2 };
+    let header_h = header_height(rc.shared.is_portrait);
 
     // Reserve a footer bar at the very bottom for the BottomEdge handle.
     let footer_rect = egui::Rect::from_min_max(
@@ -379,7 +389,67 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
                 };
                 config_rects(top, count, content_area, &nweights(&w, count))
             }
-            _ => resolve(d.handle, d.offset, top, count, trigger)
+            Handle::BottomEdge if count == 1 && top + 1 < N => {
+                // Continuous reveal: dragging the bottom edge up grows the pane below out of the
+                // bottom, its divider tracking the finger across the FULL height (not just `trigger`),
+                // so one drag sweeps the current pane → split → revealed-pane-fullscreen.
+                let frac = (-d.offset / content_area.height().max(1.0)).clamp(0.0, 1.0);
+                config_rects(top, 2, content_area, &nweights(&[1.0 - frac, frac, 0.0], 2))
+            }
+            Handle::TopEdge if count == 1 && top > 0 => {
+                // Symmetric reveal of the pane above: dragging the top edge down grows it from the top.
+                let frac = (d.offset / content_area.height().max(1.0)).clamp(0.0, 1.0);
+                config_rects(top - 1, 2, content_area, &nweights(&[frac, 1.0 - frac, 0.0], 2))
+            }
+            Handle::BottomEdge if count == 2 && max_panes == 2 => {
+                // 2-pane (landscape) → 1-pane reveal: dragging the bottom edge up first slides the
+                // window down to reveal the pane below, then collapses onto it — the whole sweep
+                // mapped over the FULL height so the dragged boundary reaches the top (rather than
+                // stalling at the even split after the slide).
+                let frac = (-d.offset / content_area.height().max(1.0)).clamp(0.0, 1.0);
+                let even2 = nweights(&even_arr(2), 2);
+                let even1 = nweights(&even_arr(1), 1);
+                if top + 2 < N {
+                    if frac <= 0.5 {
+                        let from = config_rects(top, 2, content_area, &even2);
+                        let to = config_rects(top + 1, 2, content_area, &even2);
+                        interp_layout(&from, &to, top, top + 1, frac / 0.5, content_area)
+                    } else {
+                        let from = config_rects(top + 1, 2, content_area, &even2);
+                        let to = config_rects(top + 2, 1, content_area, &even1);
+                        interp_layout(&from, &to, top + 1, top + 2, (frac - 0.5) / 0.5, content_area)
+                    }
+                } else {
+                    // No pane below → just collapse onto the bottom pane.
+                    let from = config_rects(top, 2, content_area, &even2);
+                    let to = config_rects(top + 1, 1, content_area, &even1);
+                    interp_layout(&from, &to, top, top + 1, frac, content_area)
+                }
+            }
+            Handle::TopEdge if count == 2 && max_panes == 2 => {
+                // Symmetric 2→1 reveal from the top: dragging the top edge down slides the window up
+                // to reveal the pane above, then collapses onto it.
+                let frac = (d.offset / content_area.height().max(1.0)).clamp(0.0, 1.0);
+                let even2 = nweights(&even_arr(2), 2);
+                let even1 = nweights(&even_arr(1), 1);
+                if top > 0 {
+                    if frac <= 0.5 {
+                        let from = config_rects(top, 2, content_area, &even2);
+                        let to = config_rects(top - 1, 2, content_area, &even2);
+                        interp_layout(&from, &to, top, top - 1, frac / 0.5, content_area)
+                    } else {
+                        let from = config_rects(top - 1, 2, content_area, &even2);
+                        let to = config_rects(top - 1, 1, content_area, &even1);
+                        interp_layout(&from, &to, top - 1, top - 1, (frac - 0.5) / 0.5, content_area)
+                    }
+                } else {
+                    // No pane above → collapse onto the top pane (drop the bottom).
+                    let from = config_rects(top, 2, content_area, &even2);
+                    let to = config_rects(top, 1, content_area, &even1);
+                    interp_layout(&from, &to, top, top, frac, content_area)
+                }
+            }
+            _ => resolve(d.handle, d.offset, top, count, trigger, max_panes)
                 .map(|(tt, tc, t)| {
                     let target = config_rects(tt, tc, content_area, &nweights(&even_arr(tc), tc));
                     interp_layout(&rest_bands, &target, top, tt, t, content_area)
@@ -404,9 +474,9 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
 
     // 1) Pane content, carving the header off the top of each band.
     for (slot, brect) in &draw_layout {
-        let header_h = HEADER_H.min(brect.height());
+        let hh = header_h.min(brect.height());
         let content_rect = egui::Rect::from_min_max(
-            egui::pos2(brect.left(), brect.top() + header_h),
+            egui::pos2(brect.left(), brect.top() + hh),
             brect.max,
         );
         if content_rect.height() > 1.0 {
@@ -423,21 +493,21 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, rc: &mut RenderContext, state
 
     // 2) Header visuals (animated positions). The fullscreen icon shows "restore" when a single
     // pane fills the stack.
-    let fullscreen = count == 1;
+    let fullscreen = draw_layout.len() == 1;
     for (slot, brect) in &draw_layout {
         if brect.height() < 6.0 {
             continue;
         }
         let hr = egui::Rect::from_min_max(
             brect.left_top(),
-            egui::pos2(brect.right(), brect.top() + HEADER_H.min(brect.height())),
+            egui::pos2(brect.right(), brect.top() + header_h.min(brect.height())),
         );
         draw_header(ui, hr, STACK[*slot], state.show_instruments, fullscreen, pal);
     }
     draw_footer(ui, footer_rect, top + count >= N, pal);
 
     // 3) Interactions on the resting header/footer rects (added last → they win the press).
-    handle_interactions(ui, &rest_bands, content_area, footer_rect, trigger, now, state);
+    handle_interactions(ui, &rest_bands, content_area, footer_rect, trigger, now, state, max_panes, header_h);
 }
 
 fn draw_header(ui: &egui::Ui, hr: egui::Rect, sp: StackPane, show_instruments: bool, fullscreen: bool, pal: &Palette) {
@@ -518,10 +588,10 @@ fn handle_key(h: Handle) -> (usize, usize) {
 }
 
 /// Toggle a slot between filling the stack (count==1) and a 2-pane split with an adjacent pane.
-fn toggle_fullscreen(state: &mut MobileState, slot: usize, now: f64) {
+fn toggle_fullscreen(state: &mut MobileState, slot: usize, now: f64, max: usize) {
     if state.window_count == 1 && state.window_top == slot {
         // Restore: split with the pane below if possible, else above.
-        if let Some((t, c)) = op_r5(slot, 1).or_else(|| op_r6(slot, 1)) {
+        if let Some((t, c)) = op_r5(slot, 1, max).or_else(|| op_r6(slot, 1, max)) {
             set_window(state, t, c, now);
         }
     } else {
@@ -537,13 +607,15 @@ fn handle_interactions(
     trigger: f32,
     now: f64,
     state: &mut MobileState,
+    max: usize,
+    header_h: f32,
 ) {
     // (handle, header_rect, slot) — slot is Some for band headers, None for the footer.
     let mut handles: Vec<(Handle, egui::Rect, Option<usize>)> = Vec::new();
     for (i, (slot, brect)) in rest_bands.iter().enumerate() {
         let hr = egui::Rect::from_min_max(
             brect.left_top(),
-            egui::pos2(brect.right(), brect.top() + HEADER_H.min(brect.height())),
+            egui::pos2(brect.right(), brect.top() + header_h.min(brect.height())),
         );
         let handle = if i == 0 { Handle::TopEdge } else { Handle::Divider(i - 1) };
         handles.push((handle, hr, Some(*slot)));
@@ -563,7 +635,7 @@ fn handle_interactions(
             );
             let fsresp = ui.interact(fs, ui.id().with(("mobile_fs", slot)), egui::Sense::click());
             if fsresp.clicked() {
-                toggle_fullscreen(state, slot, now);
+                toggle_fullscreen(state, slot, now, max);
             }
             if STACK[slot] == StackPane::NodeInstrument {
                 let nt = egui::Rect::from_min_max(
@@ -590,7 +662,7 @@ fn handle_interactions(
         }
         if resp.drag_stopped() {
             if let Some(d) = state.drag.take() {
-                commit_drag(d, state, content_area, trigger, now);
+                commit_drag(d, state, content_area, trigger, now, max);
             }
         }
         if resp.hovered() || state.drag.map(|d| d.handle == handle).unwrap_or(false) {
@@ -599,18 +671,81 @@ fn handle_interactions(
     }
 }
 
-fn commit_drag(d: StackDrag, state: &mut MobileState, content_area: egui::Rect, trigger: f32, now: f64) {
+fn commit_drag(d: StackDrag, state: &mut MobileState, content_area: egui::Rect, trigger: f32, now: f64, max: usize) {
     let h = content_area.height().max(1.0);
     match d.handle {
         Handle::Divider(k) if k + 1 < state.window_count => {
             commit_divider(state, k, d.offset / h, now);
+        }
+        Handle::BottomEdge if state.window_count == 1 && state.window_top + 1 < N => {
+            // Snap the continuous reveal: near the top → revealed pane fullscreen; barely moved →
+            // back to the current pane; in between → a 2-pane split at the nearest preset.
+            let top = state.window_top;
+            let frac = (-d.offset / h).clamp(0.0, 1.0);
+            let from_w = [1.0 - frac, frac, 0.0];
+            if frac >= COLLAPSE_HI {
+                begin_anim(state, top, 2, from_w, top + 1, 1, even_arr(1), 0.0, now);
+            } else if frac <= COLLAPSE_LO {
+                begin_anim(state, top, 2, from_w, top, 1, even_arr(1), 0.0, now);
+            } else {
+                begin_anim(state, top, 2, from_w, top, 2, nearest_preset(&from_w, 2), 0.0, now);
+            }
+        }
+        Handle::TopEdge if state.window_count == 1 && state.window_top > 0 => {
+            let top = state.window_top;
+            let frac = (d.offset / h).clamp(0.0, 1.0);
+            let from_w = [frac, 1.0 - frac, 0.0];
+            if frac >= COLLAPSE_HI {
+                begin_anim(state, top - 1, 2, from_w, top - 1, 1, even_arr(1), 0.0, now);
+            } else if frac <= COLLAPSE_LO {
+                begin_anim(state, top - 1, 2, from_w, top, 1, even_arr(1), 0.0, now);
+            } else {
+                begin_anim(state, top - 1, 2, from_w, top - 1, 2, nearest_preset(&from_w, 2), 0.0, now);
+            }
+        }
+        Handle::BottomEdge if state.window_count == 2 && max == 2 => {
+            // Snap the two-phase 2→1 reveal: near the top → revealed pane fullscreen; a middling drag
+            // → slid down to the next 2-pane split; barely moved → stay put.
+            let top = state.window_top;
+            let frac = (-d.offset / h).clamp(0.0, 1.0);
+            let even2 = even_arr(2);
+            if top + 2 < N {
+                if frac >= COLLAPSE_HI {
+                    let t = ((frac - 0.5) / 0.5).clamp(0.0, 1.0);
+                    begin_anim(state, top + 1, 2, even2, top + 2, 1, even_arr(1), t, now);
+                } else if frac > COLLAPSE_LO {
+                    let t = (frac / 0.5).clamp(0.0, 1.0);
+                    begin_anim(state, top, 2, even2, top + 1, 2, even2, t, now);
+                }
+                // else: barely moved → stay on the current [top, top+1] split.
+            } else if frac >= COLLAPSE_HI {
+                begin_anim(state, top, 2, even2, top + 1, 1, even_arr(1), frac, now);
+            }
+        }
+        Handle::TopEdge if state.window_count == 2 && max == 2 => {
+            // Symmetric snap for the top-edge 2→1 reveal.
+            let top = state.window_top;
+            let frac = (d.offset / h).clamp(0.0, 1.0);
+            let even2 = even_arr(2);
+            if top > 0 {
+                if frac >= COLLAPSE_HI {
+                    let t = ((frac - 0.5) / 0.5).clamp(0.0, 1.0);
+                    begin_anim(state, top - 1, 2, even2, top - 1, 1, even_arr(1), t, now);
+                } else if frac > COLLAPSE_LO {
+                    let t = (frac / 0.5).clamp(0.0, 1.0);
+                    begin_anim(state, top, 2, even2, top - 1, 2, even2, t, now);
+                }
+                // else: barely moved → stay on the current split.
+            } else if frac >= COLLAPSE_HI {
+                begin_anim(state, top, 2, even2, top, 1, even_arr(1), frac, now);
+            }
         }
         _ => {
             // Edges (and degenerate dividers): membership transition. Animate from the current
             // config to the new one, continuing from where the drag's interp left off (~progress t).
             let top = state.window_top;
             let count = state.window_count;
-            if let Some((tt, tc, t)) = resolve(d.handle, d.offset, top, count, trigger) {
+            if let Some((tt, tc, t)) = resolve(d.handle, d.offset, top, count, trigger, max) {
                 if t >= 0.5 {
                     let from_w = to_arr(&nweights(&state.weights, count));
                     begin_anim(state, top, count, from_w, tt, tc, even_arr(tc), t, now);
@@ -667,17 +802,17 @@ fn commit_divider(state: &mut MobileState, k: usize, offset_frac: f32, now: f64)
         return;
     }
 
-    // 2-pane: group resize, snap to nearest 2-pane preset, slide off at the extremes.
+    // 2-pane: group resize snapping to the nearest 2-pane preset, but releasing near an edge
+    // collapses to a single fullscreen pane (the one that grew). It does NOT slide in the next pane —
+    // that's the job of the top/bottom edge handles.
     let (bmin, bmax) = boundary_bounds(count, k);
     let from_w = to_arr(&weights_for_boundary(&nw, k, b.clamp(bmin, bmax)));
     if b <= COLLAPSE_LO {
-        if let Some((tt, tc)) = op_r1(top, count) {
-            begin_anim(state, top, count, from_w, tt, tc, even_arr(tc), 0.0, now);
-        }
+        // Divider dragged to the top → the top pane is squeezed out; the bottom pane goes fullscreen.
+        begin_anim(state, top, count, from_w, top + 1, 1, even_arr(1), 0.0, now);
     } else if b >= COLLAPSE_HI {
-        if let Some((tt, tc)) = op_r2(top, count) {
-            begin_anim(state, top, count, from_w, tt, tc, even_arr(tc), 0.0, now);
-        }
+        // Divider dragged to the bottom → the bottom pane is squeezed out; the top pane goes fullscreen.
+        begin_anim(state, top, count, from_w, top, 1, even_arr(1), 0.0, now);
     } else {
         let to_w = nearest_preset(&from_w, count);
         begin_anim(state, top, count, from_w, top, count, to_w, 0.0, now);

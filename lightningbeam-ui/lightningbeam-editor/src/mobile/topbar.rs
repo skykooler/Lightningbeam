@@ -100,6 +100,65 @@ pub fn render(
     }
 }
 
+/// Landscape: the app bar folded into the middle of the top pane header — filename + ⌕ + ⋯ as a
+/// centered cluster (the pane's own grip/label sits to the left, its buttons to the right). No bar
+/// background or divider line; the header already drew them.
+pub fn render_inline(
+    ui: &mut egui::Ui,
+    header: egui::Rect,
+    full: egui::Rect,
+    rc: &mut RenderContext,
+    state: &mut MobileState,
+    pal: &Palette,
+) {
+    let name = rc
+        .shared
+        .container_path
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "Lightningbeam".to_string());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(name, egui::FontId::proportional(14.0), pal.text);
+    let name_w = galley.rect.width();
+    let name_h = galley.rect.height();
+    let btn = header.height().min(BTN);
+    let gap = 6.0;
+    let cluster_w = name_w + gap + 2.0 * btn;
+    let x0 = (header.center().x - cluster_w / 2.0).max(header.left() + 8.0);
+    let cy = header.center().y;
+    let bt = header.top() + (header.height() - btn) / 2.0;
+
+    ui.painter().galley(egui::pos2(x0, cy - name_h / 2.0), galley, pal.text);
+
+    let palette_rect = egui::Rect::from_min_size(egui::pos2(x0 + name_w + gap, bt), egui::vec2(btn, btn));
+    let overflow_rect = egui::Rect::from_min_size(egui::pos2(palette_rect.right(), bt), egui::vec2(btn, btn));
+
+    let sresp = ui.interact(palette_rect, ui.id().with("mobile_topbar_search"), egui::Sense::click());
+    ui.painter().text(palette_rect.center(), egui::Align2::CENTER_CENTER, icons::SEARCH, icons::font(17.0),
+        if sresp.hovered() || state.palette_open { pal.text } else { pal.text_dim });
+    if sresp.clicked() {
+        state.palette_open = !state.palette_open;
+        state.overflow_open = false;
+        state.palette_query.clear();
+    }
+
+    let oresp = ui.interact(overflow_rect, ui.id().with("mobile_topbar_overflow"), egui::Sense::click());
+    ui.painter().text(overflow_rect.center(), egui::Align2::CENTER_CENTER, icons::ELLIPSIS, icons::font(18.0),
+        if oresp.hovered() || state.overflow_open { pal.text } else { pal.text_dim });
+    if oresp.clicked() {
+        state.overflow_open = !state.overflow_open;
+        state.palette_open = false;
+    }
+
+    if state.overflow_open {
+        render_overflow(ui, full, rc, state, pal);
+    } else if state.palette_open {
+        render_palette(ui, full, rc, state, pal);
+    }
+}
+
 /// Common modal scrim + panel. Returns (backdrop-tapped, panel inner rect).
 fn open_panel(ui: &mut egui::Ui, full: egui::Rect, id: &str, pal: &Palette) -> (bool, egui::Rect) {
     let scrim = ui.interact(full, ui.id().with(("mobile_topbar_scrim", id)), egui::Sense::click());
