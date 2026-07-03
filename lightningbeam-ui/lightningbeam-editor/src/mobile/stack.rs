@@ -704,13 +704,14 @@ fn commit_drag(d: StackDrag, state: &mut MobileState, content_area: egui::Rect, 
             }
         }
         Handle::BottomEdge if state.window_count == 2 && max == 2 => {
-            // Snap the two-phase 2→1 reveal: near the top → revealed pane fullscreen; a middling drag
-            // → slid down to the next 2-pane split; barely moved → stay put.
+            // Snap the two-phase 2→1 reveal to match the preview's phases: past the midpoint (phase 2,
+            // collapsing) → revealed pane fullscreen; a middling drag (phase 1, sliding) → the next
+            // 2-pane split; barely moved → stay put.
             let top = state.window_top;
             let frac = (-d.offset / h).clamp(0.0, 1.0);
             let even2 = even_arr(2);
             if top + 2 < N {
-                if frac >= COLLAPSE_HI {
+                if frac >= 0.5 {
                     let t = ((frac - 0.5) / 0.5).clamp(0.0, 1.0);
                     begin_anim(state, top + 1, 2, even2, top + 2, 1, even_arr(1), t, now);
                 } else if frac > COLLAPSE_LO {
@@ -718,7 +719,7 @@ fn commit_drag(d: StackDrag, state: &mut MobileState, content_area: egui::Rect, 
                     begin_anim(state, top, 2, even2, top + 1, 2, even2, t, now);
                 }
                 // else: barely moved → stay on the current [top, top+1] split.
-            } else if frac >= COLLAPSE_HI {
+            } else if frac >= 0.5 {
                 begin_anim(state, top, 2, even2, top + 1, 1, even_arr(1), frac, now);
             }
         }
@@ -728,7 +729,7 @@ fn commit_drag(d: StackDrag, state: &mut MobileState, content_area: egui::Rect, 
             let frac = (d.offset / h).clamp(0.0, 1.0);
             let even2 = even_arr(2);
             if top > 0 {
-                if frac >= COLLAPSE_HI {
+                if frac >= 0.5 {
                     let t = ((frac - 0.5) / 0.5).clamp(0.0, 1.0);
                     begin_anim(state, top - 1, 2, even2, top - 1, 1, even_arr(1), t, now);
                 } else if frac > COLLAPSE_LO {
@@ -736,7 +737,7 @@ fn commit_drag(d: StackDrag, state: &mut MobileState, content_area: egui::Rect, 
                     begin_anim(state, top, 2, even2, top - 1, 2, even2, t, now);
                 }
                 // else: barely moved → stay on the current split.
-            } else if frac >= COLLAPSE_HI {
+            } else if frac >= 0.5 {
                 begin_anim(state, top, 2, even2, top, 1, even_arr(1), frac, now);
             }
         }

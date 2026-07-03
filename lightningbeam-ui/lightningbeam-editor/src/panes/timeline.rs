@@ -5891,6 +5891,11 @@ impl PaneRenderer for TimelinePane {
                 } else if now - t0 >= 0.4 {
                     self.lp_time = None;
                     long_press = Some(self.lp_pos);
+                } else {
+                    // Still counting down — request a repaint so the threshold is re-evaluated even if
+                    // the finger is perfectly still and egui would otherwise go idle (no input events).
+                    let remaining = (0.4 - (now - t0)).max(0.0);
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(remaining));
                 }
             }
         }

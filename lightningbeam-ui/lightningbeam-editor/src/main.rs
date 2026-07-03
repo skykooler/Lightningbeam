@@ -211,6 +211,7 @@ fn main() -> eframe::Result {
 
     let mut viewport_builder = egui::ViewportBuilder::default()
         .with_inner_size(initial_size)
+        .with_min_inner_size([360.0, 300.0]) // keep layouts (esp. the mobile shell) above degenerate sizes
         .with_title("Lightningbeam Editor")
         .with_app_id("lightningbeam-editor"); // Set app_id for Wayland
 

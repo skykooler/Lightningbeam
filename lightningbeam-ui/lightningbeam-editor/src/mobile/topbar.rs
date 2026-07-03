@@ -118,15 +118,31 @@ pub fn render_inline(
         .and_then(|p| p.file_name())
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "Lightningbeam".to_string());
-    let galley = ui
-        .painter()
-        .layout_no_wrap(name, egui::FontId::proportional(14.0), pal.text);
-    let name_w = galley.rect.width();
-    let name_h = galley.rect.height();
     let btn = header.height().min(BTN);
     let gap = 6.0;
+    // Reserve gutters so the cluster never overlaps the pane header's own grip/label (left) or its
+    // fullscreen / node-toggle buttons (right).
+    let left_gutter = 150.0;
+    let right_gutter = 2.0 * BTN + 16.0;
+    let span_left = header.left() + left_gutter;
+    let span_right = (header.right() - right_gutter).max(span_left);
+    let span_w = span_right - span_left;
+
+    // Filename elided to fit whatever's left after the two buttons.
+    let max_name_w = (span_w - gap - 2.0 * btn).max(0.0);
+    let galley = {
+        let mut job =
+            egui::text::LayoutJob::simple_singleline(name, egui::FontId::proportional(14.0), pal.text);
+        job.wrap.max_width = max_name_w;
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        ui.painter().layout_job(job)
+    };
+    let name_w = galley.rect.width();
+    let name_h = galley.rect.height();
     let cluster_w = name_w + gap + 2.0 * btn;
-    let x0 = (header.center().x - cluster_w / 2.0).max(header.left() + 8.0);
+    // Center within the reserved span, then clamp so the right edge stays inside it.
+    let x0 = (span_left + (span_w - cluster_w) / 2.0).clamp(span_left, (span_right - cluster_w).max(span_left));
     let cy = header.center().y;
     let bt = header.top() + (header.height() - btn) / 2.0;
 
@@ -223,7 +239,11 @@ fn render_palette(ui: &mut egui::Ui, full: egui::Rect, rc: &mut RenderContext, s
             .hint_text("Search commands…")
             .desired_width(inner.width()),
     );
-    te.request_focus();
+    // Focus the field only when it isn't already focused — re-requesting every frame would stomp
+    // focus and prevent anything else in the panel from taking it.
+    if !te.has_focus() {
+        te.request_focus();
+    }
 
     // Filtered list.
     let q = state.palette_query.to_lowercase();

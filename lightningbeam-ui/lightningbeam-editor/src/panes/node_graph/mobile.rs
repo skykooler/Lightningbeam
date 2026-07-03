@@ -607,6 +607,9 @@ impl NodeGraphPane {
 
     /// Cable an output port → input port: update the frontend graph + dispatch `Connect`.
     fn mobile_connect(&mut self, out_node: NodeId, out_port: usize, in_node: NodeId, in_port: usize) {
+        // Mobile has no subgraph navigation yet, so cables always target the track-level graph. If
+        // subgraph nav is added, route through `va_context()` / `graph_connect_in_template` like desktop.
+        debug_assert!(self.subgraph_stack.is_empty(), "mobile node connect assumes the top-level graph");
         let Some(track_id) = self.track_id else { return };
         let output_id = self.state.graph.nodes.get(out_node).and_then(|n| n.outputs.get(out_port)).map(|(_, id)| *id);
         let input_id = self.state.graph.nodes.get(in_node).and_then(|n| n.inputs.get(in_port)).map(|(_, id)| *id);
@@ -625,8 +628,10 @@ impl NodeGraphPane {
         }
     }
 
-    /// Remove a cable: update the frontend graph + dispatch `Disconnect`.
+    /// Remove a cable: update the frontend graph + dispatch `Disconnect`. Like `mobile_connect`, this
+    /// assumes the track-level graph (mobile has no subgraph navigation).
     fn mobile_disconnect(&mut self, out_node: NodeId, out_port: usize, in_node: NodeId, in_port: usize) {
+        debug_assert!(self.subgraph_stack.is_empty(), "mobile node disconnect assumes the top-level graph");
         let Some(track_id) = self.track_id else { return };
         let output_id = self.state.graph.nodes.get(out_node).and_then(|n| n.outputs.get(out_port)).map(|(_, id)| *id);
         let input_id = self.state.graph.nodes.get(in_node).and_then(|n| n.inputs.get(in_port)).map(|(_, id)| *id);

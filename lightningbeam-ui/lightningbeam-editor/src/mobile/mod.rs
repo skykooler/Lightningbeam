@@ -197,6 +197,8 @@ pub struct MobileState {
     pub inspector_frac: f32,
     /// Inspector side-panel width as a fraction of the region (landscape).
     pub inspector_width_frac: f32,
+    /// Last frame's orientation (landscape?), to reset orientation-specific cached state on rotation.
+    pub was_landscape: bool,
     /// Whether the inspector sheet is currently shown. Gated to appear on pointer *release* (a tap),
     /// not on press, so press+drag interactions aren't interrupted by the sheet popping up.
     pub inspector_visible: bool,
@@ -235,6 +237,7 @@ impl Default for MobileState {
             show_instruments: false,
             inspector_frac: 0.45,
             inspector_width_frac: 0.4,
+            was_landscape: false,
             inspector_visible: false,
             inspector_anchor_y: 0.0,
             inspector_dismissed: false,
@@ -267,6 +270,13 @@ pub fn render_mobile_shell(
     if landscape && state.window_count > 2 {
         state.window_count = 2;
         state.window_top = state.window_top.min(STACK.len().saturating_sub(2));
+    }
+    // On an orientation change, the cached inspector tap-anchor is in the old layout's coordinate
+    // space; drop it to a non-covering default so the portrait reflow doesn't mis-decide until the
+    // next tap re-anchors.
+    if landscape != state.was_landscape {
+        state.was_landscape = landscape;
+        state.inspector_anchor_y = available_rect.top();
     }
 
     // Background (device color; bands paint over most of it).
@@ -317,11 +327,17 @@ pub fn render_mobile_shell(
     let mut inspector_shown = state.inspector_visible;
 
     // Inspector geometry: a bottom sheet in portrait, a right-side vertical column in landscape.
+    // Clamp defensively: on a very small region the desired minimum can exceed the available space,
+    // and `f32::clamp` panics if `min > max`, so keep `min <= max`.
     let inspector_rect = if landscape {
-        let w = (region.width() * state.inspector_width_frac).clamp(180.0, region.width() - 140.0);
+        let lo = 180.0_f32.min(region.width());
+        let hi = (region.width() - 140.0).max(lo);
+        let w = (region.width() * state.inspector_width_frac).clamp(lo, hi);
         egui::Rect::from_min_max(egui::pos2(region.right() - w, region.top()), region.max)
     } else {
-        let h = (region.height() * state.inspector_frac).clamp(120.0, region.height() - 60.0);
+        let lo = 120.0_f32.min(region.height());
+        let hi = (region.height() - 60.0).max(lo);
+        let h = (region.height() * state.inspector_frac).clamp(lo, hi);
         egui::Rect::from_min_max(egui::pos2(region.left(), region.bottom() - h), region.max)
     };
 

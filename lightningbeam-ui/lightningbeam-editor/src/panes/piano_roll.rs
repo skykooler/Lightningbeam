@@ -392,7 +392,9 @@ impl PianoRollPane {
         // the conventional piano roll. (Portrait uses the keyboard-primary "Synthesia" view below.)
         let mut rect = rect;
         if shared.is_mobile && !shared.is_portrait {
-            let bar = Rect::from_min_max(rect.min, pos2(rect.right(), rect.min.y + 30.0));
+            // Clamp the bar height so a very short pane can't invert the remaining content rect.
+            let bar_h = 30.0_f32.min(rect.height());
+            let bar = Rect::from_min_max(rect.min, pos2(rect.right(), rect.min.y + bar_h));
             rect = Rect::from_min_max(pos2(rect.left(), bar.bottom()), rect.max);
             self.render_keys_notes_toggle(ui, bar, shared);
             if self.landscape_keys {

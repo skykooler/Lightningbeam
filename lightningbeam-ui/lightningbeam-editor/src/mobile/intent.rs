@@ -81,8 +81,9 @@ pub fn render(app: &mut EditorApp, ctx: &egui::Context) {
                 )
             };
 
-            let col_w = (grid_rect.width() - (cols as f32 - 1.0) * gap) / cols as f32;
-            let card_h = (grid_rect.height() - (rows as f32 - 1.0) * gap) / rows as f32;
+            // Floor at 0 so a very small window can't produce negative/inverted card rects.
+            let col_w = ((grid_rect.width() - (cols as f32 - 1.0) * gap) / cols as f32).max(0.0);
+            let card_h = ((grid_rect.height() - (rows as f32 - 1.0) * gap) / rows as f32).max(0.0);
             for (i, intent) in intents(&pal).iter().enumerate() {
                 let col = (i % cols) as f32;
                 let row = (i / cols) as f32;

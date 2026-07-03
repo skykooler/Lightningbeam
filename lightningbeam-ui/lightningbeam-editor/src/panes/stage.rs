@@ -11407,12 +11407,12 @@ impl StagePane {
             }
         }
 
-        // P5 gesture: double-tap-drag on empty space → transient marquee, regardless of the active
-        // tool. The second tap arms it; a drag then drives ToolState::MarqueeSelecting (resolved by
-        // the release handler above). While armed we suppress the normal tool dispatch so a
+        // P5 gesture (mobile): double-tap-drag on empty space → transient marquee, regardless of the
+        // active tool. The second tap arms it; a drag then drives ToolState::MarqueeSelecting (resolved
+        // by the release handler above). While armed we suppress the normal tool dispatch so a
         // brush/etc. doesn't paint during the gesture. A double-tap without a drag falls through
-        // (Select tool handles zoom-to-fit).
-        if !is_replaying && !alt_held {
+        // (Select tool handles zoom-to-fit). Mobile-only so it can't hijack a desktop Brush/Draw drag.
+        if shared.is_mobile && !is_replaying && !alt_held {
             use vello::kurbo::Point;
             let point = Point::new(world_pos.x as f64, world_pos.y as f64);
             let press_pos = mouse_canvas_pos.to_pos2();
