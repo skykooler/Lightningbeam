@@ -6577,7 +6577,9 @@ impl eframe::App for EditorApp {
             }
         }
 
-        // Top menu bar (egui-rendered on all platforms)
+        // Top menu bar (egui-rendered on desktop). On mobile the shell's ⌕ palette + ⋯ overflow
+        // expose every command, so the desktop menu bar is suppressed.
+        if !self.mobile_active() {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             if let Some(menu_system) = &self.menu_system {
                 let recent_files = self.config.get_recent_files();
@@ -6613,6 +6615,7 @@ impl eframe::App for EditorApp {
                 }
             }
         });
+        }
 
         // Render start screen or editor based on app mode
         if self.app_mode == AppMode::StartScreen {
