@@ -700,17 +700,80 @@ struct AutosaveState {
     last_time: Option<std::time::Instant>,
     /// Progress channel for the in-flight recovery write.
     progress_rx: Option<std::sync::mpsc::Receiver<FileProgress>>,
+    /// Recovery files left over from previous sessions that didn't exit cleanly (newest first),
+    /// discovered at startup. Presented to the user as a "recover unsaved work?" prompt.
+    leftover_recoveries: Vec<std::path::PathBuf>,
 }
 
 impl AutosaveState {
     fn new() -> Self {
+        Self::gc_old_recovered();
+        let recovery_path = Self::make_session_path();
+        let leftover_recoveries = Self::find_leftovers(recovery_path.as_deref());
+        if !leftover_recoveries.is_empty() {
+            eprintln!("💾 [AUTOSAVE] found {} leftover recovery file(s) from a previous session",
+                leftover_recoveries.len());
+        }
         Self {
-            recovery_path: Self::make_session_path(),
+            recovery_path,
             baseline_epoch: 0,
             pending_event: false,
             in_flight: false,
             last_time: None,
             progress_rx: None,
+            leftover_recoveries,
+        }
+    }
+
+    /// Session recovery `.beam` files present at startup (excluding this session's own path).
+    /// Their existence means a prior session didn't reach `on_exit` — i.e. it crashed or was
+    /// killed — so they hold unsaved work. Sorted newest-first by modification time.
+    fn find_leftovers(exclude: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+        let Some(dir) = Self::recovery_dir() else { return Vec::new() };
+        let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().and_then(|x| x.to_str()) == Some("beam")
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("session-"))
+                    && Some(p.as_path()) != exclude
+            })
+            .filter_map(|p| {
+                let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok()?;
+                Some((p, mtime))
+            })
+            .collect();
+        files.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+        files.into_iter().map(|(p, _)| p).collect()
+    }
+
+    /// Delete `recovered-*` files (already-recovered work the user relocated via Save As) older than
+    /// a week, so the recovery dir doesn't grow without bound. Best-effort.
+    fn gc_old_recovered() {
+        let Some(dir) = Self::recovery_dir() else { return };
+        let Some(cutoff) =
+            std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(7 * 24 * 3600))
+        else {
+            return;
+        };
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = entry.path();
+            let is_recovered = p.extension().and_then(|x| x.to_str()) == Some("beam")
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("recovered-"));
+            if !is_recovered {
+                continue;
+            }
+            if let Ok(mtime) = std::fs::metadata(&p).and_then(|m| m.modified()) {
+                if mtime < cutoff {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
         }
     }
 
@@ -725,6 +788,15 @@ impl AutosaveState {
     /// A fresh per-session recovery file path (`recovery/session-<uuid>.beam`).
     fn make_session_path() -> Option<std::path::PathBuf> {
         Some(Self::recovery_dir()?.join(format!("session-{}.beam", uuid::Uuid::new_v4())))
+    }
+
+    /// Whether `path` is one of our recovery files (`session-*` / `recovered-*` in the recovery
+    /// dir). Saving one of these should behave as Save As so the work gets a real home instead of
+    /// being written back into the app data dir.
+    fn is_recovery_path(path: &std::path::Path) -> bool {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("session-") || n.starts_with("recovered-"))
     }
 }
 
@@ -3291,11 +3363,17 @@ impl EditorApp {
             MenuAction::Save => {
                 use rfd::FileDialog;
 
-                if let Some(path) = &self.current_file_path {
+                // A recovered file has no real home yet — Save behaves as Save As so the work lands
+                // where the user wants, not back in the app data dir.
+                let real_path = self
+                    .current_file_path
+                    .clone()
+                    .filter(|p| !AutosaveState::is_recovery_path(p));
+                if let Some(path) = real_path {
                     // Save to existing path
-                    self.save_to_file(path.clone());
+                    self.save_to_file(path);
                 } else {
-                    // No current path, fall through to Save As
+                    // No real path (untitled or recovered): fall through to Save As
                     if let Some(path) = FileDialog::new()
                         .add_filter("Lightningbeam Project", &["beam"])
                         .set_file_name("Untitled.beam")
@@ -3312,15 +3390,16 @@ impl EditorApp {
                     .add_filter("Lightningbeam Project", &["beam"])
                     .set_file_name("Untitled.beam");
 
-                // Set initial directory if we have a current file
-                let dialog = if let Some(current_path) = &self.current_file_path {
-                    if let Some(parent) = current_path.parent() {
-                        dialog.set_directory(parent)
-                    } else {
-                        dialog
-                    }
-                } else {
-                    dialog
+                // Default to the current file's directory — but not the recovery dir (a recovered
+                // file's parent), which the user never chose and shouldn't be steered back into.
+                let dialog = match self
+                    .current_file_path
+                    .as_ref()
+                    .filter(|p| !AutosaveState::is_recovery_path(p))
+                    .and_then(|p| p.parent())
+                {
+                    Some(parent) => dialog.set_directory(parent),
+                    None => dialog,
                 };
 
                 if let Some(path) = dialog.save_file() {
@@ -4208,6 +4287,78 @@ impl EditorApp {
         self.autosave.pending_event = false;
         self.autosave.last_time = Some(std::time::Instant::now());
         eprintln!("💾 [AUTOSAVE] recovery snapshot dispatched");
+    }
+
+    /// Show the crash-recovery prompt when a previous session left a recovery file behind. Recover
+    /// loads it as an untitled document; Discard deletes it; Later keeps it for the next launch.
+    fn render_recovery_prompt(&mut self, ctx: &egui::Context) {
+        // Don't prompt over an in-flight file op (including a recovery load we just started).
+        if self.autosave.leftover_recoveries.is_empty() || self.file_operation.is_some() {
+            return;
+        }
+        let path = self.autosave.leftover_recoveries[0].clone();
+
+        #[derive(PartialEq)]
+        enum Choice { Recover, Discard, Later }
+        let mut choice: Option<Choice> = None;
+
+        egui::Modal::new(egui::Id::new("crash_recovery_modal")).show(ctx, |ui| {
+            ui.set_width(crate::mobile::dialog_width(ctx, 460.0));
+            ui.heading("Recover unsaved work?");
+            ui.add_space(6.0);
+            ui.label(
+                "Lightningbeam didn't shut down cleanly last time. You have unsaved work from your \
+                 previous session — recover it?",
+            );
+            if self.autosave.leftover_recoveries.len() > 1 {
+                ui.add_space(4.0);
+                ui.weak(format!(
+                    "{} snapshots available; this shows the most recent first.",
+                    self.autosave.leftover_recoveries.len()
+                ));
+            }
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui.button("Recover").clicked() {
+                    choice = Some(Choice::Recover);
+                }
+                if ui.button("Discard").clicked() {
+                    choice = Some(Choice::Discard);
+                }
+                if ui.button("Later").clicked() {
+                    choice = Some(Choice::Later);
+                }
+            });
+        });
+
+        match choice {
+            Some(Choice::Recover) => {
+                self.autosave.leftover_recoveries.remove(0);
+                // Rename out of the `session-*` namespace before opening it, so it isn't offered
+                // again next launch — but keep the file, since recovered raster keyframes page in
+                // from it on demand (deleting it would lose paged pixels). It opens as the current
+                // file; the user relocates the work with Save As. Old `recovered-*` files are
+                // garbage-collected at startup.
+                let open_path = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(name) => {
+                        let renamed =
+                            path.with_file_name(name.replacen("session-", "recovered-", 1));
+                        if std::fs::rename(&path, &renamed).is_ok() { renamed } else { path }
+                    }
+                    None => path,
+                };
+                self.load_from_file(open_path);
+            }
+            Some(Choice::Discard) => {
+                let _ = std::fs::remove_file(&path);
+                self.autosave.leftover_recoveries.remove(0);
+            }
+            Some(Choice::Later) => {
+                // Keep the files on disk but stop prompting this session.
+                self.autosave.leftover_recoveries.clear();
+            }
+            None => {}
+        }
     }
 
     /// Load a document from a .beam file
@@ -5597,6 +5748,8 @@ impl eframe::App for EditorApp {
 
         // Background crash-recovery autosave (cheap early-out unless dirty + interval elapsed).
         self.maybe_autosave(ctx);
+        // Offer to restore a previous session's unsaved work (if a recovery file was left behind).
+        self.render_recovery_prompt(ctx);
 
         // === Raster fault-in (Phase 3 paging) ===
         // The canvas records raster keyframe ids whose `raw_pixels` weren't resident
