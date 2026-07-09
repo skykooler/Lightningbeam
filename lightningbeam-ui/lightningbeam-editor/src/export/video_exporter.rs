@@ -616,9 +616,12 @@ pub fn setup_video_encoder(
     // Configure encoder parameters BEFORE opening (critical!)
     encoder.set_width(aligned_width);
     encoder.set_height(aligned_height);
-    // HDR encodes 10-bit BT.2020 (limited range); SDR keeps 8-bit full-range BT.709.
+    // ProRes needs 10-bit 4:2:2; HDR needs 10-bit 4:2:0 BT.2020; other SDR is 8-bit 4:2:0.
+    let is_prores = codec_id == ffmpeg::codec::Id::PRORES;
     if hdr.is_hdr() {
         encoder.set_format(ffmpeg::format::Pixel::YUV420P10LE);
+    } else if is_prores {
+        encoder.set_format(ffmpeg::format::Pixel::YUV422P10LE);
     } else {
         encoder.set_format(ffmpeg::format::Pixel::YUV420P);
     }
@@ -650,6 +653,10 @@ pub fn setup_video_encoder(
         });
         color_opts.set("color_primaries", "bt709");
         color_opts.set("color_trc", "bt709");
+        if is_prores {
+            // prores_ks profile: 3 = HQ (4:2:2 10-bit). Matches the YUV422P10LE frames we feed.
+            color_opts.set("profile", "3");
+        }
     }
 
     println!("📐 Video dimensions: {}×{} (aligned to {}×{}){}",
@@ -1431,6 +1438,30 @@ mod tests {
         assert!(y[0] >= 50 && y[0] <= 60, "Y value: {}", y[0]);
         assert!(u[0] < 128, "U value: {}", u[0]);
         assert!(v[0] > 128, "V value: {}", v[0]);
+    }
+
+    /// ProRes must actually open with the 10-bit 4:2:2 format we now feed it. Before the fix the
+    /// SDR path handed prores_ks 8-bit YUV420P and `open` failed every time — so this opening
+    /// successfully is the regression guard for "ProRes export always errored".
+    #[test]
+    fn prores_encoder_opens_with_yuv422p10() {
+        ffmpeg::init().unwrap();
+        // Skip cleanly if this ffmpeg build lacks a ProRes encoder (rather than false-fail).
+        if ffmpeg::encoder::find(ffmpeg::codec::Id::PRORES).is_none()
+            && ffmpeg::encoder::find_by_name("prores_ks").is_none()
+        {
+            eprintln!("prores encoder not present in this ffmpeg build; skipping");
+            return;
+        }
+        let r = setup_video_encoder(
+            ffmpeg::codec::Id::PRORES,
+            640, 480, 30.0, 20_000,
+            lightningbeam_core::export::HdrExportMode::Sdr,
+            false,
+        );
+        assert!(r.is_ok(), "ProRes encoder failed to open: {:?}", r.err());
+        let (encoder, _codec) = r.unwrap();
+        assert_eq!(encoder.format(), ffmpeg::format::Pixel::YUV422P10LE);
     }
 
     // NOTE: `rgba_to_yuv420p` rounds dimensions up to multiples of 16 (H.264

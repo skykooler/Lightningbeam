@@ -70,6 +70,11 @@ pub struct VideoExportState {
     readback_pipeline: Option<readback_pipeline::ReadbackPipeline>,
     /// CPU YUV converter for RGBA→YUV420p conversion
     cpu_yuv_converter: Option<cpu_yuv_converter::CpuYuvConverter>,
+    /// ProRes 422 export: forces the CPU (RGBA) readback path and converts to 10-bit 4:2:2 instead
+    /// of 8-bit 4:2:0. `true` only for `VideoCodec::ProRes422` (SDR).
+    prores: bool,
+    /// CPU RGBA→YUV422P10LE converter, used only on the ProRes path.
+    cpu_yuv422p10: Option<cpu_yuv_converter::CpuYuv422P10Converter>,
     /// Frames that have been submitted to GPU but not yet encoded
     frames_in_flight: usize,
     /// Next frame number to send to encoder (for ordering)
@@ -1101,6 +1106,8 @@ impl ExportOrchestrator {
         let hdr = settings.hdr;
         let fit = settings.fit;
         let full_range = settings.color_range.is_full();
+        let prores = matches!(settings.codec, lightningbeam_core::export::VideoCodec::ProRes422)
+            && !hdr.is_hdr();
         let handle = std::thread::spawn(move || {
             Self::run_video_encoder(settings, output_path, frame_rx, progress_tx, cancel_flag, total_frames);
         });
@@ -1120,6 +1127,8 @@ impl ExportOrchestrator {
             gpu_resources: None,
             readback_pipeline: None,
             cpu_yuv_converter: None,
+            prores,
+            cpu_yuv422p10: None,
             frames_in_flight: 0,
             next_frame_to_encode: 0,
             perf_metrics: Some(perf_metrics::ExportMetrics::new()),
@@ -1350,7 +1359,10 @@ impl ExportOrchestrator {
             .unwrap()
             .as_secs();
 
-        let temp_video_path = temp_dir.join(format!("lightningbeam_video_{}.mp4", timestamp));
+        // Use the codec's real container for the temp video, not a hardcoded .mp4 — VP8 isn't a
+        // valid MP4 codec, so an .mp4 temp made `write_header` fail for any VP8+audio export.
+        let temp_video_path = temp_dir.join(format!("lightningbeam_video_{}.{}",
+            timestamp, video_settings.codec.container_format()));
         let temp_audio_path = temp_dir.join(format!("lightningbeam_audio_{}.{}",
             timestamp,
             match audio_settings.format {
@@ -1560,24 +1572,34 @@ impl ExportOrchestrator {
             // Enable GPU YUV only when the encoder's YUV420P planes are tight (no linesize
             // padding) — then the packed GPU planes copy in without row misalignment.
             // Otherwise fall back to RGBA readback + CPU swscale.
-            let gpu_yuv_tight = std::env::var("LB_DISABLE_GPU_YUV").is_err() && {
+            // ProRes needs 10-bit 4:2:2 (built on the CPU from the RGBA readback), so it forces the
+            // RGBA path — the GPU YUV converter only produces 8-bit 4:2:0.
+            let gpu_yuv_tight = !state.prores && std::env::var("LB_DISABLE_GPU_YUV").is_err() && {
                 let probe = ffmpeg_next::frame::Video::new(
                     ffmpeg_next::format::Pixel::YUV420P, width, height,
                 );
                 probe.stride(0) == width as usize && probe.stride(1) == (width / 2) as usize
             };
-            if !gpu_yuv_tight {
+            if !gpu_yuv_tight && !state.prores {
                 println!("🎬 [VIDEO EXPORT] YUV planes are padded at {width}x{height}; using CPU YUV path");
             }
             state.readback_pipeline = Some(readback_pipeline::ReadbackPipeline::new(device, queue, width, height, gpu_yuv_tight, state.full_range));
-            state.cpu_yuv_converter = Some(cpu_yuv_converter::CpuYuvConverter::new(width, height, state.full_range)?);
+            if state.prores {
+                state.cpu_yuv422p10 = Some(cpu_yuv_converter::CpuYuv422P10Converter::new(width, height, state.full_range)?);
+                println!("🎬 [VIDEO EXPORT] ProRes 422: 10-bit 4:2:2 (YUV422P10LE) CPU converter initialized");
+            } else {
+                state.cpu_yuv_converter = Some(cpu_yuv_converter::CpuYuvConverter::new(width, height, state.full_range)?);
+            }
             println!("🚀 [ASYNC PIPELINE] Triple-buffered pipeline initialized");
             println!("🚀 [CPU YUV] swscale converter initialized");
         }
 
         let pipeline = state.readback_pipeline.as_mut().unwrap();
         let gpu_resources = state.gpu_resources.as_mut().unwrap();
-        let cpu_converter = state.cpu_yuv_converter.as_mut().unwrap();
+        // Exactly one of these is present: cpu_yuv422p10 on the ProRes path, cpu_converter on the
+        // SDR fallback path (or neither is used when the GPU YUV converter is active).
+        let mut cpu_converter = state.cpu_yuv_converter.as_mut();
+        let mut cpu_yuv422p10 = state.cpu_yuv422p10.as_mut();
         let mut metrics = state.perf_metrics.as_mut();
 
         // Poll for completed async readbacks (non-blocking)
@@ -1604,12 +1626,17 @@ impl ExportOrchestrator {
                 let data = pipeline.extract_rgba_data(result.buffer_id);
                 let extraction_end = Instant::now();
 
-                // YUV planes: GPU-converted (just slice) or CPU swscale fallback (timed).
+                // YUV planes: ProRes 10-bit 4:2:2, else GPU-converted (just slice), else CPU
+                // swscale 8-bit 4:2:0 fallback (timed).
                 let conversion_start = Instant::now();
-                let (y, u, v) = if pipeline.is_yuv_mode() {
+                let (y, u, v) = if let Some(conv) = cpu_yuv422p10.as_deref_mut() {
+                    conv.convert(&data)?
+                } else if pipeline.is_yuv_mode() {
                     pipeline.split_yuv(&data)
                 } else {
-                    cpu_converter.convert(&data)?
+                    cpu_converter.as_deref_mut()
+                        .ok_or("SDR export missing its CPU YUV converter")?
+                        .convert(&data)?
                 };
                 let conversion_end = Instant::now();
 
@@ -1698,6 +1725,7 @@ impl ExportOrchestrator {
             state.gpu_resources = None;
             state.readback_pipeline = None;
             state.cpu_yuv_converter = None;
+            state.cpu_yuv422p10 = None;
             state.perf_metrics = None;
             return Ok(false);
         }
@@ -1947,6 +1975,8 @@ impl ExportOrchestrator {
         // Pixel format the encoder frames are built in (matches setup_video_encoder).
         let pixel_format = if settings.hdr.is_hdr() {
             ffmpeg_next::format::Pixel::YUV420P10LE
+        } else if matches!(settings.codec, VideoCodec::ProRes422) {
+            ffmpeg_next::format::Pixel::YUV422P10LE // ProRes 422: 10-bit 4:2:2
         } else {
             ffmpeg_next::format::Pixel::YUV420P
         };
@@ -2061,8 +2091,17 @@ impl ExportOrchestrator {
 
         // Copy each plane row-by-row honoring the frame's stride (10-bit / arbitrary widths can have
         // row padding that a flat copy would misalign). `bytes_per_row` = samples × sample size.
-        let ten_bit = matches!(pixel_format, ffmpeg_next::format::Pixel::YUV420P10LE);
-        let sample_bytes = if ten_bit { 2usize } else { 1usize };
+        // Sample size + chroma subsampling depend on the pixel format:
+        //   YUV420P     → 8-bit,  4:2:0 (chroma = w/2 × h/2)
+        //   YUV420P10LE → 10-bit, 4:2:0 (chroma = w/2 × h/2)
+        //   YUV422P10LE → 10-bit, 4:2:2 (chroma = w/2 × h, full-height)  [ProRes]
+        use ffmpeg_next::format::Pixel;
+        let (sample_bytes, chroma_h_div) = match pixel_format {
+            Pixel::YUV420P => (1usize, 2usize),
+            Pixel::YUV420P10LE => (2usize, 2usize),
+            Pixel::YUV422P10LE => (2usize, 1usize),
+            _ => (1usize, 2usize),
+        };
         let copy_plane = |frame: &mut ffmpeg_next::frame::Video, idx: usize, src: &[u8], w: usize, h: usize| {
             let bytes_per_row = w * sample_bytes;
             let stride = frame.stride(idx);
@@ -2077,8 +2116,8 @@ impl ExportOrchestrator {
         };
         let (w, h) = (width as usize, height as usize);
         copy_plane(&mut video_frame, 0, y_plane, w, h);
-        copy_plane(&mut video_frame, 1, u_plane, w / 2, h / 2);
-        copy_plane(&mut video_frame, 2, v_plane, w / 2, h / 2);
+        copy_plane(&mut video_frame, 1, u_plane, w / 2, h / chroma_h_div);
+        copy_plane(&mut video_frame, 2, v_plane, w / 2, h / chroma_h_div);
 
         // Set PTS (presentation timestamp) in encoder's time base
         // Encoder time base is 1/(framerate * 1000), so PTS = timestamp * (framerate * 1000)
