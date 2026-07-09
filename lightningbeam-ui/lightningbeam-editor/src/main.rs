@@ -809,14 +809,17 @@ impl AutosaveState {
     }
 }
 
-/// A file switch deferred behind the unsaved-changes prompt: the thing to do once the user answers
-/// Save / Don't Save (Cancel just drops it).
+/// Something to do after the unsaved-changes prompt resolves: the action deferred behind "Save
+/// changes?" (Save runs it after saving; Don't Save runs it immediately; Cancel drops it). Covers
+/// both file switches and quitting so they share one prompt + one save-then-continue path.
 #[derive(Debug, Clone)]
-enum PendingSwitch {
+enum PendingAction {
     /// New File (return to the start screen).
     NewFile,
     /// Open a specific `.beam` (covers both Open… and Open Recent — the path is already resolved).
     Open(std::path::PathBuf),
+    /// Quit (close the window).
+    Quit,
 }
 
 /// Information about an imported asset (for auto-placement)
@@ -1313,10 +1316,13 @@ struct EditorApp {
     /// Non-action changes since the last save (imports, finished recordings) that `epoch` doesn't
     /// capture. Cleared on manual save / new / load.
     media_modified: bool,
-    /// A file switch waiting on the "save changes?" prompt (New/Open/Open Recent with unsaved work).
-    unsaved_prompt: Option<PendingSwitch>,
-    /// A switch to perform once an in-flight save (triggered from that prompt) finishes.
-    switch_after_save: Option<PendingSwitch>,
+    /// The pending action waiting on the "save changes?" prompt — a file switch (New/Open/Open
+    /// Recent) or a quit, requested while the document had unsaved work.
+    unsaved_prompt: Option<PendingAction>,
+    /// The action to run once an in-flight save (triggered from that prompt via "Save") finishes.
+    after_save: Option<PendingAction>,
+    /// The user agreed to quit — let the next window-close request through instead of intercepting it.
+    confirmed_close: bool,
 
     /// Audio extraction channel for background thread communication
     audio_extraction_tx: std::sync::mpsc::Sender<AudioExtractionResult>,
@@ -1619,7 +1625,8 @@ impl EditorApp {
             saved_epoch: 0,
             media_modified: false,
             unsaved_prompt: None,
-            switch_after_save: None,
+            after_save: None,
+            confirmed_close: false,
             audio_extraction_tx,
             audio_extraction_rx,
             export_dialog: export::dialog::ExportDialog::default(),
@@ -3384,7 +3391,7 @@ impl EditorApp {
             // File menu
             MenuAction::NewFile => {
                 println!("Menu: New File");
-                self.request_switch(PendingSwitch::NewFile);
+                self.request_switch(PendingAction::NewFile);
             }
             MenuAction::NewWindow => {
                 println!("Menu: New Window");
@@ -3444,14 +3451,14 @@ impl EditorApp {
                     .add_filter("Lightningbeam Project", &["beam"])
                     .pick_file()
                 {
-                    self.request_switch(PendingSwitch::Open(path));
+                    self.request_switch(PendingAction::Open(path));
                 }
             }
             MenuAction::OpenRecent(index) => {
                 let recent_files = self.config.get_recent_files();
 
                 if let Some(path) = recent_files.get(index) {
-                    self.request_switch(PendingSwitch::Open(path.clone()));
+                    self.request_switch(PendingAction::Open(path.clone()));
                 }
             }
             MenuAction::ClearRecentFiles => {
@@ -4404,20 +4411,32 @@ impl EditorApp {
         }
     }
 
-    /// Show the "save changes?" prompt when a file switch is requested with unsaved work. Save
-    /// persists first (Save As for untitled/recovered files) then switches; Don't Save switches and
+    /// The single "save changes?" prompt for any unsaved-work exit point — file switches (New /
+    /// Open / Open Recent) and quitting. Also intercepts the window-close request. Save persists
+    /// first (Save As for untitled/recovered docs) then runs the action; Don't Save runs it and
     /// discards; Cancel stays put.
     fn render_unsaved_prompt(&mut self, ctx: &egui::Context) {
+        // Intercept a window-close request with unsaved work → veto it and queue the Quit prompt.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.confirmed_close {
+            if self.document_modified() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.unsaved_prompt = Some(PendingAction::Quit);
+            }
+            // Unmodified → let the close proceed.
+        }
+
         let Some(pending) = self.unsaved_prompt.as_ref() else { return };
-        let action_desc = match pending {
-            PendingSwitch::NewFile => "starting a new file",
-            PendingSwitch::Open(_) => "opening another file",
+        // The "…before X?" tail + the affirmative button label, per action.
+        let (desc, discard_label) = match pending {
+            PendingAction::NewFile => ("starting a new file", "Don't Save"),
+            PendingAction::Open(_) => ("opening another file", "Don't Save"),
+            PendingAction::Quit => ("quitting", "Discard & Quit"),
         };
 
         #[derive(PartialEq)]
         enum Answer {
             Save,
-            DontSave,
+            Discard,
             Cancel,
         }
         let mut answer: Option<Answer> = None;
@@ -4427,15 +4446,15 @@ impl EditorApp {
             ui.heading("Save changes?");
             ui.add_space(6.0);
             ui.label(format!(
-                "This document has unsaved changes. Save them before {action_desc}?"
+                "This document has unsaved changes. Save them before {desc}?"
             ));
             ui.add_space(14.0);
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
                     answer = Some(Answer::Save);
                 }
-                if ui.button("Don't Save").clicked() {
-                    answer = Some(Answer::DontSave);
+                if ui.button(discard_label).clicked() {
+                    answer = Some(Answer::Discard);
                 }
                 if ui.button("Cancel").clicked() {
                     answer = Some(Answer::Cancel);
@@ -4447,13 +4466,13 @@ impl EditorApp {
             Some(Answer::Cancel) => {
                 self.unsaved_prompt = None;
             }
-            Some(Answer::DontSave) => {
-                if let Some(sw) = self.unsaved_prompt.take() {
-                    self.do_switch(sw);
+            Some(Answer::Discard) => {
+                if let Some(action) = self.unsaved_prompt.take() {
+                    self.do_action(action, ctx);
                 }
             }
             Some(Answer::Save) => {
-                let sw = self.unsaved_prompt.take();
+                let action = self.unsaved_prompt.take();
                 // Save to the existing file, or Save As for an untitled / recovered document.
                 let real_path = self
                     .current_file_path
@@ -4468,12 +4487,12 @@ impl EditorApp {
                 };
                 match target {
                     Some(path) => {
-                        // Run the switch once the save completes.
-                        self.switch_after_save = sw;
+                        // Run the action once the save completes.
+                        self.after_save = action;
                         self.save_to_file(path);
                     }
                     None => {
-                        // Save As cancelled → abort the switch, keep the document (still unsaved).
+                        // Save As cancelled → abort, keep the document (still unsaved).
                     }
                 }
             }
@@ -4500,21 +4519,31 @@ impl EditorApp {
         self.app_mode = AppMode::StartScreen;
     }
 
-    /// Carry out a file switch once the unsaved-changes prompt is resolved (or when there were no
-    /// unsaved changes to begin with).
-    fn do_switch(&mut self, switch: PendingSwitch) {
-        match switch {
-            PendingSwitch::NewFile => self.do_new_file(),
-            PendingSwitch::Open(path) => self.load_from_file(path),
+    /// Carry out a deferred action once the unsaved-changes prompt is resolved (or when there was
+    /// nothing unsaved to begin with).
+    fn do_action(&mut self, action: PendingAction, ctx: &egui::Context) {
+        match action {
+            PendingAction::NewFile => self.do_new_file(),
+            PendingAction::Open(path) => self.load_from_file(path),
+            PendingAction::Quit => {
+                self.confirmed_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         }
     }
 
-    /// Begin a file switch, prompting to save first if the document has unsaved changes.
-    fn request_switch(&mut self, switch: PendingSwitch) {
+    /// Begin a file switch (New / Open / Open Recent), prompting to save first if the document has
+    /// unsaved changes. Only ever called with `NewFile`/`Open` from the menus, so the immediate path
+    /// needs no `ctx` (only `Quit`, driven by the close interceptor, does).
+    fn request_switch(&mut self, action: PendingAction) {
         if self.document_modified() {
-            self.unsaved_prompt = Some(switch);
+            self.unsaved_prompt = Some(action);
         } else {
-            self.do_switch(switch);
+            match action {
+                PendingAction::NewFile => self.do_new_file(),
+                PendingAction::Open(path) => self.load_from_file(path),
+                PendingAction::Quit => {}
+            }
         }
     }
 
@@ -6155,9 +6184,9 @@ impl eframe::App for EditorApp {
             let mut operation_complete = false;
             let mut loaded_project_data: Option<(lightningbeam_core::file_io::LoadedProject, std::path::PathBuf)> = None;
             let mut update_recent_menu = false; // Track if we need to update recent files menu
-            // A file switch that was waiting on this save (from the unsaved-changes prompt), to run
+            // An action that was waiting on this save (from the unsaved-changes prompt), to run
             // after the file_operation borrow ends.
-            let mut switch_after_save: Option<PendingSwitch> = None;
+            let mut after_save: Option<PendingAction> = None;
 
             match operation {
                 FileOperation::Saving { ref mut progress_rx, ref path } => {
@@ -6177,7 +6206,7 @@ impl eframe::App for EditorApp {
                                 self.saved_epoch = self.action_executor.epoch();
                                 self.media_modified = false;
                                 // If a file switch was waiting on this save, run it after the borrow.
-                                switch_after_save = self.switch_after_save.take();
+                                after_save = self.after_save.take();
                                 // Container path may be new (Save As); update the
                                 // raster paging store so future faults read the right file.
                                 self.raster_store.set_path(self.current_file_path.clone());
@@ -6295,9 +6324,9 @@ impl eframe::App for EditorApp {
                 self.update_recent_files_menu();
             }
 
-            // A file switch that was waiting on this save (New/Open after choosing "Save") now runs.
-            if let Some(switch) = switch_after_save {
-                self.do_switch(switch);
+            // An action that was waiting on this save ("Save" in the prompt → New/Open/Quit) runs now.
+            if let Some(action) = after_save {
+                self.do_action(action, ctx);
             }
 
             // Request repaint to keep updating progress
