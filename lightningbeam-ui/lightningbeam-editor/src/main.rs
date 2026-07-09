@@ -703,12 +703,16 @@ struct AutosaveState {
     /// Recovery files left over from previous sessions that didn't exit cleanly (newest first),
     /// discovered at startup. Presented to the user as a "recover unsaved work?" prompt.
     leftover_recoveries: Vec<std::path::PathBuf>,
+    /// Seconds between autosaves while dirty. Defaults to `AUTOSAVE_INTERVAL_SECS`; override with
+    /// `LB_AUTOSAVE_SECS` (e.g. `LB_AUTOSAVE_SECS=5`) to make manual testing practical.
+    interval_secs: f64,
 }
 
 impl AutosaveState {
     fn new() -> Self {
         Self::gc_old_recovered();
         let recovery_path = Self::make_session_path();
+        eprintln!("💾 [AUTOSAVE] recovery file for this session: {:?}", recovery_path);
         let leftover_recoveries = Self::find_leftovers(recovery_path.as_deref());
         if !leftover_recoveries.is_empty() {
             eprintln!("💾 [AUTOSAVE] found {} leftover recovery file(s) from a previous session",
@@ -722,6 +726,11 @@ impl AutosaveState {
             last_time: None,
             progress_rx: None,
             leftover_recoveries,
+            interval_secs: std::env::var("LB_AUTOSAVE_SECS")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|s| *s > 0.0)
+                .unwrap_or(AUTOSAVE_INTERVAL_SECS),
         }
     }
 
@@ -4266,11 +4275,11 @@ impl EditorApp {
         }
         if let Some(t) = self.autosave.last_time {
             let elapsed = t.elapsed().as_secs_f64();
-            if elapsed < AUTOSAVE_INTERVAL_SECS {
+            if elapsed < self.autosave.interval_secs {
                 // Dirty but throttled — wake up when the interval elapses even if the app goes idle,
                 // so an edit-then-idle session still gets its recovery snapshot.
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(
-                    (AUTOSAVE_INTERVAL_SECS - elapsed).max(0.1),
+                    (self.autosave.interval_secs - elapsed).max(0.1),
                 ));
                 return;
             }
