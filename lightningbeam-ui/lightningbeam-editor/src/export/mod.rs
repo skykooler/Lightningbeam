@@ -3,7 +3,6 @@
 //! This module provides the export orchestrator and progress tracking
 //! for exporting audio and video from the timeline.
 
-pub mod audio_exporter;
 pub mod dialog;
 pub mod gif_exporter;
 pub mod image_exporter;
@@ -1008,6 +1007,12 @@ impl ExportOrchestrator {
             start_time: daw_backend::Seconds(settings.start_time),
             end_time: daw_backend::Seconds(settings.end_time),
             tempo_map: daw_backend::TempoMap::constant(settings.bpm),
+            metadata: settings
+                .metadata
+                .pairs()
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         };
 
         // Use DAW backend export for all formats

@@ -3443,7 +3443,13 @@ impl EditorApp {
                     h
                 };
 
-                self.export_dialog.open(timeline_endpoint, &project_name, &hint);
+                self.export_dialog.open(
+                    timeline_endpoint,
+                    &project_name,
+                    &hint,
+                    &self.config.last_audio_artist,
+                    &self.config.last_audio_album,
+                );
             }
             MenuAction::Quit => {
                 println!("Menu: Quit");
@@ -6368,6 +6374,15 @@ impl eframe::App for EditorApp {
                     }
                     ExportResult::AudioOnly(settings, output_path) => {
                         println!("🎵 [MAIN] Starting audio-only export: {}", output_path.display());
+
+                        // Remember Artist/Album so they prefill next time.
+                        if !settings.metadata.artist.is_empty() {
+                            self.config.last_audio_artist = settings.metadata.artist.clone();
+                        }
+                        if !settings.metadata.album.is_empty() {
+                            self.config.last_audio_album = settings.metadata.album.clone();
+                        }
+                        self.config.save();
 
                         if let Some(audio_controller) = &self.audio_controller {
                             orchestrator.start_audio_export(

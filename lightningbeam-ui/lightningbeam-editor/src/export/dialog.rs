@@ -11,6 +11,36 @@ use lightningbeam_core::export::{
 };
 use std::path::PathBuf;
 
+/// The OS username (`$USER` / `%USERNAME%`), or empty if unavailable. Used as a default Artist tag.
+fn os_username() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default()
+}
+
+/// Current civil year (UTC) computed from the system clock — avoids pulling in a date crate.
+fn current_year() -> i64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    year_from_unix_secs(secs)
+}
+
+/// Civil year (UTC) for a Unix timestamp, via Howard Hinnant's `civil_from_days` algorithm.
+fn year_from_unix_secs(secs: i64) -> i64 {
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    y + if m <= 2 { 1 } else { 0 }
+}
+
 /// Hint about document content, used to pick a smart default export type.
 pub struct DocumentHint {
     pub has_video: bool,
@@ -129,7 +159,14 @@ impl Default for ExportDialog {
 
 impl ExportDialog {
     /// Open the dialog with default settings, using `hint` to pick a smart default tab.
-    pub fn open(&mut self, timeline_duration: f64, project_name: &str, hint: &DocumentHint) {
+    pub fn open(
+        &mut self,
+        timeline_duration: f64,
+        project_name: &str,
+        hint: &DocumentHint,
+        last_artist: &str,
+        last_album: &str,
+    ) {
         self.open = true;
         self.audio_settings.end_time = timeline_duration;
         self.video_settings.end_time = timeline_duration;
@@ -153,10 +190,23 @@ impl ExportDialog {
             else if only_raster      { ExportType::Image }
             else                     { self.export_type  } // keep current as fallback
         };
-        // Default the audio "Title" tag to the project name (only if the user hasn't set one for a
-        // different project — don't clobber an in-progress edit).
-        if self.audio_settings.metadata.title.is_empty() && !same_project {
-            self.audio_settings.metadata.title = project_name.to_owned();
+        // Sensible tag defaults, only filled when empty so a user's edits are never clobbered:
+        //  • Title  → project name (on a project switch)
+        //  • Year   → current year
+        //  • Artist → last-used artist, else the OS username
+        //  • Album  → last-used album
+        let meta = &mut self.audio_settings.metadata;
+        if meta.title.is_empty() && !same_project {
+            meta.title = project_name.to_owned();
+        }
+        if meta.year.is_empty() {
+            meta.year = current_year().to_string();
+        }
+        if meta.artist.is_empty() {
+            meta.artist = if !last_artist.is_empty() { last_artist.to_owned() } else { os_username() };
+        }
+        if meta.album.is_empty() && !last_album.is_empty() {
+            meta.album = last_album.to_owned();
         }
         self.current_project = project_name.to_owned();
 
@@ -493,6 +543,14 @@ impl ExportDialog {
     fn render_audio_metadata(&mut self, ui: &mut egui::Ui) {
         let m = &mut self.audio_settings.metadata;
         ui.label(egui::RichText::new("Tags").strong());
+        // Placeholder styling: italic + a clearly faded color so an empty field's hint never reads
+        // as a real value (the theme's default weak color is too close to the text color). An
+        // explicit color overrides egui's weak-color fallback for hint text.
+        let hint_color = {
+            let t = ui.visuals().text_color();
+            egui::Color32::from_rgba_unmultiplied(t.r(), t.g(), t.b(), 100)
+        };
+        let year_hint = format!("e.g. {}", current_year());
         egui::Grid::new("audio_metadata_grid")
             .num_columns(2)
             .spacing([8.0, 4.0])
@@ -501,18 +559,18 @@ impl ExportDialog {
                     ui.label(label);
                     ui.add(
                         egui::TextEdit::singleline(val)
-                            .hint_text(hint)
+                            .hint_text(egui::RichText::new(hint).italics().color(hint_color))
                             .desired_width(260.0),
                     );
                     ui.end_row();
                 };
-                row(ui, "Title", &mut m.title, "Track title");
-                row(ui, "Artist", &mut m.artist, "Artist");
-                row(ui, "Album", &mut m.album, "Album");
-                row(ui, "Genre", &mut m.genre, "Genre");
-                row(ui, "Year", &mut m.year, "e.g. 2026");
+                row(ui, "Title", &mut m.title, "e.g. My Song");
+                row(ui, "Artist", &mut m.artist, "e.g. Jane Doe");
+                row(ui, "Album", &mut m.album, "e.g. Greatest Hits");
+                row(ui, "Genre", &mut m.genre, "e.g. Electronic");
+                row(ui, "Year", &mut m.year, &year_hint);
                 row(ui, "Track", &mut m.track, "e.g. 1 or 1/12");
-                row(ui, "Comment", &mut m.comment, "Comment");
+                row(ui, "Comment", &mut m.comment, "Optional notes…");
             });
     }
 
@@ -971,5 +1029,32 @@ impl ExportProgressDialog {
         }
 
         should_cancel
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn year_from_unix_secs_known_values() {
+        assert_eq!(year_from_unix_secs(0), 1970); // Unix epoch
+        assert_eq!(year_from_unix_secs(946_684_800), 2000); // 2000-01-01
+        assert_eq!(year_from_unix_secs(1_735_689_600), 2025); // 2025-01-01
+        assert_eq!(year_from_unix_secs(1_767_225_599), 2025); // 2025-12-31 23:59:59
+        assert_eq!(year_from_unix_secs(1_767_225_600), 2026); // 2026-01-01
+
+        // Post-2038: these timestamps exceed i32::MAX (2_147_483_647) — and the last exceeds
+        // u32::MAX — so a 32-bit time_t would wrap here. i64 math handles them correctly.
+        assert_eq!(year_from_unix_secs(2_148_595_200), 2038); // 2038-02-01 (> i32::MAX)
+        assert_eq!(year_from_unix_secs(2_223_331_200), 2040); // 2040-06-15
+        assert_eq!(year_from_unix_secs(4_102_444_800), 2100); // 2100-01-01 (not a leap year)
+        assert_eq!(year_from_unix_secs(9_214_646_400), 2262); // 2262-01-01 (> u32::MAX)
+    }
+
+    #[test]
+    fn current_year_is_plausible() {
+        let y = current_year();
+        assert!((2020..3000).contains(&y), "implausible year: {y}");
     }
 }
