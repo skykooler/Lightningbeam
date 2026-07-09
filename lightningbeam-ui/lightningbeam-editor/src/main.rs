@@ -1379,7 +1379,17 @@ impl EditorApp {
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
         // Load application config
-        let config = AppConfig::load();
+        let mut config = AppConfig::load();
+        // One-time cleanup: earlier builds added a Recovered file to Recent on restore. Drop any
+        // recovery-dir paths that leaked in (and re-save if we removed any) so they don't show in
+        // Recent or get auto-reopened below.
+        let recent_before = config.recent_files.len();
+        config
+            .recent_files
+            .retain(|p| !AutosaveState::is_recovery_path(p));
+        if config.recent_files.len() != recent_before {
+            config.save();
+        }
 
         // Check if we should auto-reopen last session
         let pending_auto_reopen = if config.reopen_last_session {
@@ -4746,9 +4756,12 @@ impl EditorApp {
         // Point the raster paging store at the loaded container so faulting works.
         self.raster_store.set_path(self.current_file_path.clone());
 
-        // Add to recent files
-        self.config.add_recent_file(path.clone());
-        self.update_recent_files_menu();
+        // Add to recent files — but never a recovery file (it's an internal, transient container in
+        // the app data dir, not a project the user opened).
+        if !AutosaveState::is_recovery_path(&path) {
+            self.config.add_recent_file(path.clone());
+            self.update_recent_files_menu();
+        }
 
         // Set active layer
         if let Some(first) = self.action_executor.document().root.children.first() {
