@@ -20,6 +20,9 @@ vello = { workspace = true }
 
 # Text layout/shaping (text layers)
 parley = { workspace = true }
+# Glyph outline extraction for lossless text→SVG export. Pinned to the version parley resolves
+# (0.43) so glyph IDs / normalized coords from parley layouts match this outliner.
+skrifa = "0.43"
 
 # Image decoding for image fills
 image = { workspace = true }
