@@ -681,6 +681,53 @@ enum FileOperation {
     },
 }
 
+/// How often (seconds) the background autosave runs when the document is dirty.
+const AUTOSAVE_INTERVAL_SECS: f64 = 45.0;
+
+/// Background crash-recovery autosave state (see the `autosave` field on `EditorApp`).
+struct AutosaveState {
+    /// Per-session recovery container path (in the app data dir). `None` disables autosave
+    /// (e.g. the data dir couldn't be resolved/created).
+    recovery_path: Option<std::path::PathBuf>,
+    /// `ActionExecutor::epoch()` captured at the last dispatched autosave (or manual save). The
+    /// document is "dirty" when the current epoch differs, or `pending_event` is set.
+    baseline_epoch: u64,
+    /// Set by non-action changes that still need capturing (import, finished recording).
+    pending_event: bool,
+    /// True while a recovery write is in flight on the worker (don't dispatch another).
+    in_flight: bool,
+    /// Wall-clock of the last dispatched autosave, for interval throttling.
+    last_time: Option<std::time::Instant>,
+    /// Progress channel for the in-flight recovery write.
+    progress_rx: Option<std::sync::mpsc::Receiver<FileProgress>>,
+}
+
+impl AutosaveState {
+    fn new() -> Self {
+        Self {
+            recovery_path: Self::make_session_path(),
+            baseline_epoch: 0,
+            pending_event: false,
+            in_flight: false,
+            last_time: None,
+            progress_rx: None,
+        }
+    }
+
+    /// The recovery directory (`<data_dir>/recovery`), created if needed.
+    fn recovery_dir() -> Option<std::path::PathBuf> {
+        let proj = directories::ProjectDirs::from("", "", "lightningbeam")?;
+        let dir = proj.data_dir().join("recovery");
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    }
+
+    /// A fresh per-session recovery file path (`recovery/session-<uuid>.beam`).
+    fn make_session_path() -> Option<std::path::PathBuf> {
+        Some(Self::recovery_dir()?.join(format!("session-{}.beam", uuid::Uuid::new_v4())))
+    }
+}
+
 /// Information about an imported asset (for auto-placement)
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // name/duration populated for future import UX features
@@ -1163,6 +1210,11 @@ struct EditorApp {
     /// Current file operation in progress (if any)
     file_operation: Option<FileOperation>,
 
+    /// Crash-recovery autosave state. The recovery container is a per-session `.beam` in the app's
+    /// data dir; it's written in the background (reusing the file worker) and deleted on a clean
+    /// exit. A leftover file on next launch signals an unclean shutdown → offer to restore.
+    autosave: AutosaveState,
+
     /// Audio extraction channel for background thread communication
     audio_extraction_tx: std::sync::mpsc::Sender<AudioExtractionResult>,
     audio_extraction_rx: std::sync::mpsc::Receiver<AudioExtractionResult>,
@@ -1450,6 +1502,7 @@ impl EditorApp {
             config,
             file_command_tx,
             file_operation: None, // No file operation in progress initially
+            autosave: AutosaveState::new(),
             audio_extraction_tx,
             audio_extraction_rx,
             export_dialog: export::dialog::ExportDialog::default(),
@@ -1819,6 +1872,8 @@ impl EditorApp {
 
         // Reset action executor with new document
         self.action_executor = lightningbeam_core::action::ActionExecutor::new(document);
+        // Fresh document → nothing new to recover; rebase the autosave epoch.
+        self.reset_autosave_baseline();
 
         // Apply the layout
         if layout_index < self.layouts.len() {
@@ -4020,19 +4075,45 @@ impl EditorApp {
     }
 
     /// Prepare document for saving by storing current UI layout
-    fn prepare_document_for_save(&mut self) {
-        let doc = self.action_executor.document_mut();
-
-        // Store current layout state
-        doc.ui_layout = Some(self.current_layout.clone());
-
-        // Store base layout name for reference
+    /// Save the current document to a .beam file
+    /// Assemble the background save command for `path`: prepares the document (layout), clones it,
+    /// and snapshots the waveform/thumbnail side data. Shared by manual save and background autosave.
+    fn build_save_command(
+        &mut self,
+        path: std::path::PathBuf,
+        progress_tx: std::sync::mpsc::Sender<FileProgress>,
+    ) -> FileCommand {
+        // Snapshot the document and stamp the current UI layout onto the SNAPSHOT — never the live
+        // document. Mutating the live doc here (as the old prepare_document_for_save did via
+        // Arc::make_mut) would touch UI state and could deep-clone the whole document if a render
+        // callback holds a reference — unacceptable for a frequent background autosave. The live
+        // doc's `ui_layout` is only read at save/serialize time, so leaving it stale is harmless.
+        let mut document = self.action_executor.document().clone();
+        document.ui_layout = Some(self.current_layout.clone());
         if self.current_layout_index < self.layouts.len() {
-            doc.ui_layout_base = Some(self.layouts[self.current_layout_index].name.clone());
+            document.ui_layout_base = Some(self.layouts[self.current_layout_index].name.clone());
+        }
+        let waveform_blobs: std::collections::HashMap<usize, Vec<u8>> = self
+            .waveform_pyramid_blobs
+            .iter()
+            .map(|(&idx, blob)| (idx, blob.as_ref().clone()))
+            .collect();
+        let (thumbnail_snapshot, complete_thumbnail_clips) = {
+            let vm = self.video_manager.lock().unwrap();
+            (vm.snapshot_all_thumbnails(), vm.complete_thumbnail_clips())
+        };
+        FileCommand::Save {
+            path,
+            document,
+            layer_to_track_map: self.layer_to_track_map.clone(),
+            large_media_mode: self.config.large_media_default,
+            waveform_blobs,
+            thumbnail_snapshot,
+            complete_thumbnail_clips,
+            progress_tx,
         }
     }
 
-    /// Save the current document to a .beam file
     fn save_to_file(&mut self, path: std::path::PathBuf) {
         println!("Saving to: {}", path.display());
 
@@ -4041,42 +4122,9 @@ impl EditorApp {
             return;
         }
 
-        // Prepare document for save (including layout)
-        self.prepare_document_for_save();
-
         // Create progress channel
         let (progress_tx, progress_rx) = std::sync::mpsc::channel();
-
-        // Clone document for background thread
-        let document = self.action_executor.document().clone();
-
-        // Snapshot the generated waveform pyramids (by pool index) so the worker
-        // can persist them into the container alongside the audio.
-        let waveform_blobs: std::collections::HashMap<usize, Vec<u8>> = self
-            .waveform_pyramid_blobs
-            .iter()
-            .map(|(&idx, blob)| (idx, blob.as_ref().clone()))
-            .collect();
-
-        // Snapshot all video thumbnails (cheap Arc-clone) + which clips finished
-        // generating; the worker PNG-encodes them with a complete/partial flag so a
-        // save mid-generation persists progress and resumes on load.
-        let (thumbnail_snapshot, complete_thumbnail_clips) = {
-            let vm = self.video_manager.lock().unwrap();
-            (vm.snapshot_all_thumbnails(), vm.complete_thumbnail_clips())
-        };
-
-        // Send save command to worker thread
-        let command = FileCommand::Save {
-            path: path.clone(),
-            document,
-            layer_to_track_map: self.layer_to_track_map.clone(),
-            large_media_mode: self.config.large_media_default,
-            waveform_blobs,
-            thumbnail_snapshot,
-            complete_thumbnail_clips,
-            progress_tx,
-        };
+        let command = self.build_save_command(path.clone(), progress_tx);
 
         if let Err(e) = self.file_command_tx.send(command) {
             eprintln!("❌ Failed to send save command: {}", e);
@@ -4088,6 +4136,78 @@ impl EditorApp {
             path,
             progress_rx,
         });
+    }
+
+    /// Mark the current document state as the autosave baseline — there is nothing new to recover
+    /// (called after a manual save, and after the document is replaced by new/load). Clears the
+    /// pending-event flag and resets the throttle so the next real change schedules cleanly.
+    fn reset_autosave_baseline(&mut self) {
+        self.autosave.baseline_epoch = self.action_executor.epoch();
+        self.autosave.pending_event = false;
+        self.autosave.last_time = None;
+    }
+
+    /// Background crash-recovery autosave: poll any in-flight recovery write, then (if the document
+    /// is dirty, throttled to `AUTOSAVE_INTERVAL_SECS`, and no manual save is running) dispatch a
+    /// write of the current state into the per-session recovery container. Fully background — reuses
+    /// the file worker; the only UI-thread cost is the same document/side-data snapshot a manual
+    /// save does. Never touches `current_file_path` or the raster `dirty` flags (the recovery file
+    /// is a separate container from the user's file).
+    fn maybe_autosave(&mut self, ctx: &egui::Context) {
+        // Drain progress from an in-flight recovery write.
+        if let Some(rx) = &self.autosave.progress_rx {
+            while let Ok(p) = rx.try_recv() {
+                match p {
+                    FileProgress::Done => self.autosave.in_flight = false,
+                    FileProgress::Error(e) => {
+                        eprintln!("⚠️ [AUTOSAVE] recovery write failed: {}", e);
+                        self.autosave.in_flight = false;
+                    }
+                    _ => {}
+                }
+            }
+            if !self.autosave.in_flight {
+                self.autosave.progress_rx = None;
+            }
+        }
+
+        let Some(recovery_path) = self.autosave.recovery_path.clone() else { return };
+        if self.autosave.in_flight || self.audio_controller.is_none() {
+            return;
+        }
+        // Don't compete with a manual save on the single worker.
+        if matches!(self.file_operation, Some(FileOperation::Saving { .. })) {
+            return;
+        }
+
+        let epoch = self.action_executor.epoch();
+        let dirty = epoch != self.autosave.baseline_epoch || self.autosave.pending_event;
+        if !dirty {
+            return;
+        }
+        if let Some(t) = self.autosave.last_time {
+            let elapsed = t.elapsed().as_secs_f64();
+            if elapsed < AUTOSAVE_INTERVAL_SECS {
+                // Dirty but throttled — wake up when the interval elapses even if the app goes idle,
+                // so an edit-then-idle session still gets its recovery snapshot.
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    (AUTOSAVE_INTERVAL_SECS - elapsed).max(0.1),
+                ));
+                return;
+            }
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let command = self.build_save_command(recovery_path, tx);
+        if self.file_command_tx.send(command).is_err() {
+            return;
+        }
+        self.autosave.in_flight = true;
+        self.autosave.progress_rx = Some(rx);
+        self.autosave.baseline_epoch = epoch;
+        self.autosave.pending_event = false;
+        self.autosave.last_time = Some(std::time::Instant::now());
+        eprintln!("💾 [AUTOSAVE] recovery snapshot dispatched");
     }
 
     /// Load a document from a .beam file
@@ -4184,6 +4304,8 @@ impl EditorApp {
         // Replace document
         let step1_start = std::time::Instant::now();
         self.action_executor = ActionExecutor::new(loaded_project.document);
+        // Freshly loaded document is clean → rebase the autosave epoch (no spurious recovery write).
+        self.reset_autosave_baseline();
         eprintln!("📊 [APPLY] Step 1: Replace document took {:.2}ms", step1_start.elapsed().as_secs_f64() * 1000.0);
 
         // Restore UI layout from loaded document
@@ -4722,6 +4844,8 @@ impl EditorApp {
 
     fn import_image(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::ImageAsset;
+        // Imported media lives outside the action/undo system, so flag it for the next autosave.
+        self.autosave.pending_event = true;
         self.note_possible_large_media(path);
 
         // Get filename for asset name
@@ -4775,6 +4899,7 @@ impl EditorApp {
     /// GPU waveform cache.
     fn import_audio(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::AudioClip;
+        self.autosave.pending_event = true;
         self.note_possible_large_media(path);
 
         let name = path.file_stem()
@@ -4901,6 +5026,7 @@ impl EditorApp {
     fn import_video(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::VideoClip;
         use lightningbeam_core::video::probe_video;
+        self.autosave.pending_event = true;
         self.note_possible_large_media(path);
 
         let name = path.file_stem()
@@ -5443,6 +5569,14 @@ impl EditorApp {
 }
 
 impl eframe::App for EditorApp {
+    /// Clean shutdown → not a crash → delete this session's recovery file so it isn't offered for
+    /// restore on the next launch. (If we crash instead, `on_exit` never runs and the file remains.)
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(path) = self.autosave.recovery_path.take() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.tablet.poll(ctx, raw_input, self.selected_tool);
 
@@ -5460,6 +5594,9 @@ impl eframe::App for EditorApp {
         if self.mobile_active() {
             mobile::apply_touch_style(ctx);
         }
+
+        // Background crash-recovery autosave (cheap early-out unless dirty + interval elapsed).
+        self.maybe_autosave(ctx);
 
         // === Raster fault-in (Phase 3 paging) ===
         // The canvas records raster keyframe ids whose `raw_pixels` weren't resident
@@ -5708,6 +5845,13 @@ impl eframe::App for EditorApp {
                             FileProgress::Done => {
                                 println!("✅ Save complete!");
                                 self.current_file_path = Some(path.clone());
+                                // Manual save persisted everything to the user's file → no unsaved
+                                // work to recover; rebase the autosave epoch so it stays quiet until
+                                // the next real edit. (Inlined rather than reset_autosave_baseline()
+                                // to avoid a second &mut self borrow inside the file_operation match.)
+                                self.autosave.baseline_epoch = self.action_executor.epoch();
+                                self.autosave.pending_event = false;
+                                self.autosave.last_time = None;
                                 // Container path may be new (Save As); update the
                                 // raster paging store so future faults read the right file.
                                 self.raster_store.set_path(self.current_file_path.clone());
@@ -6038,6 +6182,8 @@ impl eframe::App for EditorApp {
 
                                 if !clip_id.is_nil() {
                                     // Finalize the clip (update pool_index and duration)
+                                    // A finished recording (samples in the pool) needs capturing.
+                                    self.autosave.pending_event = true;
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&clip_id) {
                                         if clip.finalize_recording(pool_index, duration) {
                                             clip.name = format!("Recording {}", pool_index);
