@@ -153,6 +153,11 @@ impl ExportDialog {
             else if only_raster      { ExportType::Image }
             else                     { self.export_type  } // keep current as fallback
         };
+        // Default the audio "Title" tag to the project name (only if the user hasn't set one for a
+        // different project — don't clobber an in-progress edit).
+        if self.audio_settings.metadata.title.is_empty() && !same_project {
+            self.audio_settings.metadata.title = project_name.to_owned();
+        }
         self.current_project = project_name.to_owned();
 
         // Restore the last exported path if available; otherwise default to project name.
@@ -475,8 +480,40 @@ impl ExportDialog {
 
         ui.add_space(8.0);
 
+        // Tag metadata (ID3 / MP4 / Vorbis / RIFF-INFO depending on format).
+        self.render_audio_metadata(ui);
+
+        ui.add_space(8.0);
+
         // Time range
         self.render_time_range(ui);
+    }
+
+    /// Render the audio tag-metadata fields (title/artist/album/…). Written into the file on export.
+    fn render_audio_metadata(&mut self, ui: &mut egui::Ui) {
+        let m = &mut self.audio_settings.metadata;
+        ui.label(egui::RichText::new("Tags").strong());
+        egui::Grid::new("audio_metadata_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                let row = |ui: &mut egui::Ui, label: &str, val: &mut String, hint: &str| {
+                    ui.label(label);
+                    ui.add(
+                        egui::TextEdit::singleline(val)
+                            .hint_text(hint)
+                            .desired_width(260.0),
+                    );
+                    ui.end_row();
+                };
+                row(ui, "Title", &mut m.title, "Track title");
+                row(ui, "Artist", &mut m.artist, "Artist");
+                row(ui, "Album", &mut m.album, "Album");
+                row(ui, "Genre", &mut m.genre, "Genre");
+                row(ui, "Year", &mut m.year, "e.g. 2026");
+                row(ui, "Track", &mut m.track, "e.g. 1 or 1/12");
+                row(ui, "Comment", &mut m.comment, "Comment");
+            });
     }
 
     /// Video presets: (name, codec, quality, width, height, fps)

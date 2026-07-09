@@ -273,49 +273,17 @@ fn write_wav<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Write FLAC file using hound (FLAC is essentially lossless WAV)
+/// FLAC export is not implemented in the backend. It previously wrote WAV bytes to a `.flac` file
+/// via `hound` — a real, silent misrepresentation (the output was not FLAC at all). The UI now
+/// encodes FLAC properly with ffmpeg (`export/audio_exporter.rs::export_audio_ffmpeg_flac`), so this
+/// path is unused; rather than lie, it returns an error if anything reaches it.
 fn write_flac<P: AsRef<Path>>(
-    samples: &[f32],
-    settings: &ExportSettings,
-    output_path: P,
+    _samples: &[f32],
+    _settings: &ExportSettings,
+    _output_path: P,
 ) -> Result<(), String> {
-    // For now, we'll use hound to write a WAV-like FLAC file
-    // In the future, we could use a dedicated FLAC encoder
-    let spec = hound::WavSpec {
-        channels: settings.channels as u16,
-        sample_rate: settings.sample_rate,
-        bits_per_sample: settings.bit_depth,
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    let mut writer = hound::WavWriter::create(output_path, spec)
-        .map_err(|e| format!("Failed to create FLAC file: {}", e))?;
-
-    // Write samples (same as WAV for now)
-    match settings.bit_depth {
-        16 => {
-            for &sample in samples {
-                let clamped = sample.max(-1.0).min(1.0);
-                let pcm_value = (clamped * 32767.0) as i16;
-                writer.write_sample(pcm_value)
-                    .map_err(|e| format!("Failed to write sample: {}", e))?;
-            }
-        }
-        24 => {
-            for &sample in samples {
-                let clamped = sample.max(-1.0).min(1.0);
-                let pcm_value = (clamped * 8388607.0) as i32;
-                writer.write_sample(pcm_value)
-                    .map_err(|e| format!("Failed to write sample: {}", e))?;
-            }
-        }
-        _ => return Err(format!("Unsupported bit depth: {}", settings.bit_depth)),
-    }
-
-    writer.finalize()
-        .map_err(|e| format!("Failed to finalize FLAC file: {}", e))?;
-
-    Ok(())
+    Err("FLAC export is not implemented in daw-backend; use the ffmpeg encoder in the UI \
+         (export_audio_ffmpeg_flac). This path formerly wrote mislabeled WAV bytes.".to_string())
 }
 
 /// Export audio as MP3 using FFmpeg (streaming - render and encode simultaneously)

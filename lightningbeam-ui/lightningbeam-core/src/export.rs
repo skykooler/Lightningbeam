@@ -51,6 +51,54 @@ impl AudioFormat {
     }
 }
 
+/// Optional tag metadata written into the exported audio file. Empty fields are omitted. FFmpeg
+/// maps these standard keys to each container's native tags: ID3v2 (MP3), iTunes/MP4 atoms (M4A),
+/// Vorbis comments (FLAC), and RIFF INFO (WAV).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AudioMetadata {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub genre: String,
+    pub comment: String,
+    /// Year or full date (written to the `date` tag).
+    pub year: String,
+    /// Track number (written to the `track` tag).
+    pub track: String,
+}
+
+impl AudioMetadata {
+    /// True when no field is set (so no metadata need be written).
+    pub fn is_empty(&self) -> bool {
+        self.title.is_empty()
+            && self.artist.is_empty()
+            && self.album.is_empty()
+            && self.genre.is_empty()
+            && self.comment.is_empty()
+            && self.year.is_empty()
+            && self.track.is_empty()
+    }
+
+    /// The set (ffmpeg-key, value) pairs for non-empty fields, in a stable order.
+    pub fn pairs(&self) -> Vec<(&'static str, &str)> {
+        let mut v = Vec::new();
+        for (key, val) in [
+            ("title", &self.title),
+            ("artist", &self.artist),
+            ("album", &self.album),
+            ("genre", &self.genre),
+            ("comment", &self.comment),
+            ("date", &self.year),
+            ("track", &self.track),
+        ] {
+            if !val.is_empty() {
+                v.push((key, val.as_str()));
+            }
+        }
+        v
+    }
+}
+
 /// Audio export settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioExportSettings {
@@ -79,6 +127,10 @@ pub struct AudioExportSettings {
 
     /// Project BPM (for beat-position scheduling during export)
     pub bpm: f64,
+
+    /// Tag metadata (title/artist/…) written into the file. Empty = none.
+    #[serde(default)]
+    pub metadata: AudioMetadata,
 }
 
 impl Default for AudioExportSettings {
@@ -92,6 +144,7 @@ impl Default for AudioExportSettings {
             start_time: 0.0,
             end_time: 60.0,
             bpm: 120.0,
+            metadata: AudioMetadata::default(),
         }
     }
 }
