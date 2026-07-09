@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phone UI — Wireframe Plates</title>
+<style>
+  :root{
+    --bg:#0E1014;
+    --ink:#D7DDE4;
+    --ink-soft:#8B95A1;
+    --rule:#23282F;
+    --frame:#3A414D;
+    --device:#16191F;
+    --panel:#1F242C;
+    --panel-2:#272D37;
+    --line:#363D49;
+    --dim:#7C8693;
+    --bright:#EAEEF3;
+    --amber:#F4A340;   /* time / playhead / transport — the spine */
+    --cyan:#54C3E8;    /* selection */
+    --coral:#E8826B;   /* annotation */
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html{-webkit-text-size-adjust:100%;}
+  body{
+    margin:0; font-family:var(--sans); color:var(--ink);
+    background:
+      radial-gradient(circle, rgba(255,255,255,.022) 1px, transparent 1.4px) 0 0/26px 26px,
+      var(--bg);
+    line-height:1.5;
+  }
+
+  /* ---- title block ---- */
+  .sheet-head{ max-width:1120px; margin:0 auto; padding:48px 24px 8px;}
+  .titleblock{ border:1.5px solid var(--frame); display:grid; grid-template-columns:1fr auto; background:rgba(255,255,255,.012);}
+  .titleblock .tl-main{ padding:20px 22px;}
+  .titleblock .tl-meta{ border-left:1.5px solid var(--frame); display:grid; grid-template-rows:repeat(3,1fr); font-family:var(--mono); font-size:11px; min-width:200px;}
+  .tl-meta div{ padding:8px 14px; display:flex; flex-direction:column; justify-content:center;}
+  .tl-meta div + div{ border-top:1px solid var(--rule);}
+  .tl-meta span{ color:var(--ink-soft); letter-spacing:.04em;}
+  .tl-meta strong{ font-weight:600; font-size:12px; color:var(--bright);}
+  .eyebrow{ font-family:var(--mono); font-size:11px; letter-spacing:.22em; text-transform:uppercase; color:var(--coral); margin:0 0 8px;}
+  .titleblock h1{ margin:0; font-size:clamp(22px,3.6vw,34px); letter-spacing:-0.01em; line-height:1.05; color:var(--bright);}
+  .titleblock p{ margin:10px 0 0; max-width:60ch; color:var(--ink-soft); font-size:14px;}
+
+  .legend-key{ max-width:1120px; margin:14px auto 0; padding:0 24px; display:flex; flex-wrap:wrap; gap:18px; font-family:var(--mono); font-size:11px; color:var(--ink-soft);}
+  .legend-key b{ display:inline-flex; align-items:center; gap:6px; font-weight:500; color:var(--ink);}
+  .swatch{ width:11px; height:11px; border-radius:2px; display:inline-block;}
+
+  /* ---- plates ---- */
+  .plate{ max-width:1120px; margin:0 auto; padding:40px 24px; border-top:1px solid var(--rule);}
+  .plate:first-of-type{ border-top:0;}
+  .plate-head{ display:flex; align-items:baseline; gap:16px; margin-bottom:8px; flex-wrap:wrap;}
+  .plate-num{ font-family:var(--mono); font-size:13px; font-weight:600; color:var(--coral); letter-spacing:.04em;}
+  .plate-head h2{ margin:0; font-size:clamp(18px,2.6vw,24px); letter-spacing:-0.01em; color:var(--bright);}
+  .plate-head .tag{ font-family:var(--mono); font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-soft); border:1px solid var(--line); padding:3px 8px; border-radius:3px;}
+  .plate > p.lede{ margin:0 0 26px; max-width:74ch; color:var(--ink-soft); font-size:14px;}
+
+  .stage-row{ display:flex; gap:34px; align-items:flex-start; flex-wrap:wrap;}
+  .figcol{ display:flex; flex-direction:column; gap:10px; align-items:center;}
+  .figcap{ font-family:var(--mono); font-size:11px; color:var(--ink-soft); text-align:center; max-width:300px; letter-spacing:.02em;}
+  .figcap b{ color:var(--bright); font-weight:600;}
+
+  /* ---- annotation callouts ---- */
+  .notes{ flex:1; min-width:240px; display:flex; flex-direction:column; gap:16px; padding-top:6px;}
+  .note{ display:grid; grid-template-columns:24px 1fr; gap:12px;}
+  .note .dot{ width:22px; height:22px; border-radius:50%; border:1.5px solid var(--frame); font-family:var(--mono); font-size:11px; font-weight:600; display:flex; align-items:center; justify-content:center; background:var(--panel); color:var(--ink);}
+  .note h4{ margin:0 0 3px; font-size:14px; letter-spacing:-0.01em; color:var(--bright);}
+  .note p{ margin:0; font-size:13px; color:var(--ink-soft);}
+  .note code{ font-family:var(--mono); font-size:12px; background:var(--panel); border:1px solid var(--line); padding:1px 5px; border-radius:3px; color:var(--bright);}
+
+  /* ================= PHONE FRAME ================= */
+  .phone{ width:266px; flex:0 0 auto; background:#04060A; border-radius:34px; padding:7px; box-shadow:0 0 0 1px rgba(255,255,255,.04), 0 22px 46px -22px rgba(0,0,0,.85); position:relative;}
+  .phone.lg{ width:300px;}
+  .phone .screen{ position:relative; border-radius:27px; overflow:hidden; background:var(--device); height:540px; display:flex; flex-direction:column; color:var(--bright); font-family:var(--mono);}
+  .phone.lg .screen{ height:610px;}
+  .phone.land{ width:520px;} .phone.land .screen{ height:266px;}
+
+  .hs{ position:absolute; width:20px; height:20px; border-radius:50%; background:var(--coral); color:#1a0f0a; font-family:var(--mono); font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; z-index:9; box-shadow:0 0 0 3px rgba(232,130,107,.22);}
+
+  .statusbar{ height:20px; display:flex; align-items:center; justify-content:space-between; padding:0 14px; font-size:9px; color:var(--dim); flex:0 0 auto;}
+
+  /* surface tabs — now at TOP */
+  .tabs{ flex:0 0 auto; height:30px; background:var(--device); border-bottom:1px solid var(--line); display:flex;}
+  .tabs .tab{ flex:1; display:flex; align-items:center; justify-content:center; gap:5px; font-size:9px; color:var(--dim); border-right:1px solid #20242c; letter-spacing:.02em;}
+  .tabs .tab:last-child{ border-right:0;}
+  .tabs .tab .g{ width:10px; height:10px; border-radius:2.5px; border:1.4px solid var(--dim);}
+  .tabs .tab.on{ color:var(--amber); box-shadow:inset 0 -2px 0 var(--amber);}
+  .tabs .tab.on .g{ border-color:var(--amber); background:rgba(244,163,64,.16);}
+
+  /* transport — now at BOTTOM, with the timeline */
+  .transport{ flex:0 0 auto; height:34px; background:var(--panel); border-top:1px solid var(--line); display:flex; align-items:center; gap:8px; padding:0 10px;}
+  .transport .play{ width:20px; height:20px; border-radius:50%; background:var(--amber); display:flex; align-items:center; justify-content:center; flex:0 0 auto;}
+  .transport .play::after{ content:""; border-left:7px solid #1b130a; border-top:5px solid transparent; border-bottom:5px solid transparent; margin-left:2px;}
+  .transport .tc{ font-size:11px; color:var(--bright); letter-spacing:.02em;}
+  .transport .scrub{ flex:1; height:4px; border-radius:2px; background:var(--line); position:relative;}
+  .transport .scrub::before{ content:""; position:absolute; left:0; top:0; bottom:0; width:38%; background:var(--amber); border-radius:2px; opacity:.45;}
+  .transport .scrub::after{ content:""; position:absolute; left:38%; top:-3px; width:2px; height:10px; background:var(--amber);}
+  .transport .mini{ font-size:9px; color:var(--dim);}
+
+  .hero{ flex:1; position:relative; overflow:hidden; display:flex; align-items:center; justify-content:center; background:radial-gradient(120% 120% at 50% 0%, #1b1f27 0%, #14161B 70%);}
+  .hero .canvas-frame{ position:absolute; border:1px dashed var(--line);}
+  .obj{ position:absolute; border-radius:6px;}
+  .obj.sel{ box-shadow:0 0 0 1.5px var(--cyan), 0 0 0 4px rgba(84,195,232,.18);}
+  .handle{ position:absolute; width:7px; height:7px; background:var(--cyan); border:1px solid #0c2a33; border-radius:2px; z-index:3;}
+
+  /* timeline ribbon — sits above the transport */
+  .ribbon{ flex:0 0 auto; background:var(--panel); display:flex; flex-direction:column; overflow:hidden; position:relative;}
+  .ribbon .grab{ height:14px; display:flex; align-items:center; justify-content:center; flex:0 0 auto;}
+  .ribbon .grab::before{ content:""; width:34px; height:4px; border-radius:2px; background:var(--line);}
+  .ribbon .ruler{ height:14px; border-bottom:1px solid var(--line); border-top:1px solid var(--line); position:relative; background:repeating-linear-gradient(90deg,transparent 0 27px,var(--line) 27px 28px); flex:0 0 auto;}
+  .ribbon .ruler::after{ content:""; position:absolute; left:38%; top:0; height:600px; width:1.5px; background:var(--amber); z-index:4;}
+  .lane{ height:22px; display:flex; align-items:center; border-bottom:1px solid #20242c; padding-left:42px; position:relative; flex:0 0 auto;}
+  .lane .gut{ position:absolute; left:0; top:0; bottom:0; width:42px; border-right:1px solid var(--line); display:flex; align-items:center; padding-left:7px; font-size:8.5px; color:var(--dim); background:var(--panel-2);}
+  .clip{ position:absolute; height:13px; border-radius:3px; top:50%; transform:translateY(-50%);}
+  .clip.a{ background:linear-gradient(180deg,#3a6ea8,#2c5482);}
+  .clip.v{ background:linear-gradient(180deg,#8a5fb0,#6a4690);}
+  .clip.raster{ background:linear-gradient(180deg,#3f9d8f,#2c7568);}
+  .clip.sel{ box-shadow:0 0 0 1.5px var(--cyan);}
+  .clip .wav{ position:absolute; inset:2px 3px; opacity:.5; background:repeating-linear-gradient(90deg,#cfe3ff 0 1px, transparent 1px 3px);}
+
+  /* bottom sheet (inspector) — rises above the transport */
+  .sheet-ui{ position:absolute; left:0; right:0; bottom:34px; background:var(--panel-2); border-top:1px solid var(--line); border-radius:14px 14px 0 0; z-index:6; box-shadow:0 -10px 30px -12px rgba(0,0,0,.7);}
+  .sheet-ui .grab{ height:16px; display:flex; align-items:center; justify-content:center;}
+  .sheet-ui .grab::before{ content:""; width:34px; height:4px; border-radius:2px; background:var(--line);}
+  .sheet-ui .sh-head{ display:flex; align-items:center; gap:8px; padding:2px 12px 8px;}
+  .sheet-ui .sh-head .ico{ width:18px; height:18px; border-radius:4px; background:var(--cyan);}
+  .sheet-ui .sh-head .ttl{ font-size:11px; color:var(--bright);}
+  .sheet-ui .sh-head .ovf{ margin-left:auto; color:var(--dim); font-size:14px; letter-spacing:1px;}
+  .chips{ display:flex; gap:6px; padding:0 12px 10px; flex-wrap:wrap;}
+  .chip{ font-size:9.5px; padding:4px 8px; border-radius:11px; border:1px solid var(--line); color:var(--dim);}
+  .chip.on{ background:var(--cyan); color:#06222b; border-color:var(--cyan);}
+  .prop{ display:flex; align-items:center; gap:8px; padding:7px 12px; border-top:1px solid #20242c;}
+  .prop .k{ font-size:10px; color:var(--dim); width:62px;}
+  .prop .field{ flex:1; height:18px; border-radius:4px; background:var(--panel); border:1px solid var(--line); display:flex; align-items:center; padding:0 7px; font-size:10px; color:var(--bright);}
+  .prop .field.slider{ position:relative; background:var(--line);}
+  .prop .field.slider::after{ content:""; position:absolute; left:0;top:0;bottom:0;width:55%; background:var(--cyan); opacity:.55; border-radius:4px 0 0 4px;}
+
+  .omni{ position:absolute; right:14px; bottom:120px; width:46px; height:46px; border-radius:50%; background:var(--amber); display:flex; align-items:center; justify-content:center; z-index:7; box-shadow:0 6px 16px -4px rgba(244,163,64,.55);}
+  .omni::before,.omni::after{ content:""; position:absolute; background:#1b130a;}
+  .omni::before{ width:16px; height:2.5px; border-radius:2px;}
+  .omni::after{ width:2.5px; height:16px; border-radius:2px;}
+
+  .radial-wrap{ position:absolute; inset:0; z-index:8;}
+  .radial-wrap .scrim{ position:absolute; inset:0; background:rgba(8,10,14,.55);}
+  .rad-btn{ position:absolute; width:42px; height:42px; border-radius:50%; background:var(--panel-2); border:1px solid var(--line); display:flex; align-items:center; justify-content:center; font-size:9px; color:var(--bright); text-align:center; line-height:1.1;}
+  .rad-btn .g{ width:16px;height:16px;border-radius:4px;}
+
+  /* intent grid */
+  .intent-screen{ flex:1; display:flex; flex-direction:column; padding:18px 16px; gap:14px; background:var(--device);}
+  .intent-screen .new-h{ font-size:13px; color:var(--bright); letter-spacing:.02em;}
+  .intent-screen .new-sub{ font-size:10px; color:var(--dim); margin-top:-8px;}
+  .intent-grid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:4px;}
+  .intent{ aspect-ratio:1/.92; border:1px solid var(--line); border-radius:12px; background:var(--panel); display:flex; flex-direction:column; justify-content:flex-end; padding:10px; gap:4px; position:relative; overflow:hidden;}
+  .intent .gico{ position:absolute; top:10px; left:10px; width:22px; height:22px; border-radius:6px;}
+  .intent .nm{ font-size:11px; color:var(--bright);}
+  .intent .de{ font-size:8.5px; color:var(--dim); line-height:1.25;}
+  .intent.draw .gico{ background:var(--coral);}
+  .intent.animate .gico{ background:var(--cyan);}
+  .intent.compose .gico{ background:var(--amber);}
+  .intent.record .gico{ background:#c75b8a;}
+  .intent.video .gico{ background:#6a4690;}
+  .intent.open{ grid-column:1/3; aspect-ratio:auto; flex-direction:row; align-items:center; gap:10px; padding:12px;}
+  .intent.open .gico{ position:static; background:var(--line);}
+
+  .keys{ flex:1; background:#0c0e12; display:flex; position:relative; padding:6px 6px 8px;}
+  .wkey{ flex:1; background:linear-gradient(180deg,#f3f4f6,#d9dde2); border-radius:0 0 4px 4px; margin:0 1px; box-shadow:inset 0 -6px 8px -6px rgba(0,0,0,.3);}
+  .bkey{ position:absolute; top:6px; width:5.4%; height:54%; background:#1b1e24; border-radius:0 0 3px 3px; z-index:2; box-shadow:0 2px 3px rgba(0,0,0,.5);}
+  .inst-bar{ flex:0 0 auto; height:26px; background:var(--panel); border-top:1px solid var(--line); border-bottom:1px solid var(--line); display:flex; align-items:center; gap:8px; padding:0 10px; font-size:9.5px; color:var(--dim);}
+  .inst-bar .pill{ padding:3px 7px; border:1px solid var(--line); border-radius:10px; color:var(--bright);}
+
+  .gmap{ display:flex; gap:30px; flex-wrap:wrap; align-items:flex-start;}
+  .gtable{ flex:1; min-width:280px; border:1px solid var(--frame); border-radius:8px; overflow:hidden; background:var(--device);}
+  .grow{ display:grid; grid-template-columns:150px 1fr; border-top:1px solid var(--rule);}
+  .grow:first-child{ border-top:0;}
+  .grow .gg{ font-family:var(--mono); font-size:12px; padding:9px 12px; background:var(--panel); color:var(--bright); border-right:1px solid var(--rule); display:flex; align-items:center;}
+  .grow .gm{ padding:9px 12px; font-size:13px; color:var(--ink-soft); display:flex; align-items:center;}
+  .grow .gm b{ color:var(--bright); font-weight:600;}
+  .grow.free .gg{ color:var(--coral);}
+  .grow.free .gm b{ color:var(--coral);}
+
+  .foot{ max-width:1120px; margin:0 auto; padding:30px 24px 70px; border-top:1.5px solid var(--frame); font-family:var(--mono); font-size:11px; color:var(--ink-soft); display:flex; justify-content:space-between; flex-wrap:wrap; gap:12px;}
+
+  @media (max-width:560px){
+    .phone{ width:240px;} .phone .screen{ height:500px;}
+    .phone.land{ width:300px;} .phone.land .screen{ height:200px;}
+    .titleblock{ grid-template-columns:1fr;} .titleblock .tl-meta{ border-left:0; border-top:1.5px solid var(--frame); grid-template-rows:none; grid-template-columns:repeat(3,1fr);}
+    .tl-meta div + div{ border-top:0; border-left:1px solid var(--rule);}
+  }
+  /* ---- node focus mode ---- */
+  .nodewrap{ position:absolute; inset:0;}
+  .minimap{ position:absolute; top:8px; right:8px; width:80px; height:54px; background:rgba(8,10,14,.72); border:1px solid var(--line); border-radius:6px; z-index:5;}
+  .minimap .mn{ position:absolute; width:11px; height:8px; border-radius:2px; background:var(--line);}
+  .minimap .mn.on{ background:var(--cyan); box-shadow:0 0 0 2px rgba(84,195,232,.3);}
+  .minimap .mw{ position:absolute; height:1.5px; background:var(--line);}
+  .node-card{ position:absolute; left:50%; top:48%; transform:translate(-50%,-50%); width:158px; background:var(--panel-2); border:1px solid var(--line); border-radius:12px; box-shadow:0 14px 30px -16px rgba(0,0,0,.85); overflow:hidden; z-index:3;}
+  .node-card .nh{ padding:8px 10px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:7px;}
+  .node-card .nh .ndot{ width:8px; height:8px; border-radius:2px; background:#9a6bc0;}
+  .node-card .nh .nt{ font-size:11px; color:var(--bright);}
+  .node-card .nh .ny{ margin-left:auto; font-size:7.5px; color:var(--dim); border:1px solid var(--line); border-radius:8px; padding:2px 6px;}
+  .node-card .nprev{ height:42px; background:linear-gradient(135deg,#3a2c52,#243042);}
+  .node-card .np{ display:flex; align-items:center; gap:7px; padding:6px 10px; border-top:1px solid #20242c;}
+  .node-card .np .k{ font-size:9px; color:var(--dim); width:42px;}
+  .node-card .np .field{ flex:1; height:15px; border-radius:4px; background:var(--panel); border:1px solid var(--line); font-size:9px; color:var(--bright); display:flex; align-items:center; padding:0 6px;}
+  .node-card .np .field.slider{ background:var(--line); position:relative;}
+  .node-card .np .field.slider::after{ content:""; position:absolute; left:0;top:0;bottom:0; width:48%; background:var(--cyan); opacity:.5; border-radius:4px;}
+  .wire-line{ position:absolute; top:48%; height:1.5px; background:var(--line); z-index:1;}
+  .wire-line.l{ left:0; width:50px;} .wire-line.r{ right:0; width:50px; background:var(--cyan); opacity:.6;}
+  .port-col{ position:absolute; top:50%; transform:translateY(-50%); display:flex; flex-direction:column; gap:9px; z-index:4;}
+  .port-col.in{ left:8px;} .port-col.out{ right:8px;}
+  .pchip{ width:54px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:5px 6px; font-size:8px; color:var(--bright); line-height:1.25;}
+  .pchip .pl{ color:var(--dim); font-size:7px; display:block; letter-spacing:.04em;}
+  .pchip.wire{ border-color:var(--cyan); box-shadow:0 0 0 2px rgba(84,195,232,.18);}
+  .swipehint{ position:absolute; top:50%; transform:translateY(-50%); font-size:8px; color:var(--dim); z-index:4;}
+  .addnode{ position:absolute; left:50%; bottom:8px; transform:translateX(-50%); background:var(--panel-2); border:1px solid var(--line); border-radius:14px; padding:5px 12px; font-size:9px; color:var(--bright); z-index:6; white-space:nowrap;}
+  .wirebanner{ position:absolute; top:8px; left:8px; right:96px; background:rgba(84,195,232,.14); border:1px solid var(--cyan); border-radius:8px; padding:5px 8px; font-size:8px; color:#bfe9f7; z-index:6; line-height:1.25;}
+
+  /* ---- patch (pair) view ---- */
+  .patch{ position:absolute; left:12px; right:12px; top:50%; transform:translateY(-50%); background:var(--panel-2); border:1px solid var(--line); border-radius:12px; overflow:hidden; z-index:2; box-shadow:0 14px 30px -16px rgba(0,0,0,.85);}
+  .patch .pthead{ display:flex; align-items:center; gap:6px; padding:8px 10px; border-bottom:1px solid var(--line); font-size:10px; color:var(--bright);}
+  .patch .pthead .ty{ margin-left:auto; font-size:7.5px; color:var(--dim); border:1px solid var(--line); border-radius:8px; padding:2px 6px;}
+  .ptrow{ display:grid; grid-template-columns:1fr 64px 1fr; align-items:center; padding:7px 10px; border-top:1px solid #20242c;}
+  .ptrow .sp{ display:flex; align-items:center; gap:6px; justify-content:flex-end; font-size:9px; color:var(--bright);}
+  .ptrow .dp{ display:flex; align-items:center; gap:6px; font-size:9px; color:var(--bright);}
+  .ptrow .dp.muted, .ptrow .sp.muted{ color:var(--dim);}
+  .ptrow .cable{ height:12px; position:relative;}
+  .ptrow .cable.on::before{ content:""; position:absolute; left:0; right:0; top:50%; height:2px; background:var(--cyan); transform:translateY(-50%);}
+  .dotport{ width:8px; height:8px; border-radius:50%; background:var(--cyan); border:1px solid #0c2a33; flex:0 0 auto;}
+  .dotport.empty{ background:var(--line); border-color:var(--dim);}
+  .patch .pthint{ padding:7px 10px; border-top:1px solid var(--line); font-size:8px; color:var(--dim);}
+
+  /* ---- conventional piano roll (landscape) ---- */
+  .proll{ flex:1; position:relative; overflow:hidden; border-bottom:1px solid var(--line); background:repeating-linear-gradient(0deg,#13161c 0 13px,#181c23 13px 26px);}
+  .proll .glab{ position:absolute; top:5px; left:8px; font-size:8px; color:var(--dim); z-index:2;}
+  .proll .pn{ position:absolute; height:10px; border-radius:2px; background:linear-gradient(180deg,#caa15a,#a07c32);}
+  .proll .ph{ position:absolute; top:0; bottom:0; width:1.5px; background:var(--amber); opacity:.7; z-index:2;}
+
+  /* ---- instrument workspace ---- */
+  .workspace{ flex:1; position:relative; overflow:hidden; border-bottom:1px solid var(--line);
+    background:repeating-linear-gradient(90deg,#13161c 0 7.14%, #181c23 7.14% 14.28%);}
+  .workspace .now{ position:absolute; left:0; right:0; bottom:0; height:1.5px; background:var(--amber); opacity:.7; z-index:3;}
+  .workspace .glab{ position:absolute; top:6px; left:8px; font-size:8px; color:var(--dim);}
+  .nbar{ position:absolute; width:5.2%; border-radius:2px; background:linear-gradient(180deg,#caa15a,#a07c32); z-index:2;}
+  .ws-toggle{ display:flex; gap:5px;}
+  .ws-toggle .seg{ font-size:8.5px; padding:3px 8px; border:1px solid var(--line); border-radius:9px; color:var(--dim);}
+  .ws-toggle .seg.on{ background:var(--cyan); color:#06222b; border-color:var(--cyan);}
+
+  @media (prefers-reduced-motion: reduce){ *{ transition:none!important; animation:none!important;}}
+</style>
+</head>
+<body>
+
+<div class="sheet-head">
+  <p class="eyebrow">Mobile port · concept plates</p>
+  <div class="titleblock">
+    <div class="tl-main">
+      <h1>Unified-timeline studio — phone layout</h1>
+      <p>One hero surface at a time, surface tabs along the top, and time controls grouped at the bottom: a fixed transport bar with the resizable timeline ribbon riding above it. Every desktop control stays reachable; almost none stay visible.</p>
+    </div>
+    <div class="tl-meta">
+      <div><span>CONSTRAINT</span><strong>Phone · single-pane</strong></div>
+      <div><span>TABS</span><strong>Top · surfaces</strong></div>
+      <div><span>SPINE</span><strong>Bottom · time</strong></div>
+    </div>
+  </div>
+</div>
+
+<div class="legend-key">
+  <b><span class="swatch" style="background:var(--amber)"></span>Time / playhead / transport</b>
+  <b><span class="swatch" style="background:var(--cyan)"></span>Selection</b>
+  <b><span class="swatch" style="background:var(--coral)"></span>Annotation</b>
+</div>
+
+<!-- ============ PLATE 01 ============ -->
+<section class="plate">
+  <div class="plate-head">
+    <span class="plate-num">PLATE 01</span>
+    <h2>The spine &amp; the resizable ribbon</h2>
+    <span class="tag">Tabs top · time bottom · 3 snaps</span>
+  </div>
+  <p class="lede">Surface tabs sit along the top. At the bottom, the transport bar is fixed — the irreducible spine — and the timeline ribbon expands upward above it through three snaps, trading stage for tracks by degrees. It never hits zero on its own; the transport is always the floor.</p>
+
+  <div class="stage-row">
+    <div class="figcol">
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>●●●</span></div>
+        <div class="tabs"><div class="tab on"><span class="g"></span>Stage</div><div class="tab"><span class="g"></span>Time</div><div class="tab"><span class="g"></span>Nodes</div><div class="tab"><span class="g"></span>Mixer</div><div class="tab"><span class="g"></span>Tree</div></div>
+        <div class="hero">
+          <div class="canvas-frame" style="inset:24px 30px;"></div>
+          <div class="obj sel" style="left:96px; top:150px; width:74px; height:54px; background:#2c5482;"></div>
+        </div>
+        <div class="ribbon"><div class="grab"></div><div class="ruler"></div><div class="lane"><span class="gut">V1</span></div></div>
+        <div class="transport"><div class="play"></div><span class="tc">00:12:04</span><div class="scrub"></div></div>
+        <span class="hs" style="left:120px; top:42px;">1</span>
+        <span class="hs" style="left:6px; bottom:48px;">2</span>
+        <span class="hs" style="left:6px; bottom:8px;">3</span>
+      </div></div>
+      <div class="figcap"><b>Peek</b> — ribbon collapsed to a sliver; transport still anchors the bottom.</div>
+    </div>
+
+    <div class="figcol">
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>●●●</span></div>
+        <div class="tabs"><div class="tab on"><span class="g"></span>Stage</div><div class="tab"><span class="g"></span>Time</div><div class="tab"><span class="g"></span>Nodes</div><div class="tab"><span class="g"></span>Mixer</div><div class="tab"><span class="g"></span>Tree</div></div>
+        <div class="hero" style="flex:0 0 168px;">
+          <div class="canvas-frame" style="inset:22px;"></div>
+          <div class="obj sel" style="left:80px; top:78px; width:66px; height:46px; background:#2c5482;"></div>
+        </div>
+        <div class="ribbon" style="flex:1;">
+          <div class="grab"></div><div class="ruler"></div>
+          <div class="lane"><span class="gut">RASTER</span><div class="clip raster" style="left:50px; width:80px;"></div></div>
+          <div class="lane"><span class="gut">VEC</span><div class="clip v sel" style="left:96px; width:64px;"></div></div>
+          <div class="lane"><span class="gut">AUD</span><div class="clip a" style="left:60px; width:120px;"><div class="wav"></div></div></div>
+          <div class="lane"><span class="gut">AUD</span><div class="clip a" style="left:130px; width:70px;"><div class="wav"></div></div></div>
+        </div>
+        <div class="transport"><div class="play"></div><span class="tc">00:12:04</span><div class="scrub"></div></div>
+      </div></div>
+      <div class="figcap"><b>Half</b> — arrange &amp; trim across tracks while the stage stays in view.</div>
+    </div>
+
+    <div class="notes">
+      <div class="note"><div class="dot">1</div><div>
+        <h4>Tabs own the top</h4>
+        <p>Stage / Time / Nodes / Mixer / Tree. The active surface is home; the rest are one tap away. Moving them up clears the bottom for the controls your thumb actually lives on.</p>
+      </div></div>
+      <div class="note"><div class="dot">2</div><div>
+        <h4>Ribbon expands upward</h4>
+        <p>Drag the grabber up for more tracks, down for more stage. A continuous reveal, not a modal toggle — there's always a sliver left.</p>
+      </div></div>
+      <div class="note"><div class="dot">3</div><div>
+        <h4>Transport = the fixed floor</h4>
+        <p>Play, playhead time and a zoomed-out project scrub never move and never disappear. It's the irreducible spine; the ribbon is detail layered on top of it.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PLATE 02 ============ -->
+<section class="plate">
+  <div class="plate-head">
+    <span class="plate-num">PLATE 02</span>
+    <h2>Tweak mode — the pull model</h2>
+    <span class="tag">Selection → inspector</span>
+  </div>
+  <p class="lede">You arrive with a full project and a vague target, so controls come <em>to</em> what you point at. Tap anything and its properties rise in a sheet above the transport. The header carries jump-to chips that reframe to another surface with the same object still selected.</p>
+
+  <div class="stage-row">
+    <div class="figcol">
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>⌕  ●●●</span></div>
+        <div class="tabs"><div class="tab on"><span class="g"></span>Stage</div><div class="tab"><span class="g"></span>Time</div><div class="tab"><span class="g"></span>Nodes</div><div class="tab"><span class="g"></span>Mixer</div><div class="tab"><span class="g"></span>Tree</div></div>
+        <div class="hero">
+          <div class="canvas-frame" style="inset:18px 22px 0;"></div>
+          <div class="obj sel" style="left:108px; top:54px; width:78px; height:58px; background:#7a4f9c;"></div>
+          <div class="handle" style="left:104px; top:50px;"></div>
+          <div class="handle" style="left:182px; top:50px;"></div>
+          <div class="handle" style="left:104px; top:108px;"></div>
+          <div class="handle" style="left:182px; top:108px;"></div>
+        </div>
+        <div class="sheet-ui" style="height:236px;">
+          <div class="grab"></div>
+          <div class="sh-head"><span class="ico" style="background:#9a6bc0;"></span><span class="ttl">Ellipse · Vector layer</span><span class="ovf">⋯</span></div>
+          <div class="chips"><span class="chip on">Properties</span><span class="chip">Timeline</span><span class="chip">Nodes</span><span class="chip">Automation</span></div>
+          <div class="prop"><span class="k">Fill</span><div class="field"><span style="width:9px;height:9px;background:#9a6bc0;border-radius:2px;margin-right:6px;"></span>#9A6BC0</div></div>
+          <div class="prop"><span class="k">Opacity</span><div class="field slider"></div></div>
+          <div class="prop"><span class="k">Position</span><div class="field">x 108</div><div class="field">y 54</div></div>
+          <div class="prop"><span class="k">Z-order</span><div class="field">Front ▾</div></div>
+        </div>
+        <div class="transport"><div class="play"></div><span class="tc">00:12:04</span><div class="scrub"></div></div>
+        <span class="hs" style="left:170px; top:74px;">1</span>
+        <span class="hs" style="left:120px; bottom:250px;">2</span>
+        <span class="hs" style="left:6px; bottom:8px;">3</span>
+      </div></div>
+      <div class="figcap"><b>Half tier</b> shown — drag up for every advanced parameter, down to a 3-control peek. Transport stays pinned below.</div>
+    </div>
+
+    <div class="notes">
+      <div class="note"><div class="dot">1</div><div>
+        <h4>Selection-driven</h4>
+        <p>Tap selects and summons the sheet. Once selected, dragging the object <em>moves</em> it; dragging empty space pans. One chain: tap → inspect → move → long-press.</p>
+      </div></div>
+      <div class="note"><div class="dot">2</div><div>
+        <h4>Jump-to chips = parity move</h4>
+        <p><code>Timeline</code> · <code>Nodes</code> · <code>Automation</code> reframe to that surface with the object still held — replacing the desktop trick of seeing panes side-by-side.</p>
+      </div></div>
+      <div class="note"><div class="dot">3</div><div>
+        <h4>Sheet floats over the floor</h4>
+        <p>The inspector rises above the transport, never under it — so even mid-tweak you can scrub and see the playhead. Object actions like <code>send to back</code> live on the <code>⋯</code>.</p>
+      </div></div>
+      <div class="note"><div class="dot" style="border-style:dashed;">+</div><div>
+        <h4>Two ways to find the thing</h4>
+        <p>For "I don't know what I want to tweak": the <code>⌕</code> command palette and an outliner surface (the <code>Tree</code> tab) — a browsable map of the whole project.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PLATE 03 ============ -->
+<section class="plate">
+  <div class="plate-head">
+    <span class="plate-num">PLATE 03</span>
+    <h2>Sketch mode — the push model</h2>
+    <span class="tag">New file · intent seeds</span>
+  </div>
+  <p class="lede">An empty project with a clearish intent, so a tool defines the surface and gets out of the way. "New" offers intents — the same non-binding menu as desktop. Picking one sets the hero surface and a minimal toolset; switching intent mid-session just swaps the hero while a real project quietly accretes underneath.</p>
+
+  <div class="stage-row">
+    <div class="figcol">
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>●●●</span></div>
+        <div class="intent-screen">
+          <div class="new-h">Start something</div>
+          <div class="new-sub">Sets your first surface — nothing is locked.</div>
+          <div class="intent-grid">
+            <div class="intent draw"><span class="gico"></span><span class="nm">Draw</span><span class="de">Full canvas · stylus · radial brushes</span></div>
+            <div class="intent animate"><span class="gico"></span><span class="nm">Animate</span><span class="de">Stage + keyframe scrub strip</span></div>
+            <div class="intent compose"><span class="gico"></span><span class="nm">Compose</span><span class="de">Instrument + arrangement ribbon</span></div>
+            <div class="intent record"><span class="gico"></span><span class="nm">Record</span><span class="de">Big button · waveform fills screen</span></div>
+            <div class="intent video"><span class="gico"></span><span class="nm">Edit video</span><span class="de">Clip bin + trim timeline</span></div>
+            <div class="intent draw" style="opacity:.5"><span class="gico" style="background:var(--line)"></span><span class="nm">Blank</span><span class="de">Empty unified timeline</span></div>
+            <div class="intent open"><span class="gico"></span><span class="nm">Open recent…</span></div>
+          </div>
+        </div>
+        <span class="hs" style="left:120px; top:160px;">1</span>
+      </div></div>
+      <div class="figcap"><b>Intent picker</b> — mirrors the desktop new-file flow; the seed steers nothing once content exists.</div>
+    </div>
+
+    <div class="notes">
+      <div class="note"><div class="dot">1</div><div>
+        <h4>Intent seeds, state steers</h4>
+        <p>At creation there's nothing else to go on, so intent is the right call. The moment content exists, the original type stops driving anything.</p>
+      </div></div>
+      <div class="note"><div class="dot">2</div><div>
+        <h4>Home-on-open ≠ birth type</h4>
+        <p>Re-opening lands on the file's <b>last-focused surface</b> + last selection — not the type it was born as. A music file that grew an animation layer shouldn't open music-shaped.</p>
+      </div></div>
+      <div class="note"><div class="dot">3</div><div>
+        <h4>Lossless underneath</h4>
+        <p>Every intent writes to the same document model. Whatever you rough out on the train reconstitutes as a full pane layout back on desktop.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PLATE 04 ============ -->
+<section class="plate">
+  <div class="plate-head">
+    <span class="plate-num">PLATE 04</span>
+    <h2>Music surface — the GarageBand fix</h2>
+    <span class="tag">Expression + context, together</span>
+  </div>
+  <p class="lede">GarageBand denies you the <em>when</em> while you play. Here the instrument lives in the thumb zone with a compressed arrangement ribbon pinned above it — loop boundaries, the playhead sweeping toward the wrap, and squashed lanes of what you're playing against. The transport anchors the bottom as everywhere else.</p>
+
+  <div class="stage-row">
+    <div class="figcol">
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>●●●</span></div>
+        <div class="tabs"><div class="tab"><span class="g"></span>Stage</div><div class="tab on"><span class="g"></span>Time</div><div class="tab"><span class="g"></span>Nodes</div><div class="tab"><span class="g"></span>Mixer</div><div class="tab"><span class="g"></span>Tree</div></div>
+        <div class="ribbon" style="flex:0 0 auto;">
+          <div class="ruler" style="background:repeating-linear-gradient(90deg,transparent 0 64px,#2a8a5a 64px 65px,transparent 65px 128px,var(--line) 128px 129px);"></div>
+          <div class="lane"><span class="gut">DRUMS</span><div class="clip a" style="left:42px; width:64px;"><div class="wav"></div></div><div class="clip a" style="left:106px; width:64px;"><div class="wav"></div></div></div>
+          <div class="lane"><span class="gut">BASS</span><div class="clip a" style="left:42px; width:128px;"><div class="wav"></div></div></div>
+          <div class="lane"><span class="gut" style="color:var(--amber);">KEYS ●</span><div class="clip a sel" style="left:42px; width:42px; background:linear-gradient(180deg,#caa15a,#a07c32);"></div></div>
+        </div>
+        <div class="inst-bar"><span class="pill">Grand Piano ▾</span><span>Loop ⟳ 2 bars</span><span style="margin-left:auto;color:var(--coral);">● REC</span></div>
+        <div class="workspace">
+          <span class="glab">LIVE TAKE · KEYS</span>
+          <div class="nbar" style="left:7.1%; bottom:0; height:30px;"></div>
+          <div class="nbar" style="left:21.4%; bottom:16px; height:24px;"></div>
+          <div class="nbar" style="left:35.7%; bottom:4px; height:40px;"></div>
+          <div class="now"></div>
+        </div>
+        <div class="keys" style="flex:0 0 150px;">
+          <div class="wkey"></div><div class="wkey"></div><div class="wkey"></div><div class="wkey"></div>
+          <div class="wkey"></div><div class="wkey"></div><div class="wkey"></div><div class="wkey"></div>
+          <div class="bkey" style="left:9.5%"></div><div class="bkey" style="left:22%"></div>
+          <div class="bkey" style="left:47%"></div><div class="bkey" style="left:59.5%"></div><div class="bkey" style="left:72%"></div>
+        </div>
+        <div class="transport"><div class="play"></div><span class="tc">2.1.03</span><div class="scrub"></div><span class="mini">120bpm</span></div>
+        <span class="hs" style="left:120px; top:52px;">1</span>
+        <span class="hs" style="left:200px; top:96px;">2</span>
+        <span class="hs" style="left:6px; bottom:8px;">3</span>
+      </div></div>
+      <div class="figcap"><b>Record-against-context</b> — see the loop wrap and the other tracks while your thumbs are on the keys.</div>
+    </div>
+
+    <div class="notes">
+      <div class="note"><div class="dot">1</div><div>
+        <h4>The loop boundary is visible</h4>
+        <p>Green markers show where the 2-bar loop wraps; the amber playhead sweeps toward it — the exact <em>when</em> GarageBand's modal switch hides.</p>
+      </div></div>
+      <div class="note"><div class="dot">2</div><div>
+        <h4>Playing against the mix</h4>
+        <p>Squashed drum/bass lanes stay on screen so you hear <em>and see</em> what your take lands over. The live KEYS lane fills as you record.</p>
+      </div></div>
+      <div class="note"><div class="dot">3</div><div>
+        <h4>Same spine, same floor</h4>
+        <p>Transport with bars-beats + tempo anchors the bottom. Drag the ribbon down for full arrangement; the Mixer is a portrait-native surface one tab away.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PLATE 05 ============ -->
+<section class="plate">
+  <div class="plate-head">
+    <span class="plate-num">PLATE 05</span>
+    <h2>Orientation is a per-surface reflow</h2>
+    <span class="tag">Not an app-global mode</span>
+  </div>
+  <p class="lede">No surface forces a rotation — that's the user's wrist, not the app's call. But the same timeline data emphasises a different axis per orientation: landscape spends pixels on time resolution, portrait spends them on track count. Rotation preserves selection, playhead and zoom-center; it only reflows.</p>
+
+  <div class="stage-row" style="align-items:flex-start;">
+    <div class="figcol">
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>●●●</span></div>
+        <div class="tabs"><div class="tab"><span class="g"></span>Stage</div><div class="tab on"><span class="g"></span>Time</div><div class="tab"><span class="g"></span>Nodes</div><div class="tab"><span class="g"></span>Mixer</div><div class="tab"><span class="g"></span>Tree</div></div>
+        <div class="ribbon" style="flex:1;">
+          <div class="ruler"></div>
+          <div class="lane"><span class="gut">V1</span><div class="clip v" style="left:50px;width:60px;"></div></div>
+          <div class="lane"><span class="gut">V2</span><div class="clip raster" style="left:70px;width:90px;"></div></div>
+          <div class="lane"><span class="gut">RAS</span><div class="clip raster" style="left:50px;width:50px;"></div></div>
+          <div class="lane"><span class="gut">A1</span><div class="clip a" style="left:48px;width:130px;"><div class="wav"></div></div></div>
+          <div class="lane"><span class="gut">A2</span><div class="clip a" style="left:90px;width:80px;"><div class="wav"></div></div></div>
+          <div class="lane"><span class="gut">A3</span><div class="clip a" style="left:60px;width:60px;"><div class="wav"></div></div></div>
+          <div class="lane"><span class="gut">A4</span><div class="clip a" style="left:120px;width:70px;"><div class="wav"></div></div></div>
+          <div class="lane"><span class="gut">FX</span><div class="clip v" style="left:42px;width:40px;"></div></div>
+        </div>
+        <div class="transport"><div class="play"></div><span class="tc">00:12:04</span><div class="scrub"></div></div>
+      </div></div>
+      <div class="figcap"><b>Portrait</b> — vertical room buys <b>more tracks</b>. Best for arranging, reordering, seeing structure.</div>
+    </div>
+
+    <div class="figcol">
+      <div class="phone land"><div class="screen">
+        <div class="tabs"><div class="tab"><span class="g"></span>Stage</div><div class="tab on"><span class="g"></span>Time</div><div class="tab"><span class="g"></span>Nodes</div><div class="tab"><span class="g"></span>Mixer</div><div class="tab"><span class="g"></span>Tree</div></div>
+        <div class="ribbon" style="flex:1;">
+          <div class="ruler" style="background:repeating-linear-gradient(90deg,transparent 0 48px,var(--line) 48px 49px);"></div>
+          <div class="lane"><span class="gut">V1</span><div class="clip v" style="left:60px;width:140px;"></div><div class="clip raster" style="left:210px;width:90px;"></div></div>
+          <div class="lane"><span class="gut">A1</span><div class="clip a" style="left:50px;width:300px;"><div class="wav"></div></div></div>
+          <div class="lane"><span class="gut">A2</span><div class="clip a" style="left:120px;width:200px;"><div class="wav"></div></div></div>
+        </div>
+        <div class="transport"><div class="play"></div><span class="tc">00:12:04</span><div class="scrub"></div><span class="mini">⌕</span><span class="mini">⋯</span></div>
+      </div></div>
+      <div class="figcap"><b>Landscape</b> — wide axis buys <b>time resolution</b>. Best for scrubbing, precise trims.</div>
+    </div>
+
+    <div class="notes" style="min-width:200px;">
+      <div class="note"><div class="dot">↻</div><div>
+        <h4>Reflow, don't reset</h4>
+        <p>Same selection, playhead and zoom-center — just re-emphasised. A rotate that throws away where you were is its own GarageBand-tier annoyance.</p>
+      </div></div>
+      <div class="note"><div class="dot">⊞</div><div>
+        <h4>Per-surface character</h4>
+        <p>Stage follows the <em>project's</em> aspect; instrument prefers landscape for key width; mixer is portrait-native. The ribbon absorbs whatever the hero leaves over.</p>
+      </div></div>
+      <div class="note"><div class="dot">🔒</div><div>
+        <h4>Manual lock</h4>
+        <p>People work lying down and propped at angles. The device <em>suggests</em>; the user can <em>pin</em>. Auto-rotate never fights a drawing gesture.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PLATE 06 ============ -->
+<section class="plate">
+  <div class="plate-head">
+    <span class="plate-num">PLATE 06</span>
+    <h2>Omnibutton &amp; the gesture map</h2>
+    <span class="tag">Tools vs commands · 7 + 1 meanings</span>
+  </div>
+  <p class="lede">The omnibutton produces <em>tools/objects</em>; the global menu holds <em>commands/destinations</em> — a clean tool-vs-command line. Below, the resolved stage gestures: seven meanings, no collisions, each reinforcing a desktop idiom rather than inventing a phone-only convention.</p>
+
+  <div class="stage-row" style="margin-bottom:30px;">
+    <div class="figcol">
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>⌕  ⋯  ●●●</span></div>
+        <div class="tabs"><div class="tab on"><span class="g"></span>Stage</div><div class="tab"><span class="g"></span>Time</div><div class="tab"><span class="g"></span>Nodes</div><div class="tab"><span class="g"></span>Mixer</div><div class="tab"><span class="g"></span>Tree</div></div>
+        <div class="hero">
+          <div class="canvas-frame" style="inset:20px;"></div>
+          <div class="radial-wrap">
+            <div class="scrim"></div>
+            <div class="rad-btn" style="right:18px; bottom:190px;"><span class="g" style="background:var(--coral);"></span></div>
+            <div class="rad-btn" style="right:64px; bottom:174px;"><span class="g" style="background:var(--cyan);"></span></div>
+            <div class="rad-btn" style="right:96px; bottom:140px;"><span class="g" style="background:var(--amber);"></span></div>
+            <div class="rad-btn" style="right:110px; bottom:98px;">Shape</div>
+            <div class="omni"></div>
+          </div>
+        </div>
+        <div class="ribbon"><div class="grab"></div><div class="ruler"></div><div class="lane"><span class="gut">V1</span></div></div>
+        <div class="transport"><div class="play"></div><span class="tc">00:12:04</span><div class="scrub"></div></div>
+        <span class="hs" style="right:6px; bottom:150px;">1</span>
+        <span class="hs" style="right:30px; top:42px;">2</span>
+      </div></div>
+      <div class="figcap"><b>Radial fans away from the finger</b> to dodge occlusion. Global commands live in the top <code>⋯</code>.</div>
+    </div>
+
+    <div class="notes">
+      <div class="note"><div class="dot">1</div><div>
+        <h4>Omnibutton = tools/objects</h4>
+        <p>Brushes, shapes, instruments, nodes — things you place or use. Long-press on empty space can summon this same create menu <em>at the point you pressed</em>.</p>
+      </div></div>
+      <div class="note"><div class="dot">2</div><div>
+        <h4>Global menu = commands</h4>
+        <p>Export, render, project settings, and the command palette itself live in the top <code>⋯</code>/<code>⌕</code>. If an item feels like either, it's usually a selection action in disguise → inspector.</p>
+      </div></div>
+      <div class="note"><div class="dot" style="border-style:dashed;">▤</div><div>
+        <h4>Palette is the safety net</h4>
+        <p>Every menu-bar verb has one contextual home <em>plus</em> the palette. That's what lets contextual homes hide rare commands without breaking parity.</p>
+      </div></div>
+    </div>
+  </div>
+
+  <div class="gmap">
+    <div class="gtable">
+      <div class="grow"><div class="gg">tap object</div><div class="gm"><b>select</b> &nbsp;+ summon inspector</div></div>
+      <div class="grow"><div class="gg">tap empty</div><div class="gm">deselect</div></div>
+      <div class="grow"><div class="gg">drag selected</div><div class="gm"><b>move</b> the object / clip</div></div>
+      <div class="grow"><div class="gg">drag empty</div><div class="gm"><b>pan</b> the view (matches timeline scroll)</div></div>
+      <div class="grow"><div class="gg">two-finger drag</div><div class="gm"><b>pan</b> — always, everywhere (escape valve)</div></div>
+      <div class="grow"><div class="gg">pinch</div><div class="gm"><b>zoom</b> — time-zoom on timeline, spatial on stage</div></div>
+      <div class="grow"><div class="gg">long-press object</div><div class="gm"><b>actions menu</b> for that object</div></div>
+      <div class="grow"><div class="gg">long-press empty</div><div class="gm">create-here radial <span style="color:var(--coral)">(proposed)</span></div></div>
+      <div class="grow"><div class="gg">double-tap object</div><div class="gm"><b>enter / edit</b> — go a level deeper</div></div>
+      <div class="grow"><div class="gg">double-tap empty</div><div class="gm">zoom-to-fit</div></div>
+      <div class="grow free"><div class="gg">double-tap-drag empty</div><div class="gm"><b>marquee select</b> — fast transient path</div></div>
+    </div>
+    <div class="notes" style="min-width:240px;">
+      <div class="note"><div class="dot">▦</div><div>
+        <h4>Two tiers for marquee</h4>
+        <p>The <b>double-tap-drag</b> gesture is the fast, transient path. A sustained <b>marquee mode</b> covers heavy vector multi-select — and with the gesture in hand, it may not even need a dedicated button.</p>
+      </div></div>
+      <div class="note"><div class="dot">◎</div><div>
+        <h4>Origin disambiguates</h4>
+        <p>Marquee is strictly empty-space-initiated. Double-tap-drag starting <em>on</em> an object never marquees — same spatial-zones logic as the ruler vs lanes.</p>
+      </div></div>
+      <div class="note"><div class="dot">⊙</div><div>
+        <h4>Crisp double-tap window</h4>
+        <p>Empty space is where both <code>zoom-to-fit</code> and <code>marquee</code> branch off the same tap-tap, so tighten the detection window there specifically.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PLATE 07 — NODE EDITOR: FOCUS & PATCH ============ -->
+<section class="plate">
+  <div class="plate-head">
+    <span class="plate-num">PLATE 07</span>
+    <h2>Node editor — focus &amp; patch</h2>
+    <span class="tag">Audio synthesis · port-to-port</span>
+  </div>
+  <p class="lede">For synthesis the graph is patch-heavy: several cables of one type running between modules. So ports are identified by <em>name</em> — gate, velocity, pitch — not just type; type only decides what <em>may</em> connect, the name decides which is which. Connections are wire-level, parallel cables between a single pair are normal, and one output can fan out. Focus mode tunes a module's parameters; patch mode runs the cables.</p>
+
+  <div class="stage-row">
+    <div class="figcol">
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>⌕  ⋯  ●●●</span></div>
+        <div class="tabs"><div class="tab"><span class="g"></span>Stage</div><div class="tab"><span class="g"></span>Time</div><div class="tab on"><span class="g"></span>Nodes</div><div class="tab"><span class="g"></span>Mixer</div><div class="tab"><span class="g"></span>Tree</div></div>
+        <div class="hero">
+          <div class="nodewrap">
+            <div class="minimap">
+              <span class="mw" style="left:14px; top:16px; width:18px; transform:rotate(20deg);"></span>
+              <span class="mw" style="left:40px; top:26px; width:20px;"></span>
+              <span class="mn" style="left:8px; top:10px;"></span>
+              <span class="mn on" style="left:30px; top:22px;"></span>
+              <span class="mn" style="left:56px; top:30px;"></span>
+              <span class="mn" style="left:34px; top:40px;"></span>
+            </div>
+            <div class="wire-line l"></div>
+            <div class="wire-line r"></div>
+            <div class="port-col in">
+              <div class="pchip"><span class="pl">◂ gate</span>MIDI→CV.gate</div>
+              <div class="pchip"><span class="pl">◂ velocity</span>MIDI→CV.vel</div>
+            </div>
+            <div class="node-card">
+              <div class="nh"><span class="ndot" style="background:#5aa0c2;"></span><span class="nt">ADSR</span><span class="ny">ENV · CV</span></div>
+              <div class="nprev" style="background:linear-gradient(135deg,#243042,#2c3a26);"></div>
+              <div class="np"><span class="k">Attack</span><div class="field slider"></div></div>
+              <div class="np"><span class="k">Decay</span><div class="field">120 ms</div></div>
+              <div class="np"><span class="k">Sustain</span><div class="field slider"></div></div>
+            </div>
+            <div class="port-col out">
+              <div class="pchip"><span class="pl">env ▸</span>VCA.in</div>
+            </div>
+            <div class="addnode">＋ Add node &nbsp;·&nbsp; ⌕ Search</div>
+          </div>
+        </div>
+        <div class="transport"><div class="play"></div><span class="tc">00:12:04</span><div class="scrub"></div></div>
+        <span class="hs" style="left:6px; top:232px;">1</span>
+        <span class="hs" style="right:34px; top:54px;">2</span>
+      </div></div>
+      <div class="figcap"><b>Focus</b> — one module's parameters; its named ports are travel chips. Input chips name the <em>remote port</em>, so two cables from the same node never collide.</div>
+    </div>
+
+    <div class="figcol">
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>⌕  ⋯  ●●●</span></div>
+        <div class="tabs"><div class="tab"><span class="g"></span>Stage</div><div class="tab"><span class="g"></span>Time</div><div class="tab on"><span class="g"></span>Nodes</div><div class="tab"><span class="g"></span>Mixer</div><div class="tab"><span class="g"></span>Tree</div></div>
+        <div class="hero">
+          <div class="patch">
+            <div class="pthead"><span>Patch</span><span style="color:var(--dim);">MIDI→CV ▸ ADSR</span><span class="ty">CV</span></div>
+            <div class="ptrow"><div class="sp">pitch <span class="dotport"></span></div><div class="cable"></div><div class="dp muted"><span class="dotport empty"></span>→ Osc 1</div></div>
+            <div class="ptrow"><div class="sp">velocity <span class="dotport"></span></div><div class="cable on"></div><div class="dp"><span class="dotport"></span>velocity</div></div>
+            <div class="ptrow"><div class="sp">gate <span class="dotport"></span></div><div class="cable on"></div><div class="dp"><span class="dotport"></span>gate</div></div>
+            <div class="pthint">tap a source port, then a target — both are CV, so the <b>name</b> decides the match</div>
+          </div>
+        </div>
+        <div class="transport"><div class="play"></div><span class="tc">00:12:04</span><div class="scrub"></div></div>
+        <span class="hs" style="left:122px; top:250px;">3</span>
+      </div></div>
+      <div class="figcap"><b>Patch</b> — two modules as port lists, each cable a row. The CV pair (gate, velocity) is just two rows; pitch fans off to the oscillator.</div>
+    </div>
+
+    <div class="notes">
+      <div class="note"><div class="dot">1</div><div>
+        <h4>Ports are named, not just typed</h4>
+        <p>Input chips read the remote endpoint as <code>node.port</code> — <code>MIDI→CV.gate</code>, <code>MIDI→CV.vel</code> — so two cables from one node stay distinct even though both are CV. Type gates compatibility; the name carries identity.</p>
+      </div></div>
+      <div class="note"><div class="dot">2</div><div>
+        <h4>Focus still travels &amp; renders live</h4>
+        <p>Tap a chip to jump to that endpoint; the minimap keeps you placed. The audio graph evaluates at the playhead, so transport stays — scrub and the envelope previews where you are.</p>
+      </div></div>
+      <div class="note"><div class="dot">3</div><div>
+        <h4>Patch mode for cabling</h4>
+        <p>A pair (or small cluster) shown as two port lists; each cable is a row. Parallel cables between the same pair are normal, and an output fans out (pitch → Osc). Tap a source port then a target — compatible ports light up, incompatible dim. This is the modular workflow, not one-node-at-a-time.</p>
+      </div></div>
+      <div class="note"><div class="dot" style="border-style:dashed;">!</div><div>
+        <h4>Honest scope</h4>
+        <p>Phone is tune-a-module and patch-a-few; large graph restructuring stays a desktop job. Reachable for parity via the palette and these two views — without faking a tiny pannable canvas of boxes.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PLATE 08 — KEYBOARD CAP & RECLAIMED SPACE ============ -->
+<section class="plate">
+  <div class="plate-head">
+    <span class="plate-num">PLATE 08</span>
+    <h2>Keyboard cap &amp; the reclaimed space</h2>
+    <span class="tag">Portrait · keys ≤ ⅓</span>
+  </div>
+  <p class="lede">Key <em>width</em> governs playability, and width is set by the screen's short axis — so past about a third of a portrait screen, taller keys add nothing. The resize catches at that cap; pulling further reveals an instrument workspace above the keys instead. By default it's a note view of the current part, pitch-aligned to the keys; toggle it to performance controllers. Landscape has no room for this, so it's a portrait-only affordance.</p>
+
+  <div class="stage-row">
+    <div class="figcol">
+      <div class="phone"><div class="screen">
+        <div class="statusbar"><span>9:41</span><span>●●●</span></div>
+        <div class="tabs"><div class="tab"><span class="g"></span>Stage</div><div class="tab on"><span class="g"></span>Time</div><div class="tab"><span class="g"></span>Nodes</div><div class="tab"><span class="g"></span>Mixer</div><div class="tab"><span class="g"></span>Tree</div></div>
+        <!-- macro context -->
+        <div class="ribbon" style="flex:0 0 auto;">
+          <div class="ruler" style="background:repeating-linear-gradient(90deg,transparent 0 64px,#2a8a5a 64px 65px,transparent 65px 128px,var(--line) 128px 129px);"></div>
+          <div class="lane"><span class="gut">DRUMS</span><div class="clip a" style="left:42px; width:64px;"><div class="wav"></div></div><div class="clip a" style="left:106px; width:64px;"><div class="wav"></div></div></div>
+          <div class="lane"><span class="gut">BASS</span><div class="clip a" style="left:42px; width:128px;"><div class="wav"></div></div></div>
+        </div>
+        <!-- instrument bar at the top of the surface (above the workspace, not between notes/keys) -->
+        <div class="inst-bar">
+          <span class="pill">Grand Piano ▾</span>
+          <div class="ws-toggle"><span class="seg on">Notes</span><span class="seg">Controllers</span></div>
+          <span style="margin-left:auto;color:var(--coral);">● REC</span>
+        </div>
+        <!-- reclaimed workspace: note view, aligned to keys -->
+        <div class="workspace">
+          <span class="glab">CURRENT PART · KEYS</span>
+          <div class="nbar" style="left:7.1%; bottom:0; height:34px;"></div>
+          <div class="nbar" style="left:21.4%; bottom:18px; height:26px;"></div>
+          <div class="nbar" style="left:35.7%; bottom:6px; height:48px;"></div>
+          <div class="nbar" style="left:50%; bottom:28px; height:22px;"></div>
+          <div class="nbar" style="left:64.2%; bottom:0; height:40px;"></div>
+          <div class="nbar" style="left:78.5%; bottom:14px; height:30px;"></div>
+          <div class="now"></div>
+        </div>
+        <!-- keys capped ~1/3 -->
+        <div class="keys" style="flex:0 0 150px;">
+          <div class="wkey"></div><div class="wkey"></div><div class="wkey"></div><div class="wkey"></div>
+          <div class="wkey"></div><div class="wkey"></div><div class="wkey"></div><div class="wkey"></div>
+          <div class="bkey" style="left:9.5%"></div><div class="bkey" style="left:22%"></div>
+          <div class="bkey" style="left:47%"></div><div class="bkey" style="left:59.5%"></div><div class="bkey" style="left:72%"></div>
+        </div>
+        <div class="transport"><div class="play"></div><span class="tc">2.1.03</span><div class="scrub"></div><span class="mini">120bpm</span></div>
+        <span class="hs" style="left:120px; top:150px;">1</span>
+        <span class="hs" style="left:120px; bottom:188px;">2</span>
+        <span class="hs" style="left:96px; bottom:158px;">3</span>
+      </div></div>
+      <div class="figcap"><b>Macro → micro → input</b>: arrangement context up top, note workspace in the middle, capped keys in the thumb zone.</div>
+    </div>
+
+    <div class="figcol">
+      <div class="phone land"><div class="screen">
+        <div class="tabs"><div class="tab"><span class="g"></span>Stage</div><div class="tab on"><span class="g"></span>Time</div><div class="tab"><span class="g"></span>Nodes</div><div class="tab"><span class="g"></span>Mixer</div><div class="tab"><span class="g"></span>Tree</div></div>
+        <div class="ribbon" style="flex:0 0 auto;">
+          <div class="ruler" style="background:repeating-linear-gradient(90deg,transparent 0 80px,#2a8a5a 80px 81px,transparent 81px 160px,var(--line) 160px 161px);"></div>
+          <div class="lane"><span class="gut">DRUMS</span><div class="clip a" style="left:42px; width:130px;"><div class="wav"></div></div><div class="clip a" style="left:180px; width:130px;"><div class="wav"></div></div></div>
+        </div>
+        <div class="inst-bar"><span class="pill">Grand Piano ▾</span><div class="ws-toggle"><span class="seg">Keys</span><span class="seg on">Notes</span></div><span style="margin-left:auto;color:var(--coral);">● REC</span></div>
+        <div class="proll">
+          <span class="glab">PIANO ROLL · time ▸</span>
+          <div class="pn" style="left:12%; top:30px; width:14%;"></div>
+          <div class="pn" style="left:30%; top:56px; width:10%;"></div>
+          <div class="pn" style="left:44%; top:17px; width:18%;"></div>
+          <div class="pn" style="left:46%; top:82px; width:8%;"></div>
+          <div class="pn" style="left:66%; top:43px; width:12%;"></div>
+          <div class="pn" style="left:80%; top:69px; width:10%;"></div>
+          <div class="ph" style="left:44%;"></div>
+        </div>
+        <div class="transport"><div class="play"></div><span class="tc">2.1.03</span><div class="scrub"></div><span class="mini">120bpm</span></div>
+        <span class="hs" style="left:200px; top:42px;">4</span>
+      </div></div>
+      <div class="figcap"><b>Landscape · Notes</b> — standalone, the editor flips to a conventional piano roll (pitch ↕, time ▸) to spend the wide axis on time. The context ribbon still rides on top.</div>
+    </div>
+
+    <div class="notes">
+      <div class="note"><div class="dot">1</div><div>
+        <h4>The cap, and what fills it</h4>
+        <p>Keys grow to ~⅓ then stop; continued upward drag reveals the workspace. The keyboard holds its ergonomic height — the new room opens <em>above</em> it. Same continuous-reveal as the timeline ribbon.</p>
+      </div></div>
+      <div class="note"><div class="dot">2</div><div>
+        <h4>Default: see what you play</h4>
+        <p>A note view of the current part, each column sitting over its key below (a waterfall toward the amber <em>now</em> line). The see-what-you're-doing principle the GarageBand port breaks — and editable in place.</p>
+      </div></div>
+      <div class="note"><div class="dot">3</div><div>
+        <h4>Or perform: Controllers</h4>
+        <p>Toggle the zone to pitch/mod strips, an XY pad, an arpeggiator — the other natural use of space above keys. The same drag, a different occupant.</p>
+      </div></div>
+      <div class="note"><div class="dot">4</div><div>
+        <h4>Landscape splits them — and reflows</h4>
+        <p>No room to stack, so keys and notes become a <b>Keys / Notes</b> toggle, with the context ribbon persisting in both — you lose seeing keys-and-notes together, never the <em>when</em>. And the note view itself reflows: Synthesia-style (pitch ↔, aligned to keys) when it sits above the keyboard in portrait; a conventional piano roll (pitch ↕, time ▸) when it's standalone in landscape and the wide axis is better spent on time. Rotate back and your part, playhead and selection carry across.</p>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<div class="foot">
+  <span>UNIFIED-TIMELINE STUDIO · PHONE CONCEPT PLATES 01–08</span>
+  <span>WIREFRAME — LAYOUT &amp; GESTURE INTENT, NOT FINAL VISUAL</span>
+</div>
+
+</body>
+</html>

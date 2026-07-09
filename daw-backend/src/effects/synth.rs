@@ -113,11 +113,10 @@ impl SynthVoice {
         // Simple sine wave
         let sample = (self.phase * 2.0 * PI).sin() * (self.velocity as f32 / 127.0) * 0.3;
 
-        // Update phase
-        self.phase += self.frequency / sample_rate;
-        if self.phase >= 1.0 {
-            self.phase -= 1.0;
-        }
+        // Update phase. Use `.fract()` for a numerically stable wraparound: repeated
+        // conditional subtraction accumulates f32 rounding error over long-held notes,
+        // which drifts the timbre.
+        self.phase = (self.phase + self.frequency / sample_rate).fract();
 
         self.age += 1;
 

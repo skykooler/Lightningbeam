@@ -5,10 +5,41 @@
 use eframe::egui;
 use lightningbeam_core::export::{
     AudioExportSettings, AudioFormat,
+    GifExportSettings,
     ImageExportSettings, ImageFormat,
     VideoExportSettings, VideoCodec, VideoQuality, ColorRange,
 };
 use std::path::PathBuf;
+
+/// The OS username (`$USER` / `%USERNAME%`), or empty if unavailable. Used as a default Artist tag.
+fn os_username() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default()
+}
+
+/// Current civil year (UTC) computed from the system clock — avoids pulling in a date crate.
+fn current_year() -> i64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
+    year_from_unix_secs(secs)
+}
+
+/// Civil year (UTC) for a Unix timestamp, via Howard Hinnant's `civil_from_days` algorithm.
+fn year_from_unix_secs(secs: i64) -> i64 {
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    y + if m <= 2 { 1 } else { 0 }
+}
 
 /// Hint about document content, used to pick a smart default export type.
 pub struct DocumentHint {
@@ -25,6 +56,8 @@ pub enum ExportType {
     Audio,
     Image,
     Video,
+    /// Animated GIF (multi-frame, palette-quantized, no audio).
+    Gif,
     /// Vector-only SVG of the current frame (lossless; raster/video layers skipped).
     Svg,
 }
@@ -36,6 +69,8 @@ pub enum ExportResult {
     Image(ImageExportSettings, PathBuf),
     VideoOnly(VideoExportSettings, PathBuf),
     VideoWithAudio(VideoExportSettings, AudioExportSettings, PathBuf),
+    /// Animated GIF export.
+    Gif(GifExportSettings, PathBuf),
     /// SVG of vector layers at the given document time.
     Svg(f64, PathBuf),
 }
@@ -56,6 +91,9 @@ pub struct ExportDialog {
 
     /// Video export settings
     pub video_settings: VideoExportSettings,
+
+    /// Animated GIF export settings
+    pub gif_settings: GifExportSettings,
 
     /// Include audio with video?
     pub include_audio: bool,
@@ -104,6 +142,7 @@ impl Default for ExportDialog {
             audio_settings: AudioExportSettings::standard_mp3(),
             image_settings: ImageExportSettings::default(),
             video_settings: VideoExportSettings::default(),
+            gif_settings: GifExportSettings::default(),
             include_audio: true,
             output_path: None,
             error_message: None,
@@ -120,10 +159,18 @@ impl Default for ExportDialog {
 
 impl ExportDialog {
     /// Open the dialog with default settings, using `hint` to pick a smart default tab.
-    pub fn open(&mut self, timeline_duration: f64, project_name: &str, hint: &DocumentHint) {
+    pub fn open(
+        &mut self,
+        timeline_duration: f64,
+        project_name: &str,
+        hint: &DocumentHint,
+        last_artist: &str,
+        last_album: &str,
+    ) {
         self.open = true;
         self.audio_settings.end_time = timeline_duration;
         self.video_settings.end_time = timeline_duration;
+        self.gif_settings.end_time   = timeline_duration;
         self.image_settings.time     = hint.current_time;
         // Propagate document dimensions as defaults (None means "use doc size").
         self.image_settings.width  = None;
@@ -143,6 +190,24 @@ impl ExportDialog {
             else if only_raster      { ExportType::Image }
             else                     { self.export_type  } // keep current as fallback
         };
+        // Sensible tag defaults, only filled when empty so a user's edits are never clobbered:
+        //  • Title  → project name (on a project switch)
+        //  • Year   → current year
+        //  • Artist → last-used artist, else the OS username
+        //  • Album  → last-used album
+        let meta = &mut self.audio_settings.metadata;
+        if meta.title.is_empty() && !same_project {
+            meta.title = project_name.to_owned();
+        }
+        if meta.year.is_empty() {
+            meta.year = current_year().to_string();
+        }
+        if meta.artist.is_empty() {
+            meta.artist = if !last_artist.is_empty() { last_artist.to_owned() } else { os_username() };
+        }
+        if meta.album.is_empty() && !last_album.is_empty() {
+            meta.album = last_album.to_owned();
+        }
         self.current_project = project_name.to_owned();
 
         // Restore the last exported path if available; otherwise default to project name.
@@ -160,6 +225,7 @@ impl ExportDialog {
             ExportType::Audio => self.audio_settings.format.extension(),
             ExportType::Image => self.image_settings.format.extension(),
             ExportType::Video => self.video_settings.codec.container_format(),
+            ExportType::Gif => "gif",
             ExportType::Svg => "svg",
         }
     }
@@ -203,12 +269,13 @@ impl ExportDialog {
             ExportType::Audio => "Export Audio",
             ExportType::Image => "Export Image",
             ExportType::Video => "Export Video",
+            ExportType::Gif => "Export GIF",
             ExportType::Svg => "Export SVG",
         };
 
         let modal_response = egui::Modal::new(egui::Id::new("export_dialog_modal"))
             .show(ctx, |ui| {
-                ui.set_width(500.0);
+                ui.set_width(crate::mobile::dialog_width(ctx, 500.0));
 
                 ui.heading(window_title);
                 ui.add_space(8.0);
@@ -225,6 +292,7 @@ impl ExportDialog {
                         (ExportType::Audio, "Audio"),
                         (ExportType::Image, "Image"),
                         (ExportType::Video, "Video"),
+                        (ExportType::Gif, "GIF"),
                         (ExportType::Svg, "SVG"),
                     ] {
                         if ui.selectable_value(&mut self.export_type, variant, label).clicked() {
@@ -242,6 +310,7 @@ impl ExportDialog {
                     ExportType::Audio => self.render_audio_basic(ui),
                     ExportType::Image => self.render_image_settings(ui),
                     ExportType::Video => self.render_video_basic(ui),
+                    ExportType::Gif => self.render_gif_basic(ui),
                     ExportType::Svg => self.render_svg_settings(ui),
                 }
 
@@ -261,6 +330,7 @@ impl ExportDialog {
                         ExportType::Audio => self.render_audio_advanced(ui),
                         ExportType::Image => self.render_image_advanced(ui),
                         ExportType::Video => self.render_video_advanced(ui),
+                        ExportType::Gif => self.render_gif_advanced(ui),
                         ExportType::Svg => {} // SVG has no advanced settings
                     }
                 }
@@ -460,8 +530,48 @@ impl ExportDialog {
 
         ui.add_space(8.0);
 
+        // Tag metadata (ID3 / MP4 / Vorbis / RIFF-INFO depending on format).
+        self.render_audio_metadata(ui);
+
+        ui.add_space(8.0);
+
         // Time range
         self.render_time_range(ui);
+    }
+
+    /// Render the audio tag-metadata fields (title/artist/album/…). Written into the file on export.
+    fn render_audio_metadata(&mut self, ui: &mut egui::Ui) {
+        let m = &mut self.audio_settings.metadata;
+        ui.label(egui::RichText::new("Tags").strong());
+        // Placeholder styling: italic + a clearly faded color so an empty field's hint never reads
+        // as a real value (the theme's default weak color is too close to the text color). An
+        // explicit color overrides egui's weak-color fallback for hint text.
+        let hint_color = {
+            let t = ui.visuals().text_color();
+            egui::Color32::from_rgba_unmultiplied(t.r(), t.g(), t.b(), 100)
+        };
+        let year_hint = format!("e.g. {}", current_year());
+        egui::Grid::new("audio_metadata_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                let row = |ui: &mut egui::Ui, label: &str, val: &mut String, hint: &str| {
+                    ui.label(label);
+                    ui.add(
+                        egui::TextEdit::singleline(val)
+                            .hint_text(egui::RichText::new(hint).italics().color(hint_color))
+                            .desired_width(260.0),
+                    );
+                    ui.end_row();
+                };
+                row(ui, "Title", &mut m.title, "e.g. My Song");
+                row(ui, "Artist", &mut m.artist, "e.g. Jane Doe");
+                row(ui, "Album", &mut m.album, "e.g. Greatest Hits");
+                row(ui, "Genre", &mut m.genre, "e.g. Electronic");
+                row(ui, "Year", &mut m.year, &year_hint);
+                row(ui, "Track", &mut m.track, "e.g. 1 or 1/12");
+                row(ui, "Comment", &mut m.comment, "Optional notes…");
+            });
     }
 
     /// Video presets: (name, codec, quality, width, height, fps)
@@ -614,12 +724,65 @@ impl ExportDialog {
         self.render_time_range(ui);
     }
 
+    /// GIF frame-rate presets (fps). GIF delays are centisecond-quantized, so these map to clean
+    /// per-frame delays (10/15/20/25/50 fps → 100/70/50/40/20 ms after rounding).
+    const GIF_FPS: &'static [f64] = &[10.0, 15.0, 20.0, 25.0, 50.0];
+
+    /// Render basic GIF settings (frame rate + loop).
+    fn render_gif_basic(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Frame rate:");
+            egui::ComboBox::from_id_salt("gif_fps")
+                .selected_text(format!("{} fps", self.gif_settings.framerate as u32))
+                .show_ui(ui, |ui| {
+                    for &fps in Self::GIF_FPS {
+                        ui.selectable_value(&mut self.gif_settings.framerate, fps, format!("{} fps", fps as u32));
+                    }
+                });
+        });
+
+        ui.checkbox(&mut self.gif_settings.loop_forever, "Loop forever");
+
+        ui.add_space(8.0);
+        self.render_time_range(ui);
+    }
+
+    /// Render advanced GIF settings (resolution, fit, transparency).
+    fn render_gif_advanced(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Size:");
+            let mut w = self.gif_settings.width.unwrap_or(0);
+            let mut h = self.gif_settings.height.unwrap_or(0);
+            let changed_w = ui.add(egui::DragValue::new(&mut w).range(0..=u32::MAX).prefix("W ")).changed();
+            let changed_h = ui.add(egui::DragValue::new(&mut h).range(0..=u32::MAX).prefix("H ")).changed();
+            if changed_w { self.gif_settings.width  = if w == 0 { None } else { Some(w) }; }
+            if changed_h { self.gif_settings.height = if h == 0 { None } else { Some(h) }; }
+            ui.weak("(0 = document size)");
+        });
+
+        ui.horizontal(|ui| {
+            use lightningbeam_core::export::ExportFitMode;
+            ui.label("Fit:");
+            egui::ComboBox::from_id_salt("gif_fit_mode")
+                .selected_text(self.gif_settings.fit.name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.gif_settings.fit, ExportFitMode::Letterbox, ExportFitMode::Letterbox.name());
+                    ui.selectable_value(&mut self.gif_settings.fit, ExportFitMode::Crop, ExportFitMode::Crop.name());
+                    ui.selectable_value(&mut self.gif_settings.fit, ExportFitMode::Stretch, ExportFitMode::Stretch.name());
+                });
+        });
+
+        ui.checkbox(&mut self.gif_settings.transparency, "Preserve transparency (1-bit)");
+        ui.label(egui::RichText::new("GIF supports only on/off transparency; semi-transparent pixels are keyed out.").weak().small());
+    }
+
     /// Render time range UI (common to both audio and video)
     fn render_time_range(&mut self, ui: &mut egui::Ui) {
         let (start_time, end_time) = match self.export_type {
             ExportType::Audio => (&mut self.audio_settings.start_time, &mut self.audio_settings.end_time),
             ExportType::Image | ExportType::Svg => return, // single time field, not a range
             ExportType::Video => (&mut self.video_settings.start_time, &mut self.video_settings.end_time),
+            ExportType::Gif => (&mut self.gif_settings.start_time, &mut self.gif_settings.end_time),
         };
 
         ui.horizontal(|ui| {
@@ -693,6 +856,13 @@ impl ExportDialog {
                 Some(ExportResult::Image(self.image_settings.clone(), output_path))
             }
             ExportType::Svg => Some(ExportResult::Svg(self.image_settings.time, output_path)),
+            ExportType::Gif => {
+                if let Err(err) = self.gif_settings.validate() {
+                    self.error_message = Some(err);
+                    return None;
+                }
+                Some(ExportResult::Gif(self.gif_settings.clone(), output_path))
+            }
             ExportType::Audio => {
                 // Validate audio settings
                 if let Err(err) = self.audio_settings.validate() {
@@ -801,7 +971,7 @@ impl ExportProgressDialog {
 
         egui::Modal::new(egui::Id::new("export_progress_modal"))
             .show(ctx, |ui| {
-                ui.set_width(400.0);
+                ui.set_width(crate::mobile::dialog_width(ctx, 400.0));
 
                 ui.heading("Exporting...");
                 ui.add_space(8.0);
@@ -859,5 +1029,32 @@ impl ExportProgressDialog {
         }
 
         should_cancel
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn year_from_unix_secs_known_values() {
+        assert_eq!(year_from_unix_secs(0), 1970); // Unix epoch
+        assert_eq!(year_from_unix_secs(946_684_800), 2000); // 2000-01-01
+        assert_eq!(year_from_unix_secs(1_735_689_600), 2025); // 2025-01-01
+        assert_eq!(year_from_unix_secs(1_767_225_599), 2025); // 2025-12-31 23:59:59
+        assert_eq!(year_from_unix_secs(1_767_225_600), 2026); // 2026-01-01
+
+        // Post-2038: these timestamps exceed i32::MAX (2_147_483_647) — and the last exceeds
+        // u32::MAX — so a 32-bit time_t would wrap here. i64 math handles them correctly.
+        assert_eq!(year_from_unix_secs(2_148_595_200), 2038); // 2038-02-01 (> i32::MAX)
+        assert_eq!(year_from_unix_secs(2_223_331_200), 2040); // 2040-06-15
+        assert_eq!(year_from_unix_secs(4_102_444_800), 2100); // 2100-01-01 (not a leap year)
+        assert_eq!(year_from_unix_secs(9_214_646_400), 2262); // 2262-01-01 (> u32::MAX)
+    }
+
+    #[test]
+    fn current_year_is_plausible() {
+        let y = current_year();
+        assert!((2020..3000).contains(&y), "implausible year: {y}");
     }
 }

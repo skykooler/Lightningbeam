@@ -138,6 +138,7 @@ impl Action for AddLayerAction {
             AnyLayer::Effect(_) => "Add effect layer",
             AnyLayer::Group(_) => "Add group layer",
             AnyLayer::Raster(_) => "Add raster layer",
+            AnyLayer::Text(_) => "Add text layer",
         }
         .to_string()
     }

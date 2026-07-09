@@ -101,6 +101,94 @@ impl CpuYuvConverter {
     }
 }
 
+/// CPU RGBA→YUV422P10LE converter (10-bit, 4:2:2) via swscale, for ProRes 422 export.
+///
+/// ProRes (`prores_ks`) requires a 10-bit 4:2:2 input; the SDR pipeline otherwise produces 8-bit
+/// 4:2:0. Source is still 8-bit RGBA (bit-depth is promoted, not conjured), which is normal for
+/// SDR ProRes. BT.709 with the requested range, matching the encoder's color tags.
+pub struct CpuYuv422P10Converter {
+    width: u32,
+    height: u32,
+    scaler: ffmpeg::software::scaling::Context,
+    rgba_frame: ffmpeg::frame::Video,
+    yuv_frame: ffmpeg::frame::Video,
+}
+
+impl CpuYuv422P10Converter {
+    pub fn new(width: u32, height: u32, full_range: bool) -> Result<Self, String> {
+        let mut scaler = ffmpeg::software::scaling::Context::get(
+            ffmpeg::format::Pixel::RGBA, width, height,
+            ffmpeg::format::Pixel::YUV422P10LE, width, height,
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        )
+        .map_err(|e| format!("Failed to create YUV422P10 swscale context: {}", e))?;
+
+        // BT.709, requested output range (matches setup_video_encoder's SDR tags). No safe
+        // ffmpeg-next wrapper for sws_setColorspaceDetails, so this is the raw call (as in
+        // CpuYuvConverter::new above).
+        unsafe {
+            let coeffs = ffmpeg::ffi::sws_getCoefficients(ffmpeg::ffi::SWS_CS_ITU709 as i32);
+            let dst_range = if full_range { 1 } else { 0 };
+            let one = 1 << 16;
+            ffmpeg::ffi::sws_setColorspaceDetails(
+                scaler.as_mut_ptr(),
+                coeffs, 1,
+                coeffs, dst_range,
+                0, one, one,
+            );
+        }
+
+        let rgba_frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA, width, height);
+        let yuv_frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::YUV422P10LE, width, height);
+        Ok(Self { width, height, scaler, rgba_frame, yuv_frame })
+    }
+
+    /// Convert packed RGBA (width*height*4) to tight YUV422P10LE planes (little-endian, 2 bytes per
+    /// sample): Y is width×height, U and V are (width/2)×height. Planes are returned tight (stride
+    /// padding stripped) to match what `encode_frame` expects.
+    pub fn convert(&mut self, rgba_data: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
+        let expected = (self.width * self.height * 4) as usize;
+        assert_eq!(rgba_data.len(), expected,
+            "RGBA data size mismatch: expected {} bytes, got {}", expected, rgba_data.len());
+
+        // Copy RGBA into the source frame honoring its stride (may be padded).
+        let row_bytes = (self.width * 4) as usize;
+        let src_stride = self.rgba_frame.stride(0);
+        {
+            let dst = self.rgba_frame.data_mut(0);
+            for row in 0..self.height as usize {
+                let s = row * row_bytes;
+                let d = row * src_stride;
+                dst[d..d + row_bytes].copy_from_slice(&rgba_data[s..s + row_bytes]);
+            }
+        }
+
+        self.scaler
+            .run(&self.rgba_frame, &mut self.yuv_frame)
+            .map_err(|e| format!("YUV422P10 swscale conversion failed: {}", e))?;
+
+        // Extract each plane tight (2 bytes/sample). Y: width samples/row × height rows.
+        // Chroma (4:2:2): width/2 samples/row × height rows.
+        let extract = |frame: &ffmpeg::frame::Video, idx: usize, samples_w: usize, rows: usize| {
+            let bytes_per_row = samples_w * 2;
+            let stride = frame.stride(idx);
+            let data = frame.data(idx);
+            let mut out = Vec::with_capacity(bytes_per_row * rows);
+            for row in 0..rows {
+                let start = row * stride;
+                out.extend_from_slice(&data[start..start + bytes_per_row]);
+            }
+            out
+        };
+        let (w, h) = (self.width as usize, self.height as usize);
+        let y_plane = extract(&self.yuv_frame, 0, w, h);
+        let u_plane = extract(&self.yuv_frame, 1, w / 2, h);
+        let v_plane = extract(&self.yuv_frame, 2, w / 2, h);
+
+        Ok((y_plane, u_plane, v_plane))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +217,20 @@ mod tests {
         // U and V planes should be quarter resolution (subsampled 2x2)
         assert_eq!(u.len(), (1920 / 2) * (1080 / 2));
         assert_eq!(v.len(), (1920 / 2) * (1080 / 2));
+    }
+
+    #[test]
+    fn test_yuv422p10_output_sizes() {
+        // Use a width that forces swscale linesize padding (not a multiple of 32/64) to exercise
+        // the stride-stripping extraction.
+        let (w, h) = (1000u32, 720u32);
+        let mut c = CpuYuv422P10Converter::new(w, h, false).unwrap();
+        let rgba = vec![0u8; (w * h * 4) as usize];
+        let (y, u, v) = c.convert(&rgba).unwrap();
+        // 10-bit → 2 bytes/sample. Y full res; U/V half width, full height (4:2:2).
+        assert_eq!(y.len(), (w * h * 2) as usize);
+        assert_eq!(u.len(), ((w / 2) * h * 2) as usize);
+        assert_eq!(v.len(), ((w / 2) * h * 2) as usize);
     }
 
     #[test]

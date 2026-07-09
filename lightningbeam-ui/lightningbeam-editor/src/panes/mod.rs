@@ -72,6 +72,7 @@ pub mod gradient_editor;
 pub mod timeline;
 pub mod infopanel;
 pub mod outliner;
+pub mod keyboard_layout;
 pub mod piano_roll;
 pub mod virtual_piano;
 pub mod node_editor;
@@ -212,10 +213,15 @@ pub struct SharedPaneState<'a> {
     pub editing_instance_id: Option<uuid::Uuid>,
     /// The parent layer ID containing the clip instance being edited
     pub editing_parent_layer_id: Option<uuid::Uuid>,
+    /// The full clip_id path being edited, outermost → current (for breadcrumbs). Empty at root.
+    pub editing_clip_path: Vec<uuid::Uuid>,
     /// Request to enter a movie clip for editing: (clip_id, instance_id, parent_layer_id)
     pub pending_enter_clip: &'a mut Option<(uuid::Uuid, uuid::Uuid, uuid::Uuid)>,
     /// Request to exit the current movie clip
     pub pending_exit_clip: &'a mut bool,
+    /// Request to exit up to a specific editing depth (number of clips to keep); e.g. a breadcrumb
+    /// click. `Some(0)` exits all the way to the document root.
+    pub pending_exit_to_depth: &'a mut Option<usize>,
     /// Currently active layer ID
     pub active_layer_id: &'a mut Option<uuid::Uuid>,
     /// Current tool interaction state (mutable for tools to modify)
@@ -356,6 +362,37 @@ pub struct SharedPaneState<'a> {
     /// on the first frame; panes (e.g. infopanel) convert the pixel data to egui
     /// TextureHandles.  Each entry is `(width, height, sRGB-premultiplied RGBA bytes)`.
     pub brush_preview_pixels: &'a std::sync::Arc<std::sync::Mutex<Vec<(u32, u32, Vec<u8>)>>>,
+    /// True when rendering the phone/mobile shell (panes can render more compactly).
+    pub is_mobile: bool,
+    /// Device orientation for the mobile shell: portrait (tall) vs landscape (wide). Defaults to
+    /// `true`; the mobile shell sets it from the available rect. Panes that reflow (e.g. the Piano
+    /// Roll's vertical vs conventional layout) key off this.
+    pub is_portrait: bool,
+    /// Shared keyboard octave offset (C4-relative), so the mobile Virtual Piano and the portrait
+    /// Piano Roll agree on which keys are visible and stay column-aligned.
+    pub keyboard_octave: &'a mut i8,
+    /// Shared horizontal keyboard pan (px) for smooth left/right scroll of the mobile keyboard+roll.
+    pub keyboard_pan_x: &'a mut f32,
+    /// Whether the mobile instrument pane should show the falling-notes roll above the keys. Driven
+    /// by the shell from the *snapped* pane size-class so the reveal happens at a stack snap point.
+    pub instrument_show_roll: bool,
+    /// Set by the mobile instrument header's "Presets" button; the shell opens the Preset Browser.
+    pub open_instrument_browser: &'a mut bool,
+    /// Set by the mobile instrument header's REC button; the Timeline pane picks it up and toggles
+    /// recording (reusing its full count-in / clip-creation flow).
+    pub pending_record_toggle: &'a mut bool,
+    /// Mobile long-press context menu request. A pane sets this on `response.secondary_clicked()`
+    /// (which fires on long-press) with the items relevant to what was pressed; the mobile shell
+    /// renders one persistent popup and dispatches the chosen `MenuAction`. `None` = no menu.
+    pub mobile_context_menu: &'a mut Option<MobileContextMenu>,
+}
+
+/// A mobile long-press context menu: a screen position and a list of `(label, action)` items.
+/// Rendered by the mobile shell; each item dispatches its `MenuAction` via `pending_menu_actions`.
+#[derive(Clone)]
+pub struct MobileContextMenu {
+    pub pos: egui::Pos2,
+    pub items: Vec<(String, crate::menu::MenuAction)>,
 }
 
 /// Trait for pane rendering

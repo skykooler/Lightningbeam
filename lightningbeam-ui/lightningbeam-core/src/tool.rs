@@ -381,7 +381,9 @@ impl Tool {
         use crate::layer::LayerType;
         match layer_type {
             None | Some(LayerType::Vector) => Tool::all(),
-            Some(LayerType::Audio) | Some(LayerType::Video) => &[Tool::Select, Tool::Split],
+            // The Text tool is available on audio/video/raster too: clicking the
+            // stage with it there creates a new top-level text layer.
+            Some(LayerType::Audio) | Some(LayerType::Video) => &[Tool::Select, Tool::Split, Tool::Text],
             Some(LayerType::Raster) => &[
                 // Brush tools
                 Tool::Draw, Tool::Pencil, Tool::Pen, Tool::Airbrush,
@@ -397,9 +399,10 @@ impl Tool {
                 // Transform
                 Tool::Transform, Tool::Warp, Tool::Liquify,
                 // Utility
-                Tool::Eyedropper,
+                Tool::Eyedropper, Tool::Text,
             ],
-            _ => &[Tool::Select],
+            Some(LayerType::Text) => &[Tool::Select, Tool::Text, Tool::Transform],
+            _ => &[Tool::Select, Tool::Text],
         }
     }
 

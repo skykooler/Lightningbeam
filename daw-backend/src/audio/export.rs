@@ -50,6 +50,10 @@ pub struct ExportSettings {
     pub end_time: Seconds,
     /// Tempo map for beat-position scheduling
     pub tempo_map: TempoMap,
+    /// Tag metadata as (ffmpeg-key, value) pairs (e.g. ("title", "…"), ("artist", "…")). Written to
+    /// the container's native tags: ID3v2 (MP3), MP4 atoms (M4A), Vorbis comments (FLAC), RIFF INFO
+    /// (WAV). Empty = no tags.
+    pub metadata: Vec<(String, String)>,
 }
 
 impl Default for ExportSettings {
@@ -63,8 +67,24 @@ impl Default for ExportSettings {
             start_time: Seconds::ZERO,
             end_time: Seconds(60.0),
             tempo_map: TempoMap::constant(120.0),
+            metadata: Vec::new(),
         }
     }
+}
+
+/// Set tag metadata on an ffmpeg output context (before `write_header`). FFmpeg maps the standard
+/// keys to each container's native tags.
+fn apply_metadata(output: &mut ffmpeg_next::format::context::Output, metadata: &[(String, String)]) {
+    if metadata.is_empty() {
+        return;
+    }
+    let mut dict = ffmpeg_next::Dictionary::new();
+    for (k, v) in metadata {
+        if !v.is_empty() {
+            dict.set(k, v);
+        }
+    }
+    output.set_metadata(dict);
 }
 
 /// Export the project to an audio file
@@ -108,17 +128,21 @@ pub fn export_audio<P: AsRef<Path>>(
     // Route to appropriate export implementation based on format.
     // Ensure export mode is disabled even if an error occurs.
     let result = match settings.format {
-        ExportFormat::Wav | ExportFormat::Flac => {
+        ExportFormat::Wav => {
             let samples = render_to_memory(project, pool, settings, event_tx.as_mut().map(|tx| &mut **tx))?;
-            // Signal that rendering is done and we're now writing the file
             if let Some(ref mut tx) = event_tx {
                 let _ = tx.push(AudioEvent::ExportFinalizing);
             }
-            match settings.format {
-                ExportFormat::Wav => write_wav(&samples, settings, &output_path),
-                ExportFormat::Flac => write_flac(&samples, settings, &output_path),
-                _ => unreachable!(),
+            write_wav(&samples, settings, &output_path)
+                // hound writes no metadata; append a RIFF INFO chunk for tags.
+                .and_then(|_| append_wav_info_chunk(output_path.as_ref(), &settings.metadata))
+        }
+        ExportFormat::Flac => {
+            let samples = render_to_memory(project, pool, settings, event_tx.as_mut().map(|tx| &mut **tx))?;
+            if let Some(ref mut tx) = event_tx {
+                let _ = tx.push(AudioEvent::ExportFinalizing);
             }
+            export_flac(&samples, settings, &output_path)
         }
         ExportFormat::Mp3 => {
             export_mp3(project, pool, settings, output_path, event_tx)
@@ -273,48 +297,174 @@ fn write_wav<P: AsRef<Path>>(
     Ok(())
 }
 
-/// Write FLAC file using hound (FLAC is essentially lossless WAV)
-fn write_flac<P: AsRef<Path>>(
+/// Export real FLAC via ffmpeg from already-rendered interleaved f32 samples (Vorbis-comment
+/// metadata). Replaces the former `write_flac`, which wrote WAV bytes to a `.flac` file. 16-bit
+/// uses S16; 24-bit uses S32 (ffmpeg's flac encoder emits `bits_per_raw_sample = 24` for S32,
+/// taking the top 24 bits).
+fn export_flac<P: AsRef<Path>>(
     samples: &[f32],
     settings: &ExportSettings,
     output_path: P,
 ) -> Result<(), String> {
-    // For now, we'll use hound to write a WAV-like FLAC file
-    // In the future, we could use a dedicated FLAC encoder
-    let spec = hound::WavSpec {
-        channels: settings.channels as u16,
-        sample_rate: settings.sample_rate,
-        bits_per_sample: settings.bit_depth,
-        sample_format: hound::SampleFormat::Int,
+    use ffmpeg_next as ffmpeg;
+
+    ffmpeg::init().map_err(|e| format!("Failed to initialize FFmpeg: {}", e))?;
+
+    let codec = ffmpeg::encoder::find(ffmpeg::codec::Id::FLAC)
+        .ok_or("FLAC encoder not found in this ffmpeg build")?;
+    let mut output = ffmpeg::format::output(&output_path)
+        .map_err(|e| format!("Failed to create output file: {}", e))?;
+
+    let channel_layout = match settings.channels {
+        1 => ffmpeg::channel_layout::ChannelLayout::MONO,
+        2 => ffmpeg::channel_layout::ChannelLayout::STEREO,
+        _ => return Err(format!("Unsupported channel count: {}", settings.channels)),
     };
 
-    let mut writer = hound::WavWriter::create(output_path, spec)
-        .map_err(|e| format!("Failed to create FLAC file: {}", e))?;
+    // FLAC accepts packed S16 or S32; S32 → 24-bit output.
+    let use_24 = settings.bit_depth >= 24;
+    let sample_fmt = if use_24 {
+        ffmpeg::format::Sample::I32(ffmpeg::format::sample::Type::Packed)
+    } else {
+        ffmpeg::format::Sample::I16(ffmpeg::format::sample::Type::Packed)
+    };
 
-    // Write samples (same as WAV for now)
-    match settings.bit_depth {
-        16 => {
-            for &sample in samples {
-                let clamped = sample.max(-1.0).min(1.0);
-                let pcm_value = (clamped * 32767.0) as i16;
-                writer.write_sample(pcm_value)
-                    .map_err(|e| format!("Failed to write sample: {}", e))?;
+    let mut encoder = ffmpeg::codec::Context::new_with_codec(codec)
+        .encoder()
+        .audio()
+        .map_err(|e| format!("Failed to create FLAC encoder: {}", e))?;
+    encoder.set_rate(settings.sample_rate as i32);
+    encoder.set_channel_layout(channel_layout);
+    encoder.set_format(sample_fmt);
+    encoder.set_time_base(ffmpeg::Rational(1, settings.sample_rate as i32));
+    let mut encoder = encoder.open_as(codec)
+        .map_err(|e| format!("Failed to open FLAC encoder: {}", e))?;
+
+    {
+        let mut stream = output.add_stream(codec)
+            .map_err(|e| format!("Failed to add stream: {}", e))?;
+        stream.set_parameters(&encoder);
+    }
+    apply_metadata(&mut output, &settings.metadata);
+    output.write_header()
+        .map_err(|e| format!("Failed to write FLAC header: {}", e))?;
+
+    let channels = settings.channels as usize;
+    let num_frames = samples.len() / channels;
+    let frame_size = if encoder.frame_size() > 0 { encoder.frame_size() as usize } else { 4096 };
+
+    let mut done = 0usize;
+    while done < num_frames {
+        let n = (num_frames - done).min(frame_size);
+        let mut frame = ffmpeg::frame::Audio::new(sample_fmt, n, channel_layout);
+        frame.set_rate(settings.sample_rate);
+        frame.set_pts(Some(done as i64)); // samples; the FLAC muxer requires PTS
+
+        let buf = frame.data_mut(0); // packed interleaved → plane 0
+        let base = done * channels;
+        if use_24 {
+            for i in 0..n * channels {
+                let s = samples[base + i].clamp(-1.0, 1.0);
+                let v = (s as f64 * 2_147_483_647.0) as i32; // full-scale S32; encoder takes top 24
+                buf[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        } else {
+            for i in 0..n * channels {
+                let s = samples[base + i].clamp(-1.0, 1.0);
+                let v = (s * 32767.0) as i16;
+                buf[i * 2..i * 2 + 2].copy_from_slice(&v.to_le_bytes());
             }
         }
-        24 => {
-            for &sample in samples {
-                let clamped = sample.max(-1.0).min(1.0);
-                let pcm_value = (clamped * 8388607.0) as i32;
-                writer.write_sample(pcm_value)
-                    .map_err(|e| format!("Failed to write sample: {}", e))?;
-            }
+
+        encoder.send_frame(&frame).map_err(|e| format!("Failed to send FLAC frame: {}", e))?;
+        flac_write_packets(&mut encoder, &mut output)?;
+        done += n;
+    }
+    encoder.send_eof().map_err(|e| format!("Failed to flush FLAC encoder: {}", e))?;
+    flac_write_packets(&mut encoder, &mut output)?;
+    output.write_trailer().map_err(|e| format!("Failed to finalize FLAC: {}", e))?;
+    Ok(())
+}
+
+/// Drain encoded FLAC packets and write them (non-interleaved). Skips the trailing empty flush
+/// packet, which the FLAC muxer otherwise rejects as "Invalid data". Rescales packet ts from the
+/// encoder time base to the stream's.
+fn flac_write_packets(
+    encoder: &mut ffmpeg_next::encoder::Audio,
+    output: &mut ffmpeg_next::format::context::Output,
+) -> Result<(), String> {
+    let mut pkt = ffmpeg_next::Packet::empty();
+    let enc_tb = encoder.time_base();
+    let stream_tb = output.stream(0).map(|s| s.time_base()).unwrap_or(enc_tb);
+    while encoder.receive_packet(&mut pkt).is_ok() {
+        if pkt.size() == 0 {
+            continue;
         }
-        _ => return Err(format!("Unsupported bit depth: {}", settings.bit_depth)),
+        pkt.set_stream(0);
+        pkt.rescale_ts(enc_tb, stream_tb);
+        pkt.write(output).map_err(|e| format!("Failed to write FLAC packet: {}", e))?;
+    }
+    Ok(())
+}
+
+/// Append a RIFF `LIST`/`INFO` metadata chunk to a finished WAV file (hound writes no tags), then
+/// fix up the top-level RIFF size. Maps ffmpeg-style keys to RIFF INFO sub-chunk IDs. Trailing INFO
+/// chunks are ignored by players that don't read them.
+fn append_wav_info_chunk(path: &Path, metadata: &[(String, String)]) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let riff_id = |key: &str| -> Option<&'static [u8; 4]> {
+        match key {
+            "title" => Some(b"INAM"),
+            "artist" => Some(b"IART"),
+            "album" => Some(b"IPRD"),
+            "genre" => Some(b"IGNR"),
+            "comment" => Some(b"ICMT"),
+            "date" => Some(b"ICRD"),
+            "track" => Some(b"ITRK"),
+            _ => None,
+        }
+    };
+
+    let mut info: Vec<u8> = Vec::new();
+    info.extend_from_slice(b"INFO");
+    for (key, val) in metadata {
+        if val.is_empty() {
+            continue;
+        }
+        let Some(id) = riff_id(key) else { continue };
+        let mut bytes = val.as_bytes().to_vec();
+        bytes.push(0); // NUL-terminate
+        if bytes.len() % 2 == 1 {
+            bytes.push(0); // pad to even
+        }
+        info.extend_from_slice(id);
+        info.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        info.extend_from_slice(&bytes);
+    }
+    if info.len() <= 4 {
+        return Ok(()); // nothing but the "INFO" tag
     }
 
-    writer.finalize()
-        .map_err(|e| format!("Failed to finalize FLAC file: {}", e))?;
+    let mut list: Vec<u8> = Vec::with_capacity(info.len() + 8);
+    list.extend_from_slice(b"LIST");
+    list.extend_from_slice(&(info.len() as u32).to_le_bytes());
+    list.extend_from_slice(&info);
 
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("Failed to open WAV for tagging: {}", e))?;
+    let end = f.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
+    if end % 2 == 1 {
+        f.write_all(&[0]).map_err(|e| e.to_string())?;
+    }
+    f.write_all(&list).map_err(|e| format!("Failed to write WAV tags: {}", e))?;
+    let new_len = f.seek(SeekFrom::End(0)).map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(4)).map_err(|e| e.to_string())?;
+    f.write_all(&((new_len - 8) as u32).to_le_bytes())
+        .map_err(|e| format!("Failed to update RIFF size: {}", e))?;
     Ok(())
 }
 
@@ -362,6 +512,7 @@ fn export_mp3<P: AsRef<Path>>(
         stream.set_parameters(&encoder);
     }
 
+    apply_metadata(&mut output, &settings.metadata);
     output.write_header()
         .map_err(|e| format!("Failed to write header: {}", e))?;
 
@@ -531,6 +682,7 @@ fn export_aac<P: AsRef<Path>>(
         stream.set_parameters(&encoder);
     }
 
+    apply_metadata(&mut output, &settings.metadata);
     output.write_header()
         .map_err(|e| format!("Failed to write header: {}", e))?;
 
@@ -837,5 +989,62 @@ mod tests {
     fn test_format_extension() {
         assert_eq!(ExportFormat::Wav.extension(), "wav");
         assert_eq!(ExportFormat::Flac.extension(), "flac");
+    }
+
+    fn tagged_settings(format: ExportFormat) -> ExportSettings {
+        ExportSettings {
+            format,
+            sample_rate: 48000,
+            channels: 2,
+            bit_depth: 24,
+            mp3_bitrate: 192,
+            start_time: Seconds::ZERO,
+            end_time: Seconds(0.2), // tiny render
+            tempo_map: TempoMap::constant(120.0),
+            metadata: vec![
+                ("title".to_string(), "Test Title".to_string()),
+                ("artist".to_string(), "Test Artist".to_string()),
+            ],
+        }
+    }
+
+    /// FLAC export must be a real FLAC container (not WAV bytes) carrying Vorbis-comment tags.
+    #[test]
+    fn flac_export_is_real_flac_with_tags() {
+        let settings = tagged_settings(ExportFormat::Flac);
+        let mut project = Project::new(48000);
+        let pool = AudioPool::new();
+        let path = std::env::temp_dir().join("lb_be_flac_test.flac");
+
+        export_audio(&mut project, &pool, &settings, &path, None).expect("FLAC export failed");
+        let bytes = std::fs::read(&path).unwrap();
+
+        assert_eq!(&bytes[0..4], b"fLaC", "not real FLAC (got {:?})", &bytes[0..4]);
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("Test Title"), "title tag missing from FLAC");
+        assert!(s.contains("Test Artist"), "artist tag missing from FLAC");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// WAV export keeps a valid RIFF container and gains a LIST/INFO tag chunk with a fixed-up size.
+    #[test]
+    fn wav_export_has_info_chunk() {
+        let settings = tagged_settings(ExportFormat::Wav);
+        let mut project = Project::new(48000);
+        let pool = AudioPool::new();
+        let path = std::env::temp_dir().join("lb_be_wav_test.wav");
+
+        export_audio(&mut project, &pool, &settings, &path, None).expect("WAV export failed");
+        let bytes = std::fs::read(&path).unwrap();
+
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        let riff_size = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+        assert_eq!(riff_size, bytes.len() - 8, "RIFF size not fixed up after tagging");
+        let s = String::from_utf8_lossy(&bytes);
+        assert!(s.contains("LIST") && s.contains("INFO") && s.contains("INAM"),
+            "no RIFF INFO chunk");
+        assert!(s.contains("Test Title"), "title not in WAV INFO chunk");
+        std::fs::remove_file(&path).ok();
     }
 }

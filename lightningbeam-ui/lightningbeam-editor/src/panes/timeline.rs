@@ -17,6 +17,8 @@ use std::collections::HashMap;
 const RULER_HEIGHT: f32 = 30.0;
 const LAYER_HEIGHT: f32 = 60.0;
 const LAYER_HEADER_WIDTH: f32 = 200.0;
+/// On mobile the header collapses to a minimal color swatch with a 1:2 width:height aspect.
+const MOBILE_LAYER_HEADER_WIDTH: f32 = LAYER_HEIGHT * 0.5;
 const MIN_PIXELS_PER_SECOND: f32 = 1.0;  // Allow zooming out to see 10+ minutes
 const MAX_PIXELS_PER_SECOND: f32 = 500.0;
 const EDGE_DETECTION_PIXELS: f32 = 8.0; // Distance from edge to detect trim handles
@@ -212,6 +214,7 @@ fn effective_clip_duration(
         AnyLayer::Effect(_) => Some(lightningbeam_core::effect::EFFECT_DURATION),
         AnyLayer::Group(_) => None,
         AnyLayer::Raster(_) => None,
+        AnyLayer::Text(_) => None,
     }
 }
 
@@ -265,6 +268,9 @@ pub struct TimelinePane {
     /// Is the user panning the timeline?
     is_panning: bool,
     last_pan_pos: Option<egui::Pos2>,
+    /// Manual long-press tracking for the mobile context menu: press start time + position.
+    lp_time: Option<f64>,
+    lp_pos: egui::Pos2,
 
     /// Clip drag state (None if not dragging)
     clip_drag_state: Option<ClipDragType>,
@@ -685,6 +691,7 @@ fn layer_clips<'a>(
         AnyLayer::Effect(l) => &l.clip_instances,
         AnyLayer::Group(_) => &[],
         AnyLayer::Raster(_) => &[],
+        AnyLayer::Text(_) => &[],
     }
 }
 
@@ -718,6 +725,7 @@ fn collect_clip_instances<'a>(
             }
         }
         AnyLayer::Raster(_) => {}
+        AnyLayer::Text(_) => {}
     }
 }
 
@@ -768,6 +776,7 @@ fn layer_type_info(layer: &AnyLayer) -> (&'static str, egui::Color32) {
         AnyLayer::Effect(_) => ("Effect", egui::Color32::from_rgb(255, 100, 180)),
         AnyLayer::Group(_) => ("Group", egui::Color32::from_rgb(0, 180, 180)),
         AnyLayer::Raster(_) => ("Raster", egui::Color32::from_rgb(160, 100, 200)),
+        AnyLayer::Text(_) => ("Text", egui::Color32::from_rgb(220, 200, 120)),
     }
 }
 
@@ -782,6 +791,8 @@ impl TimelinePane {
             is_scrubbing: false,
             is_panning: false,
             last_pan_pos: None,
+            lp_time: None,
+            lp_pos: egui::Pos2::ZERO,
             clip_drag_state: None,
             drag_offset: 0.0,
             drag_anchor_start: 0.0,
@@ -945,7 +956,7 @@ impl TimelinePane {
 
     /// Toggle recording on/off
     /// In Auto mode, records to the active layer (audio or video with camera)
-    fn toggle_recording(&mut self, shared: &mut SharedPaneState) {
+    pub(crate) fn toggle_recording(&mut self, shared: &mut SharedPaneState) {
         if *shared.is_recording {
             // Stop recording
             self.stop_recording(shared);
@@ -1206,7 +1217,7 @@ impl TimelinePane {
 
     /// Stop all active recordings
     /// Called every frame; fires deferred recording commands once the count-in pre-roll ends.
-    fn check_pending_recording_start(&mut self, shared: &mut SharedPaneState) {
+    pub(crate) fn check_pending_recording_start(&mut self, shared: &mut SharedPaneState) {
         let Some(ref pending) = self.pending_recording_start else { return };
         if !*shared.is_playing || *shared.playback_time < pending.trigger_time {
             return;
@@ -1226,7 +1237,7 @@ impl TimelinePane {
         *shared.count_in_enabled = saved_count_in;
     }
 
-    fn stop_recording(&mut self, shared: &mut SharedPaneState) {
+    pub(crate) fn stop_recording(&mut self, shared: &mut SharedPaneState) {
         // Cancel any in-progress count-in
         self.pending_recording_start = None;
 
@@ -1473,6 +1484,15 @@ impl TimelinePane {
         self.viewport_start_time = 0.0;
         self.viewport_scroll_y = 0.0;
         self.pixels_per_second = 100.0;
+    }
+
+    /// Fit the whole project duration into the given content width, scrolled to the start.
+    /// (Gesture P5-2: double-tap empty → zoom-to-fit.)
+    pub fn fit_to_project(&mut self, viewport_width: f32) {
+        let dur = self.duration.max(0.01);
+        self.pixels_per_second =
+            (viewport_width / dur as f32).clamp(MIN_PIXELS_PER_SECOND, MAX_PIXELS_PER_SECOND);
+        self.viewport_start_time = 0.0;
     }
 
     /// Apply zoom while keeping the time under the cursor stationary
@@ -1933,6 +1953,8 @@ impl TimelinePane {
         track_levels: &std::collections::HashMap<daw_backend::TrackId, f32>,
         input_level: f32,
         playback_time: f64,
+        header_width: f32,
+        is_mobile: bool,
     ) {
         // Background for header column
         let header_style = theme.style(".timeline-header", ui.ctx());
@@ -1995,7 +2017,7 @@ impl TimelinePane {
 
             let header_rect = egui::Rect::from_min_size(
                 egui::pos2(rect.min.x, y),
-                egui::vec2(LAYER_HEADER_WIDTH, LAYER_HEIGHT),
+                egui::vec2(header_width, LAYER_HEIGHT),
             );
 
             // Determine the AnyLayer or GroupLayer for this row
@@ -2028,6 +2050,27 @@ impl TimelinePane {
             };
 
             ui.painter().rect_filled(header_rect, 0.0, bg_color);
+
+            // Mobile: collapse the header to a minimal color swatch (1:2 w:h). Selection is handled
+            // by handle_input via the (narrow) header rect, so we only draw here.
+            if is_mobile {
+                let sw = header_rect.shrink(2.0);
+                let col = if is_active || is_selected {
+                    type_color
+                } else {
+                    type_color.gamma_multiply(0.55)
+                };
+                ui.painter().rect_filled(sw, 3.0, col);
+                if is_active || is_selected {
+                    ui.painter().rect_stroke(
+                        sw,
+                        3.0,
+                        egui::Stroke::new(1.5, egui::Color32::WHITE),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                continue;
+            }
 
             // Gutter area (left of indicator) — solid group color, with collapse chevron
             if indent > 0.0 {
@@ -4935,29 +4978,40 @@ impl TimelinePane {
         // Only handle scroll when mouse is over the timeline area
         let mut handled = false;
         let pointer_over_timeline = response.hovered() || ui.rect_contains_pointer(header_rect);
+
+        // Unified pinch / Ctrl+scroll time-zoom: `zoom_delta()` folds in touch-pinch (on device) AND
+        // Ctrl+wheel/trackpad (on desktop). Multiplicative factor (1.0 = no change); apply_zoom_at_point
+        // wants an additive delta. This is the single path for factor-zoom — the raw MouseWheel branch
+        // below only handles plain (non-Ctrl) mouse-wheel zoom and non-Ctrl trackpad pan.
+        if pointer_over_timeline {
+            let zoom_factor = ui.input(|i| i.zoom_delta());
+            if (zoom_factor - 1.0).abs() > f32::EPSILON {
+                let center_x = ui
+                    .input(|i| i.multi_touch().map(|m| m.center_pos.x))
+                    .map(|x| x - content_rect.min.x)
+                    .unwrap_or(mouse_x);
+                self.apply_zoom_at_point(zoom_factor - 1.0, center_x);
+            }
+        }
+
         if pointer_over_timeline { ui.input(|i| {
             for event in &i.raw.events {
                 if let egui::Event::MouseWheel { unit, delta, modifiers, .. } = event {
                     match unit {
                         egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
-                            // Real mouse wheel (discrete clicks) -> always zoom horizontally
-                            let zoom_delta = if ctrl_held || modifiers.ctrl {
-                                delta.y * 0.01 // Ctrl+wheel: faster zoom
-                            } else {
-                                delta.y * 0.005 // Normal zoom
-                            };
-                            self.apply_zoom_at_point(zoom_delta, mouse_x);
+                            // Plain mouse wheel zooms; Ctrl+wheel handled above via zoom_delta().
+                            // Consume the event either way so the pan fallback doesn't also fire.
+                            if !(ctrl_held || modifiers.ctrl) {
+                                self.apply_zoom_at_point(delta.y * 0.005, mouse_x);
+                            }
                             handled = true;
                         }
                         egui::MouseWheelUnit::Point => {
-                            // Trackpad (smooth scrolling)
+                            // Trackpad: Ctrl-zoom handled above (consume it); non-Ctrl falls through
+                            // to scroll_delta panning below.
                             if ctrl_held || modifiers.ctrl {
-                                // Ctrl held: zoom
-                                let zoom_delta = delta.y * 0.005;
-                                self.apply_zoom_at_point(zoom_delta, mouse_x);
                                 handled = true;
                             }
-                            // Otherwise let scroll_delta handle panning (below)
                         }
                     }
                 }
@@ -4997,6 +5051,18 @@ impl TimelinePane {
             if !response.dragged() {
                 self.is_panning = false;
                 self.last_pan_pos = None;
+            }
+        }
+
+        // Double-tap / double-click on empty space → fit the whole project into view. (Gesture P5-2.)
+        if response.double_clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let over_clip = self
+                    .detect_clip_at_pointer(pos, document, content_rect, header_rect, editing_clip_id, &audio_cache)
+                    .is_some();
+                if !over_clip {
+                    self.fit_to_project(content_rect.width());
+                }
             }
         }
 
@@ -5452,15 +5518,21 @@ impl PaneRenderer for TimelinePane {
         }
         self.duration = max_endpoint;
 
-        // Split into layer header column (left) and timeline content (right)
+        // Split into layer header column (left) and timeline content (right). On mobile the header
+        // column collapses to a minimal color-swatch width.
+        let header_width = if shared.is_mobile {
+            MOBILE_LAYER_HEADER_WIDTH
+        } else {
+            LAYER_HEADER_WIDTH
+        };
         let header_column_rect = egui::Rect::from_min_size(
             rect.min,
-            egui::vec2(LAYER_HEADER_WIDTH, rect.height()),
+            egui::vec2(header_width, rect.height()),
         );
 
         let timeline_rect = egui::Rect::from_min_size(
-            rect.min + egui::vec2(LAYER_HEADER_WIDTH, 0.0),
-            egui::vec2(rect.width() - LAYER_HEADER_WIDTH, rect.height()),
+            rect.min + egui::vec2(header_width, 0.0),
+            egui::vec2(rect.width() - header_width, rect.height()),
         );
 
         // Split timeline into ruler and content areas
@@ -5477,12 +5549,12 @@ impl PaneRenderer for TimelinePane {
         // Split header column into ruler area (top) and layer headers (bottom)
         let header_ruler_spacer = egui::Rect::from_min_size(
             header_column_rect.min,
-            egui::vec2(LAYER_HEADER_WIDTH, RULER_HEIGHT),
+            egui::vec2(header_width, RULER_HEIGHT),
         );
 
         let layer_headers_rect = egui::Rect::from_min_size(
             header_column_rect.min + egui::vec2(0.0, RULER_HEIGHT),
-            egui::vec2(LAYER_HEADER_WIDTH, header_column_rect.height() - RULER_HEIGHT),
+            egui::vec2(header_width, header_column_rect.height() - RULER_HEIGHT),
         );
 
         // Save original clip rect to restore at the end
@@ -5499,7 +5571,7 @@ impl PaneRenderer for TimelinePane {
 
         // Render layer header column with clipping
         ui.set_clip_rect(layer_headers_rect.intersect(original_clip_rect));
-        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers, shared.layer_to_track_map, shared.track_levels, shared.input_level, *shared.playback_time);
+        self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers, shared.layer_to_track_map, shared.track_levels, shared.input_level, *shared.playback_time, header_width, shared.is_mobile);
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
@@ -5770,9 +5842,10 @@ impl PaneRenderer for TimelinePane {
         }
         ui.set_clip_rect(original_clip_rect);
 
-        // Context menu: detect right-click on clips or empty timeline space
+        // Context menu: detect right-click on clips or empty timeline space (desktop only — mobile
+        // uses the long-press menu below).
         let mut just_opened_menu = false;
-        let secondary_clicked = ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
+        let secondary_clicked = !shared.is_mobile && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
         if secondary_clicked {
             if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
                 if content_rect.contains(pos) {
@@ -5790,6 +5863,67 @@ impl PaneRenderer for TimelinePane {
                     just_opened_menu = true;
                 }
             }
+        }
+
+        // Mobile: a manual long-press (hold in place ~0.4s) builds a persistent context menu rendered
+        // by the shell — clip actions on a clip, animation (keyframe/tween) actions on an empty lane.
+        let mut long_press: Option<egui::Pos2> = None;
+        if shared.is_mobile {
+            let now = ui.input(|i| i.time);
+            let down = ui.input(|i| i.pointer.any_down());
+            let ptr = ui.input(|i| i.pointer.latest_pos());
+            if ui.input(|i| i.pointer.primary_pressed()) {
+                match ptr {
+                    Some(p) if content_rect.contains(p) => {
+                        self.lp_time = Some(now);
+                        self.lp_pos = p;
+                    }
+                    _ => self.lp_time = None,
+                }
+            }
+            if !down {
+                self.lp_time = None;
+            }
+            if let Some(t0) = self.lp_time {
+                let moved = ptr.map_or(0.0, |p| (p - self.lp_pos).length());
+                if moved > 8.0 {
+                    self.lp_time = None;
+                } else if now - t0 >= 0.4 {
+                    self.lp_time = None;
+                    long_press = Some(self.lp_pos);
+                } else {
+                    // Still counting down — request a repaint so the threshold is re-evaluated even if
+                    // the finger is perfectly still and egui would otherwise go idle (no input events).
+                    let remaining = (0.4 - (now - t0)).max(0.0);
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(remaining));
+                }
+            }
+        }
+        if let Some(pos) = long_press {
+            use crate::menu::MenuAction;
+            let mut items: Vec<(String, MenuAction)> = Vec::new();
+                    if let Some((_drag_type, clip_id)) = self.detect_clip_at_pointer(pos, document, content_rect, layer_headers_rect, editing_clip_id.as_ref(), &audio_cache) {
+                        if !shared.selection.contains_clip_instance(&clip_id) {
+                            shared.selection.select_only_clip_instance(clip_id);
+                        }
+                        *shared.focus = lightningbeam_core::selection::FocusSelection::ClipInstances(shared.selection.clip_instances().to_vec());
+                        items.push(("Split clip".into(), MenuAction::SplitClip));
+                        items.push(("Duplicate clip".into(), MenuAction::DuplicateClip));
+                        items.push(("Cut".into(), MenuAction::Cut));
+                        items.push(("Copy".into(), MenuAction::Copy));
+                        items.push(("Paste".into(), MenuAction::Paste));
+                        items.push(("Delete".into(), MenuAction::Delete));
+                    } else {
+                        items.push(("New keyframe".into(), MenuAction::NewKeyframe));
+                        items.push(("New blank keyframe".into(), MenuAction::NewBlankKeyframe));
+                        items.push(("Add keyframe at playhead".into(), MenuAction::AddKeyframeAtPlayhead));
+                        items.push(("Duplicate keyframe".into(), MenuAction::DuplicateKeyframe));
+                        items.push(("Delete frame".into(), MenuAction::DeleteFrame));
+                        items.push(("Add motion tween".into(), MenuAction::AddMotionTween));
+                        items.push(("Add shape tween".into(), MenuAction::AddShapeTween));
+                        items.push(("Paste".into(), MenuAction::Paste));
+                    }
+            *shared.mobile_context_menu = Some(crate::panes::MobileContextMenu { pos, items });
         }
 
         // Render context menu

@@ -247,6 +247,7 @@ impl ActionExecutor {
                 Ok(()) => {
                     // Move to redo stack
                     self.redo_stack.push(action);
+                    self.epoch = self.epoch.wrapping_add(1);
                     Ok(true)
                 }
                 Err(e) => {
@@ -271,6 +272,7 @@ impl ActionExecutor {
                 Ok(()) => {
                     // Move back to undo stack
                     self.undo_stack.push(action);
+                    self.epoch = self.epoch.wrapping_add(1);
                     Ok(true)
                 }
                 Err(e) => {
@@ -444,6 +446,7 @@ impl ActionExecutor {
 
             // Move to redo stack
             self.redo_stack.push(action);
+            self.epoch = self.epoch.wrapping_add(1);
 
             Ok(true)
         } else {
@@ -481,6 +484,7 @@ impl ActionExecutor {
 
             // Move back to undo stack
             self.undo_stack.push(action);
+            self.epoch = self.epoch.wrapping_add(1);
 
             Ok(true)
         } else {

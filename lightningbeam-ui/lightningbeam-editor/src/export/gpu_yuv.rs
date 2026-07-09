@@ -175,7 +175,9 @@ impl GpuYuv {
 }
 
 /// CPU reference for the exact math/layout the shader produces — used by unit tests so
-/// the packing and BT.709 coefficients stay verifiable without a GPU.
+/// the packing and BT.709 coefficients stay verifiable without a GPU. Test-only, so it isn't
+/// compiled into (and flagged as unused by) release builds.
+#[cfg(test)]
 fn cpu_reference(rgba: &[u8], width: u32, height: u32, full_range: bool) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;

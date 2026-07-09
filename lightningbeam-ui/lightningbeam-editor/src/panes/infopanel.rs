@@ -44,12 +44,23 @@ pub struct InfopanelPane {
     selected_tool_gradient_stop: Option<usize>,
     /// FPS value captured when a drag/focus-in starts (for single-undo-action on commit)
     fps_drag_start: Option<f64>,
+    /// In-progress layer-name edit buffer, keyed by the layer being edited.
+    layer_name_edit: Option<(Uuid, String)>,
+    /// Layer opacity/volume captured when a slider drag starts (single-undo on commit).
+    layer_opacity_drag_start: Option<f64>,
+    layer_volume_drag_start: Option<f64>,
     /// Resize mode for the active raster layer's "to document size" action (scale vs canvas).
     raster_resize_mode: lightningbeam_core::raster_layer::RasterResizeMode,
+    /// Font families already registered into egui for the family-picker previews
+    /// (rendered each entry in its own font), so we only load each once.
+    registered_preview_fonts: std::collections::HashSet<String>,
 }
 
 impl InfopanelPane {
     pub fn new() -> Self {
+        // Kick off background loading of the font-picker fonts at startup so the dropdown
+        // is ready without a hitch by the time the user opens it.
+        lightningbeam_core::fonts::start_preload();
         let presets = bundled_brushes();
         let default_eraser_idx = presets.iter().position(|p| p.name == "Brush");
         Self {
@@ -63,8 +74,29 @@ impl InfopanelPane {
             selected_shape_gradient_stop: None,
             selected_tool_gradient_stop: None,
             fps_drag_start: None,
+            layer_name_edit: None,
+            layer_opacity_drag_start: None,
+            layer_volume_drag_start: None,
             raster_resize_mode: lightningbeam_core::raster_layer::RasterResizeMode::Scale,
+            registered_preview_fonts: std::collections::HashSet::new(),
         }
+    }
+
+    /// Register pre-loaded `bytes` for `family` into egui under `FontFamily::Name(family)`
+    /// so a label can be rendered in that font. Cheap (no font IO); the add is idempotent
+    /// and batched into one atlas rebuild at frame end, so the preview appears next frame.
+    fn register_font_bytes(&mut self, ctx: &egui::Context, family: &str, bytes: Vec<u8>) {
+        if family.is_empty() || !self.registered_preview_fonts.insert(family.to_string()) {
+            return;
+        }
+        ctx.add_font(egui::epaint::text::FontInsert::new(
+            family,
+            egui::FontData::from_owned(bytes),
+            vec![egui::epaint::text::InsertFontFamily {
+                family: egui::FontFamily::Name(family.into()),
+                priority: egui::epaint::text::FontPriority::Highest,
+            }],
+        ));
     }
 }
 
@@ -1141,8 +1173,9 @@ impl InfopanelPane {
     }
 
     /// Render layer info section
-    fn render_layer_section(&self, ui: &mut Ui, path: &NodePath, shared: &SharedPaneState, layer_ids: &[Uuid]) {
-        let document = shared.action_executor.document();
+    fn render_layer_section(&mut self, ui: &mut Ui, path: &NodePath, shared: &mut SharedPaneState, layer_ids: &[Uuid]) {
+        use lightningbeam_core::actions::{set_layer_properties::LayerProperty, SetLayerPropertiesAction};
+        use lightningbeam_core::layer::AudioLayerType;
 
         egui::CollapsingHeader::new("Layer")
             .id_salt(("layer_info", path))
@@ -1150,51 +1183,152 @@ impl InfopanelPane {
             .show(ui, |ui| {
                 ui.add_space(4.0);
 
-                if layer_ids.len() == 1 {
-                    if let Some(layer) = document.get_layer(&layer_ids[0]) {
-                        ui.horizontal(|ui| {
-                            ui.label("Name:");
-                            ui.label(layer.name());
-                        });
+                if layer_ids.len() != 1 {
+                    ui.label(format!("{} layers selected", layer_ids.len()));
+                    ui.add_space(4.0);
+                    return;
+                }
+                let layer_id = layer_ids[0];
 
+                // Snapshot the current values, then drop the document borrow before mutating shared.
+                let Some((type_name, is_audio, name, opacity, volume, muted, soloed, locked)) = ({
+                    let document = shared.action_executor.document();
+                    document.get_layer(&layer_id).map(|layer| {
                         let type_name = match layer {
                             AnyLayer::Vector(_) => "Vector",
                             AnyLayer::Audio(a) => match a.audio_layer_type {
-                                lightningbeam_core::layer::AudioLayerType::Midi => "MIDI",
-                                lightningbeam_core::layer::AudioLayerType::Sampled => "Audio",
+                                AudioLayerType::Midi => "MIDI",
+                                AudioLayerType::Sampled => "Audio",
                             },
                             AnyLayer::Video(_) => "Video",
                             AnyLayer::Effect(_) => "Effect",
                             AnyLayer::Group(_) => "Group",
                             AnyLayer::Raster(_) => "Raster",
+                            AnyLayer::Text(_) => "Text",
                         };
-                        ui.horizontal(|ui| {
-                            ui.label("Type:");
-                            ui.label(type_name);
-                        });
+                        (
+                            type_name,
+                            matches!(layer, AnyLayer::Audio(_)),
+                            layer.name().to_string(),
+                            layer.opacity(),
+                            layer.volume(),
+                            layer.muted(),
+                            layer.soloed(),
+                            layer.locked(),
+                        )
+                    })
+                }) else {
+                    return;
+                };
 
-                        ui.horizontal(|ui| {
-                            ui.label("Opacity:");
-                            ui.label(format!("{:.0}%", layer.opacity() * 100.0));
-                        });
-
-                        if matches!(layer, AnyLayer::Audio(_)) {
-                            ui.horizontal(|ui| {
-                                ui.label("Volume:");
-                                ui.label(format!("{:.0}%", layer.volume() * 100.0));
-                            });
-                        }
-
-                        if layer.muted() {
-                            ui.label("Muted");
-                        }
-                        if layer.locked() {
-                            ui.label("Locked");
+                // Name (editable; commits on Enter / focus loss).
+                if self.layer_name_edit.as_ref().map(|(id, _)| *id) != Some(layer_id) {
+                    self.layer_name_edit = Some((layer_id, name.clone()));
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    let buf = &mut self.layer_name_edit.as_mut().unwrap().1;
+                    let resp = ui.text_edit_singleline(buf);
+                    let commit = resp.lost_focus()
+                        && (ui.input(|i| i.key_pressed(egui::Key::Enter)) || !resp.has_focus());
+                    if commit {
+                        let new_name = buf.trim().to_string();
+                        if !new_name.is_empty() && new_name != name {
+                            shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                                layer_id,
+                                LayerProperty::Name(new_name),
+                            )));
                         }
                     }
-                } else {
-                    ui.label(format!("{} layers selected", layer_ids.len()));
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Type:");
+                    ui.label(type_name);
+                });
+
+                // Opacity slider (single-undo: live-preview while dragging, commit on release).
+                ui.horizontal(|ui| {
+                    ui.label("Opacity:");
+                    let mut op = opacity;
+                    let r = ui.add(egui::Slider::new(&mut op, 0.0..=1.0).show_value(false));
+                    ui.label(format!("{:.0}%", op * 100.0));
+                    if (r.drag_started() || r.gained_focus()) && self.layer_opacity_drag_start.is_none() {
+                        self.layer_opacity_drag_start = Some(opacity);
+                    }
+                    if r.changed() {
+                        if let Some(l) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
+                            l.set_opacity(op);
+                        }
+                    }
+                    if r.drag_stopped() || r.lost_focus() {
+                        if let Some(start) = self.layer_opacity_drag_start.take() {
+                            if (start - op).abs() > 1e-6 {
+                                if let Some(l) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
+                                    l.set_opacity(start); // revert so the action owns the change
+                                }
+                                shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                                    layer_id,
+                                    LayerProperty::Opacity(op),
+                                )));
+                            }
+                        }
+                    }
+                });
+
+                if is_audio {
+                    ui.horizontal(|ui| {
+                        ui.label("Volume:");
+                        let mut vol = volume;
+                        let r = ui.add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false));
+                        ui.label(format!("{:.0}%", vol * 100.0));
+                        if (r.drag_started() || r.gained_focus()) && self.layer_volume_drag_start.is_none() {
+                            self.layer_volume_drag_start = Some(volume);
+                        }
+                        if r.changed() {
+                            if let Some(l) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
+                                l.set_volume(vol);
+                            }
+                        }
+                        if r.drag_stopped() || r.lost_focus() {
+                            if let Some(start) = self.layer_volume_drag_start.take() {
+                                if (start - vol).abs() > 1e-6 {
+                                    if let Some(l) = shared.action_executor.document_mut().get_layer_mut(&layer_id) {
+                                        l.set_volume(start);
+                                    }
+                                    shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                                        layer_id,
+                                        LayerProperty::Volume(vol),
+                                    )));
+                                }
+                            }
+                        }
+                    });
                 }
+
+                // Toggles: mute / solo (audio) / lock.
+                ui.horizontal(|ui| {
+                    if is_audio {
+                        if ui.selectable_label(muted, "Mute").clicked() {
+                            shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                                layer_id,
+                                LayerProperty::Muted(!muted),
+                            )));
+                        }
+                        if ui.selectable_label(soloed, "Solo").clicked() {
+                            shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                                layer_id,
+                                LayerProperty::Soloed(!soloed),
+                            )));
+                        }
+                    }
+                    if ui.selectable_label(locked, "Lock").clicked() {
+                        shared.pending_actions.push(Box::new(SetLayerPropertiesAction::new(
+                            layer_id,
+                            LayerProperty::Locked(!locked),
+                        )));
+                    }
+                });
 
                 ui.add_space(4.0);
             });
@@ -1247,6 +1381,186 @@ impl InfopanelPane {
             });
     }
 
+    /// Render a text-layer section: edit the text content, font, size, color,
+    /// alignment, and box size of the active text layer. Driven by the *active*
+    /// layer so it appears whenever a text layer is selected.
+    fn render_text_layer_section(&mut self, ui: &mut Ui, path: &NodePath, shared: &mut SharedPaneState, layer_id: Uuid) {
+        use lightningbeam_core::text_layer::TextAlign;
+        use lightningbeam_core::actions::{ResizeTextBoxAction, SetTextContentAction};
+
+        // Snapshot current values, then drop the document borrow before mutating shared.
+        let snapshot = {
+            let document = shared.action_executor.document();
+            match document.get_layer(&layer_id) {
+                Some(AnyLayer::Text(tl)) => {
+                    Some((tl.content.clone(), tl.box_origin, tl.box_width, tl.box_height))
+                }
+                _ => None,
+            }
+        };
+        let Some((content0, origin, w0, h0)) = snapshot else { return };
+
+        // Families egui has actually bound (added fonts take effect next frame). Using an
+        // unbound `FontFamily::Name` panics, so only preview-render families in this set.
+        let bound_families: std::collections::HashSet<egui::FontFamily> =
+            ui.ctx().fonts(|f| f.families().into_iter().collect());
+        // Set when the font dropdown popup is open this frame (its closure only runs then),
+        // so we can synchronously finish loading any not-yet-preloaded fonts the user sees.
+        let mut dropdown_open = false;
+
+        egui::CollapsingHeader::new("Text")
+            .id_salt(("text_layer", path))
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.add_space(4.0);
+                let mut content = content0.clone();
+                let mut content_changed = false;
+
+                ui.label("Text:");
+                if ui
+                    .add(egui::TextEdit::multiline(&mut content.text).desired_rows(2).desired_width(f32::INFINITY))
+                    .changed()
+                {
+                    content_changed = true;
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label("Size:");
+                    if ui
+                        .add(egui::DragValue::new(&mut content.font_size).range(1.0..=2000.0).speed(0.5))
+                        .changed()
+                    {
+                        content_changed = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Color:");
+                    // content.color is sRGB-encoded RGBA in 0..1 (matches peniko Color::new).
+                    let mut col = egui::Color32::from_rgba_unmultiplied(
+                        (content.color[0] * 255.0).round() as u8,
+                        (content.color[1] * 255.0).round() as u8,
+                        (content.color[2] * 255.0).round() as u8,
+                        (content.color[3] * 255.0).round() as u8,
+                    );
+                    if ui.color_edit_button_srgba(&mut col).changed() {
+                        content.color = [
+                            col.r() as f32 / 255.0,
+                            col.g() as f32 / 255.0,
+                            col.b() as f32 / 255.0,
+                            col.a() as f32 / 255.0,
+                        ];
+                        content_changed = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Align:");
+                    for (label, a) in [("L", TextAlign::Left), ("C", TextAlign::Center), ("R", TextAlign::Right), ("J", TextAlign::Justify)] {
+                        if ui.selectable_label(content.align == a, label).clicked() {
+                            content.align = a;
+                            content_changed = true;
+                        }
+                    }
+                });
+
+                // Font family picker (bundled families first, then system; embedded fonts
+                // register under their own names on load).
+                ui.horizontal(|ui| {
+                    ui.label("Font:");
+                    let current_label = if content.font_family.is_empty() {
+                        "(Default)".to_string()
+                    } else {
+                        content.font_family.clone()
+                    };
+                    egui::ComboBox::from_id_salt(("text_font", path))
+                        .selected_text(current_label)
+                        .show_ui(ui, |ui| {
+                            dropdown_open = true;
+                            if ui.selectable_label(content.font_family.is_empty(), "(Default)").clicked() {
+                                content.font_family.clear();
+                                content_changed = true;
+                            }
+                            // The popup closure only runs while the dropdown is open, so each
+                            // entry is rendered in its own font and queued for registration.
+                            for fam in lightningbeam_core::fonts::families() {
+                                let named = egui::FontFamily::Name(fam.as_str().into());
+                                // Render in its own font only once egui has bound it; otherwise
+                                // plain (and queue it for registration so it previews next frame).
+                                let label = if bound_families.contains(&named) {
+                                    egui::RichText::new(&fam).family(named)
+                                } else {
+                                    egui::RichText::new(&fam)
+                                };
+                                if ui.selectable_label(content.font_family == fam, label).clicked() {
+                                    content.font_family = fam.clone();
+                                    content_changed = true;
+                                }
+                            }
+                        });
+                    // Missing-font indicator.
+                    if !content.font_family.is_empty()
+                        && !lightningbeam_core::fonts::family_available(&content.font_family)
+                    {
+                        ui.colored_label(egui::Color32::from_rgb(230, 160, 60), "⚠ missing");
+                    }
+                });
+
+                // Box size.
+                let mut bw = w0;
+                let mut bh = h0;
+                let mut box_changed = false;
+                ui.horizontal(|ui| {
+                    ui.label("Box:");
+                    if ui.add(egui::DragValue::new(&mut bw).range(1.0..=100000.0).speed(1.0)).changed() {
+                        box_changed = true;
+                    }
+                    ui.label("×");
+                    if ui.add(egui::DragValue::new(&mut bh).range(1.0..=100000.0).speed(1.0)).changed() {
+                        box_changed = true;
+                    }
+                });
+
+                ui.add_space(4.0);
+
+                if content_changed {
+                    shared.pending_actions.push(Box::new(SetTextContentAction::new(layer_id, content)));
+                }
+                if box_changed {
+                    shared.pending_actions.push(Box::new(ResizeTextBoxAction::new(layer_id, origin, bw, bh)));
+                }
+            });
+
+        // Register fonts the background preloader has finished (cheap: bytes already loaded),
+        // a few per frame so each atlas rebuild stays small. Only fall back to synchronous
+        // loading for families the user is actively viewing in the open dropdown that the
+        // background hasn't reached yet. Repaint while there's more to do or the preloader
+        // is still running, so registration keeps flowing without input.
+        let ctx = ui.ctx().clone();
+        const PER_FRAME: usize = 4;
+        let mut budget = PER_FRAME;
+        let mut more = false;
+        for fam in lightningbeam_core::fonts::families() {
+            if self.registered_preview_fonts.contains(&fam) {
+                continue;
+            }
+            let bytes = lightningbeam_core::fonts::take_preloaded(&fam).or_else(|| {
+                if dropdown_open { lightningbeam_core::fonts::family_font_bytes(&fam) } else { None }
+            });
+            if let Some(bytes) = bytes {
+                if budget == 0 {
+                    more = true;
+                    break;
+                }
+                self.register_font_bytes(&ctx, &fam, bytes);
+                budget -= 1;
+            }
+        }
+        if more || !lightningbeam_core::fonts::preload_done() {
+            ctx.request_repaint();
+        }
+    }
+
     /// Render clip instance info section
     fn render_clip_instance_section(&self, ui: &mut Ui, path: &NodePath, shared: &SharedPaneState, clip_ids: &[Uuid]) {
         let document = shared.action_executor.document();
@@ -1270,6 +1584,7 @@ impl InfopanelPane {
                             AnyLayer::Effect(l) => &l.clip_instances,
                             AnyLayer::Group(_) => &[],
                             AnyLayer::Raster(_) => &[],
+                            AnyLayer::Text(_) => &[],
                         };
                         if let Some(ci) = instances.iter().find(|c| c.id == ci_id) {
                             found = true;
@@ -1601,6 +1916,7 @@ impl PaneRenderer for InfopanelPane {
                 // active (independent of selection focus, since painting doesn't focus the layer).
                 if let Some(active_id) = *shared.active_layer_id {
                     self.render_raster_layer_section(ui, path, shared, active_id);
+                    self.render_text_layer_section(ui, path, shared, active_id);
                 }
 
                 // Onion-skinning view settings — always available, regardless of selection.

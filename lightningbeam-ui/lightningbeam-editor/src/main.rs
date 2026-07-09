@@ -10,6 +10,7 @@ use std::sync::Arc;
 use clap::Parser;
 use uuid::Uuid;
 
+mod mobile;
 mod panes;
 use panes::{PaneInstance, PaneRenderer};
 
@@ -197,8 +198,20 @@ fn main() -> eframe::Result {
         }
     };
 
+    // When developing the mobile UI on desktop (LB_MOBILE_UI), open a phone-aspect window so
+    // the shell can be exercised at a realistic size. Gating the shell itself is done at
+    // render time on the flag, not on window aspect.
+    let initial_size = if mobile::is_mobile_landscape_env() {
+        [874.0, 402.0] // iPhone-ish landscape (LB_MOBILE_UI=2)
+    } else if mobile::is_mobile_env() {
+        [402.0, 874.0] // iPhone-ish portrait
+    } else {
+        [1920.0, 1080.0]
+    };
+
     let mut viewport_builder = egui::ViewportBuilder::default()
-        .with_inner_size([1920.0, 1080.0])
+        .with_inner_size(initial_size)
+        .with_min_inner_size([360.0, 300.0]) // keep layouts (esp. the mobile shell) above degenerate sizes
         .with_title("Lightningbeam Editor")
         .with_app_id("lightningbeam-editor"); // Set app_id for Wayland
 
@@ -668,6 +681,147 @@ enum FileOperation {
     },
 }
 
+/// How often (seconds) the background autosave runs when the document is dirty.
+const AUTOSAVE_INTERVAL_SECS: f64 = 45.0;
+
+/// Background crash-recovery autosave state (see the `autosave` field on `EditorApp`).
+struct AutosaveState {
+    /// Per-session recovery container path (in the app data dir). `None` disables autosave
+    /// (e.g. the data dir couldn't be resolved/created).
+    recovery_path: Option<std::path::PathBuf>,
+    /// `ActionExecutor::epoch()` captured at the last dispatched autosave (or manual save). The
+    /// document is "dirty" when the current epoch differs, or `pending_event` is set.
+    baseline_epoch: u64,
+    /// Set by non-action changes that still need capturing (import, finished recording).
+    pending_event: bool,
+    /// True while a recovery write is in flight on the worker (don't dispatch another).
+    in_flight: bool,
+    /// Wall-clock of the last dispatched autosave, for interval throttling.
+    last_time: Option<std::time::Instant>,
+    /// Progress channel for the in-flight recovery write.
+    progress_rx: Option<std::sync::mpsc::Receiver<FileProgress>>,
+    /// Recovery files left over from previous sessions that didn't exit cleanly (newest first),
+    /// discovered at startup. Presented to the user as a "recover unsaved work?" prompt.
+    leftover_recoveries: Vec<std::path::PathBuf>,
+    /// Seconds between autosaves while dirty. Defaults to `AUTOSAVE_INTERVAL_SECS`; override with
+    /// `LB_AUTOSAVE_SECS` (e.g. `LB_AUTOSAVE_SECS=5`) to make manual testing practical.
+    interval_secs: f64,
+}
+
+impl AutosaveState {
+    fn new() -> Self {
+        Self::gc_old_recovered();
+        let recovery_path = Self::make_session_path();
+        eprintln!("💾 [AUTOSAVE] recovery file for this session: {:?}", recovery_path);
+        let leftover_recoveries = Self::find_leftovers(recovery_path.as_deref());
+        if !leftover_recoveries.is_empty() {
+            eprintln!("💾 [AUTOSAVE] found {} leftover recovery file(s) from a previous session",
+                leftover_recoveries.len());
+        }
+        Self {
+            recovery_path,
+            baseline_epoch: 0,
+            pending_event: false,
+            in_flight: false,
+            last_time: None,
+            progress_rx: None,
+            leftover_recoveries,
+            interval_secs: std::env::var("LB_AUTOSAVE_SECS")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .filter(|s| *s > 0.0)
+                .unwrap_or(AUTOSAVE_INTERVAL_SECS),
+        }
+    }
+
+    /// Session recovery `.beam` files present at startup (excluding this session's own path).
+    /// Their existence means a prior session didn't reach `on_exit` — i.e. it crashed or was
+    /// killed — so they hold unsaved work. Sorted newest-first by modification time.
+    fn find_leftovers(exclude: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+        let Some(dir) = Self::recovery_dir() else { return Vec::new() };
+        let mut files: Vec<(std::path::PathBuf, std::time::SystemTime)> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().and_then(|x| x.to_str()) == Some("beam")
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("session-"))
+                    && Some(p.as_path()) != exclude
+            })
+            .filter_map(|p| {
+                let mtime = std::fs::metadata(&p).and_then(|m| m.modified()).ok()?;
+                Some((p, mtime))
+            })
+            .collect();
+        files.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+        files.into_iter().map(|(p, _)| p).collect()
+    }
+
+    /// Delete `recovered-*` files (already-recovered work the user relocated via Save As) older than
+    /// a week, so the recovery dir doesn't grow without bound. Best-effort.
+    fn gc_old_recovered() {
+        let Some(dir) = Self::recovery_dir() else { return };
+        let Some(cutoff) =
+            std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(7 * 24 * 3600))
+        else {
+            return;
+        };
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = entry.path();
+            let is_recovered = p.extension().and_then(|x| x.to_str()) == Some("beam")
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("recovered-"));
+            if !is_recovered {
+                continue;
+            }
+            if let Ok(mtime) = std::fs::metadata(&p).and_then(|m| m.modified()) {
+                if mtime < cutoff {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+    }
+
+    /// The recovery directory (`<data_dir>/recovery`), created if needed.
+    fn recovery_dir() -> Option<std::path::PathBuf> {
+        let proj = directories::ProjectDirs::from("", "", "lightningbeam")?;
+        let dir = proj.data_dir().join("recovery");
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    }
+
+    /// A fresh per-session recovery file path (`recovery/session-<uuid>.beam`).
+    fn make_session_path() -> Option<std::path::PathBuf> {
+        Some(Self::recovery_dir()?.join(format!("session-{}.beam", uuid::Uuid::new_v4())))
+    }
+
+    /// Whether `path` is one of our recovery files (`session-*` / `recovered-*` in the recovery
+    /// dir). Saving one of these should behave as Save As so the work gets a real home instead of
+    /// being written back into the app data dir.
+    fn is_recovery_path(path: &std::path::Path) -> bool {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("session-") || n.starts_with("recovered-"))
+    }
+}
+
+/// Something to do after the unsaved-changes prompt resolves: the action deferred behind "Save
+/// changes?" (Save runs it after saving; Don't Save runs it immediately; Cancel drops it). Covers
+/// both file switches and quitting so they share one prompt + one save-then-continue path.
+#[derive(Debug, Clone)]
+enum PendingAction {
+    /// New File (return to the start screen).
+    NewFile,
+    /// Open a specific `.beam` (covers both Open… and Open Recent — the path is already resolved).
+    Open(std::path::PathBuf),
+    /// Quit (close the window).
+    Quit,
+}
+
 /// Information about an imported asset (for auto-placement)
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // name/duration populated for future import UX features
@@ -932,6 +1086,21 @@ impl EditingContext {
         self.stack.pop()
     }
 
+    /// The clip_id path from outermost to the current level (for breadcrumbs).
+    fn clip_path(&self) -> Vec<Uuid> {
+        self.stack.iter().map(|e| e.clip_id).collect()
+    }
+
+    /// Pop down to `depth` entries, returning the entry at `depth` (whose saved state should be
+    /// restored). Returns None if already at or above that depth.
+    fn exit_to_depth(&mut self, depth: usize) -> Option<EditingContextEntry> {
+        if depth >= self.stack.len() {
+            return None;
+        }
+        let restore = self.stack[depth].clone();
+        self.stack.truncate(depth);
+        Some(restore)
+    }
 }
 
 struct EditorApp {
@@ -942,6 +1111,23 @@ struct EditorApp {
     hovered_divider: Option<(NodePath, bool)>, // (path, is_horizontal)
     selected_pane: Option<NodePath>, // Currently selected pane for editing
     split_preview_mode: SplitPreviewMode,
+    // === Mobile / phone UI (developed on desktop behind LB_MOBILE_UI) ===
+    /// True if the mobile shell is requested via the env var (read once at startup).
+    mobile_ui: bool,
+    /// Runtime override of the mobile flag (None = follow `mobile_ui`).
+    mobile_ui_override: Option<bool>,
+    /// Persistent state for the mobile shell (active surface, ribbon tier).
+    mobile_state: mobile::MobileState,
+    /// Active mobile long-press context menu (set by a pane, rendered by the shell).
+    mobile_context_menu: Option<panes::MobileContextMenu>,
+    /// Shared keyboard octave offset (C4-relative) for the mobile Virtual Piano + Piano Roll.
+    keyboard_octave: i8,
+    /// Shared horizontal keyboard pan (px) for the mobile keyboard + roll.
+    keyboard_pan_x: f32,
+    /// Mobile: request to open the instrument Preset Browser (set by the music pane header).
+    open_instrument_browser: bool,
+    /// Mobile: request to toggle recording (set by the music pane REC button).
+    pending_record_toggle: bool,
     icon_cache: IconCache,
     tool_icon_cache: ToolIconCache,
     focus_icon_cache: FocusIconCache, // Focus card icons (start screen)
@@ -1118,6 +1304,26 @@ struct EditorApp {
     /// Current file operation in progress (if any)
     file_operation: Option<FileOperation>,
 
+    /// Crash-recovery autosave state. The recovery container is a per-session `.beam` in the app's
+    /// data dir; it's written in the background (reusing the file worker) and deleted on a clean
+    /// exit. A leftover file on next launch signals an unclean shutdown → offer to restore.
+    autosave: AutosaveState,
+
+    /// `ActionExecutor::epoch()` at the last manual save (or new/load) — the document is "modified"
+    /// (has unsaved changes vs. the user's file) when the current epoch differs, or `media_modified`
+    /// is set. Distinct from the autosave baseline, which also moves on every background autosave.
+    saved_epoch: u64,
+    /// Non-action changes since the last save (imports, finished recordings) that `epoch` doesn't
+    /// capture. Cleared on manual save / new / load.
+    media_modified: bool,
+    /// The pending action waiting on the "save changes?" prompt — a file switch (New/Open/Open
+    /// Recent) or a quit, requested while the document had unsaved work.
+    unsaved_prompt: Option<PendingAction>,
+    /// The action to run once an in-flight save (triggered from that prompt via "Save") finishes.
+    after_save: Option<PendingAction>,
+    /// The user agreed to quit — let the next window-close request through instead of intercepting it.
+    confirmed_close: bool,
+
     /// Audio extraction channel for background thread communication
     audio_extraction_tx: std::sync::mpsc::Sender<AudioExtractionResult>,
     audio_extraction_rx: std::sync::mpsc::Receiver<AudioExtractionResult>,
@@ -1190,6 +1396,9 @@ impl EditorApp {
     ) -> Self {
         let current_layout = layouts[0].layout.clone();
 
+        // Register the bundled Lucide icon font (used by the mobile UI; harmless on desktop).
+        mobile::icons::install(&cc.egui_ctx);
+
         // Disable egui's "Unaligned" debug overlay (on by default in debug builds)
         #[cfg(debug_assertions)]
         cc.egui_ctx.style_mut(|style| style.debug.show_unaligned = false);
@@ -1198,7 +1407,17 @@ impl EditorApp {
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
 
         // Load application config
-        let config = AppConfig::load();
+        let mut config = AppConfig::load();
+        // One-time cleanup: earlier builds added a Recovered file to Recent on restore. Drop any
+        // recovery-dir paths that leaked in (and re-save if we removed any) so they don't show in
+        // Recent or get auto-reopened below.
+        let recent_before = config.recent_files.len();
+        config
+            .recent_files
+            .retain(|p| !AutosaveState::is_recovery_path(p));
+        if config.recent_files.len() != recent_before {
+            config.save();
+        }
 
         // Check if we should auto-reopen last session
         let pending_auto_reopen = if config.reopen_last_session {
@@ -1297,6 +1516,14 @@ impl EditorApp {
             hovered_divider: None,
             selected_pane: None,
             split_preview_mode: SplitPreviewMode::default(),
+            mobile_ui: mobile::is_mobile_env(),
+            mobile_ui_override: None,
+            mobile_state: mobile::MobileState::default(),
+            mobile_context_menu: None,
+            keyboard_octave: 0,
+            keyboard_pan_x: 0.0,
+            open_instrument_browser: false,
+            pending_record_toggle: false,
             icon_cache: IconCache::new(),
             tool_icon_cache: ToolIconCache::new(),
             focus_icon_cache: FocusIconCache::new(),
@@ -1394,6 +1621,12 @@ impl EditorApp {
             config,
             file_command_tx,
             file_operation: None, // No file operation in progress initially
+            autosave: AutosaveState::new(),
+            saved_epoch: 0,
+            media_modified: false,
+            unsaved_prompt: None,
+            after_save: None,
+            confirmed_close: false,
             audio_extraction_tx,
             audio_extraction_rx,
             export_dialog: export::dialog::ExportDialog::default(),
@@ -1679,9 +1912,38 @@ impl EditorApp {
         );
     }
 
+    /// Tear down the audio backend for the currently-open project.
+    ///
+    /// Sends `Command::Reset` (fully rebuilds the backend `Project`, audio/buffer pools, and ID
+    /// counters) and clears the app-side track maps + backend-derived caches that pointed at the old
+    /// tracks. Must be called before building a new document's tracks, otherwise the previous file's
+    /// tracks/instruments stay resident in the backend and keep getting mixed (orphaned voices).
+    ///
+    /// Ordering is safe: the audio thread drains all `command_tx` commands before any `query_tx`
+    /// queries each callback, so a `reset()` pushed here always runs before the `create_*_track_sync`
+    /// queries that rebuild the project.
+    fn reset_audio_backend(&mut self) {
+        if let Some(ref controller_arc) = self.audio_controller {
+            controller_arc.lock().unwrap().reset();
+        }
+        self.layer_to_track_map.clear();
+        self.track_to_layer_map.clear();
+        self.clip_instance_to_backend_map.clear();
+        self.midi_event_cache.clear();
+        self.audio_duration_cache.clear();
+        self.raw_audio_cache.clear();
+        self.waveform_gpu_dirty.clear();
+        self.waveform_minmax_pools.clear();
+        self.waveform_pyramid_blobs.clear();
+    }
+
     /// Create a new project with the specified focus/layout
     fn create_new_project_with_focus(&mut self, layout_index: usize) {
         use lightningbeam_core::layer::{AnyLayer, AudioLayer, VectorLayer, VideoLayer};
+
+        // Drop the previous project's backend tracks/instruments before building the new one, so a
+        // "new file" while a project is open doesn't leave orphaned tracks resident in the backend.
+        self.reset_audio_backend();
 
         // Create a new blank document
         let mut document = lightningbeam_core::document::Document::with_size(
@@ -1734,6 +1996,8 @@ impl EditorApp {
 
         // Reset action executor with new document
         self.action_executor = lightningbeam_core::action::ActionExecutor::new(document);
+        // Fresh document → nothing new to recover; rebase the autosave epoch.
+        self.reset_autosave_baseline();
 
         // Apply the layout
         if layout_index < self.layouts.len() {
@@ -2130,7 +2394,7 @@ impl EditorApp {
                 AnyLayer::Audio(al) => find_splittable_clips(&al.clip_instances, split_time, document),
                 AnyLayer::Video(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
                 AnyLayer::Effect(el) => find_splittable_clips(&el.clip_instances, split_time, document),
-                AnyLayer::Group(_) | AnyLayer::Raster(_) => vec![],
+                AnyLayer::Group(_) | AnyLayer::Raster(_) | AnyLayer::Text(_) => vec![],
             };
 
             for instance_id in active_layer_clips {
@@ -2148,7 +2412,7 @@ impl EditorApp {
                                     AnyLayer::Audio(al) => find_splittable_clips(&al.clip_instances, split_time, document),
                                     AnyLayer::Video(vl) => find_splittable_clips(&vl.clip_instances, split_time, document),
                                     AnyLayer::Effect(el) => find_splittable_clips(&el.clip_instances, split_time, document),
-                                    AnyLayer::Group(_) | AnyLayer::Raster(_) => vec![],
+                                    AnyLayer::Group(_) | AnyLayer::Raster(_) | AnyLayer::Text(_) => vec![],
                                 };
                                 if member_splittable.contains(member_instance_id) {
                                     clips_to_split.push((*member_layer_id, *member_instance_id));
@@ -2499,7 +2763,7 @@ impl EditorApp {
                 AnyLayer::Audio(al) => &al.clip_instances,
                 AnyLayer::Video(vl) => &vl.clip_instances,
                 AnyLayer::Effect(el) => &el.clip_instances,
-                AnyLayer::Group(_) | AnyLayer::Raster(_) => &[],
+                AnyLayer::Group(_) | AnyLayer::Raster(_) | AnyLayer::Text(_) => &[],
             };
             let instances: Vec<_> = clip_slice
             .iter()
@@ -2658,45 +2922,56 @@ impl EditorApp {
             }
 
             self.selection.clear_clip_instances();
+            self.focus = lightningbeam_core::selection::FocusSelection::None;
         } else if self.selection.has_geometry_selection() {
             let active_layer_id = match self.active_layer_id {
                 Some(id) => id,
                 None => return,
             };
 
-            // Delete the selected edges (region/marquee/click all populate the same sets).
+            // Delete the selected geometry (region/marquee/click all populate the same sets).
+            // Selecting a fill also selects its boundary edges, so removing edges alone would leave
+            // the fill's face orphaned — free the fills too so the whole shape is removed.
             let edge_ids: Vec<lightningbeam_core::vector_graph::EdgeId> =
                 self.selection.selected_edges().iter().copied().collect();
+            let fill_ids: Vec<lightningbeam_core::vector_graph::FillId> =
+                self.selection.selected_fills().iter().copied().collect();
 
-            if !edge_ids.is_empty() {
+            if !edge_ids.is_empty() || !fill_ids.is_empty() {
                 let document = self.action_executor.document();
-                if let Some(layer) = document.get_layer(&active_layer_id) {
-                    if let lightningbeam_core::layer::AnyLayer::Vector(vector_layer) = layer {
-                        if let Some(graph_before) = vector_layer.graph_at_time(self.playback_time) {
-                            let mut graph_after = graph_before.clone();
-                            for edge_id in &edge_ids {
-                                if !graph_after.edge(*edge_id).deleted {
-                                    graph_after.remove_edge(*edge_id);
-                                }
+                if let Some(lightningbeam_core::layer::AnyLayer::Vector(vector_layer)) = document.get_layer(&active_layer_id) {
+                    if let Some(graph_before) = vector_layer.graph_at_time(self.playback_time) {
+                        let mut graph_after = graph_before.clone();
+                        // Free fills first so their boundary edges become unreferenced and are GC'd.
+                        for fill_id in &fill_ids {
+                            if !graph_after.fill(*fill_id).deleted {
+                                graph_after.free_fill(*fill_id);
                             }
-
-                            let action = lightningbeam_core::actions::ModifyGraphAction::new(
-                                active_layer_id,
-                                self.playback_time,
-                                graph_before.clone(),
-                                graph_after,
-                                "Delete selected edges",
-                            );
-
-                            if let Err(e) = self.action_executor.execute(Box::new(action)) {
-                                eprintln!("Delete DCEL edges failed: {}", e);
+                        }
+                        for edge_id in &edge_ids {
+                            if !graph_after.edge(*edge_id).deleted {
+                                graph_after.remove_edge(*edge_id);
                             }
+                        }
+                        graph_after.gc_isolated_vertices();
+
+                        let action = lightningbeam_core::actions::ModifyGraphAction::new(
+                            active_layer_id,
+                            self.playback_time,
+                            graph_before.clone(),
+                            graph_after,
+                            "Delete",
+                        );
+
+                        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+                            eprintln!("Delete geometry failed: {}", e);
                         }
                     }
                 }
             }
 
             self.selection.clear_geometry_selection();
+            self.focus = lightningbeam_core::selection::FocusSelection::None;
         }
     }
 
@@ -2884,6 +3159,39 @@ impl EditorApp {
         }
     }
 
+    /// Send the selected clip/group instances to the back or front of their layer's stacking order.
+    fn reorder_selected_clips(&mut self, to_front: bool) {
+        use lightningbeam_core::layer::AnyLayer;
+        let Some(layer_id) = self.active_layer_id else {
+            return;
+        };
+        let ids: Vec<uuid::Uuid> = {
+            let document = self.action_executor.document();
+            let Some(layer) = document.get_layer(&layer_id) else {
+                return;
+            };
+            let instances: &[lightningbeam_core::clip::ClipInstance] = match layer {
+                AnyLayer::Vector(l) => &l.clip_instances,
+                AnyLayer::Audio(l) => &l.clip_instances,
+                AnyLayer::Video(l) => &l.clip_instances,
+                AnyLayer::Effect(l) => &l.clip_instances,
+                _ => &[],
+            };
+            instances
+                .iter()
+                .filter(|ci| self.selection.contains_clip_instance(&ci.id))
+                .map(|ci| ci.id)
+                .collect()
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let action = lightningbeam_core::actions::ReorderClipInstancesAction::new(layer_id, ids, to_front);
+        if let Err(e) = self.action_executor.execute(Box::new(action)) {
+            eprintln!("Failed to reorder clip instances: {e}");
+        }
+    }
+
     /// Duplicate the selected clip instances on the active layer.
     /// Each duplicate is placed immediately after the original clip.
     fn duplicate_selected_clips(&mut self) {
@@ -2911,7 +3219,7 @@ impl EditorApp {
                     AnyLayer::Audio(al) => &al.clip_instances,
                     AnyLayer::Video(vl) => &vl.clip_instances,
                     AnyLayer::Effect(el) => &el.clip_instances,
-                    AnyLayer::Group(_) | AnyLayer::Raster(_) => &[],
+                    AnyLayer::Group(_) | AnyLayer::Raster(_) | AnyLayer::Text(_) => &[],
                 };
                 instances.iter()
                     .filter(|ci| selection.contains_clip_instance(&ci.id))
@@ -3083,28 +3391,7 @@ impl EditorApp {
             // File menu
             MenuAction::NewFile => {
                 println!("Menu: New File");
-                // TODO: Prompt to save current file if modified
-
-                // Reset state and return to start screen
-                self.layer_to_track_map.clear();
-                self.track_to_layer_map.clear();
-                self.layer_to_track_map.clear();
-                self.clip_instance_to_backend_map.clear();
-                self.current_file_path = None;
-                self.selection.clear();
-                self.editing_context = EditingContext::default();
-                self.active_layer_id = None;
-                self.playback_time = 0.0;
-                self.is_playing = false;
-                self.midi_event_cache.clear();
-                self.audio_duration_cache.clear();
-                self.raw_audio_cache.clear();
-                self.waveform_gpu_dirty.clear();
-                self.waveform_minmax_pools.clear();
-                self.waveform_pyramid_blobs.clear();
-                self.pane_instances.clear();
-                self.project_generation += 1;
-                self.app_mode = AppMode::StartScreen;
+                self.request_switch(PendingAction::NewFile);
             }
             MenuAction::NewWindow => {
                 println!("Menu: New Window");
@@ -3113,11 +3400,17 @@ impl EditorApp {
             MenuAction::Save => {
                 use rfd::FileDialog;
 
-                if let Some(path) = &self.current_file_path {
+                // A recovered file has no real home yet — Save behaves as Save As so the work lands
+                // where the user wants, not back in the app data dir.
+                let real_path = self
+                    .current_file_path
+                    .clone()
+                    .filter(|p| !AutosaveState::is_recovery_path(p));
+                if let Some(path) = real_path {
                     // Save to existing path
-                    self.save_to_file(path.clone());
+                    self.save_to_file(path);
                 } else {
-                    // No current path, fall through to Save As
+                    // No real path (untitled or recovered): fall through to Save As
                     if let Some(path) = FileDialog::new()
                         .add_filter("Lightningbeam Project", &["beam"])
                         .set_file_name("Untitled.beam")
@@ -3134,15 +3427,16 @@ impl EditorApp {
                     .add_filter("Lightningbeam Project", &["beam"])
                     .set_file_name("Untitled.beam");
 
-                // Set initial directory if we have a current file
-                let dialog = if let Some(current_path) = &self.current_file_path {
-                    if let Some(parent) = current_path.parent() {
-                        dialog.set_directory(parent)
-                    } else {
-                        dialog
-                    }
-                } else {
-                    dialog
+                // Default to the current file's directory — but not the recovery dir (a recovered
+                // file's parent), which the user never chose and shouldn't be steered back into.
+                let dialog = match self
+                    .current_file_path
+                    .as_ref()
+                    .filter(|p| !AutosaveState::is_recovery_path(p))
+                    .and_then(|p| p.parent())
+                {
+                    Some(parent) => dialog.set_directory(parent),
+                    None => dialog,
                 };
 
                 if let Some(path) = dialog.save_file() {
@@ -3152,21 +3446,19 @@ impl EditorApp {
             MenuAction::OpenFile => {
                 use rfd::FileDialog;
 
-                // TODO: Prompt to save current file if modified
-
+                // Pick the file first, then (if there are unsaved changes) prompt to save.
                 if let Some(path) = FileDialog::new()
                     .add_filter("Lightningbeam Project", &["beam"])
                     .pick_file()
                 {
-                    self.load_from_file(path);
+                    self.request_switch(PendingAction::Open(path));
                 }
             }
             MenuAction::OpenRecent(index) => {
                 let recent_files = self.config.get_recent_files();
 
                 if let Some(path) = recent_files.get(index) {
-                    // TODO: Prompt to save current file if modified
-                    self.load_from_file(path.clone());
+                    self.request_switch(PendingAction::Open(path.clone()));
                 }
             }
             MenuAction::ClearRecentFiles => {
@@ -3303,7 +3595,7 @@ impl EditorApp {
                                 AnyLayer::Video(_)  => hint.has_video  = true,
                                 AnyLayer::Audio(_)  => hint.has_audio  = true,
                                 AnyLayer::Raster(_) => hint.has_raster = true,
-                                AnyLayer::Vector(_) | AnyLayer::Effect(_) => hint.has_vector = true,
+                                AnyLayer::Vector(_) | AnyLayer::Effect(_) | AnyLayer::Text(_) => hint.has_vector = true,
                                 AnyLayer::Group(g)  => scan(&g.children, hint),
                             }
                         }
@@ -3320,7 +3612,13 @@ impl EditorApp {
                     h
                 };
 
-                self.export_dialog.open(timeline_endpoint, &project_name, &hint);
+                self.export_dialog.open(
+                    timeline_endpoint,
+                    &project_name,
+                    &hint,
+                    &self.config.last_audio_artist,
+                    &self.config.last_audio_album,
+                );
             }
             MenuAction::Quit => {
                 println!("Menu: Quit");
@@ -3524,12 +3822,10 @@ impl EditorApp {
                 }
             }
             MenuAction::SendToBack => {
-                println!("Menu: Send to Back");
-                // TODO: Implement send to back
+                self.reorder_selected_clips(false);
             }
             MenuAction::BringToFront => {
-                println!("Menu: Bring to Front");
-                // TODO: Implement bring to front
+                self.reorder_selected_clips(true);
             }
             MenuAction::SplitClip => {
                 self.split_clips_at_playhead();
@@ -3893,19 +4189,45 @@ impl EditorApp {
     }
 
     /// Prepare document for saving by storing current UI layout
-    fn prepare_document_for_save(&mut self) {
-        let doc = self.action_executor.document_mut();
-
-        // Store current layout state
-        doc.ui_layout = Some(self.current_layout.clone());
-
-        // Store base layout name for reference
+    /// Save the current document to a .beam file
+    /// Assemble the background save command for `path`: prepares the document (layout), clones it,
+    /// and snapshots the waveform/thumbnail side data. Shared by manual save and background autosave.
+    fn build_save_command(
+        &mut self,
+        path: std::path::PathBuf,
+        progress_tx: std::sync::mpsc::Sender<FileProgress>,
+    ) -> FileCommand {
+        // Snapshot the document and stamp the current UI layout onto the SNAPSHOT — never the live
+        // document. Mutating the live doc here (as the old prepare_document_for_save did via
+        // Arc::make_mut) would touch UI state and could deep-clone the whole document if a render
+        // callback holds a reference — unacceptable for a frequent background autosave. The live
+        // doc's `ui_layout` is only read at save/serialize time, so leaving it stale is harmless.
+        let mut document = self.action_executor.document().clone();
+        document.ui_layout = Some(self.current_layout.clone());
         if self.current_layout_index < self.layouts.len() {
-            doc.ui_layout_base = Some(self.layouts[self.current_layout_index].name.clone());
+            document.ui_layout_base = Some(self.layouts[self.current_layout_index].name.clone());
+        }
+        let waveform_blobs: std::collections::HashMap<usize, Vec<u8>> = self
+            .waveform_pyramid_blobs
+            .iter()
+            .map(|(&idx, blob)| (idx, blob.as_ref().clone()))
+            .collect();
+        let (thumbnail_snapshot, complete_thumbnail_clips) = {
+            let vm = self.video_manager.lock().unwrap();
+            (vm.snapshot_all_thumbnails(), vm.complete_thumbnail_clips())
+        };
+        FileCommand::Save {
+            path,
+            document,
+            layer_to_track_map: self.layer_to_track_map.clone(),
+            large_media_mode: self.config.large_media_default,
+            waveform_blobs,
+            thumbnail_snapshot,
+            complete_thumbnail_clips,
+            progress_tx,
         }
     }
 
-    /// Save the current document to a .beam file
     fn save_to_file(&mut self, path: std::path::PathBuf) {
         println!("Saving to: {}", path.display());
 
@@ -3914,42 +4236,9 @@ impl EditorApp {
             return;
         }
 
-        // Prepare document for save (including layout)
-        self.prepare_document_for_save();
-
         // Create progress channel
         let (progress_tx, progress_rx) = std::sync::mpsc::channel();
-
-        // Clone document for background thread
-        let document = self.action_executor.document().clone();
-
-        // Snapshot the generated waveform pyramids (by pool index) so the worker
-        // can persist them into the container alongside the audio.
-        let waveform_blobs: std::collections::HashMap<usize, Vec<u8>> = self
-            .waveform_pyramid_blobs
-            .iter()
-            .map(|(&idx, blob)| (idx, blob.as_ref().clone()))
-            .collect();
-
-        // Snapshot all video thumbnails (cheap Arc-clone) + which clips finished
-        // generating; the worker PNG-encodes them with a complete/partial flag so a
-        // save mid-generation persists progress and resumes on load.
-        let (thumbnail_snapshot, complete_thumbnail_clips) = {
-            let vm = self.video_manager.lock().unwrap();
-            (vm.snapshot_all_thumbnails(), vm.complete_thumbnail_clips())
-        };
-
-        // Send save command to worker thread
-        let command = FileCommand::Save {
-            path: path.clone(),
-            document,
-            layer_to_track_map: self.layer_to_track_map.clone(),
-            large_media_mode: self.config.large_media_default,
-            waveform_blobs,
-            thumbnail_snapshot,
-            complete_thumbnail_clips,
-            progress_tx,
-        };
+        let command = self.build_save_command(path.clone(), progress_tx);
 
         if let Err(e) = self.file_command_tx.send(command) {
             eprintln!("❌ Failed to send save command: {}", e);
@@ -3961,6 +4250,301 @@ impl EditorApp {
             path,
             progress_rx,
         });
+    }
+
+    /// Mark the current document state as the autosave baseline — there is nothing new to recover
+    /// (called after a manual save, and after the document is replaced by new/load). Clears the
+    /// pending-event flag and resets the throttle so the next real change schedules cleanly.
+    fn reset_autosave_baseline(&mut self) {
+        self.autosave.baseline_epoch = self.action_executor.epoch();
+        self.autosave.pending_event = false;
+        self.autosave.last_time = None;
+        // A fresh/loaded document also starts unmodified vs. its on-disk form.
+        self.saved_epoch = self.action_executor.epoch();
+        self.media_modified = false;
+    }
+
+    /// Whether the document has unsaved changes vs. the user's file (edits since the last manual
+    /// save, or an import/recording that `epoch` doesn't track). Recovered work counts as unsaved
+    /// until the user gives it a real home — its only copy is the transient recovery container.
+    fn document_modified(&self) -> bool {
+        self.action_executor.epoch() != self.saved_epoch
+            || self.media_modified
+            || self
+                .current_file_path
+                .as_ref()
+                .is_some_and(|p| AutosaveState::is_recovery_path(p))
+    }
+
+    /// Background crash-recovery autosave: poll any in-flight recovery write, then (if the document
+    /// is dirty, throttled to `AUTOSAVE_INTERVAL_SECS`, and no manual save is running) dispatch a
+    /// write of the current state into the per-session recovery container. Fully background — reuses
+    /// the file worker; the only UI-thread cost is the same document/side-data snapshot a manual
+    /// save does. Never touches `current_file_path` or the raster `dirty` flags (the recovery file
+    /// is a separate container from the user's file).
+    fn maybe_autosave(&mut self, ctx: &egui::Context) {
+        // Drain progress from an in-flight recovery write.
+        if let Some(rx) = &self.autosave.progress_rx {
+            while let Ok(p) = rx.try_recv() {
+                match p {
+                    FileProgress::Done => self.autosave.in_flight = false,
+                    FileProgress::Error(e) => {
+                        eprintln!("⚠️ [AUTOSAVE] recovery write failed: {}", e);
+                        self.autosave.in_flight = false;
+                    }
+                    _ => {}
+                }
+            }
+            if !self.autosave.in_flight {
+                self.autosave.progress_rx = None;
+            }
+        }
+
+        let Some(recovery_path) = self.autosave.recovery_path.clone() else { return };
+        if self.autosave.in_flight || self.audio_controller.is_none() {
+            return;
+        }
+        // Don't compete with a manual save on the single worker.
+        if matches!(self.file_operation, Some(FileOperation::Saving { .. })) {
+            return;
+        }
+
+        let epoch = self.action_executor.epoch();
+        let dirty = epoch != self.autosave.baseline_epoch || self.autosave.pending_event;
+        if !dirty {
+            return;
+        }
+        if let Some(t) = self.autosave.last_time {
+            let elapsed = t.elapsed().as_secs_f64();
+            if elapsed < self.autosave.interval_secs {
+                // Dirty but throttled — wake up when the interval elapses even if the app goes idle,
+                // so an edit-then-idle session still gets its recovery snapshot.
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(
+                    (self.autosave.interval_secs - elapsed).max(0.1),
+                ));
+                return;
+            }
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let command = self.build_save_command(recovery_path, tx);
+        if self.file_command_tx.send(command).is_err() {
+            return;
+        }
+        self.autosave.in_flight = true;
+        self.autosave.progress_rx = Some(rx);
+        self.autosave.baseline_epoch = epoch;
+        self.autosave.pending_event = false;
+        self.autosave.last_time = Some(std::time::Instant::now());
+        eprintln!("💾 [AUTOSAVE] recovery snapshot dispatched");
+    }
+
+    /// Show the crash-recovery prompt when a previous session left a recovery file behind. Recover
+    /// loads it as an untitled document; Discard deletes it; Later keeps it for the next launch.
+    fn render_recovery_prompt(&mut self, ctx: &egui::Context) {
+        // Don't prompt over an in-flight file op (including a recovery load we just started).
+        if self.autosave.leftover_recoveries.is_empty() || self.file_operation.is_some() {
+            return;
+        }
+        let path = self.autosave.leftover_recoveries[0].clone();
+
+        #[derive(PartialEq)]
+        enum Choice { Recover, Discard, Later }
+        let mut choice: Option<Choice> = None;
+
+        egui::Modal::new(egui::Id::new("crash_recovery_modal")).show(ctx, |ui| {
+            ui.set_width(crate::mobile::dialog_width(ctx, 460.0));
+            ui.heading("Recover unsaved work?");
+            ui.add_space(6.0);
+            ui.label(
+                "Lightningbeam didn't shut down cleanly last time. You have unsaved work from your \
+                 previous session — recover it?",
+            );
+            if self.autosave.leftover_recoveries.len() > 1 {
+                ui.add_space(4.0);
+                ui.weak(format!(
+                    "{} snapshots available; this shows the most recent first.",
+                    self.autosave.leftover_recoveries.len()
+                ));
+            }
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui.button("Recover").clicked() {
+                    choice = Some(Choice::Recover);
+                }
+                if ui.button("Discard").clicked() {
+                    choice = Some(Choice::Discard);
+                }
+                if ui.button("Later").clicked() {
+                    choice = Some(Choice::Later);
+                }
+            });
+        });
+
+        match choice {
+            Some(Choice::Recover) => {
+                self.autosave.leftover_recoveries.remove(0);
+                // Rename out of the `session-*` namespace before opening it, so it isn't offered
+                // again next launch — but keep the file, since recovered raster keyframes page in
+                // from it on demand (deleting it would lose paged pixels). It opens as the current
+                // file; the user relocates the work with Save As. Old `recovered-*` files are
+                // garbage-collected at startup.
+                let open_path = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(name) => {
+                        let renamed =
+                            path.with_file_name(name.replacen("session-", "recovered-", 1));
+                        if std::fs::rename(&path, &renamed).is_ok() { renamed } else { path }
+                    }
+                    None => path,
+                };
+                self.load_from_file(open_path);
+            }
+            Some(Choice::Discard) => {
+                let _ = std::fs::remove_file(&path);
+                self.autosave.leftover_recoveries.remove(0);
+            }
+            Some(Choice::Later) => {
+                // Keep the files on disk but stop prompting this session.
+                self.autosave.leftover_recoveries.clear();
+            }
+            None => {}
+        }
+    }
+
+    /// The single "save changes?" prompt for any unsaved-work exit point — file switches (New /
+    /// Open / Open Recent) and quitting. Also intercepts the window-close request. Save persists
+    /// first (Save As for untitled/recovered docs) then runs the action; Don't Save runs it and
+    /// discards; Cancel stays put.
+    fn render_unsaved_prompt(&mut self, ctx: &egui::Context) {
+        // Intercept a window-close request with unsaved work → veto it and queue the Quit prompt.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.confirmed_close {
+            if self.document_modified() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.unsaved_prompt = Some(PendingAction::Quit);
+            }
+            // Unmodified → let the close proceed.
+        }
+
+        let Some(pending) = self.unsaved_prompt.as_ref() else { return };
+        // The "…before X?" tail + the affirmative button label, per action.
+        let (desc, discard_label) = match pending {
+            PendingAction::NewFile => ("starting a new file", "Don't Save"),
+            PendingAction::Open(_) => ("opening another file", "Don't Save"),
+            PendingAction::Quit => ("quitting", "Discard & Quit"),
+        };
+
+        #[derive(PartialEq)]
+        enum Answer {
+            Save,
+            Discard,
+            Cancel,
+        }
+        let mut answer: Option<Answer> = None;
+
+        egui::Modal::new(egui::Id::new("unsaved_changes_modal")).show(ctx, |ui| {
+            ui.set_width(crate::mobile::dialog_width(ctx, 440.0));
+            ui.heading("Save changes?");
+            ui.add_space(6.0);
+            ui.label(format!(
+                "This document has unsaved changes. Save them before {desc}?"
+            ));
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    answer = Some(Answer::Save);
+                }
+                if ui.button(discard_label).clicked() {
+                    answer = Some(Answer::Discard);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(Answer::Cancel);
+                }
+            });
+        });
+
+        match answer {
+            Some(Answer::Cancel) => {
+                self.unsaved_prompt = None;
+            }
+            Some(Answer::Discard) => {
+                if let Some(action) = self.unsaved_prompt.take() {
+                    self.do_action(action, ctx);
+                }
+            }
+            Some(Answer::Save) => {
+                let action = self.unsaved_prompt.take();
+                // Save to the existing file, or Save As for an untitled / recovered document.
+                let real_path = self
+                    .current_file_path
+                    .clone()
+                    .filter(|p| !AutosaveState::is_recovery_path(p));
+                let target = match real_path {
+                    Some(p) => Some(p),
+                    None => rfd::FileDialog::new()
+                        .add_filter("Lightningbeam Project", &["beam"])
+                        .set_file_name("Untitled.beam")
+                        .save_file(),
+                };
+                match target {
+                    Some(path) => {
+                        // Run the action once the save completes.
+                        self.after_save = action;
+                        self.save_to_file(path);
+                    }
+                    None => {
+                        // Save As cancelled → abort, keep the document (still unsaved).
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// New File: tear down the current project and return to the start screen. (The guard for
+    /// unsaved changes lives in the menu handler; this is the actual action.)
+    fn do_new_file(&mut self) {
+        // Tear down the backend (stops old instruments/voices immediately) and clear the app-side
+        // track maps + backend-derived caches.
+        self.reset_audio_backend();
+
+        // Reset UI state and return to the start screen.
+        self.current_file_path = None;
+        self.selection.clear();
+        self.editing_context = EditingContext::default();
+        self.active_layer_id = None;
+        self.playback_time = 0.0;
+        self.is_playing = false;
+        self.pane_instances.clear();
+        self.project_generation += 1;
+        self.app_mode = AppMode::StartScreen;
+    }
+
+    /// Carry out a deferred action once the unsaved-changes prompt is resolved (or when there was
+    /// nothing unsaved to begin with).
+    fn do_action(&mut self, action: PendingAction, ctx: &egui::Context) {
+        match action {
+            PendingAction::NewFile => self.do_new_file(),
+            PendingAction::Open(path) => self.load_from_file(path),
+            PendingAction::Quit => {
+                self.confirmed_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    /// Begin a file switch (New / Open / Open Recent), prompting to save first if the document has
+    /// unsaved changes. Only ever called with `NewFile`/`Open` from the menus, so the immediate path
+    /// needs no `ctx` (only `Quit`, driven by the close interceptor, does).
+    fn request_switch(&mut self, action: PendingAction) {
+        if self.document_modified() {
+            self.unsaved_prompt = Some(action);
+        } else {
+            match action {
+                PendingAction::NewFile => self.do_new_file(),
+                PendingAction::Open(path) => self.load_from_file(path),
+                PendingAction::Quit => {}
+            }
+        }
     }
 
     /// Load a document from a .beam file
@@ -4048,9 +4632,17 @@ impl EditorApp {
             // TODO Phase 5: Show recovery dialog
         }
 
+        // Tear down the previously-open project's backend tracks/instruments before restoring this
+        // file's audio pool + tracks, so an open-over-open doesn't leave orphaned tracks resident in
+        // the backend. Reset is a command; the audio-pool/track restoration below uses queries, which
+        // the audio thread drains after all commands each callback, so the ordering holds.
+        self.reset_audio_backend();
+
         // Replace document
         let step1_start = std::time::Instant::now();
         self.action_executor = ActionExecutor::new(loaded_project.document);
+        // Freshly loaded document is clean → rebase the autosave epoch (no spurious recovery write).
+        self.reset_autosave_baseline();
         eprintln!("📊 [APPLY] Step 1: Replace document took {:.2}ms", step1_start.elapsed().as_secs_f64() * 1000.0);
 
         // Restore UI layout from loaded document
@@ -4331,9 +4923,12 @@ impl EditorApp {
         // Point the raster paging store at the loaded container so faulting works.
         self.raster_store.set_path(self.current_file_path.clone());
 
-        // Add to recent files
-        self.config.add_recent_file(path.clone());
-        self.update_recent_files_menu();
+        // Add to recent files — but never a recovery file (it's an internal, transient container in
+        // the app data dir, not a project the user opened).
+        if !AutosaveState::is_recovery_path(&path) {
+            self.config.add_recent_file(path.clone());
+            self.update_recent_files_menu();
+        }
 
         // Set active layer
         if let Some(first) = self.action_executor.document().root.children.first() {
@@ -4589,6 +5184,9 @@ impl EditorApp {
 
     fn import_image(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::ImageAsset;
+        // Imported media lives outside the action/undo system, so flag it for the next autosave.
+        self.autosave.pending_event = true;
+        self.media_modified = true;
         self.note_possible_large_media(path);
 
         // Get filename for asset name
@@ -4642,6 +5240,8 @@ impl EditorApp {
     /// GPU waveform cache.
     fn import_audio(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::AudioClip;
+        self.autosave.pending_event = true;
+        self.media_modified = true;
         self.note_possible_large_media(path);
 
         let name = path.file_stem()
@@ -4768,6 +5368,8 @@ impl EditorApp {
     fn import_video(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::VideoClip;
         use lightningbeam_core::video::probe_video;
+        self.autosave.pending_event = true;
+        self.media_modified = true;
         self.note_possible_large_media(path);
 
         let name = path.file_stem()
@@ -5310,6 +5912,14 @@ impl EditorApp {
 }
 
 impl eframe::App for EditorApp {
+    /// Clean shutdown → not a crash → delete this session's recovery file so it isn't offered for
+    /// restore on the next launch. (If we crash instead, `on_exit` never runs and the file remains.)
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(path) = self.autosave.recovery_path.take() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         self.tablet.poll(ctx, raw_input, self.selected_tool);
 
@@ -5319,6 +5929,21 @@ impl eframe::App for EditorApp {
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let _frame_start = std::time::Instant::now();
+
+        // Apply the theme's palette to egui's global visuals so the standard widgets (dialogs, pane
+        // chrome, text) share the same colors as the mobile UI and respond to light/dark/user themes.
+        self.theme.apply_to_egui(ctx);
+        // On mobile, enlarge egui spacing/sizing so widgets in panes/dialogs are touch-friendly.
+        if self.mobile_active() {
+            mobile::apply_touch_style(ctx);
+        }
+
+        // Background crash-recovery autosave (cheap early-out unless dirty + interval elapsed).
+        self.maybe_autosave(ctx);
+        // Offer to restore a previous session's unsaved work (if a recovery file was left behind).
+        self.render_recovery_prompt(ctx);
+        // Prompt to save unsaved changes before switching files (New / Open / Open Recent).
+        self.render_unsaved_prompt(ctx);
 
         // === Raster fault-in (Phase 3 paging) ===
         // The canvas records raster keyframe ids whose `raw_pixels` weren't resident
@@ -5559,6 +6184,9 @@ impl eframe::App for EditorApp {
             let mut operation_complete = false;
             let mut loaded_project_data: Option<(lightningbeam_core::file_io::LoadedProject, std::path::PathBuf)> = None;
             let mut update_recent_menu = false; // Track if we need to update recent files menu
+            // An action that was waiting on this save (from the unsaved-changes prompt), to run
+            // after the file_operation borrow ends.
+            let mut after_save: Option<PendingAction> = None;
 
             match operation {
                 FileOperation::Saving { ref mut progress_rx, ref path } => {
@@ -5567,6 +6195,18 @@ impl eframe::App for EditorApp {
                             FileProgress::Done => {
                                 println!("✅ Save complete!");
                                 self.current_file_path = Some(path.clone());
+                                // Manual save persisted everything to the user's file → no unsaved
+                                // work to recover; rebase the autosave epoch so it stays quiet until
+                                // the next real edit. (Inlined rather than reset_autosave_baseline()
+                                // to avoid a second &mut self borrow inside the file_operation match.)
+                                self.autosave.baseline_epoch = self.action_executor.epoch();
+                                self.autosave.pending_event = false;
+                                self.autosave.last_time = None;
+                                // The document now matches its file → no unsaved changes.
+                                self.saved_epoch = self.action_executor.epoch();
+                                self.media_modified = false;
+                                // If a file switch was waiting on this save, run it after the borrow.
+                                after_save = self.after_save.take();
                                 // Container path may be new (Save As); update the
                                 // raster paging store so future faults read the right file.
                                 self.raster_store.set_path(self.current_file_path.clone());
@@ -5682,6 +6322,11 @@ impl eframe::App for EditorApp {
             // Update recent files menu if needed
             if update_recent_menu {
                 self.update_recent_files_menu();
+            }
+
+            // An action that was waiting on this save ("Save" in the prompt → New/Open/Quit) runs now.
+            if let Some(action) = after_save {
+                self.do_action(action, ctx);
             }
 
             // Request repaint to keep updating progress
@@ -5897,6 +6542,9 @@ impl eframe::App for EditorApp {
 
                                 if !clip_id.is_nil() {
                                     // Finalize the clip (update pool_index and duration)
+                                    // A finished recording (samples in the pool) needs capturing.
+                                    self.autosave.pending_event = true;
+                                    self.media_modified = true;
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&clip_id) {
                                         if clip.finalize_recording(pool_index, duration) {
                                             clip.name = format!("Recording {}", pool_index);
@@ -6220,8 +6868,28 @@ impl eframe::App for EditorApp {
                         }
                         false // synchronous; no progress dialog
                     }
+                    ExportResult::Gif(settings, output_path) => {
+                        println!("🎞 [MAIN] Starting GIF export: {}", output_path.display());
+                        let doc = self.action_executor.document();
+                        orchestrator.start_gif_export(
+                            settings,
+                            output_path,
+                            doc.width  as u32,
+                            doc.height as u32,
+                        );
+                        true // background encode with progress dialog
+                    }
                     ExportResult::AudioOnly(settings, output_path) => {
                         println!("🎵 [MAIN] Starting audio-only export: {}", output_path.display());
+
+                        // Remember Artist/Album so they prefill next time.
+                        if !settings.metadata.artist.is_empty() {
+                            self.config.last_audio_artist = settings.metadata.artist.clone();
+                        }
+                        if !settings.metadata.album.is_empty() {
+                            self.config.last_audio_album = settings.metadata.album.clone();
+                        }
+                        self.config.save();
 
                         if let Some(audio_controller) = &self.audio_controller {
                             orchestrator.start_audio_export(
@@ -6306,7 +6974,8 @@ impl eframe::App for EditorApp {
         }
 
         // Render preferences dialog
-        if let Some(result) = self.preferences_dialog.render(ctx, &mut self.config, &mut self.theme) {
+        let mobile = self.mobile_active();
+        if let Some(result) = self.preferences_dialog.render(ctx, &mut self.config, &mut self.theme, mobile) {
             if result.buffer_size_changed {
                 println!("⚠️  Audio buffer size will be applied on next app restart");
             }
@@ -6371,6 +7040,21 @@ impl eframe::App for EditorApp {
                         if has_more {
                             ctx.request_repaint();
                         }
+                    }
+
+                    // Drive incremental GIF export (one frame rendered + streamed per call).
+                    match orchestrator.render_next_gif_frame(
+                        self.action_executor.document_mut(),
+                        device,
+                        queue,
+                        renderer,
+                        image_cache,
+                        &self.video_manager,
+                        Some(&self.raster_store),
+                    ) {
+                        Ok(true)  => { ctx.request_repaint(); } // more frames to render
+                        Ok(false) => {}                          // done or not a GIF export
+                        Err(e)    => { eprintln!("GIF export failed: {e}"); }
                     }
 
                     // Drive single-frame image export (two-frame async: render then readback).
@@ -6471,7 +7155,9 @@ impl eframe::App for EditorApp {
             }
         }
 
-        // Top menu bar (egui-rendered on all platforms)
+        // Top menu bar (egui-rendered on desktop). On mobile the shell's ⌕ palette + ⋯ overflow
+        // expose every command, so the desktop menu bar is suppressed.
+        if !self.mobile_active() {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             if let Some(menu_system) = &self.menu_system {
                 let recent_files = self.config.get_recent_files();
@@ -6507,10 +7193,15 @@ impl eframe::App for EditorApp {
                 }
             }
         });
+        }
 
         // Render start screen or editor based on app mode
         if self.app_mode == AppMode::StartScreen {
-            self.render_start_screen(ctx);
+            if self.mobile_active() {
+                mobile::intent::render(self, ctx);
+            } else {
+                self.render_start_screen(ctx);
+            }
             return; // Skip editor rendering
         }
 
@@ -6535,37 +7226,28 @@ impl eframe::App for EditorApp {
 
         // Main pane area (editor mode)
         let mut layout_action: Option<LayoutAction> = None;
-        let mut clipboard_consumed = false;
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // Per-frame scratch consumed by the post-render drain (see FrameScratch).
+        // Declared outside the closure because some of it (clipboard_consumed) is read
+        // after the panel closes.
+        let mut scratch = FrameScratch::default();
+        #[cfg(debug_assertions)]
+        {
+            scratch.synthetic_input = test_mode_replay.synthetic_input;
+        }
+        // On mobile the shell is full-bleed to the window edges (it paints its own background), so
+        // drop the central panel's default inner margin — otherwise every pane is inset by it while
+        // the unclipped keyboard overdraws into it, leaving an inconsistent gutter.
+        let central = egui::CentralPanel::default();
+        let central = if self.mobile_active() {
+            central.frame(egui::Frame::default())
+        } else {
+            central
+        };
+        central.show(ctx, |ui| {
             let available_rect = ui.available_rect_before_wrap();
 
             // Reset hovered divider each frame
             self.hovered_divider = None;
-
-            // Track fallback pane priority for view actions (reset each frame)
-            let mut fallback_pane_priority: Option<u32> = None;
-
-            // Registry for view action handlers (two-phase dispatch)
-            let mut pending_handlers: Vec<panes::ViewActionHandler> = Vec::new();
-
-            // Registry for actions to execute after rendering (two-phase dispatch)
-            let mut pending_actions: Vec<Box<dyn lightningbeam_core::action::Action>> = Vec::new();
-
-            // Menu actions queued by pane context menus
-            let mut pending_menu_actions: Vec<MenuAction> = Vec::new();
-
-            // Editing context navigation requests from stage pane
-            let mut pending_enter_clip: Option<(Uuid, Uuid, Uuid)> = None;
-            let mut pending_exit_clip = false;
-
-            // Synthetic input from test mode replay (debug builds only)
-            #[cfg(debug_assertions)]
-            let mut synthetic_input_storage: Option<test_mode::SyntheticInput> = test_mode_replay.synthetic_input;
-
-            // Queue for effect thumbnail requests (collected during rendering)
-            let mut effect_thumbnail_requests: Vec<Uuid> = Vec::new();
-            // Empty cache fallback if generator not initialized
-            let empty_thumbnail_cache: HashMap<Uuid, Vec<u8>> = HashMap::new();
 
             // Sync clip instance transforms from animation data at current playback time.
             // This ensures selection boxes, hit testing, and interactive editing see the
@@ -6573,6 +7255,11 @@ impl eframe::App for EditorApp {
             {
                 let time = self.playback_time;
                 let document = self.action_executor.document_mut();
+                // Keep document.current_time synced from the audio playback position every frame.
+                // The renderer reads current_time for animation eval + video-frame decode, so this
+                // must not depend on any particular pane (e.g. the timeline) being rendered —
+                // otherwise the Stage freezes during playback when that pane is off-screen.
+                document.current_time = time;
                 // Bake animation transforms for root layers
                 for layer in document.root.children.iter_mut() {
                     if let lightningbeam_core::layer::AnyLayer::Vector(vl) = layer {
@@ -6601,133 +7288,69 @@ impl eframe::App for EditorApp {
                 }
             }
 
-            // Create render context
-            let mut ctx = RenderContext {
-                shared: panes::SharedPaneState {
-                    container_path: self.current_file_path.clone(),
-                    onion: {
-                        // Onion skinning is disabled during playback.
-                        let mut o = self.onion_skin;
-                        o.enabled = o.enabled && !self.is_playing;
-                        o
-                    },
-                    onion_skin: &mut self.onion_skin,
-                    tool_icon_cache: &mut self.tool_icon_cache,
-                    icon_cache: &mut self.icon_cache,
-                    selected_tool: &mut self.selected_tool,
-                    fill_color: &mut self.fill_color,
-                    stroke_color: &mut self.stroke_color,
-                    active_color_mode: &mut self.active_color_mode,
-                    pending_view_action: &mut self.pending_view_action,
-                    fallback_pane_priority: &mut fallback_pane_priority,
-                    pending_handlers: &mut pending_handlers,
-                    theme: &self.theme,
-                    action_executor: &mut self.action_executor,
-                    selection: &mut self.selection,
-                    focus: &mut self.focus,
-                    editing_clip_id: self.editing_context.current_clip_id(),
-                    editing_instance_id: self.editing_context.current_instance_id(),
-                    editing_parent_layer_id: self.editing_context.current_parent_layer_id(),
-                    pending_enter_clip: &mut pending_enter_clip,
-                    pending_exit_clip: &mut pending_exit_clip,
-                    active_layer_id: &mut self.active_layer_id,
-                    tool_state: &mut self.tool_state,
-                    pending_actions: &mut pending_actions,
-                    draw_simplify_mode: &mut self.draw_simplify_mode,
-                    rdp_tolerance: &mut self.rdp_tolerance,
-                    schneider_max_error: &mut self.schneider_max_error,
-                    raster_settings: &mut self.raster_settings,
-                    audio_controller: self.audio_controller.as_ref(),
-                    clip_snapshot: self.audio_controller.as_ref().map(|arc| {
-                        arc.lock().unwrap().clip_snapshot()
-                    }),
-                    audio_input_opener: &mut self.audio_input,
-                    audio_input_stream: &mut self.audio_input_stream,
-                    audio_buffer_size: self.audio_buffer_size,
-                    video_manager: &self.video_manager,
-                    playback_time: &mut self.playback_time,
-                    is_playing: &mut self.is_playing,
-                    is_recording: &mut self.is_recording,
-                    metronome_enabled: &mut self.metronome_enabled,
-                    count_in_enabled: &mut self.count_in_enabled,
-                    recording_clips: &mut self.recording_clips,
-                    recording_start_time: &mut self.recording_start_time,
-                    recording_layer_ids: &mut self.recording_layer_ids,
-                    dragging_asset: &mut self.dragging_asset,
-                    stroke_width: &mut self.stroke_width,
-                    fill_enabled: &mut self.fill_enabled,
-                    snap_enabled: &mut self.snap_enabled,
-                    paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
-                    polygon_sides: &mut self.polygon_sides,
-                    layer_to_track_map: &self.layer_to_track_map,
-                    clip_instance_to_backend_map: &self.clip_instance_to_backend_map,
-                    midi_event_cache: &mut self.midi_event_cache,
-                    audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
-                    raw_audio_cache: &self.raw_audio_cache,
-                    waveform_gpu_dirty: &mut self.waveform_gpu_dirty,
-                    waveform_minmax_pools: &self.waveform_minmax_pools,
-                    raster_fault_requests: &self.raster_fault_requests,
-                    effect_to_load: &mut self.effect_to_load,
-                    effect_thumbnail_requests: &mut effect_thumbnail_requests,
-                    effect_thumbnail_cache: self.effect_thumbnail_generator.as_ref()
-                        .map(|g| g.thumbnail_cache())
-                        .unwrap_or(&empty_thumbnail_cache),
-                    effect_thumbnails_to_invalidate: &mut self.effect_thumbnails_to_invalidate,
-                    webcam_frame: self.webcam_frame.clone(),
-                    webcam_record_command: &mut self.webcam_record_command,
-                    target_format: self.target_format,
-                    pending_menu_actions: &mut pending_menu_actions,
-                    clipboard_manager: &mut self.clipboard_manager,
-                    input_level: self.input_level,
-                    output_level: self.output_level,
-                    track_levels: &self.track_levels,
-                    track_to_layer_map: &self.track_to_layer_map,
-                    waveform_stereo: self.config.waveform_stereo,
-                    project_generation: &mut self.project_generation,
-                    graph_topology_generation: &mut self.graph_topology_generation,
-                    script_to_edit: &mut self.script_to_edit,
-                    script_saved: &mut self.script_saved,
-                    pending_region_cut_base: &mut self.pending_region_cut_base,
-                    region_select_mode: &mut self.region_select_mode,
-                    lasso_mode: &mut self.lasso_mode,
-                    pending_graph_loads: &self.pending_graph_loads,
-                    clipboard_consumed: &mut clipboard_consumed,
-                    keymap: &self.keymap,
-                    pending_node_group: &mut self.pending_node_group,
-                    pending_node_ungroup: &mut self.pending_node_ungroup,
-                    #[cfg(debug_assertions)]
-                    test_mode: &mut self.test_mode,
-                    #[cfg(debug_assertions)]
-                    synthetic_input: &mut synthetic_input_storage,
-                    brush_preview_pixels: &self.brush_preview_pixels,
-                },
-                pane_instances: &mut self.pane_instances,
-            };
+            // Build the per-frame context (single source of truth for SharedPaneState,
+            // shared by the desktop and mobile paths). The bundle borrows `self` + `scratch`;
+            // it is dropped before the post-render drain below re-touches them.
+            let is_mobile = self.mobile_active();
+            let mut bundle = self.build_frame(&mut scratch);
 
-            render_layout_node(
-                ui,
-                &mut self.current_layout,
-                available_rect,
-                &mut self.drag_state,
-                &mut self.hovered_divider,
-                &mut self.selected_pane,
-                &mut layout_action,
-                &mut self.split_preview_mode,
-                &Vec::new(), // Root path
-                &mut ctx,
-            );
+            if is_mobile {
+                // Phone shell: a single hero surface + top tabs + resizable timeline ribbon
+                // + a fixed transport floor, reusing the same panes the desktop layout uses.
+                mobile::render_mobile_shell(
+                    ui,
+                    available_rect,
+                    &mut bundle.rc,
+                    bundle.mobile_state,
+                );
+
+                // Drive recording from the application, not the Timeline pane's render pass, so a
+                // REC request (from the music pane header) and count-in progression work regardless
+                // of whether the Timeline is currently visible. The Timeline pane still owns the
+                // recording *state*; we just tick it here each frame.
+                let rc = &mut bundle.rc;
+                for pane in rc.pane_instances.values_mut() {
+                    if let PaneInstance::Timeline(t) = pane {
+                        t.check_pending_recording_start(&mut rc.shared);
+                        if *rc.shared.pending_record_toggle {
+                            *rc.shared.pending_record_toggle = false;
+                            t.toggle_recording(&mut rc.shared);
+                        }
+                        // Stopping playback stops recording (stop_recording clears is_recording,
+                        // so this fires once).
+                        if *rc.shared.is_recording && !*rc.shared.is_playing {
+                            t.stop_recording(&mut rc.shared);
+                        }
+                        break;
+                    }
+                }
+            } else {
+                render_layout_node(
+                    ui,
+                    bundle.current_layout,
+                    available_rect,
+                    bundle.drag_state,
+                    bundle.hovered_divider,
+                    bundle.selected_pane,
+                    &mut layout_action,
+                    bundle.split_preview_mode,
+                    &Vec::new(), // Root path
+                    &mut bundle.rc,
+                );
+            }
+            drop(bundle);
 
             // Process collected effect thumbnail requests
-            if !effect_thumbnail_requests.is_empty() {
+            if !scratch.effect_thumbnail_requests.is_empty() {
                 if let Some(generator) = &mut self.effect_thumbnail_generator {
-                    generator.request_thumbnails(&effect_thumbnail_requests);
+                    generator.request_thumbnails(&scratch.effect_thumbnail_requests);
                 }
             }
 
 
             // Execute action on the best handler (two-phase dispatch)
             if let Some(action) = &self.pending_view_action {
-                if let Some(best_handler) = pending_handlers.iter().min_by_key(|h| h.priority) {
+                if let Some(best_handler) = scratch.pending_handlers.iter().min_by_key(|h| h.priority) {
                     // Look up the pane instance and execute the action
                     if let Some(pane_instance) = self.pane_instances.get_mut(&best_handler.pane_path) {
                         match pane_instance {
@@ -6748,7 +7371,7 @@ impl eframe::App for EditorApp {
             self.sync_audio_layers_to_backend();
 
             // Execute all pending actions (two-phase dispatch)
-            for action in pending_actions {
+            for action in std::mem::take(&mut scratch.pending_actions) {
                 // Record action for test mode (debug builds only)
                 #[cfg(debug_assertions)]
                 let action_desc = action.description();
@@ -6780,7 +7403,7 @@ impl eframe::App for EditorApp {
             }
 
             // Process menu actions queued by pane context menus
-            for action in pending_menu_actions {
+            for action in std::mem::take(&mut scratch.pending_menu_actions) {
                 self.handle_menu_action(action);
             }
 
@@ -6942,7 +7565,7 @@ impl eframe::App for EditorApp {
             }
 
             // Process editing context navigation (enter/exit movie clips)
-            if let Some((clip_id, instance_id, parent_layer_id)) = pending_enter_clip {
+            if let Some((clip_id, instance_id, parent_layer_id)) = scratch.pending_enter_clip {
                 let entry = EditingContextEntry {
                     clip_id,
                     instance_id,
@@ -6966,8 +7589,17 @@ impl eframe::App for EditorApp {
                 self.commit_raster_floating();
             }
 
-            if pending_exit_clip {
+            if scratch.pending_exit_clip {
                 if let Some(entry) = self.editing_context.pop() {
+                    self.selection.clear();
+                    self.active_layer_id = entry.saved_active_layer_id;
+                    self.playback_time = entry.saved_playback_time;
+                }
+            }
+
+            // Breadcrumb jump: exit up to a specific depth (restoring that level's saved context).
+            if let Some(depth) = scratch.pending_exit_to_depth.take() {
+                if let Some(entry) = self.editing_context.exit_to_depth(depth) {
                     self.selection.clear();
                     self.active_layer_id = entry.saved_active_layer_id;
                     self.playback_time = entry.saved_playback_time;
@@ -7030,8 +7662,8 @@ impl eframe::App for EditorApp {
             // Event::Copy/Cut/Paste instead of regular key events, so
             // check_shortcuts won't see them via key_pressed().
             // Skip if a pane (e.g. piano roll) already handled the clipboard event.
-            let mut clipboard_handled = clipboard_consumed;
-            if !clipboard_consumed {
+            let mut clipboard_handled = scratch.clipboard_consumed;
+            if !scratch.clipboard_consumed {
                 for event in &i.events {
                     match event {
                         egui::Event::Copy => {
@@ -7192,6 +7824,175 @@ impl eframe::App for EditorApp {
 struct RenderContext<'a> {
     shared: panes::SharedPaneState<'a>,
     pane_instances: &'a mut HashMap<NodePath, PaneInstance>,
+}
+
+/// Per-frame scratch state used to build the `RenderContext`. These values live only
+/// for the duration of one `update()` frame: panes write into them during rendering
+/// and the post-render drain consumes them. Grouping them lets [`EditorApp::build_frame`]
+/// hand back a context that borrows both `self` and this scratch, so the desktop and
+/// mobile render paths share one construction site for the ~80-field `SharedPaneState`.
+#[derive(Default)]
+struct FrameScratch {
+    fallback_pane_priority: Option<u32>,
+    pending_handlers: Vec<panes::ViewActionHandler>,
+    pending_enter_clip: Option<(Uuid, Uuid, Uuid)>,
+    pending_exit_clip: bool,
+    pending_exit_to_depth: Option<usize>,
+    pending_actions: Vec<Box<dyn lightningbeam_core::action::Action>>,
+    pending_menu_actions: Vec<MenuAction>,
+    effect_thumbnail_requests: Vec<Uuid>,
+    clipboard_consumed: bool,
+    empty_thumbnail_cache: HashMap<Uuid, Vec<u8>>,
+    #[cfg(debug_assertions)]
+    synthetic_input: Option<test_mode::SyntheticInput>,
+}
+
+/// Everything `update()` hands to a per-frame layout renderer: the [`RenderContext`]
+/// plus the layout-editing borrows that ride alongside it (these are passed to
+/// `render_layout_node` as separate `&mut` args and are disjoint from `SharedPaneState`).
+/// Built by [`EditorApp::build_frame`] from a single `&mut self`, which is what lets the
+/// huge `SharedPaneState` literal have one home shared by the desktop and mobile paths.
+struct FrameBundle<'a> {
+    rc: RenderContext<'a>,
+    current_layout: &'a mut LayoutNode,
+    drag_state: &'a mut DragState,
+    hovered_divider: &'a mut Option<(NodePath, bool)>,
+    selected_pane: &'a mut Option<NodePath>,
+    split_preview_mode: &'a mut SplitPreviewMode,
+    mobile_state: &'a mut mobile::MobileState,
+}
+
+impl EditorApp {
+    /// Whether the mobile shell is active this frame (runtime override wins over the env flag).
+    fn mobile_active(&self) -> bool {
+        self.mobile_ui_override.unwrap_or(self.mobile_ui)
+    }
+
+    /// Build the per-frame [`FrameBundle`]. The returned bundle borrows `self` and
+    /// `scratch` for `'a`; it must be dropped before the post-render drain touches
+    /// `self`/`scratch` again. This is the single source of truth for `SharedPaneState`.
+    fn build_frame<'a>(&'a mut self, scratch: &'a mut FrameScratch) -> FrameBundle<'a> {
+        let is_mobile = self.mobile_active();
+        FrameBundle {
+            rc: RenderContext {
+                shared: panes::SharedPaneState {
+                    is_mobile,
+                    is_portrait: true, // set by the mobile shell from the available rect
+                    keyboard_octave: &mut self.keyboard_octave,
+                    keyboard_pan_x: &mut self.keyboard_pan_x,
+                    instrument_show_roll: false,
+                    open_instrument_browser: &mut self.open_instrument_browser,
+                    pending_record_toggle: &mut self.pending_record_toggle,
+                    mobile_context_menu: &mut self.mobile_context_menu,
+                    container_path: self.current_file_path.clone(),
+                    onion: {
+                        // Onion skinning is disabled during playback.
+                        let mut o = self.onion_skin;
+                        o.enabled = o.enabled && !self.is_playing;
+                        o
+                    },
+                    onion_skin: &mut self.onion_skin,
+                    tool_icon_cache: &mut self.tool_icon_cache,
+                    icon_cache: &mut self.icon_cache,
+                    selected_tool: &mut self.selected_tool,
+                    fill_color: &mut self.fill_color,
+                    stroke_color: &mut self.stroke_color,
+                    active_color_mode: &mut self.active_color_mode,
+                    pending_view_action: &mut self.pending_view_action,
+                    fallback_pane_priority: &mut scratch.fallback_pane_priority,
+                    pending_handlers: &mut scratch.pending_handlers,
+                    theme: &self.theme,
+                    action_executor: &mut self.action_executor,
+                    selection: &mut self.selection,
+                    focus: &mut self.focus,
+                    editing_clip_id: self.editing_context.current_clip_id(),
+                    editing_instance_id: self.editing_context.current_instance_id(),
+                    editing_parent_layer_id: self.editing_context.current_parent_layer_id(),
+                    editing_clip_path: self.editing_context.clip_path(),
+                    pending_enter_clip: &mut scratch.pending_enter_clip,
+                    pending_exit_clip: &mut scratch.pending_exit_clip,
+                    pending_exit_to_depth: &mut scratch.pending_exit_to_depth,
+                    active_layer_id: &mut self.active_layer_id,
+                    tool_state: &mut self.tool_state,
+                    pending_actions: &mut scratch.pending_actions,
+                    draw_simplify_mode: &mut self.draw_simplify_mode,
+                    rdp_tolerance: &mut self.rdp_tolerance,
+                    schneider_max_error: &mut self.schneider_max_error,
+                    raster_settings: &mut self.raster_settings,
+                    audio_controller: self.audio_controller.as_ref(),
+                    clip_snapshot: self.audio_controller.as_ref().map(|arc| {
+                        arc.lock().unwrap().clip_snapshot()
+                    }),
+                    audio_input_opener: &mut self.audio_input,
+                    audio_input_stream: &mut self.audio_input_stream,
+                    audio_buffer_size: self.audio_buffer_size,
+                    video_manager: &self.video_manager,
+                    playback_time: &mut self.playback_time,
+                    is_playing: &mut self.is_playing,
+                    is_recording: &mut self.is_recording,
+                    metronome_enabled: &mut self.metronome_enabled,
+                    count_in_enabled: &mut self.count_in_enabled,
+                    recording_clips: &mut self.recording_clips,
+                    recording_start_time: &mut self.recording_start_time,
+                    recording_layer_ids: &mut self.recording_layer_ids,
+                    dragging_asset: &mut self.dragging_asset,
+                    stroke_width: &mut self.stroke_width,
+                    fill_enabled: &mut self.fill_enabled,
+                    snap_enabled: &mut self.snap_enabled,
+                    paint_bucket_gap_tolerance: &mut self.paint_bucket_gap_tolerance,
+                    polygon_sides: &mut self.polygon_sides,
+                    layer_to_track_map: &self.layer_to_track_map,
+                    clip_instance_to_backend_map: &self.clip_instance_to_backend_map,
+                    midi_event_cache: &mut self.midi_event_cache,
+                    audio_pools_with_new_waveforms: &self.audio_pools_with_new_waveforms,
+                    raw_audio_cache: &self.raw_audio_cache,
+                    waveform_gpu_dirty: &mut self.waveform_gpu_dirty,
+                    waveform_minmax_pools: &self.waveform_minmax_pools,
+                    raster_fault_requests: &self.raster_fault_requests,
+                    effect_to_load: &mut self.effect_to_load,
+                    effect_thumbnail_requests: &mut scratch.effect_thumbnail_requests,
+                    effect_thumbnail_cache: self.effect_thumbnail_generator.as_ref()
+                        .map(|g| g.thumbnail_cache())
+                        .unwrap_or(&scratch.empty_thumbnail_cache),
+                    effect_thumbnails_to_invalidate: &mut self.effect_thumbnails_to_invalidate,
+                    webcam_frame: self.webcam_frame.clone(),
+                    webcam_record_command: &mut self.webcam_record_command,
+                    target_format: self.target_format,
+                    pending_menu_actions: &mut scratch.pending_menu_actions,
+                    clipboard_manager: &mut self.clipboard_manager,
+                    input_level: self.input_level,
+                    output_level: self.output_level,
+                    track_levels: &self.track_levels,
+                    track_to_layer_map: &self.track_to_layer_map,
+                    waveform_stereo: self.config.waveform_stereo,
+                    project_generation: &mut self.project_generation,
+                    graph_topology_generation: &mut self.graph_topology_generation,
+                    script_to_edit: &mut self.script_to_edit,
+                    script_saved: &mut self.script_saved,
+                    pending_region_cut_base: &mut self.pending_region_cut_base,
+                    region_select_mode: &mut self.region_select_mode,
+                    lasso_mode: &mut self.lasso_mode,
+                    pending_graph_loads: &self.pending_graph_loads,
+                    clipboard_consumed: &mut scratch.clipboard_consumed,
+                    keymap: &self.keymap,
+                    pending_node_group: &mut self.pending_node_group,
+                    pending_node_ungroup: &mut self.pending_node_ungroup,
+                    #[cfg(debug_assertions)]
+                    test_mode: &mut self.test_mode,
+                    #[cfg(debug_assertions)]
+                    synthetic_input: &mut scratch.synthetic_input,
+                    brush_preview_pixels: &self.brush_preview_pixels,
+                },
+                pane_instances: &mut self.pane_instances,
+            },
+            current_layout: &mut self.current_layout,
+            drag_state: &mut self.drag_state,
+            hovered_divider: &mut self.hovered_divider,
+            selected_pane: &mut self.selected_pane,
+            split_preview_mode: &mut self.split_preview_mode,
+            mobile_state: &mut self.mobile_state,
+        }
+    }
 }
 
 /// Find which GroupLayer (if any) contains the given layer as a direct child.

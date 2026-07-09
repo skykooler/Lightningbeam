@@ -351,6 +351,29 @@ impl VectorGraph {
         }
     }
 
+    /// Free any vertex no longer referenced by a non-deleted edge (e.g. after deleting a shape's
+    /// edges), so stale vertices don't linger as snap targets.
+    pub fn gc_isolated_vertices(&mut self) {
+        let mut referenced = vec![false; self.vertices.len()];
+        for e in &self.edges {
+            if e.deleted {
+                continue;
+            }
+            for v in e.vertices.iter() {
+                if !v.is_none() {
+                    referenced[v.idx()] = true;
+                }
+            }
+        }
+        let to_free: Vec<VertexId> = (0..self.vertices.len())
+            .filter(|&i| !self.vertices[i].deleted && !referenced[i])
+            .map(|i| VertexId(i as u32))
+            .collect();
+        for vid in to_free {
+            self.free_vertex(vid);
+        }
+    }
+
     // -------------------------------------------------------------------
     // Fill / hit-test queries
     // -------------------------------------------------------------------

@@ -519,6 +519,73 @@ impl Theme {
         self.resolve(context, ctx).border_color.unwrap_or(fallback)
     }
 
+    /// Look up a CSS custom property (variable) as a color, respecting the active light/dark mode.
+    /// `name` is given without the leading `--` (e.g. `"bg-surface"`). Dark overrides light.
+    pub fn var(&self, name: &str, ctx: &egui::Context) -> Option<egui::Color32> {
+        let mut vars = self.light_variables.clone();
+        if self.is_dark(ctx) {
+            vars.extend(self.dark_variables.clone());
+        }
+        let raw = vars.get(name)?.clone();
+        parse_color_value(&raw, &vars)
+    }
+
+    /// Apply the theme's core palette variables to egui's global `Visuals`, so the standard egui
+    /// widgets (buttons, text fields, dialogs, pane chrome) share the same colors as the mobile UI.
+    /// Cheap enough to call every frame; respects the active light/dark mode.
+    pub fn apply_to_egui(&self, ctx: &egui::Context) {
+        let is_dark = self.is_dark(ctx);
+        let v = |name: &str, fb: egui::Color32| self.var(name, ctx).unwrap_or(fb);
+        let g = |n: u8| egui::Color32::from_gray(n);
+
+        let text = v("text-primary", if is_dark { g(230) } else { g(20) });
+        let bg_app = v("bg-app", if is_dark { g(42) } else { g(224) });
+        let panel = v("bg-panel", bg_app);
+        let surface = v("bg-surface", panel);
+        let raised = v("bg-surface-raised", surface);
+        let sunken = v("bg-surface-sunken", bg_app);
+        let border = v("border-default", if is_dark { g(68) } else { g(153) });
+        let accent = v("accent", egui::Color32::from_rgb(0x39, 0x6c, 0xd8));
+        let on_accent = v("text-on-accent", egui::Color32::WHITE);
+        let stroke = |c: egui::Color32| egui::Stroke::new(1.0, c);
+
+        let mut visuals = if is_dark { egui::Visuals::dark() } else { egui::Visuals::light() };
+        visuals.panel_fill = panel;
+        visuals.window_fill = panel;
+        visuals.window_stroke = stroke(border);
+        visuals.extreme_bg_color = sunken;
+        visuals.faint_bg_color = surface;
+        visuals.override_text_color = Some(text);
+        visuals.hyperlink_color = accent;
+
+        let w = &mut visuals.widgets;
+        w.noninteractive.bg_fill = panel;
+        w.noninteractive.weak_bg_fill = panel;
+        w.noninteractive.bg_stroke = stroke(border);
+        w.noninteractive.fg_stroke = stroke(text);
+        w.inactive.bg_fill = surface;
+        w.inactive.weak_bg_fill = surface;
+        w.inactive.bg_stroke = stroke(border);
+        w.inactive.fg_stroke = stroke(text);
+        w.hovered.bg_fill = raised;
+        w.hovered.weak_bg_fill = raised;
+        w.hovered.bg_stroke = stroke(border);
+        w.hovered.fg_stroke = stroke(text);
+        w.active.bg_fill = accent;
+        w.active.weak_bg_fill = accent;
+        w.active.bg_stroke = stroke(accent);
+        w.active.fg_stroke = stroke(on_accent);
+        w.open.bg_fill = surface;
+        w.open.weak_bg_fill = surface;
+        w.open.bg_stroke = stroke(border);
+        w.open.fg_stroke = stroke(text);
+
+        visuals.selection.bg_fill = accent.linear_multiply(0.4);
+        visuals.selection.stroke = stroke(on_accent);
+
+        ctx.set_visuals(visuals);
+    }
+
     /// Convenience: resolve and extract a dimension with fallback
     #[allow(dead_code)]
     pub fn dimension(&self, context: &[&str], ctx: &egui::Context, property: &str, fallback: f32) -> f32 {

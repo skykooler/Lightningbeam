@@ -24,6 +24,11 @@ vello = { git = "https://github.com/linebender/vello", branch = "main" }
 wgpu = { version = "27", features = ["vulkan", "metal", "gles"] }
 kurbo = { version = "0.12", features = ["serde"] }
 peniko = "0.5"
+# Text layout/shaping for text layers. Pinned to git main to match the peniko 0.5
+# / skrifa 0.37 that vello's git-main resolves to — a released parley still pins
+# peniko 0.4, which would split `peniko::Font` into two incompatible types at the
+# vello `draw_glyphs` boundary.
+parley = { git = "https://github.com/linebender/parley", branch = "main" }
 
 # Windowing
 winit = "0.30"
@@ -77,6 +82,15 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.cpal]
 opt-level = 2
+
+# GIF export: NeuQuant palette quantization is tight numeric loops that are punishingly slow
+# unoptimized (10–30× in debug). Optimize the encoder crates even in dev builds.
+[profile.dev.package.gif]
+opt-level = 3
+[profile.dev.package.color_quant]
+opt-level = 3
+[profile.dev.package.weezl]
+opt-level = 3
 
 # Use local egui fork with ibus/Wayland text input fix
 [patch.crates-io]

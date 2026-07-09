@@ -101,6 +101,7 @@ impl Action for TransformClipInstancesAction {
             AnyLayer::Effect(_) => {}
             AnyLayer::Group(_) => {}
             AnyLayer::Raster(_) => {}
+            AnyLayer::Text(_) => {}
         }
         Ok(())
     }
@@ -140,6 +141,7 @@ impl Action for TransformClipInstancesAction {
             AnyLayer::Effect(_) => {}
             AnyLayer::Group(_) => {}
             AnyLayer::Raster(_) => {}
+            AnyLayer::Text(_) => {}
         }
         Ok(())
     }

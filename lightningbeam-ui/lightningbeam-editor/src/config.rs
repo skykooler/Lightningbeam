@@ -70,6 +70,14 @@ pub struct AppConfig {
     /// sooner; larger = smaller pyramid, wider re-decode span. Default 256.
     #[serde(default = "defaults::waveform_floor_samples_per_texel")]
     pub waveform_floor_samples_per_texel: u32,
+
+    /// Last-used audio-export "Artist" tag, remembered so it prefills next time.
+    #[serde(default)]
+    pub last_audio_artist: String,
+
+    /// Last-used audio-export "Album" tag, remembered so it prefills next time.
+    #[serde(default)]
+    pub last_audio_album: String,
 }
 
 impl Default for AppConfig {
@@ -90,6 +98,8 @@ impl Default for AppConfig {
             keybindings: KeybindingConfig::default(),
             large_media_default: LargeMediaMode::default(),
             waveform_floor_samples_per_texel: defaults::waveform_floor_samples_per_texel(),
+            last_audio_artist: String::new(),
+            last_audio_album: String::new(),
         }
     }
 }

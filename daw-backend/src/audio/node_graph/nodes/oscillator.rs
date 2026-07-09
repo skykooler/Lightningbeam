@@ -164,11 +164,11 @@ impl AudioNode for OscillatorNode {
             output[frame * 2] = sample;       // Left
             output[frame * 2 + 1] = sample;   // Right
 
-            // Update phase once per frame
-            self.phase += freq_mod / sample_rate_f32;
-            if self.phase >= 1.0 {
-                self.phase -= 1.0;
-            }
+            // Update phase once per frame. `rem_euclid(1.0)` gives a numerically stable
+            // wraparound into [0, 1): repeated conditional subtraction accumulates f32
+            // rounding error over long-held notes (timbre drift), and FM can drive
+            // `freq_mod` negative, which a one-sided `if >= 1.0` wouldn't wrap at all.
+            self.phase = (self.phase + freq_mod / sample_rate_f32).rem_euclid(1.0);
         }
     }
 

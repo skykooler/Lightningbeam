@@ -242,6 +242,21 @@ fn thumbnail_media_id(clip_id: Uuid) -> Uuid {
     Uuid::from_u128(clip_id.as_u128() ^ SENTINEL)
 }
 
+/// Content-hash id for an embedded font row, so identical font files dedupe to one
+/// row regardless of which / how many text layers use them. A 128-bit id is built
+/// from two salted 64-bit hashes of the bytes.
+fn font_media_id(bytes: &[u8]) -> Uuid {
+    use std::hash::{Hash, Hasher};
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    bytes.hash(&mut h1);
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    0xF0E1_D2C3_B4A5_9687u64.hash(&mut h2);
+    bytes.hash(&mut h2);
+    let hi = h1.finish() as u128;
+    let lo = h2.finish() as u128;
+    Uuid::from_u128((hi << 64) | lo)
+}
+
 /// Derived id for a raster keyframe's low-res proxy row (distinct from the keyframe's
 /// own full-res `Raster` row, which is keyed by the raw keyframe id).
 fn raster_proxy_media_id(kf_id: Uuid) -> Uuid {
@@ -384,16 +399,29 @@ pub fn save_beam(
     }
 
     // --- raster keyframes -> media rows (PNG), keyed by keyframe id ---
-    // (Phase 0 writes all resident frames each save; a disk-dirty flag to skip
-    // unchanged frames in place is deferred to Phase 3.)
+    // Incremental: only (re)encode a keyframe whose pixels changed since the last save.
+    // `kf.dirty` means "current pixels are not yet in the container" (set on any edit,
+    // cleared on a successful save — see main.rs); a clean frame already stored is kept
+    // in place, skipping the PNG re-encode of every resident frame on every save.
     // Walk ALL layers (incl. nested in groups/clips) so nested raster keyframes
     // are persisted too, and so `live_media` covers them — matching the load path,
     // which arms `needs_fault_in` recursively. Top-level-only projects are unaffected.
     let mut raster_count = 0usize;
+    let mut raster_skipped = 0usize;
     for layer in document.all_layers() {
         if let crate::layer::AnyLayer::Raster(rl) = layer {
             for kf in &rl.keyframes {
                 if !kf.raw_pixels.is_empty() {
+                    // Clean + already stored → keep the existing full + proxy rows untouched.
+                    if !kf.dirty && txn.media_exists(kf.id)? {
+                        live_media.insert(kf.id);
+                        let proxy_id = raster_proxy_media_id(kf.id);
+                        if txn.media_exists(proxy_id)? {
+                            live_media.insert(proxy_id);
+                        }
+                        raster_skipped += 1;
+                        continue;
+                    }
                     let img =
                         crate::brush_engine::image_from_raw(kf.raw_pixels.clone(), kf.width, kf.height);
                     match crate::brush_engine::encode_png(&img) {
@@ -535,6 +563,32 @@ pub fn save_beam(
     }
     let _ = image_count;
 
+    // --- embedded fonts -> media rows (Font), keyed by content hash so identical
+    //     fonts dedupe. Embed every non-bundled family used by a text layer so the
+    //     document renders faithfully on machines lacking the font. The bundled
+    //     three ship with the app and are never embedded. ---
+    {
+        use crate::layer::AnyLayer;
+        let mut families: HashSet<String> = HashSet::new();
+        for layer in document.all_layers() {
+            if let AnyLayer::Text(tl) = layer {
+                let fam = &tl.content.font_family;
+                if !fam.is_empty() && !crate::fonts::is_bundled(fam) {
+                    families.insert(fam.clone());
+                }
+            }
+        }
+        for fam in families {
+            if let Some(bytes) = crate::fonts::family_font_bytes(&fam) {
+                let id = font_media_id(&bytes);
+                if !txn.media_exists(id)? {
+                    txn.put_media_packed(id, MediaKind::Font, &fam, &bytes, MediaMeta::default())?;
+                }
+                live_media.insert(id);
+            }
+        }
+    }
+
     // --- orphan cleanup: drop media for removed clips/keyframes ---
     let removed = txn.retain_media(&live_media)?;
 
@@ -567,9 +621,10 @@ pub fn save_beam(
     }
 
     eprintln!(
-        "📊 [SAVE_BEAM] ✅ Saved {} audio + {} raster media, {} orphans removed, in {:.2}ms",
+        "📊 [SAVE_BEAM] ✅ Saved {} audio + {} raster media ({} unchanged frames skipped), {} orphans removed, in {:.2}ms",
         audio_pool_entries.len(),
         raster_count,
+        raster_skipped,
         removed,
         fn_start.elapsed().as_secs_f64() * 1000.0
     );
@@ -598,6 +653,17 @@ fn load_beam_sqlite(path: &Path) -> Result<LoadedProject, String> {
     eprintln!("📊 [LOAD_BEAM] Starting load_beam() (SQLite container)...");
 
     let archive = BeamArchive::open(path)?;
+
+    // Register document-embedded fonts into the runtime font collection so text
+    // layers referencing them render faithfully even if the host lacks the font.
+    if let Ok(font_ids) = archive.media_ids_of_kind(MediaKind::Font) {
+        for id in font_ids {
+            if let Ok(bytes) = archive.read_media_full(id) {
+                crate::fonts::register_embedded(bytes);
+            }
+        }
+    }
+
     let json = archive.get_project_json()?;
     let beam_project: BeamProject = serde_json::from_str(&json)
         .map_err(|e| format!("Failed to deserialize project.json: {}", e))?;

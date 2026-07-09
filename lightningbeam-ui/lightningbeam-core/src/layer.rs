@@ -9,6 +9,7 @@ use crate::vector_graph::VectorGraph;
 use crate::effect_layer::EffectLayer;
 use crate::object::ShapeInstance;
 use crate::raster_layer::RasterLayer;
+use crate::text_layer::TextLayer;
 use crate::shape::Shape;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -31,6 +32,8 @@ pub enum LayerType {
     Group,
     /// Raster pixel-buffer painting layer
     Raster,
+    /// Text layer (a single editable text box)
+    Text,
 }
 
 /// Common trait for all layer types
@@ -866,6 +869,7 @@ impl GroupLayer {
                 AnyLayer::Effect(l) => &l.clip_instances,
                 AnyLayer::Group(_) => &[], // no nested groups
                 AnyLayer::Raster(_) => &[], // raster layers have no clip instances
+                AnyLayer::Text(_) => &[], // raster layers have no clip instances
                 };
             for ci in instances {
                 result.push((child_id, ci));
@@ -884,6 +888,7 @@ pub enum AnyLayer {
     Effect(EffectLayer),
     Group(GroupLayer),
     Raster(RasterLayer),
+    Text(TextLayer),
 }
 
 impl LayerTrait for AnyLayer {
@@ -895,6 +900,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.id(),
             AnyLayer::Group(l) => l.id(),
             AnyLayer::Raster(l) => l.id(),
+            AnyLayer::Text(l) => l.id(),
         }
     }
 
@@ -906,6 +912,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.name(),
             AnyLayer::Group(l) => l.name(),
             AnyLayer::Raster(l) => l.name(),
+            AnyLayer::Text(l) => l.name(),
         }
     }
 
@@ -917,6 +924,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.set_name(name),
             AnyLayer::Group(l) => l.set_name(name),
             AnyLayer::Raster(l) => l.set_name(name),
+            AnyLayer::Text(l) => l.set_name(name),
         }
     }
 
@@ -928,6 +936,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.has_custom_name(),
             AnyLayer::Group(l) => l.has_custom_name(),
             AnyLayer::Raster(l) => l.has_custom_name(),
+            AnyLayer::Text(l) => l.has_custom_name(),
         }
     }
 
@@ -939,6 +948,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.set_has_custom_name(custom),
             AnyLayer::Group(l) => l.set_has_custom_name(custom),
             AnyLayer::Raster(l) => l.set_has_custom_name(custom),
+            AnyLayer::Text(l) => l.set_has_custom_name(custom),
         }
     }
 
@@ -950,6 +960,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.visible(),
             AnyLayer::Group(l) => l.visible(),
             AnyLayer::Raster(l) => l.visible(),
+            AnyLayer::Text(l) => l.visible(),
         }
     }
 
@@ -961,6 +972,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.set_visible(visible),
             AnyLayer::Group(l) => l.set_visible(visible),
             AnyLayer::Raster(l) => l.set_visible(visible),
+            AnyLayer::Text(l) => l.set_visible(visible),
         }
     }
 
@@ -972,6 +984,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.opacity(),
             AnyLayer::Group(l) => l.opacity(),
             AnyLayer::Raster(l) => l.opacity(),
+            AnyLayer::Text(l) => l.opacity(),
         }
     }
 
@@ -983,6 +996,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.set_opacity(opacity),
             AnyLayer::Group(l) => l.set_opacity(opacity),
             AnyLayer::Raster(l) => l.set_opacity(opacity),
+            AnyLayer::Text(l) => l.set_opacity(opacity),
         }
     }
 
@@ -994,6 +1008,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.volume(),
             AnyLayer::Group(l) => l.volume(),
             AnyLayer::Raster(l) => l.volume(),
+            AnyLayer::Text(l) => l.volume(),
         }
     }
 
@@ -1005,6 +1020,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.set_volume(volume),
             AnyLayer::Group(l) => l.set_volume(volume),
             AnyLayer::Raster(l) => l.set_volume(volume),
+            AnyLayer::Text(l) => l.set_volume(volume),
         }
     }
 
@@ -1016,6 +1032,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.muted(),
             AnyLayer::Group(l) => l.muted(),
             AnyLayer::Raster(l) => l.muted(),
+            AnyLayer::Text(l) => l.muted(),
         }
     }
 
@@ -1027,6 +1044,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.set_muted(muted),
             AnyLayer::Group(l) => l.set_muted(muted),
             AnyLayer::Raster(l) => l.set_muted(muted),
+            AnyLayer::Text(l) => l.set_muted(muted),
         }
     }
 
@@ -1038,6 +1056,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.soloed(),
             AnyLayer::Group(l) => l.soloed(),
             AnyLayer::Raster(l) => l.soloed(),
+            AnyLayer::Text(l) => l.soloed(),
         }
     }
 
@@ -1049,6 +1068,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.set_soloed(soloed),
             AnyLayer::Group(l) => l.set_soloed(soloed),
             AnyLayer::Raster(l) => l.set_soloed(soloed),
+            AnyLayer::Text(l) => l.set_soloed(soloed),
         }
     }
 
@@ -1060,6 +1080,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.locked(),
             AnyLayer::Group(l) => l.locked(),
             AnyLayer::Raster(l) => l.locked(),
+            AnyLayer::Text(l) => l.locked(),
         }
     }
 
@@ -1071,6 +1092,7 @@ impl LayerTrait for AnyLayer {
             AnyLayer::Effect(l) => l.set_locked(locked),
             AnyLayer::Group(l) => l.set_locked(locked),
             AnyLayer::Raster(l) => l.set_locked(locked),
+            AnyLayer::Text(l) => l.set_locked(locked),
         }
     }
 }
@@ -1085,6 +1107,7 @@ impl AnyLayer {
             AnyLayer::Effect(l) => &l.layer,
             AnyLayer::Group(l) => &l.layer,
             AnyLayer::Raster(l) => &l.layer,
+            AnyLayer::Text(l) => &l.layer,
         }
     }
 
@@ -1097,6 +1120,7 @@ impl AnyLayer {
             AnyLayer::Effect(l) => &mut l.layer,
             AnyLayer::Group(l) => &mut l.layer,
             AnyLayer::Raster(l) => &mut l.layer,
+            AnyLayer::Text(l) => &mut l.layer,
         }
     }
 

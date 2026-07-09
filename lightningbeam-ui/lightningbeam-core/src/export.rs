@@ -51,6 +51,54 @@ impl AudioFormat {
     }
 }
 
+/// Optional tag metadata written into the exported audio file. Empty fields are omitted. FFmpeg
+/// maps these standard keys to each container's native tags: ID3v2 (MP3), iTunes/MP4 atoms (M4A),
+/// Vorbis comments (FLAC), and RIFF INFO (WAV).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AudioMetadata {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub genre: String,
+    pub comment: String,
+    /// Year or full date (written to the `date` tag).
+    pub year: String,
+    /// Track number (written to the `track` tag).
+    pub track: String,
+}
+
+impl AudioMetadata {
+    /// True when no field is set (so no metadata need be written).
+    pub fn is_empty(&self) -> bool {
+        self.title.is_empty()
+            && self.artist.is_empty()
+            && self.album.is_empty()
+            && self.genre.is_empty()
+            && self.comment.is_empty()
+            && self.year.is_empty()
+            && self.track.is_empty()
+    }
+
+    /// The set (ffmpeg-key, value) pairs for non-empty fields, in a stable order.
+    pub fn pairs(&self) -> Vec<(&'static str, &str)> {
+        let mut v = Vec::new();
+        for (key, val) in [
+            ("title", &self.title),
+            ("artist", &self.artist),
+            ("album", &self.album),
+            ("genre", &self.genre),
+            ("comment", &self.comment),
+            ("date", &self.year),
+            ("track", &self.track),
+        ] {
+            if !val.is_empty() {
+                v.push((key, val.as_str()));
+            }
+        }
+        v
+    }
+}
+
 /// Audio export settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioExportSettings {
@@ -79,6 +127,10 @@ pub struct AudioExportSettings {
 
     /// Project BPM (for beat-position scheduling during export)
     pub bpm: f64,
+
+    /// Tag metadata (title/artist/…) written into the file. Empty = none.
+    #[serde(default)]
+    pub metadata: AudioMetadata,
 }
 
 impl Default for AudioExportSettings {
@@ -92,6 +144,7 @@ impl Default for AudioExportSettings {
             start_time: 0.0,
             end_time: 60.0,
             bpm: 120.0,
+            metadata: AudioMetadata::default(),
         }
     }
 }
@@ -543,6 +596,82 @@ impl ImageExportSettings {
     }
 }
 
+// ── Animated GIF export ──────────────────────────────────────────────────────
+
+/// Settings for exporting an animated GIF (multi-frame, palette-quantized, no audio).
+///
+/// GIF stores a per-frame delay in centiseconds (1/100 s), so effective frame rate is quantized to
+/// whole centiseconds — [`Self::frame_delay_ms`] rounds accordingly and the dialog offers sensible
+/// GIF rates. Each frame is quantized to a 256-color palette by the encoder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GifExportSettings {
+    /// Output width in pixels (None = use document width).
+    pub width: Option<u32>,
+    /// Output height in pixels (None = use document height).
+    pub height: Option<u32>,
+    /// Frame rate (fps). Snapped to whole-centisecond delays at encode time.
+    pub framerate: f64,
+    /// Loop the animation forever (GIF `NETSCAPE2.0` infinite loop). False = play once.
+    pub loop_forever: bool,
+    /// Preserve full alpha as GIF 1-bit transparency (pixels below the alpha threshold become the
+    /// transparent index). When false, frames are composited onto an opaque background first.
+    pub transparency: bool,
+    /// How the document is fit into the output frame when aspect ratios differ (default Letterbox).
+    #[serde(default)]
+    pub fit: ExportFitMode,
+    /// Start time in seconds.
+    pub start_time: f64,
+    /// End time in seconds.
+    pub end_time: f64,
+}
+
+impl Default for GifExportSettings {
+    fn default() -> Self {
+        Self {
+            width: None,
+            height: None,
+            framerate: 15.0,
+            loop_forever: true,
+            transparency: false,
+            fit: ExportFitMode::Letterbox,
+            start_time: 0.0,
+            end_time: 5.0,
+        }
+    }
+}
+
+impl GifExportSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(w) = self.width  { if w == 0 { return Err("Width must be > 0".into());  } }
+        if let Some(h) = self.height { if h == 0 { return Err("Height must be > 0".into()); } }
+        if self.framerate <= 0.0 {
+            return Err("Framerate must be greater than 0".into());
+        }
+        if self.start_time < 0.0 {
+            return Err("Start time cannot be negative".into());
+        }
+        if self.end_time <= self.start_time {
+            return Err("End time must be greater than start time".into());
+        }
+        Ok(())
+    }
+
+    /// Duration in seconds.
+    pub fn duration(&self) -> f64 { self.end_time - self.start_time }
+
+    /// Total number of frames to render.
+    pub fn total_frames(&self) -> usize {
+        (self.duration() * self.framerate).ceil().max(1.0) as usize
+    }
+
+    /// Per-frame delay in milliseconds, from the framerate (GIF stores this at centisecond
+    /// resolution, so the effective rate is snapped to the nearest 10 ms, min 10 ms).
+    pub fn frame_delay_ms(&self) -> u32 {
+        let ms = 1000.0 / self.framerate;
+        ((ms / 10.0).round().max(1.0) * 10.0) as u32
+    }
+}
+
 /// Progress updates during export
 #[derive(Debug, Clone)]
 pub enum ExportProgress {
@@ -726,6 +855,33 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(settings.total_frames(), 300);
+    }
+
+    #[test]
+    fn test_gif_frame_delay_and_frames() {
+        // Frame rates that map to clean centisecond delays.
+        let mk = |fps: f64| GifExportSettings { framerate: fps, ..Default::default() };
+        assert_eq!(mk(10.0).frame_delay_ms(), 100); // 100 ms
+        assert_eq!(mk(20.0).frame_delay_ms(), 50);  // 50 ms
+        assert_eq!(mk(50.0).frame_delay_ms(), 20);  // 20 ms
+        // 15 fps = 66.6 ms rounds to 70 ms (7 cs); 25 fps = 40 ms.
+        assert_eq!(mk(15.0).frame_delay_ms(), 70);
+        assert_eq!(mk(25.0).frame_delay_ms(), 40);
+        // Very high fps clamps to the 10 ms minimum (1 cs).
+        assert_eq!(mk(1000.0).frame_delay_ms(), 10);
+
+        let settings = GifExportSettings { framerate: 20.0, start_time: 0.0, end_time: 3.0, ..Default::default() };
+        assert_eq!(settings.total_frames(), 60);
+    }
+
+    #[test]
+    fn test_gif_validate() {
+        let mut s = GifExportSettings::default();
+        assert!(s.validate().is_ok());
+        s.framerate = 0.0;
+        assert!(s.validate().is_err());
+        s = GifExportSettings { start_time: 5.0, end_time: 2.0, ..Default::default() };
+        assert!(s.validate().is_err());
     }
 
     #[test]

@@ -122,6 +122,7 @@ impl VectorClip {
                 AnyLayer::Effect(el) => &el.clip_instances,
                 AnyLayer::Group(_) => &[],
                 AnyLayer::Raster(_) => &[],
+                AnyLayer::Text(_) => &[],
             };
             for ci in clip_instances {
                 // Compute end position of this clip instance in beats
@@ -223,6 +224,17 @@ impl VectorClip {
                         Some(existing) => existing.union(transformed_bounds),
                     });
                 }
+            } else if let AnyLayer::Text(text_layer) = &layer_node.data {
+                // Text layers contribute their box bounds (so a text-only clip is
+                // selectable/draggable, not a degenerate point).
+                let r = Rect::from_origin_size(
+                    text_layer.box_origin,
+                    (text_layer.box_width, text_layer.box_height),
+                );
+                combined_bounds = Some(match combined_bounds {
+                    None => r,
+                    Some(existing) => existing.union(r),
+                });
             }
         }
 

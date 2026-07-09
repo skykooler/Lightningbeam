@@ -58,6 +58,7 @@ impl Action for MoveClipInstancesAction {
                                     AnyLayer::Effect(el) => &el.clip_instances,
                                     AnyLayer::Group(_) => &[],
                                     AnyLayer::Raster(_) => &[],
+                                    AnyLayer::Text(_) => &[],
                                 };
 
                                 if let Some(instance) = clip_instances.iter().find(|ci| ci.id == *member_instance_id) {
@@ -97,6 +98,7 @@ impl Action for MoveClipInstancesAction {
                 AnyLayer::Effect(el) => &el.clip_instances,
                 AnyLayer::Group(_) => &[],
                 AnyLayer::Raster(_) => &[],
+                AnyLayer::Text(_) => &[],
             };
 
             let group: Vec<(Uuid, f64, f64)> = moves.iter().filter_map(|(id, old_start, _)| {
@@ -132,6 +134,7 @@ impl Action for MoveClipInstancesAction {
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
                 AnyLayer::Raster(_) => continue,
+                AnyLayer::Text(_) => continue,
             };
 
             // Update timeline_start for each clip instance
@@ -159,6 +162,7 @@ impl Action for MoveClipInstancesAction {
                 AnyLayer::Effect(el) => &mut el.clip_instances,
                 AnyLayer::Group(_) => continue,
                 AnyLayer::Raster(_) => continue,
+                AnyLayer::Text(_) => continue,
             };
 
             // Restore original timeline_start for each clip instance

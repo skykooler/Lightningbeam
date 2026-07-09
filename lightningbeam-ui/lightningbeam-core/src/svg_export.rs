@@ -232,8 +232,9 @@ use crate::vector_graph::{FillId, VectorGraph};
 use kurbo::{BezPath, PathEl, Rect, Shape};
 
 /// Serialize the document's **vector** content to a standalone SVG string, at document time `time`.
-/// Vector layers (and groups of them) only — raster/video/audio/effect layers are skipped (a later
-/// pass can rasterize them to `<image>`). Animation is a single static frame at `time`.
+/// Vector layers, groups of them, and text layers (as real glyph outlines) — raster/video/audio/
+/// effect layers are skipped (a later pass can rasterize them to `<image>`). Animation is a single
+/// static frame at `time`.
 pub fn document_to_svg(document: &Document, time: f64) -> String {
     let (w, h) = (document.width, document.height);
     let mut defs = String::new();
@@ -300,9 +301,134 @@ fn layer_to_svg(layer: &AnyLayer, time: f64, parent_opacity: f64, body: &mut Str
                 body.push_str("</g>");
             }
         }
+        AnyLayer::Text(tl) => text_layer_to_svg(tl, time, parent_opacity, body),
         // Raster/Video/Audio/Effect have no lossless vector representation — skipped this pass.
         _ => {}
     }
+}
+
+/// A skrifa outline pen that appends transformed glyph contours to an SVG path `d` string.
+///
+/// skrifa emits outline points in y-up pixel space (origin at the glyph baseline); this maps each
+/// point into document space: `x = gx + px + skew·py`, `y = gy − py` (Y flips, `skew` applies any
+/// synthetic-italic slant), where `(gx, gy)` is the glyph's document-space pen position.
+struct SvgOutlinePen<'a> {
+    gx: f64,
+    gy: f64,
+    skew: f64,
+    d: &'a mut String,
+}
+
+impl<'a> SvgOutlinePen<'a> {
+    fn map(&self, px: f32, py: f32) -> (f64, f64) {
+        let (px, py) = (px as f64, py as f64);
+        (self.gx + px + self.skew * py, self.gy - py)
+    }
+}
+
+impl skrifa::outline::OutlinePen for SvgOutlinePen<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.map(x, y);
+        self.d.push_str(&format!("M{x:.2} {y:.2}"));
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.map(x, y);
+        self.d.push_str(&format!("L{x:.2} {y:.2}"));
+    }
+    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
+        let (cx, cy) = self.map(cx, cy);
+        let (x, y) = self.map(x, y);
+        self.d.push_str(&format!("Q{cx:.2} {cy:.2} {x:.2} {y:.2}"));
+    }
+    fn curve_to(&mut self, c0x: f32, c0y: f32, c1x: f32, c1y: f32, x: f32, y: f32) {
+        let (c0x, c0y) = self.map(c0x, c0y);
+        let (c1x, c1y) = self.map(c1x, c1y);
+        let (x, y) = self.map(x, y);
+        self.d.push_str(&format!("C{c0x:.2} {c0y:.2} {c1x:.2} {c1y:.2} {x:.2} {y:.2}"));
+    }
+    fn close(&mut self) {
+        self.d.push('Z');
+    }
+}
+
+/// Append a text layer's glyphs to `body` as a single filled `<path>` of real glyph outlines
+/// (lossless — no font dependency in the SVG). Lays the text out with the same parley path the
+/// renderer uses, then extracts each glyph's outline with skrifa. Variable-font axis positions and
+/// synthetic-italic skew are honored; synthetic bold is not (rare).
+fn text_layer_to_svg(
+    tl: &crate::text_layer::TextLayer,
+    time: f64,
+    parent_opacity: f64,
+    body: &mut String,
+) {
+    use skrifa::MetadataProvider;
+
+    if !tl.layer.visible {
+        return;
+    }
+    let content = tl.content_at(time);
+    if content.text.is_empty() {
+        return;
+    }
+
+    let (ox, oy) = (tl.box_origin.x, tl.box_origin.y);
+    let mut d = String::new();
+
+    crate::fonts::with_layout(content, tl.box_width as f32, |layout| {
+        for line in layout.lines() {
+            for item in line.items() {
+                let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item else { continue };
+                let run = glyph_run.run();
+                let font = run.font();
+                let font_size = run.font_size();
+                let skew = run
+                    .synthesis()
+                    .skew()
+                    .map(|angle| (angle as f64).to_radians().tan())
+                    .unwrap_or(0.0);
+
+                let Ok(font_ref) = skrifa::FontRef::from_index(font.data.data(), font.index) else {
+                    continue;
+                };
+                let outlines = font_ref.outline_glyphs();
+
+                // Variable-font axis position for this run (empty for static fonts).
+                let coords: Vec<skrifa::instance::NormalizedCoord> = run
+                    .normalized_coords()
+                    .iter()
+                    .map(|&c| skrifa::instance::NormalizedCoord::from_bits(c))
+                    .collect();
+                let location = skrifa::instance::LocationRef::new(&coords);
+                let size = skrifa::instance::Size::new(font_size);
+
+                for g in glyph_run.positioned_glyphs() {
+                    let Some(glyph) = outlines.get(skrifa::GlyphId::new(g.id as u32)) else {
+                        continue;
+                    };
+                    let mut pen = SvgOutlinePen {
+                        gx: ox + g.x as f64,
+                        gy: oy + g.y as f64,
+                        skew,
+                        d: &mut d,
+                    };
+                    let settings = skrifa::outline::DrawSettings::unhinted(size, location);
+                    let _ = glyph.draw(settings, &mut pen);
+                }
+            }
+        }
+    });
+
+    if d.is_empty() {
+        return;
+    }
+
+    let [r, g, b, a] = content.color;
+    let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let fill_opacity = (a as f64 * parent_opacity * tl.layer.opacity).clamp(0.0, 1.0);
+    body.push_str(&format!(
+        r#"<path fill="rgb({},{},{})" fill-opacity="{:.4}" fill-rule="nonzero" d="{}"/>"#,
+        to_u8(r), to_u8(g), to_u8(b), fill_opacity, d
+    ));
 }
 
 /// Emit a vector graph's fills (`<path fill>`) and stroked edges (`<path stroke>`) into `body`,
@@ -487,5 +613,59 @@ mod export_tests {
         assert!(defs.is_empty(), "no gradients expected: {defs}");
         // 1 fill path + 3 stroked edges = 4 <path> elements.
         assert_eq!(body.matches("<path").count(), 4, "{body}");
+    }
+
+    #[test]
+    fn outline_pen_maps_yflip_and_skew() {
+        use skrifa::outline::OutlinePen;
+        let mut d = String::new();
+        {
+            let mut pen = SvgOutlinePen { gx: 10.0, gy: 100.0, skew: 0.0, d: &mut d };
+            pen.move_to(0.0, 0.0); // baseline origin → (10, 100)
+            pen.line_to(5.0, 20.0); // 20 up → y = 100 − 20 = 80
+            pen.close();
+        }
+        assert!(d.contains("M10.00 100.00"), "d={d}");
+        assert!(d.contains("L15.00 80.00"), "d={d}");
+        assert!(d.ends_with('Z'));
+
+        // Synthetic-italic skew shifts x right in proportion to height.
+        let mut d2 = String::new();
+        {
+            let mut pen = SvgOutlinePen { gx: 0.0, gy: 0.0, skew: 0.5, d: &mut d2 };
+            pen.move_to(0.0, 10.0); // x = 0 + 0.5·10 = 5, y = −10
+        }
+        assert!(d2.contains("M5.00 -10.00"), "d={d2}");
+    }
+
+    #[test]
+    fn text_layer_emits_real_glyph_outlines() {
+        use crate::text_layer::TextLayer;
+
+        let mut tl = TextLayer::new("t", Point::new(20.0, 60.0));
+        tl.content.text = "Hi".to_string();
+        tl.content.font_size = 48.0;
+        tl.content.color = [1.0, 0.0, 0.0, 1.0];
+
+        let mut body = String::new();
+        text_layer_to_svg(&tl, 0.0, 1.0, &mut body);
+
+        // Bundled fonts guarantee glyphs → a filled path with actual outline segments.
+        assert!(body.contains("<path"), "no path emitted: {body}");
+        assert!(body.contains(r#"fill="rgb(255,0,0)""#), "wrong fill: {body}");
+        assert!(
+            body.contains('C') || body.contains('Q') || body.contains('L'),
+            "path has no outline segments: {body}"
+        );
+        assert!(body.len() > 80, "suspiciously short path: {body}");
+    }
+
+    #[test]
+    fn empty_text_layer_emits_nothing() {
+        use crate::text_layer::TextLayer;
+        let tl = TextLayer::new("t", Point::new(0.0, 0.0)); // no text set
+        let mut body = String::new();
+        text_layer_to_svg(&tl, 0.0, 1.0, &mut body);
+        assert!(body.is_empty(), "empty text should emit nothing: {body}");
     }
 }

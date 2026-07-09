@@ -58,7 +58,8 @@ impl SampleImportDialog {
             .resizable(true)
             .collapsible(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .default_width(700.0)
+            .default_width(crate::mobile::dialog_width(ctx, 700.0))
+            .max_width(crate::mobile::dialog_width(ctx, 700.0))
             .default_height(500.0)
             .show(ctx, |ui| {
                 // Folder info

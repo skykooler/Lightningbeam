@@ -3,8 +3,8 @@
 //! This module provides the export orchestrator and progress tracking
 //! for exporting audio and video from the timeline.
 
-pub mod audio_exporter;
 pub mod dialog;
+pub mod gif_exporter;
 pub mod image_exporter;
 pub mod video_exporter;
 pub mod readback_pipeline;
@@ -13,7 +13,8 @@ pub mod cpu_yuv_converter;
 pub mod gpu_yuv;
 pub mod hdr_frame;
 
-use lightningbeam_core::export::{AudioExportSettings, ImageExportSettings, VideoExportSettings, ExportProgress};
+use lightningbeam_core::export::{AudioExportSettings, GifExportSettings, ImageExportSettings, VideoExportSettings, ExportProgress};
+use gif_exporter::GifFrameMessage;
 use lightningbeam_core::document::Document;
 use lightningbeam_core::renderer::ImageCache;
 use lightningbeam_core::video::VideoManager;
@@ -68,6 +69,11 @@ pub struct VideoExportState {
     readback_pipeline: Option<readback_pipeline::ReadbackPipeline>,
     /// CPU YUV converter for RGBA→YUV420p conversion
     cpu_yuv_converter: Option<cpu_yuv_converter::CpuYuvConverter>,
+    /// ProRes 422 export: forces the CPU (RGBA) readback path and converts to 10-bit 4:2:2 instead
+    /// of 8-bit 4:2:0. `true` only for `VideoCodec::ProRes422` (SDR).
+    prores: bool,
+    /// CPU RGBA→YUV422P10LE converter, used only on the ProRes path.
+    cpu_yuv422p10: Option<cpu_yuv_converter::CpuYuv422P10Converter>,
     /// Frames that have been submitted to GPU but not yet encoded
     frames_in_flight: usize,
     /// Next frame number to send to encoder (for ordering)
@@ -131,6 +137,38 @@ pub struct ExportOrchestrator {
 
     /// Single-frame image export state
     image_state: Option<ImageExportState>,
+
+    /// Animated GIF export state (frames rendered on the UI thread, encoded on `thread_handle`).
+    gif_state: Option<GifExportState>,
+}
+
+/// State for an in-progress animated GIF export. Frames are rendered + read back on the UI thread
+/// (one per `render_next_gif_frame` call) and streamed to the encoder thread over `frame_tx`.
+struct GifExportState {
+    /// Resolved pixel dimensions (after applying any width/height overrides).
+    width: u32,
+    height: u32,
+    /// Total frames to render.
+    total_frames: usize,
+    /// Next frame index to render (0-based).
+    next_frame: usize,
+    /// Document time (seconds) of frame 0.
+    start_time: f64,
+    /// Seconds between frames (1 / framerate).
+    frame_step: f64,
+    /// How the document is fit into the export frame.
+    fit: lightningbeam_core::export::ExportFitMode,
+    /// Preserve alpha as GIF transparency (else the encoder flattens onto black).
+    transparency: bool,
+    /// GPU resources allocated on the first render call, reused each frame.
+    gpu_resources: Option<video_exporter::ExportGpuResources>,
+    /// Output RGBA texture (kept separate from gpu_resources to avoid split-borrow issues).
+    output_texture: Option<wgpu::Texture>,
+    output_texture_view: Option<wgpu::TextureView>,
+    /// Staging buffer for synchronous GPU→CPU readback (reused each frame).
+    staging_buffer: Option<wgpu::Buffer>,
+    /// Sender to the encoder thread; dropped after the final frame to signal completion.
+    frame_tx: Option<Sender<GifFrameMessage>>,
 }
 
 /// State for parallel audio+video export
@@ -168,6 +206,7 @@ impl ExportOrchestrator {
             video_state: None,
             parallel_export: None,
             image_state: None,
+            gif_state: None,
         }
     }
 
@@ -250,7 +289,7 @@ impl ExportOrchestrator {
     /// unconsumed terminal message). Used to gate the UI poll loop so it doesn't run every
     /// repaint forever after an export finishes.
     pub fn has_pending_progress(&self) -> bool {
-        self.parallel_export.is_some() || self.image_state.is_some() || self.progress_rx.is_some()
+        self.parallel_export.is_some() || self.image_state.is_some() || self.gif_state.is_some() || self.progress_rx.is_some()
     }
 
     /// Poll progress for parallel video+audio export
@@ -534,6 +573,9 @@ impl ExportOrchestrator {
         }
         self.video_state = None;
         self.image_state = None;
+        // Dropping gif_state drops its frame sender, unblocking the encoder thread's recv() so it
+        // observes the cancel flag, removes the partial file, and exits.
+        self.gif_state = None;
         self.progress_rx = None;
         self.thread_handle = None;
     }
@@ -542,6 +584,7 @@ impl ExportOrchestrator {
     pub fn is_exporting(&self) -> bool {
         if self.parallel_export.is_some() { return true; }
         if self.image_state.is_some()     { return true; }
+        if self.gif_state.is_some()       { return true; }
         if let Some(handle) = &self.thread_handle {
             !handle.is_finished()
         } else {
@@ -719,6 +762,196 @@ impl ExportOrchestrator {
         result.map(|_| true)
     }
 
+    /// Enqueue an animated GIF export. Spawns the encoder thread now; call `render_next_gif_frame()`
+    /// from the egui update loop (where the wgpu device/queue are available) to render + stream each
+    /// frame to it.
+    pub fn start_gif_export(
+        &mut self,
+        settings: GifExportSettings,
+        output_path: PathBuf,
+        doc_width: u32,
+        doc_height: u32,
+    ) {
+        self.cancel_flag.store(false, Ordering::Relaxed);
+
+        let width  = settings.width.unwrap_or(doc_width).max(1);
+        let height = settings.height.unwrap_or(doc_height).max(1);
+        let total_frames = settings.total_frames();
+        let delay_ms = settings.frame_delay_ms();
+        let frame_step = 1.0 / settings.framerate;
+
+        let (progress_tx, progress_rx) = channel();
+        let (frame_tx, frame_rx) = channel();
+        self.progress_rx = Some(progress_rx);
+
+        let cancel_flag = Arc::clone(&self.cancel_flag);
+        let loop_forever = settings.loop_forever;
+        let transparency = settings.transparency;
+        let handle = std::thread::spawn(move || {
+            gif_exporter::run_gif_encoder(
+                frame_rx, output_path, width, height, total_frames, delay_ms,
+                loop_forever, transparency, progress_tx, cancel_flag,
+            );
+        });
+        self.thread_handle = Some(handle);
+
+        self.gif_state = Some(GifExportState {
+            width,
+            height,
+            total_frames,
+            next_frame: 0,
+            start_time: settings.start_time,
+            frame_step,
+            fit: settings.fit,
+            transparency,
+            gpu_resources: None,
+            output_texture: None,
+            output_texture_view: None,
+            staging_buffer: None,
+            frame_tx: Some(frame_tx),
+        });
+    }
+
+    /// Drive the animated GIF export: render + read back one frame per call and stream it to the
+    /// encoder thread. Returns `Ok(true)` while more frames remain (call again next egui frame),
+    /// `Ok(false)` once every frame has been sent (encoding then finishes on the background thread).
+    pub fn render_next_gif_frame(
+        &mut self,
+        document: &mut Document,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut vello::Renderer,
+        image_cache: &mut ImageCache,
+        video_manager: &Arc<std::sync::Mutex<VideoManager>>,
+        raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
+    ) -> Result<bool, String> {
+        if self.cancel_flag.load(Ordering::Relaxed) {
+            // Dropping frame_tx unblocks the encoder thread's recv() so it can clean up.
+            self.gif_state = None;
+            return Ok(false);
+        }
+
+        let state = match self.gif_state.as_mut() {
+            Some(s) => s,
+            None    => return Ok(false),
+        };
+
+        // All frames sent → drop the sender (signals the encoder to finalize) and finish.
+        if state.next_frame >= state.total_frames {
+            if let Some(tx) = state.frame_tx.take() {
+                let _ = tx.send(GifFrameMessage::Done);
+                drop(tx);
+            }
+            self.gif_state = None;
+            return Ok(false);
+        }
+
+        let w = state.width;
+        let h = state.height;
+        let fit = state.fit;
+        let timestamp = state.start_time + state.next_frame as f64 * state.frame_step;
+
+        if state.gpu_resources.is_none() {
+            state.gpu_resources = Some(video_exporter::ExportGpuResources::new(device, w, h));
+        }
+        if state.output_texture.is_none() {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label:           Some("gif_export_output"),
+                size:            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count:    1,
+                dimension:       wgpu::TextureDimension::D2,
+                format:          wgpu::TextureFormat::Rgba8Unorm,
+                usage:           wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats:    &[],
+            });
+            state.output_texture_view = Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
+            state.output_texture = Some(tex);
+        }
+
+        // Render the frame (transparency preserved through readback; the encoder flattens if needed).
+        {
+            let gpu = state.gpu_resources.as_mut().unwrap();
+            let output_view = state.output_texture_view.as_ref().unwrap();
+            let encoder = video_exporter::render_frame_to_gpu_rgba(
+                document,
+                timestamp,
+                w, h,
+                device, queue, renderer, image_cache, video_manager,
+                gpu,
+                output_view,
+                None, // no floating raster selection during export
+                state.transparency,
+                raster_store,
+                true, // GIF export composites on the shared device
+                fit,
+            )?;
+            queue.submit(Some(encoder.finish()));
+        }
+
+        // Synchronous readback (wgpu requires bytes_per_row aligned to 256).
+        let align         = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let bytes_per_row = (w * 4 + align - 1) / align * align;
+        if state.staging_buffer.is_none() {
+            state.staging_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label:              Some("gif_export_staging"),
+                size:               (bytes_per_row * h) as u64,
+                usage:              wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }));
+        }
+        let staging = state.staging_buffer.as_ref().unwrap();
+
+        let mut copy_enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("gif_export_copy"),
+        });
+        let output_tex = state.output_texture.as_ref().unwrap();
+        copy_enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture:   output_tex,
+                mip_level: 0,
+                origin:    wgpu::Origin3d::ZERO,
+                aspect:    wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset:         0,
+                    bytes_per_row:  Some(bytes_per_row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        queue.submit(Some(copy_enc.finish()));
+
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+
+        let pixels: Vec<u8> = {
+            let mapped = slice.get_mapped_range();
+            let mut out = Vec::with_capacity((w * h * 4) as usize);
+            for row in 0..h {
+                let start = (row * bytes_per_row) as usize;
+                out.extend_from_slice(&mapped[start..start + (w * 4) as usize]);
+            }
+            out
+        };
+        staging.unmap();
+
+        let frame_num = state.next_frame;
+        if let Some(tx) = state.frame_tx.as_ref() {
+            // If the encoder thread died, stop — its dropped receiver returns an error here.
+            if tx.send(GifFrameMessage::Frame { frame_num, pixels }).is_err() {
+                self.gif_state = None;
+                return Ok(false);
+            }
+        }
+        state.next_frame += 1;
+        Ok(true)
+    }
+
     /// Wait for the export to complete
     ///
     /// This blocks until the export thread finishes.
@@ -774,6 +1007,12 @@ impl ExportOrchestrator {
             start_time: daw_backend::Seconds(settings.start_time),
             end_time: daw_backend::Seconds(settings.end_time),
             tempo_map: daw_backend::TempoMap::constant(settings.bpm),
+            metadata: settings
+                .metadata
+                .pairs()
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         };
 
         // Use DAW backend export for all formats
@@ -872,6 +1111,8 @@ impl ExportOrchestrator {
         let hdr = settings.hdr;
         let fit = settings.fit;
         let full_range = settings.color_range.is_full();
+        let prores = matches!(settings.codec, lightningbeam_core::export::VideoCodec::ProRes422)
+            && !hdr.is_hdr();
         let handle = std::thread::spawn(move || {
             Self::run_video_encoder(settings, output_path, frame_rx, progress_tx, cancel_flag, total_frames);
         });
@@ -891,6 +1132,8 @@ impl ExportOrchestrator {
             gpu_resources: None,
             readback_pipeline: None,
             cpu_yuv_converter: None,
+            prores,
+            cpu_yuv422p10: None,
             frames_in_flight: 0,
             next_frame_to_encode: 0,
             perf_metrics: Some(perf_metrics::ExportMetrics::new()),
@@ -1121,7 +1364,10 @@ impl ExportOrchestrator {
             .unwrap()
             .as_secs();
 
-        let temp_video_path = temp_dir.join(format!("lightningbeam_video_{}.mp4", timestamp));
+        // Use the codec's real container for the temp video, not a hardcoded .mp4 — VP8 isn't a
+        // valid MP4 codec, so an .mp4 temp made `write_header` fail for any VP8+audio export.
+        let temp_video_path = temp_dir.join(format!("lightningbeam_video_{}.{}",
+            timestamp, video_settings.codec.container_format()));
         let temp_audio_path = temp_dir.join(format!("lightningbeam_audio_{}.{}",
             timestamp,
             match audio_settings.format {
@@ -1331,24 +1577,34 @@ impl ExportOrchestrator {
             // Enable GPU YUV only when the encoder's YUV420P planes are tight (no linesize
             // padding) — then the packed GPU planes copy in without row misalignment.
             // Otherwise fall back to RGBA readback + CPU swscale.
-            let gpu_yuv_tight = std::env::var("LB_DISABLE_GPU_YUV").is_err() && {
+            // ProRes needs 10-bit 4:2:2 (built on the CPU from the RGBA readback), so it forces the
+            // RGBA path — the GPU YUV converter only produces 8-bit 4:2:0.
+            let gpu_yuv_tight = !state.prores && std::env::var("LB_DISABLE_GPU_YUV").is_err() && {
                 let probe = ffmpeg_next::frame::Video::new(
                     ffmpeg_next::format::Pixel::YUV420P, width, height,
                 );
                 probe.stride(0) == width as usize && probe.stride(1) == (width / 2) as usize
             };
-            if !gpu_yuv_tight {
+            if !gpu_yuv_tight && !state.prores {
                 println!("🎬 [VIDEO EXPORT] YUV planes are padded at {width}x{height}; using CPU YUV path");
             }
             state.readback_pipeline = Some(readback_pipeline::ReadbackPipeline::new(device, queue, width, height, gpu_yuv_tight, state.full_range));
-            state.cpu_yuv_converter = Some(cpu_yuv_converter::CpuYuvConverter::new(width, height, state.full_range)?);
+            if state.prores {
+                state.cpu_yuv422p10 = Some(cpu_yuv_converter::CpuYuv422P10Converter::new(width, height, state.full_range)?);
+                println!("🎬 [VIDEO EXPORT] ProRes 422: 10-bit 4:2:2 (YUV422P10LE) CPU converter initialized");
+            } else {
+                state.cpu_yuv_converter = Some(cpu_yuv_converter::CpuYuvConverter::new(width, height, state.full_range)?);
+            }
             println!("🚀 [ASYNC PIPELINE] Triple-buffered pipeline initialized");
             println!("🚀 [CPU YUV] swscale converter initialized");
         }
 
         let pipeline = state.readback_pipeline.as_mut().unwrap();
         let gpu_resources = state.gpu_resources.as_mut().unwrap();
-        let cpu_converter = state.cpu_yuv_converter.as_mut().unwrap();
+        // Exactly one of these is present: cpu_yuv422p10 on the ProRes path, cpu_converter on the
+        // SDR fallback path (or neither is used when the GPU YUV converter is active).
+        let mut cpu_converter = state.cpu_yuv_converter.as_mut();
+        let mut cpu_yuv422p10 = state.cpu_yuv422p10.as_mut();
         let mut metrics = state.perf_metrics.as_mut();
 
         // Poll for completed async readbacks (non-blocking)
@@ -1375,12 +1631,17 @@ impl ExportOrchestrator {
                 let data = pipeline.extract_rgba_data(result.buffer_id);
                 let extraction_end = Instant::now();
 
-                // YUV planes: GPU-converted (just slice) or CPU swscale fallback (timed).
+                // YUV planes: ProRes 10-bit 4:2:2, else GPU-converted (just slice), else CPU
+                // swscale 8-bit 4:2:0 fallback (timed).
                 let conversion_start = Instant::now();
-                let (y, u, v) = if pipeline.is_yuv_mode() {
+                let (y, u, v) = if let Some(conv) = cpu_yuv422p10.as_deref_mut() {
+                    conv.convert(&data)?
+                } else if pipeline.is_yuv_mode() {
                     pipeline.split_yuv(&data)
                 } else {
-                    cpu_converter.convert(&data)?
+                    cpu_converter.as_deref_mut()
+                        .ok_or("SDR export missing its CPU YUV converter")?
+                        .convert(&data)?
                 };
                 let conversion_end = Instant::now();
 
@@ -1469,6 +1730,7 @@ impl ExportOrchestrator {
             state.gpu_resources = None;
             state.readback_pipeline = None;
             state.cpu_yuv_converter = None;
+            state.cpu_yuv422p10 = None;
             state.perf_metrics = None;
             return Ok(false);
         }
@@ -1718,6 +1980,8 @@ impl ExportOrchestrator {
         // Pixel format the encoder frames are built in (matches setup_video_encoder).
         let pixel_format = if settings.hdr.is_hdr() {
             ffmpeg_next::format::Pixel::YUV420P10LE
+        } else if matches!(settings.codec, VideoCodec::ProRes422) {
+            ffmpeg_next::format::Pixel::YUV422P10LE // ProRes 422: 10-bit 4:2:2
         } else {
             ffmpeg_next::format::Pixel::YUV420P
         };
@@ -1832,8 +2096,17 @@ impl ExportOrchestrator {
 
         // Copy each plane row-by-row honoring the frame's stride (10-bit / arbitrary widths can have
         // row padding that a flat copy would misalign). `bytes_per_row` = samples × sample size.
-        let ten_bit = matches!(pixel_format, ffmpeg_next::format::Pixel::YUV420P10LE);
-        let sample_bytes = if ten_bit { 2usize } else { 1usize };
+        // Sample size + chroma subsampling depend on the pixel format:
+        //   YUV420P     → 8-bit,  4:2:0 (chroma = w/2 × h/2)
+        //   YUV420P10LE → 10-bit, 4:2:0 (chroma = w/2 × h/2)
+        //   YUV422P10LE → 10-bit, 4:2:2 (chroma = w/2 × h, full-height)  [ProRes]
+        use ffmpeg_next::format::Pixel;
+        let (sample_bytes, chroma_h_div) = match pixel_format {
+            Pixel::YUV420P => (1usize, 2usize),
+            Pixel::YUV420P10LE => (2usize, 2usize),
+            Pixel::YUV422P10LE => (2usize, 1usize),
+            _ => (1usize, 2usize),
+        };
         let copy_plane = |frame: &mut ffmpeg_next::frame::Video, idx: usize, src: &[u8], w: usize, h: usize| {
             let bytes_per_row = w * sample_bytes;
             let stride = frame.stride(idx);
@@ -1848,8 +2121,8 @@ impl ExportOrchestrator {
         };
         let (w, h) = (width as usize, height as usize);
         copy_plane(&mut video_frame, 0, y_plane, w, h);
-        copy_plane(&mut video_frame, 1, u_plane, w / 2, h / 2);
-        copy_plane(&mut video_frame, 2, v_plane, w / 2, h / 2);
+        copy_plane(&mut video_frame, 1, u_plane, w / 2, h / chroma_h_div);
+        copy_plane(&mut video_frame, 2, v_plane, w / 2, h / chroma_h_div);
 
         // Set PTS (presentation timestamp) in encoder's time base
         // Encoder time base is 1/(framerate * 1000), so PTS = timestamp * (framerate * 1000)
