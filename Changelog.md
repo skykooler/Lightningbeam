@@ -1,3 +1,23 @@
+# 1.0.8-alpha:
+Changes:
+- Mobile/touch UI (experimental, testing only — not built or packaged for mobile yet; enabled on desktop with the LB_MOBILE_UI environment variable): work-in-progress phone-friendly interface with a vertical sliding-window pane stack you drag to reveal panes, a new-file intent picker, a selection inspector sheet, a keyboard-primary music surface, a Focus/Patch node editor, long-press context menus, a command palette, and landscape/orientation support
+- Text layers: add and edit text with a chosen font; non-bundled fonts are embedded in the project so it renders on machines that lack them
+- Animated GIF export (parallel palette encoding)
+- Audio tag metadata (title, artist, album, genre, year, track, comment) is written into exports — ID3v2 for MP3, iTunes/MP4 atoms for AAC, Vorbis comments for FLAC, RIFF INFO for WAV — with sensible defaults (year, artist/album remembered between exports)
+- Lossy WebP image export, so the quality control now actually applies
+- SVG export now includes text layers, as real font-independent glyph outlines
+- Crash recovery: the editor autosaves your work to a recovery file in the background and offers to restore it after an unclean shutdown
+- Prompt to save unsaved changes before starting a new file, opening another, or quitting
+- Faster saves on painting projects: unchanged raster frames are no longer re-encoded every save
+
+Bugfixes:
+- FLAC export previously wrote a WAV file with a .flac extension; it now encodes real (compressed) FLAC
+- ProRes 422 export always failed; it now encodes 10-bit 4:2:2 correctly
+- Fix VP8 video export with audio (muxed into WebM instead of an incompatible container)
+- The WebP "Quality" slider had no effect
+- Starting a new file now fully resets the audio engine, so instruments and voices from the previous project no longer linger
+- Fix oscillator/synth phase drift over long playback
+
 # 1.0.7-alpha:
 Changes:
 - HDR video support: PQ/HLG/BT.2020 video is now read correctly (decoded to scene-linear), with a per-document output mode (clip vs highlight rolloff) and 10-bit HDR export (HEVC Main10, PQ or HLG)

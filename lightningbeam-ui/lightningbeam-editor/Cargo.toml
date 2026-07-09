@@ -1,6 +1,6 @@
 [package]
 name = "lightningbeam-editor"
-version = "1.0.7-alpha"
+version = "1.0.8-alpha"
 edition = "2021"
 description = "Multimedia editor for audio, video and 2D animation"
 license = "GPL-3.0-or-later"
