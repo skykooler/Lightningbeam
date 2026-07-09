@@ -399,16 +399,29 @@ pub fn save_beam(
     }
 
     // --- raster keyframes -> media rows (PNG), keyed by keyframe id ---
-    // (Phase 0 writes all resident frames each save; a disk-dirty flag to skip
-    // unchanged frames in place is deferred to Phase 3.)
+    // Incremental: only (re)encode a keyframe whose pixels changed since the last save.
+    // `kf.dirty` means "current pixels are not yet in the container" (set on any edit,
+    // cleared on a successful save — see main.rs); a clean frame already stored is kept
+    // in place, skipping the PNG re-encode of every resident frame on every save.
     // Walk ALL layers (incl. nested in groups/clips) so nested raster keyframes
     // are persisted too, and so `live_media` covers them — matching the load path,
     // which arms `needs_fault_in` recursively. Top-level-only projects are unaffected.
     let mut raster_count = 0usize;
+    let mut raster_skipped = 0usize;
     for layer in document.all_layers() {
         if let crate::layer::AnyLayer::Raster(rl) = layer {
             for kf in &rl.keyframes {
                 if !kf.raw_pixels.is_empty() {
+                    // Clean + already stored → keep the existing full + proxy rows untouched.
+                    if !kf.dirty && txn.media_exists(kf.id)? {
+                        live_media.insert(kf.id);
+                        let proxy_id = raster_proxy_media_id(kf.id);
+                        if txn.media_exists(proxy_id)? {
+                            live_media.insert(proxy_id);
+                        }
+                        raster_skipped += 1;
+                        continue;
+                    }
                     let img =
                         crate::brush_engine::image_from_raw(kf.raw_pixels.clone(), kf.width, kf.height);
                     match crate::brush_engine::encode_png(&img) {
@@ -608,9 +621,10 @@ pub fn save_beam(
     }
 
     eprintln!(
-        "📊 [SAVE_BEAM] ✅ Saved {} audio + {} raster media, {} orphans removed, in {:.2}ms",
+        "📊 [SAVE_BEAM] ✅ Saved {} audio + {} raster media ({} unchanged frames skipped), {} orphans removed, in {:.2}ms",
         audio_pool_entries.len(),
         raster_count,
+        raster_skipped,
         removed,
         fn_start.elapsed().as_secs_f64() * 1000.0
     );
