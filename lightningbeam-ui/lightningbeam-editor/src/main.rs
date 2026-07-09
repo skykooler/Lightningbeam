@@ -809,6 +809,16 @@ impl AutosaveState {
     }
 }
 
+/// A file switch deferred behind the unsaved-changes prompt: the thing to do once the user answers
+/// Save / Don't Save (Cancel just drops it).
+#[derive(Debug, Clone)]
+enum PendingSwitch {
+    /// New File (return to the start screen).
+    NewFile,
+    /// Open a specific `.beam` (covers both Open… and Open Recent — the path is already resolved).
+    Open(std::path::PathBuf),
+}
+
 /// Information about an imported asset (for auto-placement)
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // name/duration populated for future import UX features
@@ -1296,6 +1306,18 @@ struct EditorApp {
     /// exit. A leftover file on next launch signals an unclean shutdown → offer to restore.
     autosave: AutosaveState,
 
+    /// `ActionExecutor::epoch()` at the last manual save (or new/load) — the document is "modified"
+    /// (has unsaved changes vs. the user's file) when the current epoch differs, or `media_modified`
+    /// is set. Distinct from the autosave baseline, which also moves on every background autosave.
+    saved_epoch: u64,
+    /// Non-action changes since the last save (imports, finished recordings) that `epoch` doesn't
+    /// capture. Cleared on manual save / new / load.
+    media_modified: bool,
+    /// A file switch waiting on the "save changes?" prompt (New/Open/Open Recent with unsaved work).
+    unsaved_prompt: Option<PendingSwitch>,
+    /// A switch to perform once an in-flight save (triggered from that prompt) finishes.
+    switch_after_save: Option<PendingSwitch>,
+
     /// Audio extraction channel for background thread communication
     audio_extraction_tx: std::sync::mpsc::Sender<AudioExtractionResult>,
     audio_extraction_rx: std::sync::mpsc::Receiver<AudioExtractionResult>,
@@ -1594,6 +1616,10 @@ impl EditorApp {
             file_command_tx,
             file_operation: None, // No file operation in progress initially
             autosave: AutosaveState::new(),
+            saved_epoch: 0,
+            media_modified: false,
+            unsaved_prompt: None,
+            switch_after_save: None,
             audio_extraction_tx,
             audio_extraction_rx,
             export_dialog: export::dialog::ExportDialog::default(),
@@ -3358,22 +3384,7 @@ impl EditorApp {
             // File menu
             MenuAction::NewFile => {
                 println!("Menu: New File");
-                // TODO: Prompt to save current file if modified
-
-                // Tear down the backend (stops old instruments/voices immediately) and clear the
-                // app-side track maps + backend-derived caches.
-                self.reset_audio_backend();
-
-                // Reset UI state and return to start screen
-                self.current_file_path = None;
-                self.selection.clear();
-                self.editing_context = EditingContext::default();
-                self.active_layer_id = None;
-                self.playback_time = 0.0;
-                self.is_playing = false;
-                self.pane_instances.clear();
-                self.project_generation += 1;
-                self.app_mode = AppMode::StartScreen;
+                self.request_switch(PendingSwitch::NewFile);
             }
             MenuAction::NewWindow => {
                 println!("Menu: New Window");
@@ -3428,21 +3439,19 @@ impl EditorApp {
             MenuAction::OpenFile => {
                 use rfd::FileDialog;
 
-                // TODO: Prompt to save current file if modified
-
+                // Pick the file first, then (if there are unsaved changes) prompt to save.
                 if let Some(path) = FileDialog::new()
                     .add_filter("Lightningbeam Project", &["beam"])
                     .pick_file()
                 {
-                    self.load_from_file(path);
+                    self.request_switch(PendingSwitch::Open(path));
                 }
             }
             MenuAction::OpenRecent(index) => {
                 let recent_files = self.config.get_recent_files();
 
                 if let Some(path) = recent_files.get(index) {
-                    // TODO: Prompt to save current file if modified
-                    self.load_from_file(path.clone());
+                    self.request_switch(PendingSwitch::Open(path.clone()));
                 }
             }
             MenuAction::ClearRecentFiles => {
@@ -4243,6 +4252,21 @@ impl EditorApp {
         self.autosave.baseline_epoch = self.action_executor.epoch();
         self.autosave.pending_event = false;
         self.autosave.last_time = None;
+        // A fresh/loaded document also starts unmodified vs. its on-disk form.
+        self.saved_epoch = self.action_executor.epoch();
+        self.media_modified = false;
+    }
+
+    /// Whether the document has unsaved changes vs. the user's file (edits since the last manual
+    /// save, or an import/recording that `epoch` doesn't track). Recovered work counts as unsaved
+    /// until the user gives it a real home — its only copy is the transient recovery container.
+    fn document_modified(&self) -> bool {
+        self.action_executor.epoch() != self.saved_epoch
+            || self.media_modified
+            || self
+                .current_file_path
+                .as_ref()
+                .is_some_and(|p| AutosaveState::is_recovery_path(p))
     }
 
     /// Background crash-recovery autosave: poll any in-flight recovery write, then (if the document
@@ -4377,6 +4401,120 @@ impl EditorApp {
                 self.autosave.leftover_recoveries.clear();
             }
             None => {}
+        }
+    }
+
+    /// Show the "save changes?" prompt when a file switch is requested with unsaved work. Save
+    /// persists first (Save As for untitled/recovered files) then switches; Don't Save switches and
+    /// discards; Cancel stays put.
+    fn render_unsaved_prompt(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.unsaved_prompt.as_ref() else { return };
+        let action_desc = match pending {
+            PendingSwitch::NewFile => "starting a new file",
+            PendingSwitch::Open(_) => "opening another file",
+        };
+
+        #[derive(PartialEq)]
+        enum Answer {
+            Save,
+            DontSave,
+            Cancel,
+        }
+        let mut answer: Option<Answer> = None;
+
+        egui::Modal::new(egui::Id::new("unsaved_changes_modal")).show(ctx, |ui| {
+            ui.set_width(crate::mobile::dialog_width(ctx, 440.0));
+            ui.heading("Save changes?");
+            ui.add_space(6.0);
+            ui.label(format!(
+                "This document has unsaved changes. Save them before {action_desc}?"
+            ));
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    answer = Some(Answer::Save);
+                }
+                if ui.button("Don't Save").clicked() {
+                    answer = Some(Answer::DontSave);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(Answer::Cancel);
+                }
+            });
+        });
+
+        match answer {
+            Some(Answer::Cancel) => {
+                self.unsaved_prompt = None;
+            }
+            Some(Answer::DontSave) => {
+                if let Some(sw) = self.unsaved_prompt.take() {
+                    self.do_switch(sw);
+                }
+            }
+            Some(Answer::Save) => {
+                let sw = self.unsaved_prompt.take();
+                // Save to the existing file, or Save As for an untitled / recovered document.
+                let real_path = self
+                    .current_file_path
+                    .clone()
+                    .filter(|p| !AutosaveState::is_recovery_path(p));
+                let target = match real_path {
+                    Some(p) => Some(p),
+                    None => rfd::FileDialog::new()
+                        .add_filter("Lightningbeam Project", &["beam"])
+                        .set_file_name("Untitled.beam")
+                        .save_file(),
+                };
+                match target {
+                    Some(path) => {
+                        // Run the switch once the save completes.
+                        self.switch_after_save = sw;
+                        self.save_to_file(path);
+                    }
+                    None => {
+                        // Save As cancelled → abort the switch, keep the document (still unsaved).
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// New File: tear down the current project and return to the start screen. (The guard for
+    /// unsaved changes lives in the menu handler; this is the actual action.)
+    fn do_new_file(&mut self) {
+        // Tear down the backend (stops old instruments/voices immediately) and clear the app-side
+        // track maps + backend-derived caches.
+        self.reset_audio_backend();
+
+        // Reset UI state and return to the start screen.
+        self.current_file_path = None;
+        self.selection.clear();
+        self.editing_context = EditingContext::default();
+        self.active_layer_id = None;
+        self.playback_time = 0.0;
+        self.is_playing = false;
+        self.pane_instances.clear();
+        self.project_generation += 1;
+        self.app_mode = AppMode::StartScreen;
+    }
+
+    /// Carry out a file switch once the unsaved-changes prompt is resolved (or when there were no
+    /// unsaved changes to begin with).
+    fn do_switch(&mut self, switch: PendingSwitch) {
+        match switch {
+            PendingSwitch::NewFile => self.do_new_file(),
+            PendingSwitch::Open(path) => self.load_from_file(path),
+        }
+    }
+
+    /// Begin a file switch, prompting to save first if the document has unsaved changes.
+    fn request_switch(&mut self, switch: PendingSwitch) {
+        if self.document_modified() {
+            self.unsaved_prompt = Some(switch);
+        } else {
+            self.do_switch(switch);
         }
     }
 
@@ -5019,6 +5157,7 @@ impl EditorApp {
         use lightningbeam_core::clip::ImageAsset;
         // Imported media lives outside the action/undo system, so flag it for the next autosave.
         self.autosave.pending_event = true;
+        self.media_modified = true;
         self.note_possible_large_media(path);
 
         // Get filename for asset name
@@ -5073,6 +5212,7 @@ impl EditorApp {
     fn import_audio(&mut self, path: &std::path::Path) -> Option<ImportedAssetInfo> {
         use lightningbeam_core::clip::AudioClip;
         self.autosave.pending_event = true;
+        self.media_modified = true;
         self.note_possible_large_media(path);
 
         let name = path.file_stem()
@@ -5200,6 +5340,7 @@ impl EditorApp {
         use lightningbeam_core::clip::VideoClip;
         use lightningbeam_core::video::probe_video;
         self.autosave.pending_event = true;
+        self.media_modified = true;
         self.note_possible_large_media(path);
 
         let name = path.file_stem()
@@ -5772,6 +5913,8 @@ impl eframe::App for EditorApp {
         self.maybe_autosave(ctx);
         // Offer to restore a previous session's unsaved work (if a recovery file was left behind).
         self.render_recovery_prompt(ctx);
+        // Prompt to save unsaved changes before switching files (New / Open / Open Recent).
+        self.render_unsaved_prompt(ctx);
 
         // === Raster fault-in (Phase 3 paging) ===
         // The canvas records raster keyframe ids whose `raw_pixels` weren't resident
@@ -6012,6 +6155,9 @@ impl eframe::App for EditorApp {
             let mut operation_complete = false;
             let mut loaded_project_data: Option<(lightningbeam_core::file_io::LoadedProject, std::path::PathBuf)> = None;
             let mut update_recent_menu = false; // Track if we need to update recent files menu
+            // A file switch that was waiting on this save (from the unsaved-changes prompt), to run
+            // after the file_operation borrow ends.
+            let mut switch_after_save: Option<PendingSwitch> = None;
 
             match operation {
                 FileOperation::Saving { ref mut progress_rx, ref path } => {
@@ -6027,6 +6173,11 @@ impl eframe::App for EditorApp {
                                 self.autosave.baseline_epoch = self.action_executor.epoch();
                                 self.autosave.pending_event = false;
                                 self.autosave.last_time = None;
+                                // The document now matches its file → no unsaved changes.
+                                self.saved_epoch = self.action_executor.epoch();
+                                self.media_modified = false;
+                                // If a file switch was waiting on this save, run it after the borrow.
+                                switch_after_save = self.switch_after_save.take();
                                 // Container path may be new (Save As); update the
                                 // raster paging store so future faults read the right file.
                                 self.raster_store.set_path(self.current_file_path.clone());
@@ -6142,6 +6293,11 @@ impl eframe::App for EditorApp {
             // Update recent files menu if needed
             if update_recent_menu {
                 self.update_recent_files_menu();
+            }
+
+            // A file switch that was waiting on this save (New/Open after choosing "Save") now runs.
+            if let Some(switch) = switch_after_save {
+                self.do_switch(switch);
             }
 
             // Request repaint to keep updating progress
@@ -6359,6 +6515,7 @@ impl eframe::App for EditorApp {
                                     // Finalize the clip (update pool_index and duration)
                                     // A finished recording (samples in the pool) needs capturing.
                                     self.autosave.pending_event = true;
+                                    self.media_modified = true;
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&clip_id) {
                                         if clip.finalize_recording(pool_index, duration) {
                                             clip.name = format!("Recording {}", pool_index);
