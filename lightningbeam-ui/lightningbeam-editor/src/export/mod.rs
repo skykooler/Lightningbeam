@@ -5,6 +5,7 @@
 
 pub mod audio_exporter;
 pub mod dialog;
+pub mod gif_exporter;
 pub mod image_exporter;
 pub mod video_exporter;
 pub mod readback_pipeline;
@@ -13,7 +14,8 @@ pub mod cpu_yuv_converter;
 pub mod gpu_yuv;
 pub mod hdr_frame;
 
-use lightningbeam_core::export::{AudioExportSettings, ImageExportSettings, VideoExportSettings, ExportProgress};
+use lightningbeam_core::export::{AudioExportSettings, GifExportSettings, ImageExportSettings, VideoExportSettings, ExportProgress};
+use gif_exporter::GifFrameMessage;
 use lightningbeam_core::document::Document;
 use lightningbeam_core::renderer::ImageCache;
 use lightningbeam_core::video::VideoManager;
@@ -131,6 +133,38 @@ pub struct ExportOrchestrator {
 
     /// Single-frame image export state
     image_state: Option<ImageExportState>,
+
+    /// Animated GIF export state (frames rendered on the UI thread, encoded on `thread_handle`).
+    gif_state: Option<GifExportState>,
+}
+
+/// State for an in-progress animated GIF export. Frames are rendered + read back on the UI thread
+/// (one per `render_next_gif_frame` call) and streamed to the encoder thread over `frame_tx`.
+struct GifExportState {
+    /// Resolved pixel dimensions (after applying any width/height overrides).
+    width: u32,
+    height: u32,
+    /// Total frames to render.
+    total_frames: usize,
+    /// Next frame index to render (0-based).
+    next_frame: usize,
+    /// Document time (seconds) of frame 0.
+    start_time: f64,
+    /// Seconds between frames (1 / framerate).
+    frame_step: f64,
+    /// How the document is fit into the export frame.
+    fit: lightningbeam_core::export::ExportFitMode,
+    /// Preserve alpha as GIF transparency (else the encoder flattens onto black).
+    transparency: bool,
+    /// GPU resources allocated on the first render call, reused each frame.
+    gpu_resources: Option<video_exporter::ExportGpuResources>,
+    /// Output RGBA texture (kept separate from gpu_resources to avoid split-borrow issues).
+    output_texture: Option<wgpu::Texture>,
+    output_texture_view: Option<wgpu::TextureView>,
+    /// Staging buffer for synchronous GPU→CPU readback (reused each frame).
+    staging_buffer: Option<wgpu::Buffer>,
+    /// Sender to the encoder thread; dropped after the final frame to signal completion.
+    frame_tx: Option<Sender<GifFrameMessage>>,
 }
 
 /// State for parallel audio+video export
@@ -168,6 +202,7 @@ impl ExportOrchestrator {
             video_state: None,
             parallel_export: None,
             image_state: None,
+            gif_state: None,
         }
     }
 
@@ -250,7 +285,7 @@ impl ExportOrchestrator {
     /// unconsumed terminal message). Used to gate the UI poll loop so it doesn't run every
     /// repaint forever after an export finishes.
     pub fn has_pending_progress(&self) -> bool {
-        self.parallel_export.is_some() || self.image_state.is_some() || self.progress_rx.is_some()
+        self.parallel_export.is_some() || self.image_state.is_some() || self.gif_state.is_some() || self.progress_rx.is_some()
     }
 
     /// Poll progress for parallel video+audio export
@@ -534,6 +569,9 @@ impl ExportOrchestrator {
         }
         self.video_state = None;
         self.image_state = None;
+        // Dropping gif_state drops its frame sender, unblocking the encoder thread's recv() so it
+        // observes the cancel flag, removes the partial file, and exits.
+        self.gif_state = None;
         self.progress_rx = None;
         self.thread_handle = None;
     }
@@ -542,6 +580,7 @@ impl ExportOrchestrator {
     pub fn is_exporting(&self) -> bool {
         if self.parallel_export.is_some() { return true; }
         if self.image_state.is_some()     { return true; }
+        if self.gif_state.is_some()       { return true; }
         if let Some(handle) = &self.thread_handle {
             !handle.is_finished()
         } else {
@@ -717,6 +756,196 @@ impl ExportOrchestrator {
 
         self.image_state = None;
         result.map(|_| true)
+    }
+
+    /// Enqueue an animated GIF export. Spawns the encoder thread now; call `render_next_gif_frame()`
+    /// from the egui update loop (where the wgpu device/queue are available) to render + stream each
+    /// frame to it.
+    pub fn start_gif_export(
+        &mut self,
+        settings: GifExportSettings,
+        output_path: PathBuf,
+        doc_width: u32,
+        doc_height: u32,
+    ) {
+        self.cancel_flag.store(false, Ordering::Relaxed);
+
+        let width  = settings.width.unwrap_or(doc_width).max(1);
+        let height = settings.height.unwrap_or(doc_height).max(1);
+        let total_frames = settings.total_frames();
+        let delay_ms = settings.frame_delay_ms();
+        let frame_step = 1.0 / settings.framerate;
+
+        let (progress_tx, progress_rx) = channel();
+        let (frame_tx, frame_rx) = channel();
+        self.progress_rx = Some(progress_rx);
+
+        let cancel_flag = Arc::clone(&self.cancel_flag);
+        let loop_forever = settings.loop_forever;
+        let transparency = settings.transparency;
+        let handle = std::thread::spawn(move || {
+            gif_exporter::run_gif_encoder(
+                frame_rx, output_path, width, height, total_frames, delay_ms,
+                loop_forever, transparency, progress_tx, cancel_flag,
+            );
+        });
+        self.thread_handle = Some(handle);
+
+        self.gif_state = Some(GifExportState {
+            width,
+            height,
+            total_frames,
+            next_frame: 0,
+            start_time: settings.start_time,
+            frame_step,
+            fit: settings.fit,
+            transparency,
+            gpu_resources: None,
+            output_texture: None,
+            output_texture_view: None,
+            staging_buffer: None,
+            frame_tx: Some(frame_tx),
+        });
+    }
+
+    /// Drive the animated GIF export: render + read back one frame per call and stream it to the
+    /// encoder thread. Returns `Ok(true)` while more frames remain (call again next egui frame),
+    /// `Ok(false)` once every frame has been sent (encoding then finishes on the background thread).
+    pub fn render_next_gif_frame(
+        &mut self,
+        document: &mut Document,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut vello::Renderer,
+        image_cache: &mut ImageCache,
+        video_manager: &Arc<std::sync::Mutex<VideoManager>>,
+        raster_store: Option<&lightningbeam_core::raster_store::RasterStore>,
+    ) -> Result<bool, String> {
+        if self.cancel_flag.load(Ordering::Relaxed) {
+            // Dropping frame_tx unblocks the encoder thread's recv() so it can clean up.
+            self.gif_state = None;
+            return Ok(false);
+        }
+
+        let state = match self.gif_state.as_mut() {
+            Some(s) => s,
+            None    => return Ok(false),
+        };
+
+        // All frames sent → drop the sender (signals the encoder to finalize) and finish.
+        if state.next_frame >= state.total_frames {
+            if let Some(tx) = state.frame_tx.take() {
+                let _ = tx.send(GifFrameMessage::Done);
+                drop(tx);
+            }
+            self.gif_state = None;
+            return Ok(false);
+        }
+
+        let w = state.width;
+        let h = state.height;
+        let fit = state.fit;
+        let timestamp = state.start_time + state.next_frame as f64 * state.frame_step;
+
+        if state.gpu_resources.is_none() {
+            state.gpu_resources = Some(video_exporter::ExportGpuResources::new(device, w, h));
+        }
+        if state.output_texture.is_none() {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label:           Some("gif_export_output"),
+                size:            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count:    1,
+                dimension:       wgpu::TextureDimension::D2,
+                format:          wgpu::TextureFormat::Rgba8Unorm,
+                usage:           wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats:    &[],
+            });
+            state.output_texture_view = Some(tex.create_view(&wgpu::TextureViewDescriptor::default()));
+            state.output_texture = Some(tex);
+        }
+
+        // Render the frame (transparency preserved through readback; the encoder flattens if needed).
+        {
+            let gpu = state.gpu_resources.as_mut().unwrap();
+            let output_view = state.output_texture_view.as_ref().unwrap();
+            let encoder = video_exporter::render_frame_to_gpu_rgba(
+                document,
+                timestamp,
+                w, h,
+                device, queue, renderer, image_cache, video_manager,
+                gpu,
+                output_view,
+                None, // no floating raster selection during export
+                state.transparency,
+                raster_store,
+                true, // GIF export composites on the shared device
+                fit,
+            )?;
+            queue.submit(Some(encoder.finish()));
+        }
+
+        // Synchronous readback (wgpu requires bytes_per_row aligned to 256).
+        let align         = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let bytes_per_row = (w * 4 + align - 1) / align * align;
+        if state.staging_buffer.is_none() {
+            state.staging_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label:              Some("gif_export_staging"),
+                size:               (bytes_per_row * h) as u64,
+                usage:              wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }));
+        }
+        let staging = state.staging_buffer.as_ref().unwrap();
+
+        let mut copy_enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("gif_export_copy"),
+        });
+        let output_tex = state.output_texture.as_ref().unwrap();
+        copy_enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture:   output_tex,
+                mip_level: 0,
+                origin:    wgpu::Origin3d::ZERO,
+                aspect:    wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset:         0,
+                    bytes_per_row:  Some(bytes_per_row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        queue.submit(Some(copy_enc.finish()));
+
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+
+        let pixels: Vec<u8> = {
+            let mapped = slice.get_mapped_range();
+            let mut out = Vec::with_capacity((w * h * 4) as usize);
+            for row in 0..h {
+                let start = (row * bytes_per_row) as usize;
+                out.extend_from_slice(&mapped[start..start + (w * 4) as usize]);
+            }
+            out
+        };
+        staging.unmap();
+
+        let frame_num = state.next_frame;
+        if let Some(tx) = state.frame_tx.as_ref() {
+            // If the encoder thread died, stop — its dropped receiver returns an error here.
+            if tx.send(GifFrameMessage::Frame { frame_num, pixels }).is_err() {
+                self.gif_state = None;
+                return Ok(false);
+            }
+        }
+        state.next_frame += 1;
+        Ok(true)
     }
 
     /// Wait for the export to complete

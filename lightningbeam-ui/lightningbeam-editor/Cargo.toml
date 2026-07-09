@@ -41,6 +41,10 @@ serde_json = { workspace = true }
 
 # Image loading
 image = { workspace = true }
+# Animated GIF encoding — used directly (not just via `image`) so per-frame NeuQuant palette
+# quantization can be parallelized across a worker pool. Pinned to the version `image` already
+# resolves (0.13), so this adds no new transitive graph.
+gif = "0.13"
 resvg = { workspace = true }
 tiny-skia = "0.11"
 

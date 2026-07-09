@@ -3641,6 +3641,7 @@ dependencies = [
  "egui_extras",
  "egui_node_graph2",
  "ffmpeg-next",
+ "gif",
  "gpu-video-encoder",
  "half",
  "image",

@@ -83,6 +83,15 @@ opt-level = 2
 [profile.dev.package.cpal]
 opt-level = 2
 
+# GIF export: NeuQuant palette quantization is tight numeric loops that are punishingly slow
+# unoptimized (10–30× in debug). Optimize the encoder crates even in dev builds.
+[profile.dev.package.gif]
+opt-level = 3
+[profile.dev.package.color_quant]
+opt-level = 3
+[profile.dev.package.weezl]
+opt-level = 3
+
 # Use local egui fork with ibus/Wayland text input fix
 [patch.crates-io]
 egui = { path = "../../egui-fork/crates/egui" }

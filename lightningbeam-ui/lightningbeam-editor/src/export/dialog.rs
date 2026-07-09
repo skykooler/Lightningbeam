@@ -5,6 +5,7 @@
 use eframe::egui;
 use lightningbeam_core::export::{
     AudioExportSettings, AudioFormat,
+    GifExportSettings,
     ImageExportSettings, ImageFormat,
     VideoExportSettings, VideoCodec, VideoQuality, ColorRange,
 };
@@ -25,6 +26,8 @@ pub enum ExportType {
     Audio,
     Image,
     Video,
+    /// Animated GIF (multi-frame, palette-quantized, no audio).
+    Gif,
     /// Vector-only SVG of the current frame (lossless; raster/video layers skipped).
     Svg,
 }
@@ -36,6 +39,8 @@ pub enum ExportResult {
     Image(ImageExportSettings, PathBuf),
     VideoOnly(VideoExportSettings, PathBuf),
     VideoWithAudio(VideoExportSettings, AudioExportSettings, PathBuf),
+    /// Animated GIF export.
+    Gif(GifExportSettings, PathBuf),
     /// SVG of vector layers at the given document time.
     Svg(f64, PathBuf),
 }
@@ -56,6 +61,9 @@ pub struct ExportDialog {
 
     /// Video export settings
     pub video_settings: VideoExportSettings,
+
+    /// Animated GIF export settings
+    pub gif_settings: GifExportSettings,
 
     /// Include audio with video?
     pub include_audio: bool,
@@ -104,6 +112,7 @@ impl Default for ExportDialog {
             audio_settings: AudioExportSettings::standard_mp3(),
             image_settings: ImageExportSettings::default(),
             video_settings: VideoExportSettings::default(),
+            gif_settings: GifExportSettings::default(),
             include_audio: true,
             output_path: None,
             error_message: None,
@@ -124,6 +133,7 @@ impl ExportDialog {
         self.open = true;
         self.audio_settings.end_time = timeline_duration;
         self.video_settings.end_time = timeline_duration;
+        self.gif_settings.end_time   = timeline_duration;
         self.image_settings.time     = hint.current_time;
         // Propagate document dimensions as defaults (None means "use doc size").
         self.image_settings.width  = None;
@@ -160,6 +170,7 @@ impl ExportDialog {
             ExportType::Audio => self.audio_settings.format.extension(),
             ExportType::Image => self.image_settings.format.extension(),
             ExportType::Video => self.video_settings.codec.container_format(),
+            ExportType::Gif => "gif",
             ExportType::Svg => "svg",
         }
     }
@@ -203,6 +214,7 @@ impl ExportDialog {
             ExportType::Audio => "Export Audio",
             ExportType::Image => "Export Image",
             ExportType::Video => "Export Video",
+            ExportType::Gif => "Export GIF",
             ExportType::Svg => "Export SVG",
         };
 
@@ -225,6 +237,7 @@ impl ExportDialog {
                         (ExportType::Audio, "Audio"),
                         (ExportType::Image, "Image"),
                         (ExportType::Video, "Video"),
+                        (ExportType::Gif, "GIF"),
                         (ExportType::Svg, "SVG"),
                     ] {
                         if ui.selectable_value(&mut self.export_type, variant, label).clicked() {
@@ -242,6 +255,7 @@ impl ExportDialog {
                     ExportType::Audio => self.render_audio_basic(ui),
                     ExportType::Image => self.render_image_settings(ui),
                     ExportType::Video => self.render_video_basic(ui),
+                    ExportType::Gif => self.render_gif_basic(ui),
                     ExportType::Svg => self.render_svg_settings(ui),
                 }
 
@@ -261,6 +275,7 @@ impl ExportDialog {
                         ExportType::Audio => self.render_audio_advanced(ui),
                         ExportType::Image => self.render_image_advanced(ui),
                         ExportType::Video => self.render_video_advanced(ui),
+                        ExportType::Gif => self.render_gif_advanced(ui),
                         ExportType::Svg => {} // SVG has no advanced settings
                     }
                 }
@@ -614,12 +629,65 @@ impl ExportDialog {
         self.render_time_range(ui);
     }
 
+    /// GIF frame-rate presets (fps). GIF delays are centisecond-quantized, so these map to clean
+    /// per-frame delays (10/15/20/25/50 fps → 100/70/50/40/20 ms after rounding).
+    const GIF_FPS: &'static [f64] = &[10.0, 15.0, 20.0, 25.0, 50.0];
+
+    /// Render basic GIF settings (frame rate + loop).
+    fn render_gif_basic(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Frame rate:");
+            egui::ComboBox::from_id_salt("gif_fps")
+                .selected_text(format!("{} fps", self.gif_settings.framerate as u32))
+                .show_ui(ui, |ui| {
+                    for &fps in Self::GIF_FPS {
+                        ui.selectable_value(&mut self.gif_settings.framerate, fps, format!("{} fps", fps as u32));
+                    }
+                });
+        });
+
+        ui.checkbox(&mut self.gif_settings.loop_forever, "Loop forever");
+
+        ui.add_space(8.0);
+        self.render_time_range(ui);
+    }
+
+    /// Render advanced GIF settings (resolution, fit, transparency).
+    fn render_gif_advanced(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Size:");
+            let mut w = self.gif_settings.width.unwrap_or(0);
+            let mut h = self.gif_settings.height.unwrap_or(0);
+            let changed_w = ui.add(egui::DragValue::new(&mut w).range(0..=u32::MAX).prefix("W ")).changed();
+            let changed_h = ui.add(egui::DragValue::new(&mut h).range(0..=u32::MAX).prefix("H ")).changed();
+            if changed_w { self.gif_settings.width  = if w == 0 { None } else { Some(w) }; }
+            if changed_h { self.gif_settings.height = if h == 0 { None } else { Some(h) }; }
+            ui.weak("(0 = document size)");
+        });
+
+        ui.horizontal(|ui| {
+            use lightningbeam_core::export::ExportFitMode;
+            ui.label("Fit:");
+            egui::ComboBox::from_id_salt("gif_fit_mode")
+                .selected_text(self.gif_settings.fit.name())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.gif_settings.fit, ExportFitMode::Letterbox, ExportFitMode::Letterbox.name());
+                    ui.selectable_value(&mut self.gif_settings.fit, ExportFitMode::Crop, ExportFitMode::Crop.name());
+                    ui.selectable_value(&mut self.gif_settings.fit, ExportFitMode::Stretch, ExportFitMode::Stretch.name());
+                });
+        });
+
+        ui.checkbox(&mut self.gif_settings.transparency, "Preserve transparency (1-bit)");
+        ui.label(egui::RichText::new("GIF supports only on/off transparency; semi-transparent pixels are keyed out.").weak().small());
+    }
+
     /// Render time range UI (common to both audio and video)
     fn render_time_range(&mut self, ui: &mut egui::Ui) {
         let (start_time, end_time) = match self.export_type {
             ExportType::Audio => (&mut self.audio_settings.start_time, &mut self.audio_settings.end_time),
             ExportType::Image | ExportType::Svg => return, // single time field, not a range
             ExportType::Video => (&mut self.video_settings.start_time, &mut self.video_settings.end_time),
+            ExportType::Gif => (&mut self.gif_settings.start_time, &mut self.gif_settings.end_time),
         };
 
         ui.horizontal(|ui| {
@@ -693,6 +761,13 @@ impl ExportDialog {
                 Some(ExportResult::Image(self.image_settings.clone(), output_path))
             }
             ExportType::Svg => Some(ExportResult::Svg(self.image_settings.time, output_path)),
+            ExportType::Gif => {
+                if let Err(err) = self.gif_settings.validate() {
+                    self.error_message = Some(err);
+                    return None;
+                }
+                Some(ExportResult::Gif(self.gif_settings.clone(), output_path))
+            }
             ExportType::Audio => {
                 // Validate audio settings
                 if let Err(err) = self.audio_settings.validate() {

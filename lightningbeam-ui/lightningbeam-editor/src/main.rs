@@ -6355,6 +6355,17 @@ impl eframe::App for EditorApp {
                         }
                         false // synchronous; no progress dialog
                     }
+                    ExportResult::Gif(settings, output_path) => {
+                        println!("🎞 [MAIN] Starting GIF export: {}", output_path.display());
+                        let doc = self.action_executor.document();
+                        orchestrator.start_gif_export(
+                            settings,
+                            output_path,
+                            doc.width  as u32,
+                            doc.height as u32,
+                        );
+                        true // background encode with progress dialog
+                    }
                     ExportResult::AudioOnly(settings, output_path) => {
                         println!("🎵 [MAIN] Starting audio-only export: {}", output_path.display());
 
@@ -6507,6 +6518,21 @@ impl eframe::App for EditorApp {
                         if has_more {
                             ctx.request_repaint();
                         }
+                    }
+
+                    // Drive incremental GIF export (one frame rendered + streamed per call).
+                    match orchestrator.render_next_gif_frame(
+                        self.action_executor.document_mut(),
+                        device,
+                        queue,
+                        renderer,
+                        image_cache,
+                        &self.video_manager,
+                        Some(&self.raster_store),
+                    ) {
+                        Ok(true)  => { ctx.request_repaint(); } // more frames to render
+                        Ok(false) => {}                          // done or not a GIF export
+                        Err(e)    => { eprintln!("GIF export failed: {e}"); }
                     }
 
                     // Drive single-frame image export (two-frame async: render then readback).
