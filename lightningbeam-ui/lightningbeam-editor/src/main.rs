@@ -1735,9 +1735,38 @@ impl EditorApp {
         );
     }
 
+    /// Tear down the audio backend for the currently-open project.
+    ///
+    /// Sends `Command::Reset` (fully rebuilds the backend `Project`, audio/buffer pools, and ID
+    /// counters) and clears the app-side track maps + backend-derived caches that pointed at the old
+    /// tracks. Must be called before building a new document's tracks, otherwise the previous file's
+    /// tracks/instruments stay resident in the backend and keep getting mixed (orphaned voices).
+    ///
+    /// Ordering is safe: the audio thread drains all `command_tx` commands before any `query_tx`
+    /// queries each callback, so a `reset()` pushed here always runs before the `create_*_track_sync`
+    /// queries that rebuild the project.
+    fn reset_audio_backend(&mut self) {
+        if let Some(ref controller_arc) = self.audio_controller {
+            controller_arc.lock().unwrap().reset();
+        }
+        self.layer_to_track_map.clear();
+        self.track_to_layer_map.clear();
+        self.clip_instance_to_backend_map.clear();
+        self.midi_event_cache.clear();
+        self.audio_duration_cache.clear();
+        self.raw_audio_cache.clear();
+        self.waveform_gpu_dirty.clear();
+        self.waveform_minmax_pools.clear();
+        self.waveform_pyramid_blobs.clear();
+    }
+
     /// Create a new project with the specified focus/layout
     fn create_new_project_with_focus(&mut self, layout_index: usize) {
         use lightningbeam_core::layer::{AnyLayer, AudioLayer, VectorLayer, VideoLayer};
+
+        // Drop the previous project's backend tracks/instruments before building the new one, so a
+        // "new file" while a project is open doesn't leave orphaned tracks resident in the backend.
+        self.reset_audio_backend();
 
         // Create a new blank document
         let mut document = lightningbeam_core::document::Document::with_size(
@@ -3185,23 +3214,17 @@ impl EditorApp {
                 println!("Menu: New File");
                 // TODO: Prompt to save current file if modified
 
-                // Reset state and return to start screen
-                self.layer_to_track_map.clear();
-                self.track_to_layer_map.clear();
-                self.layer_to_track_map.clear();
-                self.clip_instance_to_backend_map.clear();
+                // Tear down the backend (stops old instruments/voices immediately) and clear the
+                // app-side track maps + backend-derived caches.
+                self.reset_audio_backend();
+
+                // Reset UI state and return to start screen
                 self.current_file_path = None;
                 self.selection.clear();
                 self.editing_context = EditingContext::default();
                 self.active_layer_id = None;
                 self.playback_time = 0.0;
                 self.is_playing = false;
-                self.midi_event_cache.clear();
-                self.audio_duration_cache.clear();
-                self.raw_audio_cache.clear();
-                self.waveform_gpu_dirty.clear();
-                self.waveform_minmax_pools.clear();
-                self.waveform_pyramid_blobs.clear();
                 self.pane_instances.clear();
                 self.project_generation += 1;
                 self.app_mode = AppMode::StartScreen;
@@ -4145,6 +4168,12 @@ impl EditorApp {
             }
             // TODO Phase 5: Show recovery dialog
         }
+
+        // Tear down the previously-open project's backend tracks/instruments before restoring this
+        // file's audio pool + tracks, so an open-over-open doesn't leave orphaned tracks resident in
+        // the backend. Reset is a command; the audio-pool/track restoration below uses queries, which
+        // the audio thread drains after all commands each callback, so the ordering holds.
+        self.reset_audio_backend();
 
         // Replace document
         let step1_start = std::time::Instant::now();
