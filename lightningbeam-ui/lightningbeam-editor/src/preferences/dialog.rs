@@ -165,7 +165,7 @@ impl PreferencesDialog {
         // mobile modals; on desktop, the familiar draggable window.
         let width = crate::mobile::dialog_width(ctx, 550.0);
         let scroll_h = if mobile {
-            (ctx.screen_rect().height() - 220.0).clamp(160.0, 400.0)
+            (ctx.content_rect().height() - 220.0).clamp(160.0, 400.0)
         } else {
             400.0
         };

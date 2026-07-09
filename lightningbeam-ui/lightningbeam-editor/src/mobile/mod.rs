@@ -40,7 +40,7 @@ const TOPBAR_H: f32 = 40.0;
 /// Clamp a desktop dialog width to fit the current screen (with side margins). A no-op on wide
 /// desktop screens (`min` keeps the desired width); on a phone-aspect window it shrinks to fit.
 pub fn dialog_width(ctx: &egui::Context, desired: f32) -> f32 {
-    let avail = ctx.screen_rect().width() - 24.0;
+    let avail = ctx.content_rect().width() - 24.0;
     desired.min(avail.max(200.0))
 }
 

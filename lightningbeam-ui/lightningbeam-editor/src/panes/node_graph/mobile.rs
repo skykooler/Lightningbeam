@@ -36,8 +36,6 @@ pub struct MobileNodeState {
     pub mode: NodeViewMode,
     /// The module currently shown in Focus (and centred in Patch).
     pub focus_node: Option<NodeId>,
-    /// Armed cable source in Patch: (node, output-port index).
-    pub patch_source: Option<(NodeId, usize)>,
     /// Whether the add-node picker overlay is open.
     pub show_add: bool,
     /// Search filter in the add-node picker.
@@ -51,7 +49,6 @@ impl Default for MobileNodeState {
         Self {
             mode: NodeViewMode::Focus,
             focus_node: None,
-            patch_source: None,
             show_add: false,
             add_search: String::new(),
             patch_pick: None,
