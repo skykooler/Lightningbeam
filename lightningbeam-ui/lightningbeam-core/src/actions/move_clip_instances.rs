@@ -6,13 +6,15 @@ use crate::action::Action;
 use crate::clip::ClipInstance;
 use crate::document::Document;
 use crate::layer::AnyLayer;
+use daw_backend::Beats;
 use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Action that moves clip instances to new timeline positions
 pub struct MoveClipInstancesAction {
-    /// Map of layer IDs to vectors of (clip_instance_id, old_timeline_start, new_timeline_start)
-    layer_moves: HashMap<Uuid, Vec<(Uuid, f64, f64)>>,
+    /// Map of layer IDs to vectors of (clip_instance_id, old_timeline_start, new_timeline_start).
+    /// Timeline positions are in beats.
+    layer_moves: HashMap<Uuid, Vec<(Uuid, Beats, Beats)>>,
 }
 
 impl MoveClipInstancesAction {
@@ -20,8 +22,8 @@ impl MoveClipInstancesAction {
     ///
     /// # Arguments
     ///
-    /// * `layer_moves` - Map of layer IDs to vectors of (clip_instance_id, old_timeline_start, new_timeline_start)
-    pub fn new(layer_moves: HashMap<Uuid, Vec<(Uuid, f64, f64)>>) -> Self {
+    /// * `layer_moves` - Map of layer IDs to vectors of (clip_instance_id, old_timeline_start, new_timeline_start) in beats
+    pub fn new(layer_moves: HashMap<Uuid, Vec<(Uuid, Beats, Beats)>>) -> Self {
         Self { layer_moves }
     }
 }
@@ -42,7 +44,7 @@ impl Action for MoveClipInstancesAction {
 
                 // Check if this instance is in a group
                 if let Some(group) = document.find_group_for_instance(instance_id) {
-                    let offset = new_start - old_start;
+                    let offset = *new_start - *old_start;
 
                     // Add all group members to the move list
                     for (member_layer_id, member_instance_id) in group.get_members() {
@@ -77,7 +79,7 @@ impl Action for MoveClipInstancesAction {
         }
 
         // Auto-adjust moves to avoid overlaps
-        let mut adjusted_moves: HashMap<Uuid, Vec<(Uuid, f64, f64)>> = HashMap::new();
+        let mut adjusted_moves: HashMap<Uuid, Vec<(Uuid, Beats, Beats)>> = HashMap::new();
 
         for (layer_id, moves) in &expanded_moves {
             let layer = document.get_layer(layer_id)
@@ -101,10 +103,10 @@ impl Action for MoveClipInstancesAction {
                 AnyLayer::Text(_) => &[],
             };
 
-            let group: Vec<(Uuid, f64, f64)> = moves.iter().filter_map(|(id, old_start, _)| {
+            let group: Vec<(Uuid, Beats, Beats)> = moves.iter().filter_map(|(id, old_start, _)| {
                 let inst = clip_instances.iter().find(|ci| &ci.id == id)?;
                 let dur = document.get_clip_duration(&inst.clip_id)?;
-                let eff = inst.trim_end.unwrap_or(dur) - inst.trim_start;
+                let eff = inst.effective_duration_beats(dur, document.tempo_map());
                 Some((*id, *old_start, eff))
             }).collect();
 
@@ -112,7 +114,7 @@ impl Action for MoveClipInstancesAction {
             let clamped = document.clamp_group_move_offset(layer_id, &group, desired_offset);
 
             for (instance_id, old_start, _) in moves {
-                adjusted_layer_moves.push((*instance_id, *old_start, (*old_start + clamped).max(0.0)));
+                adjusted_layer_moves.push((*instance_id, *old_start, (*old_start + clamped).max(Beats::ZERO)));
             }
 
             adjusted_moves.insert(*layer_id, adjusted_layer_moves);
@@ -208,7 +210,7 @@ impl Action for MoveClipInstancesAction {
                     if let Some(instance) = vl.clip_instances.iter().find(|ci| ci.id == *instance_id) {
                         // Check if this clip has a metatrack
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
-                            controller.set_offset(metatrack_id, *new_start);
+                            controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(*new_start));
                             controller.set_trim_start(metatrack_id, instance.trim_start);
                             controller.set_trim_end(metatrack_id, instance.trim_end);
                         }
@@ -292,7 +294,7 @@ impl Action for MoveClipInstancesAction {
                 for (instance_id, old_start, _new_start) in moves {
                     if let Some(instance) = vl.clip_instances.iter().find(|ci| ci.id == *instance_id) {
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
-                            controller.set_offset(metatrack_id, *old_start);
+                            controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(*old_start));
                             controller.set_trim_start(metatrack_id, instance.trim_start);
                             controller.set_trim_end(metatrack_id, instance.trim_end);
                         }
@@ -373,15 +375,15 @@ mod tests {
         let mut vector_layer = VectorLayer::new("Layer 1");
 
         let mut clip_instance = ClipInstance::new(clip_id);
-        clip_instance.timeline_start = 1.0; // Start at 1 second
+        clip_instance.timeline_start = Beats(1.0); // Start at beat 1
         let instance_id = clip_instance.id;
         vector_layer.clip_instances.push(clip_instance);
 
         let layer_id = document.root.add_child(AnyLayer::Vector(vector_layer));
 
-        // Create move action: move from 1.0 to 5.0 seconds
+        // Create move action: move from beat 1 to beat 5
         let mut layer_moves = HashMap::new();
-        layer_moves.insert(layer_id, vec![(instance_id, 1.0, 5.0)]);
+        layer_moves.insert(layer_id, vec![(instance_id, Beats(1.0), Beats(5.0))]);
 
         let mut action = MoveClipInstancesAction::new(layer_moves);
 
@@ -395,7 +397,7 @@ mod tests {
                 .iter()
                 .find(|ci| ci.id == instance_id)
                 .unwrap();
-            assert_eq!(instance.timeline_start, 5.0);
+            assert_eq!(instance.timeline_start, Beats(5.0));
         }
 
         // Rollback
@@ -408,7 +410,7 @@ mod tests {
                 .iter()
                 .find(|ci| ci.id == instance_id)
                 .unwrap();
-            assert_eq!(instance.timeline_start, 1.0);
+            assert_eq!(instance.timeline_start, Beats(1.0));
         }
     }
 }

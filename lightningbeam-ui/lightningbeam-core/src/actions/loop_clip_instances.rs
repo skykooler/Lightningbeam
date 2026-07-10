@@ -9,8 +9,9 @@ use crate::layer::AnyLayer;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// Per-instance loop change: (instance_id, old_timeline_duration, new_timeline_duration, old_loop_before, new_loop_before)
-pub type LoopEntry = (Uuid, Option<f64>, Option<f64>, Option<f64>, Option<f64>);
+/// Per-instance loop change: (instance_id, old_timeline_duration, new_timeline_duration, old_loop_before, new_loop_before).
+/// All durations/offsets are in beats.
+pub type LoopEntry = (Uuid, Option<daw_backend::Beats>, Option<daw_backend::Beats>, Option<daw_backend::Beats>, Option<daw_backend::Beats>);
 
 /// Action that changes the loop duration of clip instances
 pub struct LoopClipInstancesAction {
@@ -129,10 +130,17 @@ impl LoopClipInstancesAction {
 
                 let content_window = {
                     let trim_end = instance.trim_end.unwrap_or(clip.duration);
-                    (trim_end - instance.trim_start).max(0.0)
+                    (trim_end - instance.trim_start).max(0.0) // seconds
                 };
-                let right_duration = target_duration.unwrap_or(content_window);
-                let left_duration = target_loop_before.unwrap_or(0.0);
+                // Natural content length as a beats span at the clip's start (the
+                // fallback when no explicit timeline_duration is set).
+                let tempo_map = document.tempo_map();
+                let content_window_beats = tempo_map.seconds_to_beats(
+                    tempo_map.beats_to_seconds(instance.timeline_start)
+                        + daw_backend::Seconds(content_window),
+                ) - instance.timeline_start;
+                let right_duration = target_duration.unwrap_or(content_window_beats);
+                let left_duration = target_loop_before.unwrap_or(daw_backend::Beats::ZERO);
                 let external_duration = left_duration + right_duration;
                 let external_start = instance.timeline_start - left_duration;
 

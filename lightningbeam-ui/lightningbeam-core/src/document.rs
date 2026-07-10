@@ -5,6 +5,7 @@
 
 use crate::asset_folder::AssetFolderTree;
 use crate::clip::{AudioClip, ClipInstance, ImageAsset, VideoClip, VectorClip};
+use daw_backend::{Beats, Seconds};
 use crate::effect::EffectDefinition;
 use crate::layer::{AnyLayer, GroupLayer};
 use crate::script::ScriptDefinition;
@@ -438,20 +439,24 @@ impl Document {
     /// Returns the end time of the last clip instance across all layers,
     /// or the document's duration if no clips are found.
     pub fn calculate_timeline_endpoint(&self) -> f64 {
+        let tempo_map = self.tempo_map();
+        // Accumulated in **beats** (as f64, to keep the recursive helper's `Fn(_, f64) -> f64`
+        // signature); converted to seconds once at the return.
         let mut max_end_time: f64 = 0.0;
 
-        // Helper function to calculate the end time of a clip instance
+        // End position of a clip instance, in **beats**. Its trimmed content window is in seconds
+        // (scaled by playback speed), so convert that seconds span to beats via the tempo map — the
+        // old code added a seconds duration straight onto the beats start.
         let calculate_instance_end = |instance: &ClipInstance, clip_duration: f64| -> f64 {
-            let effective_duration = if let Some(timeline_duration) = instance.timeline_duration {
-                // Explicit timeline duration set (may include looping)
-                timeline_duration
+            let end_beats: Beats = if let Some(timeline_duration) = instance.timeline_duration {
+                instance.timeline_start + timeline_duration
             } else {
-                // Calculate from trim points
                 let trim_end = instance.trim_end.unwrap_or(clip_duration);
-                let trimmed_duration = trim_end - instance.trim_start;
-                trimmed_duration / instance.playback_speed // Adjust for playback speed
+                let trimmed_secs = ((trim_end - instance.trim_start) / instance.playback_speed).max(0.0);
+                let start_secs = tempo_map.beats_to_seconds(instance.timeline_start);
+                tempo_map.seconds_to_beats(start_secs + Seconds(trimmed_secs))
             };
-            instance.timeline_start + effective_duration
+            end_beats.beats_to_f64()
         };
 
         // Iterate through all layers to find the maximum end time
@@ -484,7 +489,7 @@ impl Document {
                 crate::layer::AnyLayer::Effect(effect_layer) => {
                     for instance in &effect_layer.clip_instances {
                         if let Some(clip_duration) = self.get_clip_duration(&instance.clip_id) {
-                            let end_time = calculate_instance_end(instance, clip_duration);
+                            let end_time = calculate_instance_end(instance, clip_duration.seconds_to_f64());
                             max_end_time = max_end_time.max(end_time);
                         }
                     }
@@ -526,7 +531,7 @@ impl Document {
                                 crate::layer::AnyLayer::Effect(el) => {
                                     for inst in &el.clip_instances {
                                         if let Some(dur) = doc.get_clip_duration(&inst.clip_id) {
-                                            *max_end = max_end.max(calc_end(inst, dur));
+                                            *max_end = max_end.max(calc_end(inst, dur.seconds_to_f64()));
                                         }
                                     }
                                 }
@@ -544,9 +549,10 @@ impl Document {
             }
         }
 
-        // Return the maximum end time, or document duration if no clips found
+        // Return the max end (converting the beats accumulator to seconds), or the document
+        // duration (already seconds) if no clips were found.
         if max_end_time > 0.0 {
-            max_end_time
+            tempo_map.beats_to_seconds(Beats(max_end_time)).seconds_to_f64()
         } else {
             self.duration
         }
@@ -890,13 +896,13 @@ impl Document {
     /// Searches through all clip libraries to find the clip and return its duration.
     /// For effect definitions, returns `EFFECT_DURATION` (f64::MAX) since effects
     /// have infinite internal duration.
-    pub fn get_clip_duration(&self, clip_id: &Uuid) -> Option<f64> {
+    pub fn get_clip_duration(&self, clip_id: &Uuid) -> Option<Seconds> {
         if let Some(clip) = self.vector_clips.get(clip_id) {
             if clip.is_group {
-                Some(clip.duration)
+                Some(Seconds(clip.duration))
             } else {
                 let tempo_map = self.tempo_map();
-                Some(clip.content_duration_with(self.framerate, tempo_map, |id| {
+                Some(Seconds(clip.content_duration_with(self.framerate, tempo_map, |id| {
                     // Resolve nested clip durations (audio, video, other vector clips)
                     if let Some(vc) = self.vector_clips.get(id) {
                         // Avoid deep recursion — use stored duration for nested vector clips
@@ -910,23 +916,23 @@ impl Document {
                     } else {
                         None
                     }
-                }))
+                })))
             }
         } else if let Some(clip) = self.video_clips.get(clip_id) {
-            Some(clip.duration)
+            Some(Seconds(clip.duration))
         } else if let Some(clip) = self.audio_clips.get(clip_id) {
-            Some(clip.duration)
+            Some(Seconds(clip.duration))
         } else if self.effect_definitions.contains_key(clip_id) {
             // Effects have infinite internal duration - their timeline length
             // is controlled by ClipInstance.trim_end
-            Some(crate::effect::EFFECT_DURATION)
+            Some(Seconds(crate::effect::EFFECT_DURATION))
         } else {
             None
         }
     }
 
-    /// Calculate the end time of a clip instance on the timeline
-    pub fn get_clip_instance_end_time(&self, layer_id: &Uuid, instance_id: &Uuid) -> Option<f64> {
+    /// Calculate the end position of a clip instance on the timeline, in **beats**.
+    pub fn get_clip_instance_end_time(&self, layer_id: &Uuid, instance_id: &Uuid) -> Option<Beats> {
         let layer = self.get_layer(layer_id)?;
 
         // Find the clip instance
@@ -942,12 +948,8 @@ impl Document {
 
         let instance = instances.iter().find(|inst| &inst.id == instance_id)?;
         let clip_duration = self.get_clip_duration(&instance.clip_id)?;
-
-        let trim_start = instance.trim_start;
-        let trim_end = instance.trim_end.unwrap_or(clip_duration);
-        let effective_duration = trim_end - trim_start;
-
-        Some(instance.timeline_start + effective_duration)
+        // End position on the timeline, in beats (convert the seconds content window via tempo map).
+        Some(instance.timeline_start + instance.effective_duration_beats(clip_duration, self.tempo_map()))
     }
 
     /// Check if a time range overlaps with any existing clip on the layer
@@ -958,8 +960,8 @@ impl Document {
     pub fn check_overlap_on_layer(
         &self,
         layer_id: &Uuid,
-        start_time: f64,
-        end_time: f64,
+        start_time: Beats,
+        end_time: Beats,
         exclude_instance_ids: &[Uuid],
     ) -> (bool, Option<Uuid>) {
         let Some(layer) = self.get_layer(layer_id) else {
@@ -1012,14 +1014,14 @@ impl Document {
     pub fn find_nearest_valid_position(
         &self,
         layer_id: &Uuid,
-        desired_start: f64,
-        clip_duration: f64,
+        desired_start: Beats,
+        clip_duration: Beats,
         exclude_instance_ids: &[Uuid],
-    ) -> Option<f64> {
+    ) -> Option<Beats> {
         let layer = self.get_layer(layer_id)?;
 
         // Clamp to timeline start (can't go before 0)
-        let desired_start = desired_start.max(0.0);
+        let desired_start = desired_start.max(Beats::ZERO);
 
         // Vector layers don't need overlap adjustment, but still respect timeline start
         if matches!(layer, AnyLayer::Vector(_) | AnyLayer::Group(_)) {
@@ -1044,7 +1046,7 @@ impl Document {
             AnyLayer::Text(_) => return Some(desired_start), // Text layers don't have own clips
         };
 
-        let mut occupied_ranges: Vec<(f64, f64, Uuid)> = Vec::new();
+        let mut occupied_ranges: Vec<(Beats, Beats, Uuid)> = Vec::new();
         for instance in instances {
             if exclude_instance_ids.contains(&instance.id) {
                 continue;
@@ -1063,7 +1065,7 @@ impl Document {
         // Find the clip we're overlapping with and try both sides, pick nearest
         for (occupied_start, occupied_end, _) in &occupied_ranges {
             if desired_start < *occupied_end && *occupied_start < desired_end {
-                let mut candidates: Vec<f64> = Vec::new();
+                let mut candidates: Vec<Beats> = Vec::new();
 
                 // Try snapping to the right (after this clip)
                 let snap_right = *occupied_end;
@@ -1079,8 +1081,8 @@ impl Document {
                 }
 
                 // Try snapping to the left (before this clip)
-                let snap_left = occupied_start - clip_duration;
-                if snap_left >= 0.0 {
+                let snap_left = *occupied_start - clip_duration;
+                if snap_left >= Beats::ZERO {
                     let (overlaps_left, _) = self.check_overlap_on_layer(
                         layer_id,
                         snap_left,
@@ -1095,8 +1097,8 @@ impl Document {
                 // Pick the candidate closest to desired_start
                 if !candidates.is_empty() {
                     candidates.sort_by(|a, b| {
-                        let dist_a = (a - desired_start).abs();
-                        let dist_b = (b - desired_start).abs();
+                        let dist_a = (*a - desired_start).abs();
+                        let dist_b = (*b - desired_start).abs();
                         dist_a.partial_cmp(&dist_b).unwrap_or(std::cmp::Ordering::Equal)
                     });
                     return Some(candidates[0]);
@@ -1106,7 +1108,7 @@ impl Document {
 
         // If no gap found, try placing at timeline start
         if occupied_ranges.is_empty() || occupied_ranges[0].0 >= clip_duration {
-            return Some(0.0);
+            return Some(Beats::ZERO);
         }
 
         // No valid position found
@@ -1118,9 +1120,9 @@ impl Document {
     pub fn clamp_group_move_offset(
         &self,
         layer_id: &Uuid,
-        group: &[(Uuid, f64, f64)], // (instance_id, timeline_start, effective_duration)
-        desired_offset: f64,
-    ) -> f64 {
+        group: &[(Uuid, Beats, Beats)], // (instance_id, timeline_start, effective_duration) in beats
+        desired_offset: Beats,
+    ) -> Beats {
         let Some(layer) = self.get_layer(layer_id) else {
             return desired_offset;
         };
@@ -1140,8 +1142,8 @@ impl Document {
             AnyLayer::Text(_) => &[],
         };
 
-        // Collect non-group clip ranges
-        let mut non_group: Vec<(f64, f64)> = Vec::new();
+        // Collect non-group clip ranges (beats)
+        let mut non_group: Vec<(Beats, Beats)> = Vec::new();
         for inst in instances {
             if group_ids.contains(&inst.id) {
                 continue;
@@ -1163,12 +1165,12 @@ impl Document {
 
             // Check against non-group clips
             for &(ns, ne) in &non_group {
-                if clamped < 0.0 {
+                if clamped < Beats::ZERO {
                     // Moving left: if non-group clip end is between our destination and current start
                     if ne <= start && ne > start + clamped {
                         clamped = clamped.max(ne - start);
                     }
-                } else if clamped > 0.0 {
+                } else if clamped > Beats::ZERO {
                     // Moving right: if non-group clip start is between our current end and destination
                     if ns >= end && ns < end + clamped {
                         clamped = clamped.min(ns - end);
@@ -1188,8 +1190,8 @@ impl Document {
         &self,
         layer_id: &Uuid,
         instance_id: &Uuid,
-        current_timeline_start: f64,
-    ) -> f64 {
+        current_timeline_start: Beats,
+    ) -> Beats {
         let Some(layer) = self.get_layer(layer_id) else {
             return current_timeline_start; // No limit if layer not found
         };
@@ -1200,7 +1202,7 @@ impl Document {
         };
 
         // Find the nearest clip to the left
-        let mut nearest_end = 0.0; // Can extend to timeline start by default
+        let mut nearest_end = Beats::ZERO; // Can extend to timeline start by default
 
         let instances: &[ClipInstance] = match layer {
             AnyLayer::Audio(audio) => &audio.clip_instances,
@@ -1220,6 +1222,7 @@ impl Document {
             // Calculate other clip's extent (accounting for loop_before)
             if let Some(clip_duration) = self.get_clip_duration(&other.clip_id) {
                 let other_end = other.timeline_start + other.effective_duration(clip_duration, self.tempo_map());
+                // (clip_duration is Seconds via get_clip_duration; effective_duration converts.)
 
                 // If this clip is to the left and closer than current nearest
                 if other_end <= current_timeline_start && other_end > nearest_end {
@@ -1239,16 +1242,16 @@ impl Document {
         &self,
         layer_id: &Uuid,
         instance_id: &Uuid,
-        current_timeline_start: f64,
-        current_effective_duration: f64,
-    ) -> f64 {
+        current_timeline_start: Beats,
+        current_effective_duration: Beats,
+    ) -> Beats {
         let Some(layer) = self.get_layer(layer_id) else {
-            return f64::MAX; // No limit if layer not found
+            return Beats(f64::MAX); // No limit if layer not found
         };
 
         // Only check audio, video, and effect layers
         if matches!(layer, AnyLayer::Vector(_) | AnyLayer::Group(_)) {
-            return f64::MAX; // No limit for vector/group layers
+            return Beats(f64::MAX); // No limit for vector/group layers
         }
 
         let instances: &[ClipInstance] = match layer {
@@ -1261,7 +1264,7 @@ impl Document {
             AnyLayer::Text(_) => &[],
         };
 
-        let mut nearest_start = f64::MAX;
+        let mut nearest_start = Beats(f64::MAX);
         let current_end = current_timeline_start + current_effective_duration;
 
         for other in instances {
@@ -1276,10 +1279,10 @@ impl Document {
             }
         }
 
-        if nearest_start == f64::MAX {
-            f64::MAX // No clip to the right, can extend freely
+        if nearest_start == Beats(f64::MAX) {
+            Beats(f64::MAX) // No clip to the right, can extend freely
         } else {
-            (nearest_start - current_end).max(0.0) // Gap between our end and next clip's start
+            (nearest_start - current_end).max(Beats::ZERO) // Gap between our end and next clip's start
         }
     }
     /// Find the maximum amount we can extend loop_before to the left without overlapping.
@@ -1289,8 +1292,8 @@ impl Document {
         &self,
         layer_id: &Uuid,
         instance_id: &Uuid,
-        current_effective_start: f64,
-    ) -> f64 {
+        current_effective_start: Beats,
+    ) -> Beats {
         let Some(layer) = self.get_layer(layer_id) else {
             return current_effective_start;
         };
@@ -1309,7 +1312,7 @@ impl Document {
             AnyLayer::Text(_) => &[],
         };
 
-        let mut nearest_end = 0.0;
+        let mut nearest_end = Beats::ZERO;
 
         for other in instances {
             if &other.id == instance_id {

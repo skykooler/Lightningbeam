@@ -81,9 +81,11 @@ impl Action for SetKeyframeAction {
         if let Some(AnyLayer::Vector(vl)) = document.get_layer(&self.layer_id) {
             for clip_id in &self.clip_instance_ids {
                 if let Some(ci) = vl.clip_instances.iter().find(|c| c.id == *clip_id) {
+                    // `start` is a keyframe time in seconds; group_visibility_start returns seconds,
+                    // so the fallback must convert the clip's beats start to seconds too.
                     let start = vl
                         .group_visibility_start(clip_id, self.time)
-                        .unwrap_or(ci.timeline_start);
+                        .unwrap_or_else(|| document.tempo_map().beats_to_seconds(ci.timeline_start).seconds_to_f64());
                     clip_info.insert(*clip_id, (ci.transform.clone(), ci.opacity, start));
                 }
             }

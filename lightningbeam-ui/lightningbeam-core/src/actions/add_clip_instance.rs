@@ -60,13 +60,14 @@ impl AddClipInstanceAction {
 
 impl Action for AddClipInstanceAction {
     fn execute(&mut self, document: &mut Document) -> Result<(), String> {
-        // Calculate the clip's effective duration
+        // Calculate the clip's effective duration in BEATS for overlap testing.
+        // `get_clip_duration` is the content length in seconds; the placement span
+        // must be beats (the timeline is beats-domain), so convert via the clip's
+        // typed helper rather than treating the seconds span as beats.
         let clip_duration = document.get_clip_duration(&self.clip_instance.clip_id)
             .ok_or_else(|| format!("Clip {} not found", self.clip_instance.clip_id))?;
-
-        let trim_start = self.clip_instance.trim_start;
-        let trim_end = self.clip_instance.trim_end.unwrap_or(clip_duration);
-        let effective_duration = trim_end - trim_start;
+        let effective_duration = self.clip_instance
+            .effective_duration_beats(clip_duration, document.tempo_map());
 
         // Auto-adjust position for audio/video layers to avoid overlaps
         let adjusted_start = document.find_nearest_valid_position(
@@ -200,9 +201,10 @@ impl Action for AddClipInstanceAction {
                 let internal_end = self.clip_instance.trim_end.unwrap_or(clip.duration);
                 let external_start = self.clip_instance.timeline_start;
 
-                // Calculate external duration (for looping if timeline_duration is set)
+                // Calculate external duration (for looping if timeline_duration is set).
+                // MIDI trims are beats-domain, so the fallback span is beats too.
                 let external_duration = self.clip_instance.timeline_duration
-                    .unwrap_or(internal_end - internal_start);
+                    .unwrap_or(daw_backend::Beats(internal_end - internal_start));
 
                 // Create MidiClipInstance
                 let instance = daw_backend::MidiClipInstance::new(
@@ -210,8 +212,8 @@ impl Action for AddClipInstanceAction {
                     *midi_clip_id,
                     daw_backend::Beats(internal_start),
                     daw_backend::Beats(internal_end),
-                    daw_backend::Beats(external_start),
-                    daw_backend::Beats(external_duration),
+                    external_start,
+                    external_duration,
                 );
 
                 // Send query to add instance and get instance ID
@@ -247,8 +249,8 @@ impl Action for AddClipInstanceAction {
                 // the seconds-as-beats bug that made clips stop early off 60 BPM).
                 let effective_duration = self.clip_instance.timeline_duration.unwrap_or_else(|| {
                     let tempo_map = document.tempo_map();
-                    let content_secs = internal_end - internal_start;
-                    tempo_map.inverse_transform(tempo_map.transform(start_time) + content_secs)
+                    let content_secs = daw_backend::Seconds(internal_end - internal_start);
+                    tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(start_time) + content_secs)
                         - start_time
                 });
 
@@ -257,7 +259,7 @@ impl Action for AddClipInstanceAction {
                     *audio_pool_index,
                     start_time,
                     effective_duration,
-                    internal_start,
+                    daw_backend::Seconds(internal_start),
                 );
 
                 self.backend_track_id = Some(*backend_track_id);

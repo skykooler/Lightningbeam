@@ -11,6 +11,7 @@
 use crate::animation::TransformProperty;
 use crate::clip::{ClipInstance, ImageAsset};
 use crate::document::Document;
+use daw_backend::Seconds;
 use crate::gpu::BlendMode;
 use crate::layer::{AnyLayer, LayerTrait, VectorLayer};
 use kurbo::Affine;
@@ -567,7 +568,8 @@ pub fn render_layer_isolated(
             let tempo_map = document.tempo_map();
             for clip_instance in &video_layer.clip_instances {
                 let Some(video_clip) = document.video_clips.get(&clip_instance.clip_id) else { continue };
-                let Some(clip_time) = clip_instance.remap_time(time, video_clip.duration, tempo_map) else { continue };
+                let Some(clip_time) = clip_instance.remap_time(Seconds(time), Seconds(video_clip.duration), tempo_map) else { continue };
+                let clip_time = clip_time.seconds_to_f64();
                 let Some(frame) = video_mgr.get_frame(&clip_instance.clip_id, clip_time, target_w, target_h) else { continue };
 
                 // Evaluate animated transform properties.
@@ -975,7 +977,7 @@ pub fn render_single_clip_instance(
         .filter(|vc| vc.is_group)
         .map(|_| {
             let frame_duration = 1.0 / document.framerate;
-            vector_layer.group_visibility_end(&clip_instance.id, clip_instance.timeline_start, frame_duration)
+            vector_layer.group_visibility_end(&clip_instance.id, document.tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64(), frame_duration)
         });
 
     render_clip_instance(
@@ -1010,18 +1012,18 @@ fn render_clip_instance(
     let clip_time = if vector_clip.is_group {
         // Groups are static — visible from timeline_start to the next keyframe boundary.
         // timeline_start is in beats; group_end_time is in seconds (render time).
-        let start_secs = tempo_map.transform(clip_instance.timeline_start);
+        let start_secs = tempo_map.beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
         let end = group_end_time.unwrap_or(start_secs);
         if time < start_secs || time >= end {
             return;
         }
         0.0
     } else {
-        let clip_dur = document.get_clip_duration(&vector_clip.id).unwrap_or(vector_clip.duration);
-        let Some(t) = clip_instance.remap_time(time, clip_dur, tempo_map) else {
+        let clip_dur = document.get_clip_duration(&vector_clip.id).unwrap_or(Seconds(vector_clip.duration));
+        let Some(t) = clip_instance.remap_time(Seconds(time), clip_dur, tempo_map) else {
             return; // Clip instance not active at this time
         };
-        t
+        t.seconds_to_f64()
     };
 
     // Evaluate animated transform properties
@@ -1172,9 +1174,10 @@ fn render_video_layer(
 
         // Remap timeline time to clip's internal time
         let tempo_map = document.tempo_map();
-        let Some(clip_time) = clip_instance.remap_time(time, video_clip.duration, tempo_map) else {
+        let Some(clip_time) = clip_instance.remap_time(Seconds(time), Seconds(video_clip.duration), tempo_map) else {
             continue; // Clip instance not active at this time
         };
+        let clip_time = clip_time.seconds_to_f64();
 
         // Get video frame from VideoManager at the output (export/preview) resolution.
         let (target_w, target_h) = video_decode_target(document, base_transform);
@@ -1568,7 +1571,7 @@ fn render_vector_layer(
             .filter(|vc| vc.is_group)
             .map(|_| {
                 let frame_duration = 1.0 / document.framerate;
-                layer.group_visibility_end(&clip_instance.id, clip_instance.timeline_start, frame_duration)
+                layer.group_visibility_end(&clip_instance.id, document.tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64(), frame_duration)
             });
         render_clip_instance(document, time, clip_instance, layer_opacity, scene, base_transform, &layer.layer.animation_data, image_cache, video_manager, group_end_time, extract.as_deref_mut());
     }
@@ -1877,7 +1880,7 @@ fn render_vector_layer_cpu(
             .filter(|vc| vc.is_group)
             .map(|_| {
                 let frame_duration = 1.0 / document.framerate;
-                layer.group_visibility_end(&clip_instance.id, clip_instance.timeline_start, frame_duration)
+                layer.group_visibility_end(&clip_instance.id, document.tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64(), frame_duration)
             });
         render_clip_instance_cpu(
             document, time, clip_instance, layer_opacity, pixmap, base_transform,
@@ -1902,14 +1905,14 @@ fn render_clip_instance_cpu(
 
     let tempo_map = document.tempo_map();
     let clip_time = if vector_clip.is_group {
-        let start_secs = tempo_map.transform(clip_instance.timeline_start);
+        let start_secs = tempo_map.beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
         let end = group_end_time.unwrap_or(start_secs);
         if time < start_secs || time >= end { return; }
         0.0
     } else {
-        let clip_dur = document.get_clip_duration(&vector_clip.id).unwrap_or(vector_clip.duration);
-        let Some(t) = clip_instance.remap_time(time, clip_dur, tempo_map) else { return };
-        t
+        let clip_dur = document.get_clip_duration(&vector_clip.id).unwrap_or(Seconds(vector_clip.duration));
+        let Some(t) = clip_instance.remap_time(Seconds(time), clip_dur, tempo_map) else { return };
+        t.seconds_to_f64()
     };
 
     let transform = &clip_instance.transform;

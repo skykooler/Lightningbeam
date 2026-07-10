@@ -1001,20 +1001,20 @@ impl Engine {
                 let _ = self.event_tx.push(AudioEvent::AudioFileAdded(pool_index, path));
             }
             Command::AddAudioClip(track_id, clip_id, pool_index, start_time, duration, offset) => {
-                // Create a new clip instance with the pre-assigned clip_id
-                // start_time and duration are in beats; offset (internal_start) is seconds
-                let start_beats = Beats(start_time);
-                let end_beats = Beats(start_time + duration);
+                // Create a new clip instance with the pre-assigned clip_id.
+                // start_time/duration are beats; offset (internal_start) is seconds.
+                let start_beats = start_time;
+                let end_beats = start_time + duration;
                 let start_secs = self.tempo_map.beats_to_seconds(start_beats);
                 let end_secs = self.tempo_map.beats_to_seconds(end_beats);
                 let content_dur_secs = (end_secs - start_secs).seconds_to_f64();
                 let mut clip = AudioClipInstance::new(
                     clip_id,
                     pool_index,
-                    Seconds(offset),
-                    Seconds(offset + content_dur_secs),
+                    offset,
+                    offset + Seconds(content_dur_secs),
                     start_beats,
-                    Beats(duration),
+                    duration,
                 );
 
                 // If the source is streamed (a compressed audio file, or a video's
@@ -3380,8 +3380,8 @@ impl EngineController {
     }
 
     /// Move a clip to a new timeline position (changes external_start)
-    pub fn move_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: f64) {
-        let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time));
+    pub fn move_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: Beats) {
+        let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time.beats_to_f64()));
     }
 
     /// Trim a clip's internal boundaries (changes which portion of source content is used)
@@ -3391,8 +3391,8 @@ impl EngineController {
     }
 
     /// Extend or shrink a clip's external duration (enables looping if > internal duration)
-    pub fn extend_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_external_duration: f64) {
-        let _ = self.command_tx.push(Command::ExtendClip(track_id, clip_id, new_external_duration));
+    pub fn extend_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_external_duration: Beats) {
+        let _ = self.command_tx.push(Command::ExtendClip(track_id, clip_id, new_external_duration.beats_to_f64()));
     }
 
     /// Send a generic command to the audio thread
@@ -3440,8 +3440,8 @@ impl EngineController {
 
     /// Set metatrack time offset in seconds
     /// Positive = shift content later, negative = shift earlier
-    pub fn set_offset(&mut self, track_id: TrackId, offset: f64) {
-        let _ = self.command_tx.push(Command::SetOffset(track_id, offset));
+    pub fn set_offset(&mut self, track_id: TrackId, offset: Seconds) {
+        let _ = self.command_tx.push(Command::SetOffset(track_id, offset.seconds_to_f64()));
     }
 
     /// Set metatrack pitch shift in semitones (for future use)
@@ -3525,14 +3525,14 @@ impl EngineController {
 
     /// Add a clip to an audio track (async, fire-and-forget)
     /// Returns the pre-assigned clip instance ID so callers can track the clip without a sync round-trip
-    pub fn add_audio_clip(&mut self, track_id: TrackId, pool_index: usize, start_time: f64, duration: f64, offset: f64) -> AudioClipInstanceId {
+    pub fn add_audio_clip(&mut self, track_id: TrackId, pool_index: usize, start_time: Beats, duration: Beats, offset: Seconds) -> AudioClipInstanceId {
         let clip_id = self.next_audio_clip_id.fetch_add(1, Ordering::Relaxed);
         let _ = self.command_tx.push(Command::AddAudioClip(track_id, clip_id, pool_index, start_time, duration, offset));
         clip_id
     }
 
     /// Add a clip to an audio track with a pre-assigned ID (for undo/redo, restoring deleted clips)
-    pub fn add_audio_clip_with_id(&mut self, track_id: TrackId, clip_id: AudioClipInstanceId, pool_index: usize, start_time: f64, duration: f64, offset: f64) {
+    pub fn add_audio_clip_with_id(&mut self, track_id: TrackId, clip_id: AudioClipInstanceId, pool_index: usize, start_time: Beats, duration: Beats, offset: Seconds) {
         let _ = self.command_tx.push(Command::AddAudioClip(track_id, clip_id, pool_index, start_time, duration, offset));
     }
 

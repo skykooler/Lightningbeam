@@ -159,7 +159,7 @@ mod tests {
     fn test_add_effect() {
         let (mut document, layer_id, def) = create_test_setup();
 
-        let instance = def.create_instance(0.0, 10.0);
+        let instance = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let instance_id = instance.id;
 
         let mut action = AddEffectAction::new(layer_id, instance);
@@ -181,7 +181,7 @@ mod tests {
     fn test_add_effect_rollback() {
         let (mut document, layer_id, def) = create_test_setup();
 
-        let instance = def.create_instance(0.0, 10.0);
+        let instance = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
 
         let mut action = AddEffectAction::new(layer_id, instance);
         action.execute(&mut document).unwrap();
@@ -201,19 +201,19 @@ mod tests {
         let (mut document, layer_id, def) = create_test_setup();
 
         // Add first effect
-        let instance1 = def.create_instance(0.0, 10.0);
+        let instance1 = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let id1 = instance1.id;
         let mut action1 = AddEffectAction::new(layer_id, instance1);
         action1.execute(&mut document).unwrap();
 
         // Add second effect
-        let instance2 = def.create_instance(0.0, 10.0);
+        let instance2 = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let id2 = instance2.id;
         let mut action2 = AddEffectAction::new(layer_id, instance2);
         action2.execute(&mut document).unwrap();
 
         // Insert third effect at index 1 (between first and second)
-        let instance3 = def.create_instance(0.0, 10.0);
+        let instance3 = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let id3 = instance3.id;
         let mut action3 = AddEffectAction::at_index(layer_id, instance3, 1);
         action3.execute(&mut document).unwrap();
