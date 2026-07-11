@@ -5,6 +5,7 @@
 /// When a sampled audio layer is selected, shows a GPU-rendered spectrogram.
 
 use eframe::egui;
+use daw_backend::Seconds;
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, Stroke, StrokeKind};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
@@ -465,8 +466,8 @@ impl PianoRollPane {
                 for instance in &audio_layer.clip_instances {
                     if let Some(clip) = document.audio_clips.get(&instance.clip_id) {
                         if let AudioClipType::Midi { midi_clip_id } = clip.clip_type {
-                            let duration = instance.effective_duration(clip.duration, document.tempo_map());
-                            clip_data.push((midi_clip_id, instance.timeline_start, instance.trim_start, duration, instance.id));
+                            let duration = instance.effective_duration(Seconds(clip.duration), document.tempo_map());
+                            clip_data.push((midi_clip_id, instance.timeline_start.beats_to_f64(), instance.trim_start, duration.beats_to_f64(), instance.id));
                         }
                     }
                 }
@@ -2454,10 +2455,15 @@ impl PianoRollPane {
             for instance in &audio_layer.clip_instances {
                 if let Some(clip) = document.audio_clips.get(&instance.clip_id) {
                     if let AudioClipType::Sampled { audio_pool_index } = clip.clip_type {
-                        let duration = instance.timeline_duration.unwrap_or(clip.duration);
+                        // Duration in beats: explicit timeline_duration, else the clip's content
+                        // length converted to beats at the clip's start.
+                        let duration = instance.timeline_duration.unwrap_or_else(|| {
+                            let tmap = document.tempo_map();
+                            tmap.seconds_to_beats(tmap.beats_to_seconds(instance.timeline_start) + Seconds(clip.duration)) - instance.timeline_start
+                        });
                         // Get sample rate from raw_audio_cache
                         if let Some((_samples, sr, _ch)) = shared.raw_audio_cache.get(&audio_pool_index) {
-                            clip_infos.push((audio_pool_index, instance.timeline_start, instance.trim_start, duration, *sr));
+                            clip_infos.push((audio_pool_index, instance.timeline_start.beats_to_f64(), instance.trim_start, duration.beats_to_f64(), *sr));
                         }
                     }
                 }

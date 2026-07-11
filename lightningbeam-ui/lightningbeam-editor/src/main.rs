@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
+use daw_backend::{Beats, Seconds};
 use lightningbeam_core::layer::{AnyLayer, AudioLayer};
 use lightningbeam_core::layout::{LayoutDefinition, LayoutNode};
 use lightningbeam_core::pane::PaneType;
@@ -2352,7 +2353,8 @@ impl EditorApp {
         use lightningbeam_core::instance_group::InstanceGroup;
         use std::collections::HashSet;
 
-        let split_time = self.playback_time;
+        // Split position as a beats timeline position (playback_time is seconds).
+        let split_time = self.action_executor.document().tempo_map().seconds_to_beats(Seconds(self.playback_time));
         let active_layer_id = match self.active_layer_id {
             Some(id) => id,
             None => return, // No active layer, nothing to split
@@ -2363,7 +2365,7 @@ impl EditorApp {
         // Helper to find clips that span the playhead in a specific layer
         fn find_splittable_clips(
             clip_instances: &[lightningbeam_core::clip::ClipInstance],
-            split_time: f64,
+            split_time: Beats,
             document: &lightningbeam_core::document::Document,
         ) -> Vec<uuid::Uuid> {
             let mut result = Vec::new();
@@ -2372,9 +2374,9 @@ impl EditorApp {
                     let effective_duration = instance.effective_duration(clip_duration, document.tempo_map());
                     let timeline_end = instance.timeline_start + effective_duration;
 
-                    const EPSILON: f64 = 0.001;
-                    if split_time > instance.timeline_start + EPSILON
-                        && split_time < timeline_end - EPSILON
+                    let epsilon = Beats(0.001);
+                    if split_time > instance.timeline_start + epsilon
+                        && split_time < timeline_end - epsilon
                     {
                         result.push(instance.id);
                     }
@@ -3051,10 +3053,11 @@ impl EditorApp {
                     let min_start = instances
                         .iter()
                         .map(|i| i.timeline_start)
-                        .fold(f64::INFINITY, f64::min);
-                    let offset = self.playback_time - min_start;
+                        .fold(Beats(f64::INFINITY), |a, b| a.min(b));
+                    let playhead_beats = self.action_executor.document().tempo_map().seconds_to_beats(Seconds(self.playback_time));
+                    let offset = playhead_beats - min_start;
                     for inst in &mut instances {
-                        inst.timeline_start = (inst.timeline_start + offset).max(0.0);
+                        inst.timeline_start = (inst.timeline_start + offset).max(Beats::ZERO);
                     }
                 }
 
@@ -3256,7 +3259,7 @@ impl EditorApp {
             let duplicates: Vec<lightningbeam_core::clip::ClipInstance> = clips_to_duplicate.iter().map(|original| {
                 let mut duplicate = original.clone();
                 duplicate.id = uuid::Uuid::new_v4();
-                let clip_duration = document.get_clip_duration(&original.clip_id).unwrap_or(1.0);
+                let clip_duration = document.get_clip_duration(&original.clip_id).unwrap_or(Seconds(1.0));
                 let effective_duration = original.effective_duration(clip_duration, document.tempo_map());
                 duplicate.timeline_start = original.timeline_start + effective_duration;
                 if let Some((new_clip_def_id, _)) = midi_clip_replacements.get(&original.clip_id) {
@@ -5553,6 +5556,7 @@ impl EditorApp {
         use lightningbeam_core::layer::*;
 
         let drop_time = self.playback_time;
+        let drop_beats = self.action_executor.document().tempo_map().seconds_to_beats(Seconds(drop_time));
 
         // Find or create a compatible layer
         let document = self.action_executor.document();
@@ -5645,7 +5649,7 @@ impl EditorApp {
             } else {
                 // For clips, create a clip instance
                 let mut clip_instance = ClipInstance::new(asset_info.clip_id)
-                    .with_timeline_start(drop_time);
+                    .with_timeline_start(drop_beats);
 
                 // For video clips, scale to fit and center in document
                 if asset_info.clip_type == panes::DragClipType::Video {
@@ -5706,7 +5710,7 @@ impl EditorApp {
 
                     // Create audio clip instance at same timeline position
                     let audio_instance = ClipInstance::new(linked_audio_clip_id)
-                        .with_timeline_start(drop_time);
+                        .with_timeline_start(drop_beats);
                     let audio_instance_id = audio_instance.id;
 
                     // Execute audio action with backend sync
@@ -5748,7 +5752,7 @@ impl EditorApp {
 
         // Find the video clip instance in the document
         let document = self.action_executor.document();
-        let mut video_instance_info: Option<(uuid::Uuid, f64, bool)> = None; // (layer_id, timeline_start, already_in_group)
+        let mut video_instance_info: Option<(uuid::Uuid, Beats, bool)> = None; // (layer_id, timeline_start [beats], already_in_group)
 
         // Search root layers for a video clip instance with matching clip_id
         for layer in &document.root.children {
@@ -6418,9 +6422,10 @@ impl eframe::App for EditorApp {
                                     let clip = AudioClip::new_recording("Recording...");
                                     let doc_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
 
-                                    // Create clip instance on the layer
+                                    // Create clip instance on the layer (recording_start_time is seconds)
+                                    let rec_start_beats = self.action_executor.document().tempo_map().seconds_to_beats(Seconds(self.recording_start_time));
                                     let clip_instance = ClipInstance::new(doc_clip_id)
-                                        .with_timeline_start(self.recording_start_time);
+                                        .with_timeline_start(rec_start_beats);
 
                                     let clip_instance_id = clip_instance.id;
 
@@ -6537,7 +6542,7 @@ impl eframe::App for EditorApp {
                                                 None
                                             }
                                         })
-                                        .unwrap_or((uuid::Uuid::nil(), uuid::Uuid::nil(), 0.0, 0.0))
+                                        .unwrap_or((uuid::Uuid::nil(), uuid::Uuid::nil(), Beats::ZERO, 0.0))
                                 };
 
                                 if !clip_id.is_nil() {
@@ -7494,9 +7499,13 @@ impl eframe::App for EditorApp {
                                                 let duration = clip.duration;
                                                 self.action_executor.document_mut().video_clips.insert(clip_id, clip);
 
+                                                // recording_start_time and duration are seconds; convert to beats.
+                                                let tempo_map = self.action_executor.document().tempo_map();
+                                                let rec_start_beats = tempo_map.seconds_to_beats(Seconds(self.recording_start_time));
+                                                let dur_beats = tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(rec_start_beats) + Seconds(duration)) - rec_start_beats;
                                                 let mut clip_instance = ClipInstance::new(clip_id)
-                                                    .with_timeline_start(self.recording_start_time)
-                                                    .with_timeline_duration(duration);
+                                                    .with_timeline_start(rec_start_beats)
+                                                    .with_timeline_duration(dur_beats);
 
                                                 // Scale to fit document and center (like drag-dropped videos)
                                                 {

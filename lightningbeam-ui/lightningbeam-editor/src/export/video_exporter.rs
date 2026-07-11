@@ -1062,10 +1062,13 @@ fn composite_document_to_hdr(
                         let success = gpu_resources.effect_processor.compile_effect(device, effect_def);
                         if !success { eprintln!("Failed to compile effect: {}", effect_def.name); continue; }
                     }
+                    let tempo_map = document.tempo_map();
+                    let effect_end_beats = effect_instance.timeline_start
+                        + effect_instance.effective_duration(daw_backend::Seconds(lightningbeam_core::effect::EFFECT_DURATION), tempo_map);
                     let effect_inst = lightningbeam_core::effect::EffectInstance::new(
                         effect_def,
-                        effect_instance.timeline_start,
-                        effect_instance.timeline_start + effect_instance.effective_duration(lightningbeam_core::effect::EFFECT_DURATION, document.tempo_map()),
+                        tempo_map.beats_to_seconds(effect_instance.timeline_start).seconds_to_f64(),
+                        tempo_map.beats_to_seconds(effect_end_beats).seconds_to_f64(),
                     );
                     let effect_output_handle = gpu_resources.buffer_pool.acquire(device, hdr_spec);
                     if let Some(effect_output_view) = gpu_resources.buffer_pool.get_view(effect_output_handle) {

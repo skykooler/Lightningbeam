@@ -204,20 +204,12 @@ impl Action for TrimClipInstancesAction {
                         {
                             // If extending to the left (new_trim < old_trim)
                             if should_validate && new_trim < old_trim {
-                                // Max we can extend left is the timeline gap to the
-                                // previous clip (beats).
-                                let max_extend_beats = document.find_max_trim_extend_left(
+                                // Max leftward extension as content seconds (the gap's wall-clock span).
+                                let max_extend_secs = document.find_max_trim_extend_left(
                                     layer_id,
                                     instance_id,
                                     instance.timeline_start,
-                                );
-                                // Audio plays 1 content-second per timeline-second, so the
-                                // revealable content equals that gap's wall-clock span.
-                                let tempo_map = document.tempo_map();
-                                let old_timeline_secs = tempo_map.beats_to_seconds(old_timeline);
-                                let max_extend_secs = (old_timeline_secs
-                                    - tempo_map.beats_to_seconds(old_timeline - max_extend_beats))
-                                    .seconds_to_f64();
+                                ).seconds_to_f64();
 
                                 // Calculate how much we want to extend (content seconds)
                                 let desired_extend = old_trim - new_trim;
@@ -226,8 +218,9 @@ impl Action for TrimClipInstancesAction {
                                 let actual_extend = desired_extend.min(max_extend_secs);
                                 let clamped_trim_start = old_trim - actual_extend;
                                 // Move the timeline left by the same wall-clock seconds.
+                                let tempo_map = document.tempo_map();
                                 let clamped_timeline_start = tempo_map
-                                    .seconds_to_beats(old_timeline_secs - Seconds(actual_extend))
+                                    .seconds_to_beats(tempo_map.beats_to_seconds(old_timeline) - Seconds(actual_extend))
                                     .max(Beats::ZERO);
 
                                 clamped_new = TrimData::left(clamped_trim_start, clamped_timeline_start);
@@ -248,19 +241,13 @@ impl Action for TrimClipInstancesAction {
                                 tempo_map.beats_to_seconds(instance.timeline_start) + content_secs,
                             ) - instance.timeline_start;
 
-                            // Max we can extend right is the timeline gap to the next
-                            // clip (beats).
-                            let max_extend_beats = document.find_max_trim_extend_right(
+                            // Max rightward extension as content seconds (the gap's wall-clock span).
+                            let max_extend_secs = document.find_max_trim_extend_right(
                                 layer_id,
                                 instance_id,
                                 instance.timeline_start,
                                 current_effective_duration,
-                            );
-                            // Convert that gap to content seconds at the clip's right edge.
-                            let right_edge = instance.timeline_start + current_effective_duration;
-                            let max_extend_secs = (tempo_map.beats_to_seconds(right_edge + max_extend_beats)
-                                - tempo_map.beats_to_seconds(right_edge))
-                                .seconds_to_f64();
+                            ).seconds_to_f64();
 
                             // Calculate how much we want to extend (content seconds)
                             let desired_extend = new_trim_end - old_trim_end;

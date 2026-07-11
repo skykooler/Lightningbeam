@@ -1186,19 +1186,21 @@ impl Document {
     ///
     /// Returns the distance to the nearest clip to the left, or the distance to
     /// timeline start (0.0) if no clips exist to the left.
+    /// Returns the max leftward trim extension as a content-seconds span (the wall-clock
+    /// length of the timeline gap to the previous clip); the trim domain is seconds.
     pub fn find_max_trim_extend_left(
         &self,
         layer_id: &Uuid,
         instance_id: &Uuid,
         current_timeline_start: Beats,
-    ) -> Beats {
+    ) -> Seconds {
         let Some(layer) = self.get_layer(layer_id) else {
-            return current_timeline_start; // No limit if layer not found
+            return self.tempo_map().beats_to_seconds(current_timeline_start); // No limit if layer not found
         };
 
         // Only check audio, video, and effect layers
         if matches!(layer, AnyLayer::Vector(_) | AnyLayer::Group(_)) {
-            return current_timeline_start; // No limit for vector/group layers
+            return self.tempo_map().beats_to_seconds(current_timeline_start); // No limit for vector/group layers
         };
 
         // Find the nearest clip to the left
@@ -1231,27 +1233,27 @@ impl Document {
             }
         }
 
-        current_timeline_start - nearest_end
+        self.tempo_map().beats_to_seconds(current_timeline_start) - self.tempo_map().beats_to_seconds(nearest_end)
     }
 
-    /// Find the maximum amount we can extend a clip to the right without overlapping
+    /// Find the maximum amount we can extend a clip to the right without overlapping.
     ///
-    /// Returns the distance to the nearest clip to the right, or f64::MAX if no
-    /// clips exist to the right.
+    /// Returns the content-seconds span of the timeline gap to the nearest clip on the
+    /// right, or Seconds(f64::MAX) if none. `current_effective_duration` is beats (timeline).
     pub fn find_max_trim_extend_right(
         &self,
         layer_id: &Uuid,
         instance_id: &Uuid,
         current_timeline_start: Beats,
         current_effective_duration: Beats,
-    ) -> Beats {
+    ) -> Seconds {
         let Some(layer) = self.get_layer(layer_id) else {
-            return Beats(f64::MAX); // No limit if layer not found
+            return Seconds(f64::MAX); // No limit if layer not found
         };
 
         // Only check audio, video, and effect layers
         if matches!(layer, AnyLayer::Vector(_) | AnyLayer::Group(_)) {
-            return Beats(f64::MAX); // No limit for vector/group layers
+            return Seconds(f64::MAX); // No limit for vector/group layers
         }
 
         let instances: &[ClipInstance] = match layer {
@@ -1280,9 +1282,10 @@ impl Document {
         }
 
         if nearest_start == Beats(f64::MAX) {
-            Beats(f64::MAX) // No clip to the right, can extend freely
+            Seconds(f64::MAX) // No clip to the right, can extend freely
         } else {
-            (nearest_start - current_end).max(Beats::ZERO) // Gap between our end and next clip's start
+            // Gap between our end and next clip's start, as content seconds.
+            (self.tempo_map().beats_to_seconds(nearest_start) - self.tempo_map().beats_to_seconds(current_end)).max(Seconds::ZERO)
         }
     }
     /// Find the maximum amount we can extend loop_before to the left without overlapping.
