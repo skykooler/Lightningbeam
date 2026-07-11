@@ -921,7 +921,15 @@ impl Document {
         } else if let Some(clip) = self.video_clips.get(clip_id) {
             Some(Seconds(clip.duration))
         } else if let Some(clip) = self.audio_clips.get(clip_id) {
-            Some(Seconds(clip.duration))
+            // MIDI clips store `duration` in BEATS (they share the AudioClip struct with
+            // sampled clips, whose duration is seconds). Convert to wall-clock seconds so
+            // the content-window sizing works uniformly.
+            match clip.clip_type {
+                crate::clip::AudioClipType::Midi { .. } => {
+                    Some(self.tempo_map().beats_to_seconds(Beats(clip.duration)))
+                }
+                _ => Some(Seconds(clip.duration)),
+            }
         } else if self.effect_definitions.contains_key(clip_id) {
             // Effects have infinite internal duration - their timeline length
             // is controlled by ClipInstance.trim_end
