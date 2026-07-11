@@ -830,7 +830,7 @@ fn execute_command(
             app.next_clip_id += 1;
             app.add_clip(track_id, clip_id, start_time, duration, format!("Clip {}", clip_id), Vec::new());
 
-            controller.create_midi_clip(track_id, start_time, duration);
+            controller.create_midi_clip(track_id, crate::Beats(start_time), crate::Beats(duration));
             app.set_status(format!("Created MIDI clip on track {} at {:.2}s for {:.2}s", track_id, start_time, duration));
         }
         "loadmidi" => {

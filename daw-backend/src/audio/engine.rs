@@ -3607,10 +3607,10 @@ impl EngineController {
     }
 
     /// Create a new MIDI clip on a track
-    pub fn create_midi_clip(&mut self, track_id: TrackId, start_time: f64, duration: f64) -> MidiClipId {
+    pub fn create_midi_clip(&mut self, track_id: TrackId, start_time: Beats, duration: Beats) -> MidiClipId {
         // Peek at the next clip ID that will be used
         let clip_id = self.next_midi_clip_id.load(Ordering::Relaxed);
-        let _ = self.command_tx.push(Command::CreateMidiClip(track_id, start_time, duration));
+        let _ = self.command_tx.push(Command::CreateMidiClip(track_id, start_time.beats_to_f64(), duration.beats_to_f64()));
         clip_id
     }
 
@@ -3739,8 +3739,8 @@ impl EngineController {
     }
 
     /// Start recording on a track
-    pub fn start_recording(&mut self, track_id: TrackId, start_time: f64) {
-        let _ = self.command_tx.push(Command::StartRecording(track_id, Beats(start_time)));
+    pub fn start_recording(&mut self, track_id: TrackId, start_time: Beats) {
+        let _ = self.command_tx.push(Command::StartRecording(track_id, start_time));
     }
 
     /// Stop the current recording
@@ -3759,8 +3759,8 @@ impl EngineController {
     }
 
     /// Start MIDI recording on a track
-    pub fn start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: f64) {
-        let _ = self.command_tx.push(Command::StartMidiRecording(track_id, clip_id, Beats(start_time)));
+    pub fn start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: Beats) {
+        let _ = self.command_tx.push(Command::StartMidiRecording(track_id, clip_id, start_time));
     }
 
     /// Stop the current MIDI recording

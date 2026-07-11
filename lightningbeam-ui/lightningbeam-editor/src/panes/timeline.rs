@@ -1127,6 +1127,9 @@ impl TimelinePane {
 
         shared.recording_layer_ids.clear();
 
+        // The backend records in the beats domain; start_time is the seconds playhead.
+        let start_beats = shared.action_executor.document().tempo_map().seconds_to_beats(Seconds(start_time));
+
         // Step 4: Dispatch recording for each candidate
         for &(layer_id, ref cat, _) in &candidates {
             match cat {
@@ -1150,7 +1153,7 @@ impl TimelinePane {
                         }
                         if let Some(controller_arc) = shared.audio_controller {
                             let mut controller = controller_arc.lock().unwrap();
-                            controller.start_recording(track_id, start_time);
+                            controller.start_recording(track_id, start_beats);
                             println!("🎤 Started audio recording on track {:?} at {:.2}s", track_id, start_time);
                         }
                         shared.recording_layer_ids.push(layer_id);
@@ -1162,8 +1165,8 @@ impl TimelinePane {
                     if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
                         if let Some(controller_arc) = shared.audio_controller {
                             let mut controller = controller_arc.lock().unwrap();
-                            let clip_id = controller.create_midi_clip(track_id, start_time, 0.0);
-                            controller.start_midi_recording(track_id, clip_id, start_time);
+                            let clip_id = controller.create_midi_clip(track_id, start_beats, Beats::ZERO);
+                            controller.start_midi_recording(track_id, clip_id, start_beats);
                             shared.recording_clips.insert(layer_id, clip_id);
                             println!("🎹 Started MIDI recording on track {:?} at {:.2}s, clip_id={}",
                                      track_id, start_time, clip_id);
@@ -1174,8 +1177,6 @@ impl TimelinePane {
                             *shared.recording_clips.get(&layer_id).unwrap_or(&0), daw_backend::Beats::ZERO);
                         let doc_clip_id = shared.action_executor.document_mut().add_audio_clip(doc_clip);
 
-                        let start_beats = shared.action_executor.document().tempo_map()
-                            .seconds_to_beats(Seconds(start_time));
                         let clip_instance = ClipInstance::new(doc_clip_id)
                             .with_timeline_start(start_beats);
 
