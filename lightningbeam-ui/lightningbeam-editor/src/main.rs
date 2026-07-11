@@ -6547,10 +6547,8 @@ impl eframe::App for EditorApp {
                                 };
 
                                 if !clip_id.is_nil() {
-                                    // Finalize the clip (update pool_index and duration)
-                                    // A finished recording (samples in the pool) needs capturing.
+                                    // Finalize the clip (update pool_index and duration).
                                     self.autosave.pending_event = true;
-                                    self.media_modified = true;
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&clip_id) {
                                         if clip.finalize_recording(pool_index, duration) {
                                             clip.name = format!("Recording {}", pool_index);
@@ -6563,11 +6561,31 @@ impl eframe::App for EditorApp {
                                     // Map the document instance_id → the existing backend clip so that
                                     // delete/move/trim actions can reference it correctly.
                                     // DO NOT call AddAudioClipSync — that would create a duplicate clip.
-                                    self.clip_instance_to_backend_map.insert(
-                                        instance_id,
-                                        lightningbeam_core::action::BackendClipInstanceId::Audio(_backend_clip_id),
-                                    );
+                                    let backend_id = lightningbeam_core::action::BackendClipInstanceId::Audio(_backend_clip_id);
+                                    self.clip_instance_to_backend_map.insert(instance_id, backend_id);
                                     eprintln!("[AUDIO] Mapped doc instance {} → backend clip {}", instance_id, _backend_clip_id);
+
+                                    // Register the finished recording as an already-applied action so
+                                    // it bumps the epoch (marks the document modified for save-on-close
+                                    // and autosave) and can be undone/redone like any other edit.
+                                    let clip_instance = self.layer_to_track_map.get(&layer_id).copied().and_then(|track_id| {
+                                        self.action_executor.document()
+                                            .get_layer(&layer_id)
+                                            .and_then(|l| if let AnyLayer::Audio(al) = l {
+                                                al.clip_instances.iter().find(|ci| ci.id == instance_id).cloned()
+                                            } else { None })
+                                            .map(|ci| (track_id, ci))
+                                    });
+                                    if let Some((track_id, clip_instance)) = clip_instance {
+                                        let action = lightningbeam_core::actions::AddClipInstanceAction::already_applied(
+                                            layer_id, clip_instance, track_id, backend_id,
+                                        );
+                                        self.action_executor.push_applied(Box::new(action));
+                                    } else {
+                                        // Couldn't build the action; still mark modified so the recording
+                                        // isn't silently lost on close.
+                                        self.media_modified = true;
+                                    }
                                 }
                             }
 
@@ -6702,9 +6720,33 @@ impl eframe::App for EditorApp {
                                 }
                             }
 
-                            // TODO: Store clip_instance_to_backend_map entry for this MIDI clip.
-                            // The backend created the instance in create_midi_clip(), but doesn't
-                            // report the instance_id back. Needed for move/trim operations later.
+                            // Register the finished MIDI recording as an already-applied action so it
+                            // marks the document modified (save-on-close / autosave) and is undoable,
+                            // like the audio path. The backend instance id was mapped during
+                            // MidiRecordingProgress.
+                            if let Some(&layer_id) = self.track_to_layer_map.get(&track_id) {
+                                let doc_clip_id = self.action_executor.document()
+                                    .audio_clip_by_midi_clip_id(clip_id).map(|(id, _)| id);
+                                if let Some(doc_clip_id) = doc_clip_id {
+                                    let instance = self.action_executor.document()
+                                        .get_layer(&layer_id)
+                                        .and_then(|l| if let AnyLayer::Audio(al) = l {
+                                            al.clip_instances.iter().find(|ci| ci.clip_id == doc_clip_id).cloned()
+                                        } else { None });
+                                    if let Some(instance) = instance {
+                                        if let Some(&backend_id) = self.clip_instance_to_backend_map.get(&instance.id) {
+                                            let action = lightningbeam_core::actions::AddClipInstanceAction::already_applied(
+                                                layer_id, instance, track_id, backend_id,
+                                            );
+                                            self.action_executor.push_applied(Box::new(action));
+                                        } else {
+                                            // No backend mapping (e.g. snapshot lookup missed); still mark
+                                            // modified so the recording isn't silently lost on close.
+                                            self.media_modified = true;
+                                        }
+                                    }
+                                }
+                            }
 
                             // Remove this MIDI layer from active recordings
                             if let Some(&layer_id) = self.track_to_layer_map.get(&track_id) {

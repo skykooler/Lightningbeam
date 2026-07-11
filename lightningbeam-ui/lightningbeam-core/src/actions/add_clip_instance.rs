@@ -47,6 +47,31 @@ impl AddClipInstanceAction {
         }
     }
 
+    /// Construct the action in its **already-applied** state: the clip instance is already in the
+    /// document and its backend clip already exists (e.g. a finished recording). Pair with
+    /// `ActionExecutor::push_applied` so the recording becomes undoable without re-adding anything.
+    /// Undo will `rollback`/`rollback_backend` (removing the clip from doc + backend via the seeded
+    /// ids); redo re-adds it via the normal `execute`/`execute_backend` path.
+    pub fn already_applied(
+        layer_id: Uuid,
+        clip_instance: ClipInstance,
+        backend_track_id: daw_backend::TrackId,
+        backend_id: crate::action::BackendClipInstanceId,
+    ) -> Self {
+        let (backend_midi_instance_id, backend_audio_instance_id) = match backend_id {
+            crate::action::BackendClipInstanceId::Midi(id) => (Some(id), None),
+            crate::action::BackendClipInstanceId::Audio(id) => (None, Some(id)),
+        };
+        Self {
+            layer_id,
+            clip_instance,
+            executed: true, // already present in the document
+            backend_track_id: Some(backend_track_id),
+            backend_midi_instance_id,
+            backend_audio_instance_id,
+        }
+    }
+
     /// Get the ID of the clip instance that will be/was added
     pub fn clip_instance_id(&self) -> Uuid {
         self.clip_instance.id

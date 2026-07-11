@@ -236,6 +236,24 @@ impl ActionExecutor {
         Ok(())
     }
 
+    /// Register an action whose effect has **already been applied** to the document (and backend)
+    /// outside the executor — e.g. a recording, which streams its content into the document live
+    /// over time and can't be applied by a single synchronous `execute()`.
+    ///
+    /// Unlike `execute`, this does NOT run `execute()`/`execute_backend()` (the effect is already
+    /// present). It clears the redo stack, bumps the epoch (so the document reads as modified), and
+    /// pushes the action so it becomes undoable: undo runs `rollback`/`rollback_backend` to remove
+    /// the content, redo runs `execute`/`execute_backend` to bring it back. The action must be
+    /// constructed already in its post-execute state (see e.g. `AddClipInstanceAction::already_applied`).
+    pub fn push_applied(&mut self, action: Box<dyn Action>) {
+        self.redo_stack.clear();
+        self.epoch = self.epoch.wrapping_add(1);
+        self.undo_stack.push(action);
+        if self.undo_stack.len() > self.max_undo_depth {
+            self.undo_stack.remove(0);
+        }
+    }
+
     /// Undo the last action
     ///
     /// Returns Ok(true) if an action was undone, Ok(false) if undo stack is empty,
