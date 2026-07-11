@@ -387,8 +387,8 @@ impl Action for TrimClipInstancesAction {
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             // Instance already has new values after execute()
                             controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(instance.timeline_start));
-                            controller.set_trim_start(metatrack_id, instance.trim_start);
-                            controller.set_trim_end(metatrack_id, instance.trim_end);
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
                         }
                     }
                 }
@@ -477,8 +477,8 @@ impl Action for TrimClipInstancesAction {
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             // Instance already has old values after rollback()
                             controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(instance.timeline_start));
-                            controller.set_trim_start(metatrack_id, instance.trim_start);
-                            controller.set_trim_end(metatrack_id, instance.trim_end);
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
                         }
                     }
                 }

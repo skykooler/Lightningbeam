@@ -1110,7 +1110,7 @@ impl TimelinePane {
 
             if let Some(controller_arc) = shared.audio_controller {
                 let mut controller = controller_arc.lock().unwrap();
-                controller.seek(seek_to);
+                controller.seek(Seconds(seek_to));
                 controller.set_metronome_enabled(true);
                 if !*shared.is_playing {
                     controller.play();
@@ -5006,7 +5006,7 @@ impl TimelinePane {
                     *playback_time = kf_time;
                     if let Some(controller_arc) = audio_controller {
                         let mut controller = controller_arc.lock().unwrap();
-                        controller.seek(kf_time);
+                        controller.seek(Seconds(kf_time));
                     }
                 }
             }
@@ -5034,7 +5034,7 @@ impl TimelinePane {
                 // Seek immediately so it works while playing
                 if let Some(controller_arc) = audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
-                    controller.seek(new_time);
+                    controller.seek(Seconds(new_time));
                 }
             }
         }
@@ -5046,7 +5046,7 @@ impl TimelinePane {
                 *playback_time = new_time;
                 if let Some(controller_arc) = audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
-                    controller.seek(new_time);
+                    controller.seek(Seconds(new_time));
                 }
             }
         }
@@ -5206,7 +5206,7 @@ impl PaneRenderer for TimelinePane {
                     *shared.playback_time = 0.0;
                     if let Some(controller_arc) = shared.audio_controller {
                         let mut controller = controller_arc.lock().unwrap();
-                        controller.seek(0.0);
+                        controller.seek(Seconds(0.0));
                     }
                 }
 
@@ -5215,7 +5215,7 @@ impl PaneRenderer for TimelinePane {
                     *shared.playback_time = (*shared.playback_time - 0.1).max(0.0);
                     if let Some(controller_arc) = shared.audio_controller {
                         let mut controller = controller_arc.lock().unwrap();
-                        controller.seek(*shared.playback_time);
+                        controller.seek(Seconds(*shared.playback_time));
                     }
                 }
 
@@ -5251,7 +5251,7 @@ impl PaneRenderer for TimelinePane {
                     *shared.playback_time = (*shared.playback_time + 0.1).min(self.duration);
                     if let Some(controller_arc) = shared.audio_controller {
                         let mut controller = controller_arc.lock().unwrap();
-                        controller.seek(*shared.playback_time);
+                        controller.seek(Seconds(*shared.playback_time));
                     }
                 }
 
@@ -5260,7 +5260,7 @@ impl PaneRenderer for TimelinePane {
                     *shared.playback_time = self.duration;
                     if let Some(controller_arc) = shared.audio_controller {
                         let mut controller = controller_arc.lock().unwrap();
-                        controller.seek(self.duration);
+                        controller.seek(Seconds(self.duration));
                     }
                 }
 
@@ -5692,7 +5692,7 @@ impl PaneRenderer for TimelinePane {
                                 self.automation_cache.remove(&layer_id);
                             } else if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
                                 // time is already in beats (all automation x-axes use beats)
-                                controller.automation_add_keyframe(track_id, node_id, time, value, "linear".to_string(), (0.0, 0.0), (0.0, 0.0));
+                                controller.automation_add_keyframe(track_id, node_id, Beats(time), value, "linear".to_string(), (0.0, 0.0), (0.0, 0.0));
                                 // Optimistic cache update (beats)
                                 if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
                                     if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
@@ -5740,8 +5740,8 @@ impl PaneRenderer for TimelinePane {
                                 self.automation_cache.remove(&layer_id);
                             } else if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
                                 // old_time / new_time are already in beats
-                                controller.automation_remove_keyframe(track_id, node_id, old_time);
-                                controller.automation_add_keyframe(track_id, node_id, new_time, new_value, interpolation.clone(), ease_out, ease_in);
+                                controller.automation_remove_keyframe(track_id, node_id, Beats(old_time));
+                                controller.automation_add_keyframe(track_id, node_id, Beats(new_time), new_value, interpolation.clone(), ease_out, ease_in);
                                 // Optimistic cache update (beats)
                                 if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
                                     if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {
@@ -5769,7 +5769,7 @@ impl PaneRenderer for TimelinePane {
                                 }
                             } else if let Some(&track_id) = shared.layer_to_track_map.get(&layer_id) {
                                 // time is already in beats
-                                controller.automation_remove_keyframe(track_id, node_id, time);
+                                controller.automation_remove_keyframe(track_id, node_id, Beats(time));
                                 // Optimistic cache update (beats)
                                 if let Some(lanes) = self.automation_cache.get_mut(&layer_id) {
                                     if let Some(lane) = lanes.iter_mut().find(|l| l.node_id == node_id) {

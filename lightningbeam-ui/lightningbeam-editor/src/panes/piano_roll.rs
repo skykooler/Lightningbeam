@@ -651,7 +651,7 @@ impl PianoRollPane {
                     *shared.playback_time = nt;
                     if let Some(ctrl) = shared.audio_controller.as_ref() {
                         if let Ok(mut c) = ctrl.lock() {
-                            c.seek(nt);
+                            c.seek(Seconds(nt));
                         }
                     }
                 }
@@ -1764,7 +1764,7 @@ impl PianoRollPane {
             let seek_time = snap_to_value(time.max(0.0), self.snap_value, tempo_map);
             *shared.playback_time = seek_time;
             if let Some(ctrl) = shared.audio_controller.as_ref() {
-                if let Ok(mut c) = ctrl.lock() { c.seek(seek_time); }
+                if let Ok(mut c) = ctrl.lock() { c.seek(Seconds(seek_time)); }
             }
         }
     }

@@ -211,8 +211,8 @@ impl Action for MoveClipInstancesAction {
                         // Check if this clip has a metatrack
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(*new_start));
-                            controller.set_trim_start(metatrack_id, instance.trim_start);
-                            controller.set_trim_end(metatrack_id, instance.trim_end);
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
                         }
                     }
                 }
@@ -295,8 +295,8 @@ impl Action for MoveClipInstancesAction {
                     if let Some(instance) = vl.clip_instances.iter().find(|ci| ci.id == *instance_id) {
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(*old_start));
-                            controller.set_trim_start(metatrack_id, instance.trim_start);
-                            controller.set_trim_end(metatrack_id, instance.trim_end);
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
                         }
                     }
                 }

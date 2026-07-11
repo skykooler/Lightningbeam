@@ -790,7 +790,7 @@ fn execute_command(
                 return Err("Usage: seek <seconds>".to_string());
             }
             let pos: f64 = parts[1].parse().map_err(|_| "Invalid position")?;
-            controller.seek(pos);
+            controller.seek(crate::Seconds(pos));
             app.set_status(format!("Seeked to {:.2}s", pos));
         }
         "track" => {
@@ -882,7 +882,7 @@ fn execute_command(
                     app.next_clip_id += 1;
 
                     // Send to audio engine with the start_time (clip content is separate from timeline position)
-                    controller.add_loaded_midi_clip(track_id, midi_clip, start_time);
+                    controller.add_loaded_midi_clip(track_id, midi_clip, crate::Beats(start_time));
 
                     app.set_status(format!("Loaded {} ({} events, {:.2}s) to track {} at {:.2}s",
                         file_path, event_count, duration, track_id, start_time));
