@@ -472,8 +472,10 @@ impl Document {
                 }
                 crate::layer::AnyLayer::Audio(audio_layer) => {
                     for instance in &audio_layer.clip_instances {
-                        if let Some(clip) = self.audio_clips.get(&instance.clip_id) {
-                            let end_time = calculate_instance_end(instance, clip.duration);
+                        // get_clip_duration yields seconds (converting MIDI's beats duration),
+                        // which is what the closure expects.
+                        if let Some(clip_duration) = self.get_clip_duration(&instance.clip_id) {
+                            let end_time = calculate_instance_end(instance, clip_duration.seconds_to_f64());
                             max_end_time = max_end_time.max(end_time);
                         }
                     }
@@ -516,8 +518,8 @@ impl Document {
                                 }
                                 crate::layer::AnyLayer::Audio(al) => {
                                     for inst in &al.clip_instances {
-                                        if let Some(clip) = doc.audio_clips.get(&inst.clip_id) {
-                                            *max_end = max_end.max(calc_end(inst, clip.duration));
+                                        if let Some(clip_duration) = doc.get_clip_duration(&inst.clip_id) {
+                                            *max_end = max_end.max(calc_end(inst, clip_duration.seconds_to_f64()));
                                         }
                                     }
                                 }
@@ -908,7 +910,7 @@ impl Document {
                         // Avoid deep recursion — use stored duration for nested vector clips
                         Some(vc.content_duration(self.framerate, tempo_map))
                     } else if let Some(ac) = self.audio_clips.get(id) {
-                        Some(ac.duration)
+                        Some(ac.content_duration().to_seconds(tempo_map).seconds_to_f64())
                     } else if let Some(vc) = self.video_clips.get(id) {
                         Some(vc.duration)
                     } else if self.effect_definitions.contains_key(id) {
@@ -921,15 +923,9 @@ impl Document {
         } else if let Some(clip) = self.video_clips.get(clip_id) {
             Some(Seconds(clip.duration))
         } else if let Some(clip) = self.audio_clips.get(clip_id) {
-            // MIDI clips store `duration` in BEATS (they share the AudioClip struct with
-            // sampled clips, whose duration is seconds). Convert to wall-clock seconds so
-            // the content-window sizing works uniformly.
-            match clip.clip_type {
-                crate::clip::AudioClipType::Midi { .. } => {
-                    Some(self.tempo_map().beats_to_seconds(Beats(clip.duration)))
-                }
-                _ => Some(Seconds(clip.duration)),
-            }
+            // Interpret the clip's native-domain duration as wall-clock seconds (MIDI stores
+            // beats, sampled stores seconds — content_duration keeps that straight).
+            Some(clip.content_duration().to_seconds(self.tempo_map()))
         } else if self.effect_definitions.contains_key(clip_id) {
             // Effects have infinite internal duration - their timeline length
             // is controlled by ClipInstance.trim_end

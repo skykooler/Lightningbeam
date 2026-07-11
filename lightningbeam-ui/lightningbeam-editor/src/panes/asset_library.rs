@@ -932,7 +932,7 @@ impl AssetLibraryPane {
                 name: clip.name.clone(),
                 category: AssetCategory::Audio,
                 drag_clip_type,
-                duration: clip.duration,
+                duration: clip.content_duration().native(),
                 dimensions: None,
                 extra_info,
                 is_builtin: false,
@@ -1136,7 +1136,7 @@ impl AssetLibraryPane {
                             name: clip.name.clone(),
                             category: AssetCategory::Audio,
                             drag_clip_type,
-                            duration: clip.duration,
+                            duration: clip.content_duration().native(),
                             dimensions: None,
                             extra_info,
                             is_builtin: false,
@@ -1802,7 +1802,7 @@ impl AssetLibraryPane {
                                 AudioClipType::Midi { midi_clip_id } => {
                                     let note_color = egui::Color32::from_rgb(100, 200, 100);
                                     if let Some(events) = shared.midi_event_cache.get(midi_clip_id) {
-                                        Some(generate_midi_thumbnail(events, clip.duration, bg_color, note_color))
+                                        Some(generate_midi_thumbnail(events, clip.content_duration().native(), bg_color, note_color))
                                     } else {
                                         Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                     }
@@ -2358,7 +2358,7 @@ impl AssetLibraryPane {
                             AudioClipType::Midi { midi_clip_id } => {
                                 let note_color = egui::Color32::from_rgb(100, 200, 100);
                                 if let Some(events) = shared.midi_event_cache.get(midi_clip_id) {
-                                    Some(generate_midi_thumbnail(events, clip.duration, bg_color, note_color))
+                                    Some(generate_midi_thumbnail(events, clip.content_duration().native(), bg_color, note_color))
                                 } else {
                                     Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                 }
@@ -2495,7 +2495,7 @@ impl AssetLibraryPane {
                             AudioClipType::Midi { midi_clip_id } => {
                                 let note_color = egui::Color32::from_rgb(100, 200, 100);
                                 if let Some(events) = shared.midi_event_cache.get(midi_clip_id) {
-                                    Some(generate_midi_thumbnail(events, clip.duration, bg_color, note_color))
+                                    Some(generate_midi_thumbnail(events, clip.content_duration().native(), bg_color, note_color))
                                 } else {
                                     Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                 }
@@ -2858,7 +2858,7 @@ impl AssetLibraryPane {
                                                 let note_color = egui::Color32::from_rgb(100, 200, 100);
 
                                                 if let Some(events) = shared.midi_event_cache.get(midi_clip_id) {
-                                                    Some(generate_midi_thumbnail(events, clip.duration, bg_color, note_color))
+                                                    Some(generate_midi_thumbnail(events, clip.content_duration().native(), bg_color, note_color))
                                                 } else {
                                                     Some(generate_placeholder_thumbnail(AssetCategory::Audio, 200))
                                                 }

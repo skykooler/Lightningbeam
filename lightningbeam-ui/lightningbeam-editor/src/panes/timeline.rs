@@ -209,7 +209,9 @@ fn effective_clip_duration(
                 document.get_clip_duration(&clip_instance.clip_id)
             }
         }
-        AnyLayer::Audio(_) => document.get_audio_clip(&clip_instance.clip_id).map(|c| Seconds(c.duration)),
+        // Delegate to get_clip_duration so MIDI clips (whose `duration` is stored in beats,
+        // not seconds) are converted correctly rather than read as raw seconds.
+        AnyLayer::Audio(_) => document.get_clip_duration(&clip_instance.clip_id),
         AnyLayer::Video(_) => document.get_video_clip(&clip_instance.clip_id).map(|c| Seconds(c.duration)),
         AnyLayer::Effect(_) => Some(Seconds(lightningbeam_core::effect::EFFECT_DURATION)),
         AnyLayer::Group(_) => None,
@@ -3082,7 +3084,7 @@ impl TimelinePane {
                                 };
                                 let audio_file_duration = total_frames as f64 / eff_sr as f64;
 
-                                let clip_dur = Seconds(audio_clip.duration);
+                                let clip_dur = audio_clip.content_duration().to_seconds(document.tempo_map());
                                 let mut ci_start = ci.effective_start();
                                 if is_move_drag && selection.contains_clip_instance(&ci.id) {
                                     ci_start = self.moved_start(ci_start, document.tempo_map(), &document.time_signature, document.framerate);
@@ -4699,7 +4701,7 @@ impl TimelinePane {
                                     if selection.contains_clip_instance(&clip_instance.id) {
                                         let clip_duration = match layer {
                                             lightningbeam_core::layer::AnyLayer::Audio(_) => {
-                                                document.get_audio_clip(&clip_instance.clip_id).map(|c| c.duration)
+                                                document.get_audio_clip(&clip_instance.clip_id).map(|c| c.content_duration().native())
                                             }
                                             _ => continue,
                                         };
@@ -4773,7 +4775,7 @@ impl TimelinePane {
                                     if selection.contains_clip_instance(&clip_instance.id) {
                                         let clip_duration = match layer {
                                             lightningbeam_core::layer::AnyLayer::Audio(_) => {
-                                                document.get_audio_clip(&clip_instance.clip_id).map(|c| c.duration)
+                                                document.get_audio_clip(&clip_instance.clip_id).map(|c| c.content_duration().native())
                                             }
                                             _ => continue,
                                         };

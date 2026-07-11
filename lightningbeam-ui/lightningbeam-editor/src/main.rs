@@ -2,6 +2,7 @@
 
 use eframe::egui;
 use daw_backend::{Beats, Seconds};
+use lightningbeam_core::clip::ClipDuration;
 use lightningbeam_core::layer::{AnyLayer, AudioLayer};
 use lightningbeam_core::layout::{LayoutDefinition, LayoutNode};
 use lightningbeam_core::pane::PaneType;
@@ -5879,7 +5880,7 @@ impl EditorApp {
                     // Get audio clip duration for logging
                     let duration = self.action_executor.document().audio_clips
                         .get(&audio_clip_id)
-                        .map(|c| c.duration)
+                        .map(|c| c.content_duration().native())
                         .unwrap_or(0.0);
 
                     println!("✅ Extracted audio from '{}' ({:.1}s, {}ch, {}Hz) - AudioClip ID: {}",
@@ -6477,7 +6478,7 @@ impl eframe::App for EditorApp {
                                 if let Some(doc_clip_id) = doc_clip_id {
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
                                         if clip.is_recording() {
-                                            clip.duration = duration.seconds_to_f64();
+                                            clip.set_content_duration(ClipDuration::Seconds(duration));
                                         }
                                     }
                                 }
@@ -6650,7 +6651,7 @@ impl eframe::App for EditorApp {
                                     }
                                     // Update the clip's duration so the timeline bar grows
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
-                                        clip.duration = duration.beats_to_f64();
+                                        clip.set_content_duration(ClipDuration::Beats(duration));
                                     }
                                 }
                             }
@@ -6686,7 +6687,7 @@ impl eframe::App for EditorApp {
                                             .map(|(id, _)| id);
                                         if let Some(doc_clip_id) = doc_clip_id {
                                             if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
-                                                clip.duration = midi_clip_data.duration;
+                                                clip.set_content_duration(ClipDuration::Beats(Beats(midi_clip_data.duration)));
                                                 clip.name = format!("MIDI Recording {}", clip_id);
                                             }
                                         }

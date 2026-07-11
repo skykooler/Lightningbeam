@@ -129,7 +129,7 @@ impl LoopClipInstancesAction {
                 };
 
                 let content_window = {
-                    let trim_end = instance.trim_end.unwrap_or(clip.duration);
+                    let trim_end = instance.trim_end.unwrap_or(clip.content_duration().native());
                     (trim_end - instance.trim_start).max(0.0) // seconds
                 };
                 // Natural content length as a beats span at the clip's start (the

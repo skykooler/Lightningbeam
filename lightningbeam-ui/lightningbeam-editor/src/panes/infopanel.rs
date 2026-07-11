@@ -1808,7 +1808,7 @@ impl InfopanelPane {
                         });
                         ui.horizontal(|ui| {
                             ui.label("Duration:");
-                            ui.label(format!("{:.2}s", clip.duration));
+                            ui.label(format!("{:.2}s", clip.content_duration().to_seconds(document.tempo_map()).seconds_to_f64()));
                         });
                     } else {
                         // Could be an image asset or effect — show ID

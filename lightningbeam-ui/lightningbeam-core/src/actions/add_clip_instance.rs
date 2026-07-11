@@ -198,7 +198,7 @@ impl Action for AddClipInstanceAction {
 
                 // Calculate internal start/end from trim parameters
                 let internal_start = self.clip_instance.trim_start;
-                let internal_end = self.clip_instance.trim_end.unwrap_or(clip.duration);
+                let internal_end = self.clip_instance.trim_end.unwrap_or(clip.content_duration().native());
                 let external_start = self.clip_instance.timeline_start;
 
                 // Calculate external duration (for looping if timeline_duration is set).
@@ -240,7 +240,7 @@ impl Action for AddClipInstanceAction {
                 // `trim_*` / `clip.duration` are in SECONDS (audio content time),
                 // while `timeline_*` and the backend's `duration` are in BEATS.
                 let internal_start = self.clip_instance.trim_start;
-                let internal_end = self.clip_instance.trim_end.unwrap_or(clip.duration);
+                let internal_end = self.clip_instance.trim_end.unwrap_or(clip.content_duration().native());
                 let start_time = self.clip_instance.timeline_start;
                 // `effective_duration` is in BEATS. When `timeline_duration` is set
                 // it already is; otherwise the clip occupies its natural content

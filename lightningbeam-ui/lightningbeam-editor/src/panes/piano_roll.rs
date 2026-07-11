@@ -466,7 +466,7 @@ impl PianoRollPane {
                 for instance in &audio_layer.clip_instances {
                     if let Some(clip) = document.audio_clips.get(&instance.clip_id) {
                         if let AudioClipType::Midi { midi_clip_id } = clip.clip_type {
-                            let duration = instance.effective_duration(Seconds(clip.duration), document.tempo_map());
+                            let duration = instance.effective_duration(clip.content_duration().to_seconds(document.tempo_map()), document.tempo_map());
                             clip_data.push((midi_clip_id, instance.timeline_start.beats_to_f64(), instance.trim_start, duration.beats_to_f64(), instance.id));
                         }
                     }
@@ -2459,7 +2459,7 @@ impl PianoRollPane {
                         // length converted to beats at the clip's start.
                         let duration = instance.timeline_duration.unwrap_or_else(|| {
                             let tmap = document.tempo_map();
-                            tmap.seconds_to_beats(tmap.beats_to_seconds(instance.timeline_start) + Seconds(clip.duration)) - instance.timeline_start
+                            tmap.seconds_to_beats(tmap.beats_to_seconds(instance.timeline_start) + clip.content_duration().to_seconds(tmap)) - instance.timeline_start
                         });
                         // Get sample rate from raw_audio_cache
                         if let Some((_samples, sr, _ch)) = shared.raw_audio_cache.get(&audio_pool_index) {

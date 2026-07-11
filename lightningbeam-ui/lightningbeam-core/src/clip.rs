@@ -468,6 +468,37 @@ pub enum AudioClipType {
     Recording,
 }
 
+/// A clip's content duration, tagged by its native unit.
+///
+/// Sampled/recording audio and video measure content in wall-clock **seconds**; MIDI measures
+/// it in **beats** (tempo-independent musical length). Carrying the domain in the type means a
+/// duration can't be silently read in the wrong unit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ClipDuration {
+    Seconds(Seconds),
+    Beats(Beats),
+}
+
+impl ClipDuration {
+    /// Wall-clock seconds. Beats are converted as a length from beat 0 (exact under constant
+    /// tempo; a reasonable approximation otherwise — durations are position-independent here).
+    pub fn to_seconds(self, tempo_map: &daw_backend::TempoMap) -> Seconds {
+        match self {
+            ClipDuration::Seconds(s) => s,
+            ClipDuration::Beats(b) => tempo_map.beats_to_seconds(b),
+        }
+    }
+
+    /// The raw magnitude in the clip's native unit. Use only in code that already works in that
+    /// domain (e.g. trim math, whose values share the clip's native domain).
+    pub fn native(self) -> f64 {
+        match self {
+            ClipDuration::Seconds(s) => s.seconds_to_f64(),
+            ClipDuration::Beats(b) => b.beats_to_f64(),
+        }
+    }
+}
+
 /// Audio clip
 ///
 /// This is compatible with daw-backend's audio system:
@@ -481,9 +512,13 @@ pub struct AudioClip {
     /// Clip name
     pub name: String,
 
-    /// Duration in seconds
-    /// For sampled audio, this can be set to trim the audio shorter than the source file
-    pub duration: f64,
+    /// Raw content duration in the clip's **native domain** — SECONDS for sampled/recording
+    /// audio, BEATS for MIDI (musical length, tempo-independent). Private on purpose: the domain
+    /// depends on `clip_type`, so all access goes through [`AudioClip::content_duration`] /
+    /// [`AudioClip::set_content_duration`], which keep it type-safe. Stored as a bare `f64`
+    /// because the `.beam` format serializes it as a plain number (serde derives over private
+    /// fields fine); a domain-tagged newtype would change the on-disk shape.
+    duration: f64,
 
     /// Audio clip type (sampled or MIDI)
     pub clip_type: AudioClipType,
@@ -494,6 +529,31 @@ pub struct AudioClip {
 }
 
 impl AudioClip {
+    /// The clip's content duration, tagged with its native domain (seconds for sampled/recording,
+    /// beats for MIDI). This is the only sanctioned way to read the raw `duration` field.
+    pub fn content_duration(&self) -> ClipDuration {
+        match self.clip_type {
+            AudioClipType::Midi { .. } => ClipDuration::Beats(Beats(self.duration)),
+            AudioClipType::Sampled { .. } | AudioClipType::Recording => {
+                ClipDuration::Seconds(Seconds(self.duration))
+            }
+        }
+    }
+
+    /// Set the content duration. Debug-asserts the value's domain matches the clip type so a
+    /// beats duration can't be stored on a seconds clip (or vice-versa).
+    pub fn set_content_duration(&mut self, duration: ClipDuration) {
+        debug_assert!(
+            matches!(
+                (&self.clip_type, duration),
+                (AudioClipType::Midi { .. }, ClipDuration::Beats(_))
+                    | (AudioClipType::Sampled { .. } | AudioClipType::Recording, ClipDuration::Seconds(_))
+            ),
+            "clip duration domain must match clip type",
+        );
+        self.duration = duration.native();
+    }
+
     /// Create a new sampled audio clip
     ///
     /// # Arguments

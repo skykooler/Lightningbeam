@@ -377,7 +377,7 @@ impl Action for SplitClipInstanceAction {
 
                 // 1. Trim the original (left) instance
                 let orig_internal_start = original_instance.trim_start;
-                let orig_internal_end = original_instance.trim_end.unwrap_or(clip.duration);
+                let orig_internal_end = original_instance.trim_end.unwrap_or(clip.content_duration().native());
 
                 // Look up the original backend instance ID
                 if let Some(crate::action::BackendClipInstanceId::Midi(orig_backend_id)) =
@@ -388,7 +388,7 @@ impl Action for SplitClipInstanceAction {
 
                 // 2. Add the new (right) instance
                 let internal_start = new_instance.trim_start;
-                let internal_end = new_instance.trim_end.unwrap_or(clip.duration);
+                let internal_end = new_instance.trim_end.unwrap_or(clip.content_duration().native());
                 let external_start = new_instance.timeline_start;
                 // MIDI trims are beats-domain, so the fallback span is beats too.
                 let external_duration = new_instance
@@ -425,7 +425,7 @@ impl Action for SplitClipInstanceAction {
             AudioClipType::Sampled { audio_pool_index } => {
                 // 1. Trim the original (left) instance
                 let orig_internal_start = original_instance.trim_start;
-                let orig_internal_end = original_instance.trim_end.unwrap_or(clip.duration);
+                let orig_internal_end = original_instance.trim_end.unwrap_or(clip.content_duration().native());
 
                 // Look up the original backend instance ID
                 if let Some(crate::action::BackendClipInstanceId::Audio(orig_backend_id)) =
@@ -436,7 +436,7 @@ impl Action for SplitClipInstanceAction {
 
                 // 2. Add the new (right) instance
                 let internal_start = new_instance.trim_start;
-                let internal_end = new_instance.trim_end.unwrap_or(clip.duration);
+                let internal_end = new_instance.trim_end.unwrap_or(clip.content_duration().native());
                 let start_time = new_instance.timeline_start;
                 // Fallback span is the content seconds converted to beats at the
                 // clip's start (not the seconds span treated as beats).
@@ -499,7 +499,7 @@ impl Action for SplitClipInstanceAction {
                     if let Some(instance) = al.clip_instances.iter().find(|ci| ci.id == self.instance_id) {
                         if let Some(clip) = document.get_audio_clip(&instance.clip_id) {
                             let orig_internal_start = instance.trim_start;
-                            let orig_internal_end = self.original_trim_end.unwrap_or(clip.duration);
+                            let orig_internal_end = self.original_trim_end.unwrap_or(clip.content_duration().native());
 
                             // Restore based on clip type
                             use crate::clip::AudioClipType;

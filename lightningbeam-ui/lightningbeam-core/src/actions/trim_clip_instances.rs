@@ -424,7 +424,7 @@ impl Action for TrimClipInstancesAction {
                 // Calculate new internal_start and internal_end for backend
                 // Note: instance already has the new trim values after execute()
                 let internal_start = instance.trim_start;
-                let internal_end = instance.trim_end.unwrap_or(clip.duration);
+                let internal_end = instance.trim_end.unwrap_or(clip.content_duration().native());
 
                 // Handle trim based on clip type
                 match &clip.clip_type {
@@ -517,8 +517,8 @@ impl Action for TrimClipInstancesAction {
                     TrimType::TrimRight => instance.trim_start, // trim_start wasn't changed
                 };
                 let internal_end = match trim_type {
-                    TrimType::TrimLeft => instance.trim_end.unwrap_or(clip.duration), // trim_end wasn't changed
-                    TrimType::TrimRight => old.trim_value.unwrap_or(clip.duration),
+                    TrimType::TrimLeft => instance.trim_end.unwrap_or(clip.content_duration().native()), // trim_end wasn't changed
+                    TrimType::TrimRight => old.trim_value.unwrap_or(clip.content_duration().native()),
                 };
 
                 // Handle trim based on clip type

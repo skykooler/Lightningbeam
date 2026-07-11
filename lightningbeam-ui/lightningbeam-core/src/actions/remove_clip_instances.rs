@@ -170,7 +170,7 @@ impl Action for RemoveClipInstancesAction {
                     use daw_backend::command::{Query, QueryResponse};
 
                     let internal_start = instance.trim_start;
-                    let internal_end = instance.trim_end.unwrap_or(clip.duration);
+                    let internal_end = instance.trim_end.unwrap_or(clip.content_duration().native());
                     let external_start = instance.timeline_start;
                     // MIDI trims are beats-domain, so the fallback span is beats too.
                     let external_duration = instance
@@ -198,7 +198,7 @@ impl Action for RemoveClipInstancesAction {
                 }
                 AudioClipType::Sampled { audio_pool_index } => {
                     let internal_start = instance.trim_start;
-                    let internal_end = instance.trim_end.unwrap_or(clip.duration);
+                    let internal_end = instance.trim_end.unwrap_or(clip.content_duration().native());
                     let start_time = instance.timeline_start;
                     // Fallback span is the content seconds converted to beats at the
                     // clip's start (not the seconds span treated as beats).
