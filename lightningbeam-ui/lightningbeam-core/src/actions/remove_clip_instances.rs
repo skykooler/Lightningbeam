@@ -170,19 +170,20 @@ impl Action for RemoveClipInstancesAction {
                     use daw_backend::command::{Query, QueryResponse};
 
                     let internal_start = instance.trim_start;
-                    let internal_end = instance.trim_end.unwrap_or(clip.duration);
+                    let internal_end = instance.trim_end.unwrap_or(clip.content_duration().native());
                     let external_start = instance.timeline_start;
+                    // MIDI trims are beats-domain, so the fallback span is beats too.
                     let external_duration = instance
                         .timeline_duration
-                        .unwrap_or(internal_end - internal_start);
+                        .unwrap_or(daw_backend::Beats(internal_end - internal_start));
 
                     let midi_instance = daw_backend::MidiClipInstance::new(
                         0,
                         *midi_clip_id,
                         daw_backend::Beats(internal_start),
                         daw_backend::Beats(internal_end),
-                        daw_backend::Beats(external_start),
-                        daw_backend::Beats(external_duration),
+                        external_start,
+                        external_duration,
                     );
 
                     let query = Query::AddMidiClipInstanceSync(track_id, midi_instance);
@@ -197,17 +198,23 @@ impl Action for RemoveClipInstancesAction {
                 }
                 AudioClipType::Sampled { audio_pool_index } => {
                     let internal_start = instance.trim_start;
-                    let internal_end = instance.trim_end.unwrap_or(clip.duration);
-                    let effective_duration = instance.timeline_duration
-                        .unwrap_or(internal_end - internal_start);
+                    let internal_end = instance.trim_end.unwrap_or(clip.content_duration().native());
                     let start_time = instance.timeline_start;
+                    // Fallback span is the content seconds converted to beats at the
+                    // clip's start (not the seconds span treated as beats).
+                    let effective_duration = instance.timeline_duration.unwrap_or_else(|| {
+                        let tempo_map = document.tempo_map();
+                        let content_secs = daw_backend::Seconds(internal_end - internal_start);
+                        tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(start_time) + content_secs)
+                            - start_time
+                    });
 
                     let new_id = controller.add_audio_clip(
                         track_id,
                         *audio_pool_index,
                         start_time,
                         effective_duration,
-                        internal_start,
+                        daw_backend::Seconds(internal_start),
                     );
                     backend.clip_instance_to_backend_map.insert(
                         instance.id,
@@ -238,11 +245,11 @@ mod tests {
         let mut vector_layer = VectorLayer::new("Layer 1");
 
         let mut ci1 = ClipInstance::new(clip_id);
-        ci1.timeline_start = 0.0;
+        ci1.timeline_start = daw_backend::Beats::ZERO;
         let id1 = ci1.id;
 
         let mut ci2 = ClipInstance::new(clip_id);
-        ci2.timeline_start = 5.0;
+        ci2.timeline_start = daw_backend::Beats(5.0);
         let id2 = ci2.id;
 
         vector_layer.clip_instances.push(ci1);

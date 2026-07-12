@@ -71,7 +71,8 @@ pub enum Command {
     AddAudioFile(String, Vec<f32>, u32, u32),
     /// Add a clip to an audio track (track_id, clip_id, pool_index, start_time, duration, offset)
     /// The clip_id is pre-assigned by the caller (via EngineController::next_audio_clip_id())
-    AddAudioClip(TrackId, AudioClipInstanceId, usize, f64, f64, f64),
+    /// (track, clip_id, pool_index, start_time [beats], duration [beats], offset [seconds])
+    AddAudioClip(TrackId, AudioClipInstanceId, usize, Beats, Beats, Seconds),
 
     // MIDI commands
     /// Create a new MIDI track with a name and optional parent group

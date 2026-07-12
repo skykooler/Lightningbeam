@@ -2,6 +2,7 @@
 //! project scrub. Wired to the audio controller exactly like `TimelinePane`'s header.
 
 use eframe::egui;
+use daw_backend::Seconds;
 
 use super::{icons, Palette};
 use crate::panes::SharedPaneState;
@@ -32,7 +33,7 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState,
         if let Some(controller_arc) = shared.audio_controller {
             let mut controller = controller_arc.lock().unwrap();
             if *shared.is_playing {
-                controller.seek(*shared.playback_time);
+                controller.seek(Seconds(*shared.playback_time));
                 controller.play();
             } else {
                 controller.pause();
@@ -101,7 +102,7 @@ pub fn render(ui: &mut egui::Ui, rect: egui::Rect, shared: &mut SharedPaneState,
             *shared.playback_time = new_time;
             if let Some(controller_arc) = shared.audio_controller {
                 let mut controller = controller_arc.lock().unwrap();
-                controller.seek(new_time);
+                controller.seek(Seconds(new_time));
             }
         }
     }

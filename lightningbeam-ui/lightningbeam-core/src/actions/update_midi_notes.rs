@@ -1,6 +1,12 @@
 use crate::action::Action;
 use crate::document::Document;
+use daw_backend::Beats;
 use uuid::Uuid;
+
+/// Convert editor-side beats-domain note tuples to the typed backend form.
+fn notes_to_beats(notes: &[(f64, u8, u8, f64)]) -> Vec<(Beats, u8, u8, Beats)> {
+    notes.iter().map(|&(t, n, v, d)| (Beats(t), n, v, Beats(d))).collect()
+}
 
 /// Action to update MIDI notes in a clip (supports undo/redo)
 ///
@@ -49,7 +55,8 @@ impl Action for UpdateMidiNotesAction {
             .get(&self.layer_id)
             .ok_or_else(|| format!("Layer {} not mapped to backend track", self.layer_id))?;
 
-        controller.update_midi_clip_notes(*track_id, self.midi_clip_id, self.new_notes.clone());
+        // Note times/durations are beats (MIDI content domain); assert that at the typed boundary.
+        controller.update_midi_clip_notes(*track_id, self.midi_clip_id, notes_to_beats(&self.new_notes));
         Ok(())
     }
 
@@ -68,7 +75,7 @@ impl Action for UpdateMidiNotesAction {
             .get(&self.layer_id)
             .ok_or_else(|| format!("Layer {} not mapped to backend track", self.layer_id))?;
 
-        controller.update_midi_clip_notes(*track_id, self.midi_clip_id, self.old_notes.clone());
+        controller.update_midi_clip_notes(*track_id, self.midi_clip_id, notes_to_beats(&self.old_notes));
         Ok(())
     }
 

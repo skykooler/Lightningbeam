@@ -1,3 +1,11 @@
+# 1.0.9-alpha:
+Bugfixes:
+- Fix audio recording placement: a second recording landed at the wrong spot (and clicking/dragging clips was similarly off) at any tempo other than 60 BPM — recordings now start exactly at the playhead at any tempo
+- While recording a second audio clip, the live bar showed as a zero-length clip until you stopped; it now grows as you record
+- MIDI clips were drawn with the wrong length (their end grew too fast) at tempos other than 120 BPM
+- Recording a MIDI clip didn't mark the project as having unsaved changes, so closing or starting a new file didn't prompt to save
+- Audio and MIDI recording can now be undone (and redone)
+
 # 1.0.8-alpha:
 Changes:
 - Mobile/touch UI (experimental, testing only — not built or packaged for mobile yet; enabled on desktop with the LB_MOBILE_UI environment variable): work-in-progress phone-friendly interface with a vertical sliding-window pane stack you drag to reveal panes, a new-file intent picker, a selection inspector sheet, a keyboard-primary music surface, a Focus/Patch node editor, long-press context menus, a command palette, and landscape/orientation support

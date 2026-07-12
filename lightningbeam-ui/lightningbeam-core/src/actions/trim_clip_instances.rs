@@ -6,6 +6,7 @@ use crate::action::Action;
 use crate::clip::ClipInstance;
 use crate::document::Document;
 use crate::layer::AnyLayer;
+use daw_backend::{Beats, Seconds};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -32,14 +33,14 @@ pub struct TrimData {
     /// For TrimLeft: trim_start value
     /// For TrimRight: trim_end value (Option because it can be None)
     pub trim_value: Option<f64>,
-    /// For TrimLeft: timeline_start value (where the clip appears on timeline)
+    /// For TrimLeft: timeline_start value (where the clip appears on timeline, beats)
     /// For TrimRight: unused (None)
-    pub timeline_start: Option<f64>,
+    pub timeline_start: Option<Beats>,
 }
 
 impl TrimData {
     /// Create TrimData for left trim
-    pub fn left(trim_start: f64, timeline_start: f64) -> Self {
+    pub fn left(trim_start: f64, timeline_start: Beats) -> Self {
         Self {
             trim_value: Some(trim_start),
             timeline_start: Some(timeline_start),
@@ -203,51 +204,60 @@ impl Action for TrimClipInstancesAction {
                         {
                             // If extending to the left (new_trim < old_trim)
                             if should_validate && new_trim < old_trim {
-                                // Find the maximum we can extend left
-                                let max_extend = document.find_max_trim_extend_left(
+                                // Max leftward extension as content seconds (the gap's wall-clock span).
+                                let max_extend_secs = document.find_max_trim_extend_left(
                                     layer_id,
                                     instance_id,
                                     instance.timeline_start,
-                                );
+                                ).seconds_to_f64();
 
-                                // Calculate how much we want to extend
+                                // Calculate how much we want to extend (content seconds)
                                 let desired_extend = old_trim - new_trim;
 
                                 // Clamp to max allowed
-                                let actual_extend = desired_extend.min(max_extend);
+                                let actual_extend = desired_extend.min(max_extend_secs);
                                 let clamped_trim_start = old_trim - actual_extend;
-                                let clamped_timeline_start = (old_timeline - actual_extend).max(0.0);
+                                // Move the timeline left by the same wall-clock seconds.
+                                let tempo_map = document.tempo_map();
+                                let clamped_timeline_start = tempo_map
+                                    .seconds_to_beats(tempo_map.beats_to_seconds(old_timeline) - Seconds(actual_extend))
+                                    .max(Beats::ZERO);
 
                                 clamped_new = TrimData::left(clamped_trim_start, clamped_timeline_start);
                             }
                         }
                     }
                     TrimType::TrimRight => {
-                        let old_trim_end = old.trim_value.unwrap_or(clip_duration);
-                        let new_trim_end = new.trim_value.unwrap_or(clip_duration);
+                        let old_trim_end = old.trim_value.unwrap_or(clip_duration.seconds_to_f64());
+                        let new_trim_end = new.trim_value.unwrap_or(clip_duration.seconds_to_f64());
 
                         // If extending to the right (new_trim_end > old_trim_end)
                         if should_validate && new_trim_end > old_trim_end {
-                            // Calculate current effective duration
-                            let current_effective_duration = old_trim_end - instance.trim_start;
+                            let tempo_map = document.tempo_map();
+                            // Current effective duration in beats (content seconds
+                            // converted to beats at the clip's start).
+                            let content_secs = Seconds(old_trim_end - instance.trim_start);
+                            let current_effective_duration = tempo_map.seconds_to_beats(
+                                tempo_map.beats_to_seconds(instance.timeline_start) + content_secs,
+                            ) - instance.timeline_start;
 
-                            // Find the maximum we can extend right
-                            let max_extend = document.find_max_trim_extend_right(
+                            // Max rightward extension as content seconds (the gap's wall-clock span).
+                            let max_extend_secs = document.find_max_trim_extend_right(
                                 layer_id,
                                 instance_id,
                                 instance.timeline_start,
                                 current_effective_duration,
-                            );
+                            ).seconds_to_f64();
 
-                            // Calculate how much we want to extend
+                            // Calculate how much we want to extend (content seconds)
                             let desired_extend = new_trim_end - old_trim_end;
 
                             // Clamp to max allowed
-                            let actual_extend = desired_extend.min(max_extend);
+                            let actual_extend = desired_extend.min(max_extend_secs);
                             let clamped_trim_end = old_trim_end + actual_extend;
 
                             // Don't exceed clip duration
-                            let final_trim_end = clamped_trim_end.min(clip_duration);
+                            let final_trim_end = clamped_trim_end.min(clip_duration.seconds_to_f64());
 
                             clamped_new = TrimData::right(Some(final_trim_end));
                         }
@@ -376,9 +386,9 @@ impl Action for TrimClipInstancesAction {
                     if let Some(instance) = vl.clip_instances.iter().find(|ci| ci.id == *instance_id) {
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             // Instance already has new values after execute()
-                            controller.set_offset(metatrack_id, instance.timeline_start);
-                            controller.set_trim_start(metatrack_id, instance.trim_start);
-                            controller.set_trim_end(metatrack_id, instance.trim_end);
+                            controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(instance.timeline_start));
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
                         }
                     }
                 }
@@ -414,7 +424,7 @@ impl Action for TrimClipInstancesAction {
                 // Calculate new internal_start and internal_end for backend
                 // Note: instance already has the new trim values after execute()
                 let internal_start = instance.trim_start;
-                let internal_end = instance.trim_end.unwrap_or(clip.duration);
+                let internal_end = instance.trim_end.unwrap_or(clip.content_duration().native());
 
                 // Handle trim based on clip type
                 match &clip.clip_type {
@@ -466,9 +476,9 @@ impl Action for TrimClipInstancesAction {
                     if let Some(instance) = vl.clip_instances.iter().find(|ci| ci.id == *instance_id) {
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             // Instance already has old values after rollback()
-                            controller.set_offset(metatrack_id, instance.timeline_start);
-                            controller.set_trim_start(metatrack_id, instance.trim_start);
-                            controller.set_trim_end(metatrack_id, instance.trim_end);
+                            controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(instance.timeline_start));
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
                         }
                     }
                 }
@@ -507,8 +517,8 @@ impl Action for TrimClipInstancesAction {
                     TrimType::TrimRight => instance.trim_start, // trim_start wasn't changed
                 };
                 let internal_end = match trim_type {
-                    TrimType::TrimLeft => instance.trim_end.unwrap_or(clip.duration), // trim_end wasn't changed
-                    TrimType::TrimRight => old.trim_value.unwrap_or(clip.duration),
+                    TrimType::TrimLeft => instance.trim_end.unwrap_or(clip.content_duration().native()), // trim_end wasn't changed
+                    TrimType::TrimRight => old.trim_value.unwrap_or(clip.content_duration().native()),
                 };
 
                 // Handle trim based on clip type
@@ -558,7 +568,7 @@ mod tests {
         let mut vector_layer = VectorLayer::new("Layer 1");
 
         let mut clip_instance = ClipInstance::new(clip_id);
-        clip_instance.timeline_start = 0.0;
+        clip_instance.timeline_start = Beats::ZERO;
         clip_instance.trim_start = 0.0;
         let instance_id = clip_instance.id;
         vector_layer.clip_instances.push(clip_instance);
@@ -572,8 +582,8 @@ mod tests {
             vec![(
                 instance_id,
                 TrimType::TrimLeft,
-                TrimData::left(0.0, 0.0),
-                TrimData::left(2.0, 2.0),
+                TrimData::left(0.0, Beats::ZERO),
+                TrimData::left(2.0, Beats(2.0)),
             )],
         );
 
@@ -590,7 +600,7 @@ mod tests {
                 .find(|ci| ci.id == instance_id)
                 .unwrap();
             assert_eq!(instance.trim_start, 2.0);
-            assert_eq!(instance.timeline_start, 2.0);
+            assert_eq!(instance.timeline_start, Beats(2.0));
         }
 
         // Rollback
@@ -604,7 +614,7 @@ mod tests {
                 .find(|ci| ci.id == instance_id)
                 .unwrap();
             assert_eq!(instance.trim_start, 0.0);
-            assert_eq!(instance.timeline_start, 0.0);
+            assert_eq!(instance.timeline_start, Beats::ZERO);
         }
     }
 

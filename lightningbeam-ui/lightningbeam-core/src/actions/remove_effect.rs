@@ -134,7 +134,7 @@ mod tests {
         let (mut document, layer_id, def) = create_test_setup();
 
         // Add an effect first
-        let instance = def.create_instance(0.0, 10.0);
+        let instance = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let instance_id = instance.id;
 
         if let Some(AnyLayer::Effect(el)) = document.get_layer_mut(&layer_id) {
@@ -161,7 +161,7 @@ mod tests {
         let (mut document, layer_id, def) = create_test_setup();
 
         // Add an effect first
-        let instance = def.create_instance(0.0, 10.0);
+        let instance = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let instance_id = instance.id;
 
         if let Some(AnyLayer::Effect(el)) = document.get_layer_mut(&layer_id) {
@@ -185,11 +185,11 @@ mod tests {
         let (mut document, layer_id, def) = create_test_setup();
 
         // Add three effects
-        let instance1 = def.create_instance(0.0, 10.0);
+        let instance1 = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let id1 = instance1.id;
-        let instance2 = def.create_instance(0.0, 10.0);
+        let instance2 = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let id2 = instance2.id;
-        let instance3 = def.create_instance(0.0, 10.0);
+        let instance3 = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let id3 = instance3.id;
 
         if let Some(AnyLayer::Effect(el)) = document.get_layer_mut(&layer_id) {

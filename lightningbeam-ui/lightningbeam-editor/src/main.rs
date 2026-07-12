@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
+use daw_backend::{Beats, Seconds};
+use lightningbeam_core::clip::ClipDuration;
 use lightningbeam_core::layer::{AnyLayer, AudioLayer};
 use lightningbeam_core::layout::{LayoutDefinition, LayoutNode};
 use lightningbeam_core::pane::PaneType;
@@ -2352,7 +2354,8 @@ impl EditorApp {
         use lightningbeam_core::instance_group::InstanceGroup;
         use std::collections::HashSet;
 
-        let split_time = self.playback_time;
+        // Split position as a beats timeline position (playback_time is seconds).
+        let split_time = self.action_executor.document().tempo_map().seconds_to_beats(Seconds(self.playback_time));
         let active_layer_id = match self.active_layer_id {
             Some(id) => id,
             None => return, // No active layer, nothing to split
@@ -2363,7 +2366,7 @@ impl EditorApp {
         // Helper to find clips that span the playhead in a specific layer
         fn find_splittable_clips(
             clip_instances: &[lightningbeam_core::clip::ClipInstance],
-            split_time: f64,
+            split_time: Beats,
             document: &lightningbeam_core::document::Document,
         ) -> Vec<uuid::Uuid> {
             let mut result = Vec::new();
@@ -2372,9 +2375,9 @@ impl EditorApp {
                     let effective_duration = instance.effective_duration(clip_duration, document.tempo_map());
                     let timeline_end = instance.timeline_start + effective_duration;
 
-                    const EPSILON: f64 = 0.001;
-                    if split_time > instance.timeline_start + EPSILON
-                        && split_time < timeline_end - EPSILON
+                    let epsilon = Beats(0.001);
+                    if split_time > instance.timeline_start + epsilon
+                        && split_time < timeline_end - epsilon
                     {
                         result.push(instance.id);
                     }
@@ -3051,10 +3054,11 @@ impl EditorApp {
                     let min_start = instances
                         .iter()
                         .map(|i| i.timeline_start)
-                        .fold(f64::INFINITY, f64::min);
-                    let offset = self.playback_time - min_start;
+                        .fold(Beats(f64::INFINITY), |a, b| a.min(b));
+                    let playhead_beats = self.action_executor.document().tempo_map().seconds_to_beats(Seconds(self.playback_time));
+                    let offset = playhead_beats - min_start;
                     for inst in &mut instances {
-                        inst.timeline_start = (inst.timeline_start + offset).max(0.0);
+                        inst.timeline_start = (inst.timeline_start + offset).max(Beats::ZERO);
                     }
                 }
 
@@ -3256,7 +3260,7 @@ impl EditorApp {
             let duplicates: Vec<lightningbeam_core::clip::ClipInstance> = clips_to_duplicate.iter().map(|original| {
                 let mut duplicate = original.clone();
                 duplicate.id = uuid::Uuid::new_v4();
-                let clip_duration = document.get_clip_duration(&original.clip_id).unwrap_or(1.0);
+                let clip_duration = document.get_clip_duration(&original.clip_id).unwrap_or(Seconds(1.0));
                 let effective_duration = original.effective_duration(clip_duration, document.tempo_map());
                 duplicate.timeline_start = original.timeline_start + effective_duration;
                 if let Some((new_clip_def_id, _)) = midi_clip_replacements.get(&original.clip_id) {
@@ -5553,6 +5557,7 @@ impl EditorApp {
         use lightningbeam_core::layer::*;
 
         let drop_time = self.playback_time;
+        let drop_beats = self.action_executor.document().tempo_map().seconds_to_beats(Seconds(drop_time));
 
         // Find or create a compatible layer
         let document = self.action_executor.document();
@@ -5645,7 +5650,7 @@ impl EditorApp {
             } else {
                 // For clips, create a clip instance
                 let mut clip_instance = ClipInstance::new(asset_info.clip_id)
-                    .with_timeline_start(drop_time);
+                    .with_timeline_start(drop_beats);
 
                 // For video clips, scale to fit and center in document
                 if asset_info.clip_type == panes::DragClipType::Video {
@@ -5706,7 +5711,7 @@ impl EditorApp {
 
                     // Create audio clip instance at same timeline position
                     let audio_instance = ClipInstance::new(linked_audio_clip_id)
-                        .with_timeline_start(drop_time);
+                        .with_timeline_start(drop_beats);
                     let audio_instance_id = audio_instance.id;
 
                     // Execute audio action with backend sync
@@ -5748,7 +5753,7 @@ impl EditorApp {
 
         // Find the video clip instance in the document
         let document = self.action_executor.document();
-        let mut video_instance_info: Option<(uuid::Uuid, f64, bool)> = None; // (layer_id, timeline_start, already_in_group)
+        let mut video_instance_info: Option<(uuid::Uuid, Beats, bool)> = None; // (layer_id, timeline_start [beats], already_in_group)
 
         // Search root layers for a video clip instance with matching clip_id
         for layer in &document.root.children {
@@ -5875,7 +5880,7 @@ impl EditorApp {
                     // Get audio clip duration for logging
                     let duration = self.action_executor.document().audio_clips
                         .get(&audio_clip_id)
-                        .map(|c| c.duration)
+                        .map(|c| c.content_duration().native())
                         .unwrap_or(0.0);
 
                     println!("✅ Extracted audio from '{}' ({:.1}s, {}ch, {}Hz) - AudioClip ID: {}",
@@ -6418,9 +6423,10 @@ impl eframe::App for EditorApp {
                                     let clip = AudioClip::new_recording("Recording...");
                                     let doc_clip_id = self.action_executor.document_mut().add_audio_clip(clip);
 
-                                    // Create clip instance on the layer
+                                    // Create clip instance on the layer (recording_start_time is seconds)
+                                    let rec_start_beats = self.action_executor.document().tempo_map().seconds_to_beats(Seconds(self.recording_start_time));
                                     let clip_instance = ClipInstance::new(doc_clip_id)
-                                        .with_timeline_start(self.recording_start_time);
+                                        .with_timeline_start(rec_start_beats);
 
                                     let clip_instance_id = clip_instance.id;
 
@@ -6472,7 +6478,7 @@ impl eframe::App for EditorApp {
                                 if let Some(doc_clip_id) = doc_clip_id {
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
                                         if clip.is_recording() {
-                                            clip.duration = duration.seconds_to_f64();
+                                            clip.set_content_duration(ClipDuration::Seconds(duration));
                                         }
                                     }
                                 }
@@ -6537,14 +6543,12 @@ impl eframe::App for EditorApp {
                                                 None
                                             }
                                         })
-                                        .unwrap_or((uuid::Uuid::nil(), uuid::Uuid::nil(), 0.0, 0.0))
+                                        .unwrap_or((uuid::Uuid::nil(), uuid::Uuid::nil(), Beats::ZERO, 0.0))
                                 };
 
                                 if !clip_id.is_nil() {
-                                    // Finalize the clip (update pool_index and duration)
-                                    // A finished recording (samples in the pool) needs capturing.
+                                    // Finalize the clip (update pool_index and duration).
                                     self.autosave.pending_event = true;
-                                    self.media_modified = true;
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&clip_id) {
                                         if clip.finalize_recording(pool_index, duration) {
                                             clip.name = format!("Recording {}", pool_index);
@@ -6557,11 +6561,31 @@ impl eframe::App for EditorApp {
                                     // Map the document instance_id → the existing backend clip so that
                                     // delete/move/trim actions can reference it correctly.
                                     // DO NOT call AddAudioClipSync — that would create a duplicate clip.
-                                    self.clip_instance_to_backend_map.insert(
-                                        instance_id,
-                                        lightningbeam_core::action::BackendClipInstanceId::Audio(_backend_clip_id),
-                                    );
+                                    let backend_id = lightningbeam_core::action::BackendClipInstanceId::Audio(_backend_clip_id);
+                                    self.clip_instance_to_backend_map.insert(instance_id, backend_id);
                                     eprintln!("[AUDIO] Mapped doc instance {} → backend clip {}", instance_id, _backend_clip_id);
+
+                                    // Register the finished recording as an already-applied action so
+                                    // it bumps the epoch (marks the document modified for save-on-close
+                                    // and autosave) and can be undone/redone like any other edit.
+                                    let clip_instance = self.layer_to_track_map.get(&layer_id).copied().and_then(|track_id| {
+                                        self.action_executor.document()
+                                            .get_layer(&layer_id)
+                                            .and_then(|l| if let AnyLayer::Audio(al) = l {
+                                                al.clip_instances.iter().find(|ci| ci.id == instance_id).cloned()
+                                            } else { None })
+                                            .map(|ci| (track_id, ci))
+                                    });
+                                    if let Some((track_id, clip_instance)) = clip_instance {
+                                        let action = lightningbeam_core::actions::AddClipInstanceAction::already_applied(
+                                            layer_id, clip_instance, track_id, backend_id,
+                                        );
+                                        self.action_executor.push_applied(Box::new(action));
+                                    } else {
+                                        // Couldn't build the action; still mark modified so the recording
+                                        // isn't silently lost on close.
+                                        self.media_modified = true;
+                                    }
                                 }
                             }
 
@@ -6645,7 +6669,7 @@ impl eframe::App for EditorApp {
                                     }
                                     // Update the clip's duration so the timeline bar grows
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
-                                        clip.duration = duration.beats_to_f64();
+                                        clip.set_content_duration(ClipDuration::Beats(duration));
                                     }
                                 }
                             }
@@ -6681,7 +6705,7 @@ impl eframe::App for EditorApp {
                                             .map(|(id, _)| id);
                                         if let Some(doc_clip_id) = doc_clip_id {
                                             if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
-                                                clip.duration = midi_clip_data.duration;
+                                                clip.set_content_duration(ClipDuration::Beats(Beats(midi_clip_data.duration)));
                                                 clip.name = format!("MIDI Recording {}", clip_id);
                                             }
                                         }
@@ -6696,9 +6720,33 @@ impl eframe::App for EditorApp {
                                 }
                             }
 
-                            // TODO: Store clip_instance_to_backend_map entry for this MIDI clip.
-                            // The backend created the instance in create_midi_clip(), but doesn't
-                            // report the instance_id back. Needed for move/trim operations later.
+                            // Register the finished MIDI recording as an already-applied action so it
+                            // marks the document modified (save-on-close / autosave) and is undoable,
+                            // like the audio path. The backend instance id was mapped during
+                            // MidiRecordingProgress.
+                            if let Some(&layer_id) = self.track_to_layer_map.get(&track_id) {
+                                let doc_clip_id = self.action_executor.document()
+                                    .audio_clip_by_midi_clip_id(clip_id).map(|(id, _)| id);
+                                if let Some(doc_clip_id) = doc_clip_id {
+                                    let instance = self.action_executor.document()
+                                        .get_layer(&layer_id)
+                                        .and_then(|l| if let AnyLayer::Audio(al) = l {
+                                            al.clip_instances.iter().find(|ci| ci.clip_id == doc_clip_id).cloned()
+                                        } else { None });
+                                    if let Some(instance) = instance {
+                                        if let Some(&backend_id) = self.clip_instance_to_backend_map.get(&instance.id) {
+                                            let action = lightningbeam_core::actions::AddClipInstanceAction::already_applied(
+                                                layer_id, instance, track_id, backend_id,
+                                            );
+                                            self.action_executor.push_applied(Box::new(action));
+                                        } else {
+                                            // No backend mapping (e.g. snapshot lookup missed); still mark
+                                            // modified so the recording isn't silently lost on close.
+                                            self.media_modified = true;
+                                        }
+                                    }
+                                }
+                            }
 
                             // Remove this MIDI layer from active recordings
                             if let Some(&layer_id) = self.track_to_layer_map.get(&track_id) {
@@ -7494,9 +7542,13 @@ impl eframe::App for EditorApp {
                                                 let duration = clip.duration;
                                                 self.action_executor.document_mut().video_clips.insert(clip_id, clip);
 
+                                                // recording_start_time and duration are seconds; convert to beats.
+                                                let tempo_map = self.action_executor.document().tempo_map();
+                                                let rec_start_beats = tempo_map.seconds_to_beats(Seconds(self.recording_start_time));
+                                                let dur_beats = tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(rec_start_beats) + Seconds(duration)) - rec_start_beats;
                                                 let mut clip_instance = ClipInstance::new(clip_id)
-                                                    .with_timeline_start(self.recording_start_time)
-                                                    .with_timeline_duration(duration);
+                                                    .with_timeline_start(rec_start_beats)
+                                                    .with_timeline_duration(dur_beats);
 
                                                 // Scale to fit document and center (like drag-dropped videos)
                                                 {

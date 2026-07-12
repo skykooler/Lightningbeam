@@ -1609,15 +1609,17 @@ impl InfopanelPane {
 
                             ui.horizontal(|ui| {
                                 ui.label("Start:");
-                                ui.label(format!("{:.2}s", ci.effective_start()));
+                                ui.label(format!("{:.2}s", document.tempo_map().beats_to_seconds(ci.effective_start()).seconds_to_f64()));
                             });
 
                             let clip_dur = document.get_clip_duration(&ci.clip_id)
-                                .unwrap_or_else(|| ci.trim_end.unwrap_or(1.0) - ci.trim_start);
+                                .unwrap_or_else(|| daw_backend::Seconds(ci.trim_end.unwrap_or(1.0) - ci.trim_start));
                             let total_dur = ci.total_duration(clip_dur, document.tempo_map());
+                            let total_dur_secs = (document.tempo_map().beats_to_seconds(ci.effective_start() + total_dur)
+                                - document.tempo_map().beats_to_seconds(ci.effective_start())).seconds_to_f64();
                             ui.horizontal(|ui| {
                                 ui.label("Duration:");
-                                ui.label(format!("{:.2}s", total_dur));
+                                ui.label(format!("{:.2}s", total_dur_secs));
                             });
 
                             if ci.trim_start > 0.0 {
@@ -1806,7 +1808,7 @@ impl InfopanelPane {
                         });
                         ui.horizontal(|ui| {
                             ui.label("Duration:");
-                            ui.label(format!("{:.2}s", clip.duration));
+                            ui.label(format!("{:.2}s", clip.content_duration().to_seconds(document.tempo_map()).seconds_to_f64()));
                         });
                     } else {
                         // Could be an image asset or effect — show ID

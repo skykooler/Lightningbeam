@@ -4,6 +4,7 @@
 /// Supports HDR compositing pipeline with per-layer buffers and effects.
 
 use eframe::egui;
+use daw_backend::Seconds;
 use lightningbeam_core::action::Action;
 use lightningbeam_core::clip::ClipInstance;
 use lightningbeam_core::gpu::{BufferPool, BufferFormat, BufferSpec, Compositor, EffectProcessor, SrgbToLinearConverter};
@@ -1851,10 +1852,13 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                             // Create EffectInstance from ClipInstance for the processor
                             // For now, create a simple effect instance with default parameters
+                            let tempo_map = self.ctx.document.tempo_map();
+                            let effect_end_beats = effect_instance.timeline_start
+                                + effect_instance.effective_duration(Seconds(lightningbeam_core::effect::EFFECT_DURATION), tempo_map);
                             let effect_inst = lightningbeam_core::effect::EffectInstance::new(
                                 effect_def,
-                                effect_instance.timeline_start,
-                                effect_instance.timeline_start + effect_instance.effective_duration(lightningbeam_core::effect::EFFECT_DURATION, self.ctx.document.tempo_map()),
+                                tempo_map.beats_to_seconds(effect_instance.timeline_start).seconds_to_f64(),
+                                tempo_map.beats_to_seconds(effect_end_beats).seconds_to_f64(),
                             );
 
                             // Acquire temp buffer for effect output (HDR format)
@@ -2204,7 +2208,8 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 let combined_transform = overlay_transform * clip_transform;
 
                                 // Calculate clip bounds for preview
-                                let clip_time = ((self.ctx.playback_time - clip_inst.timeline_start) * clip_inst.playback_speed) + clip_inst.trim_start;
+                                let start_secs = self.ctx.document.tempo_map().beats_to_seconds(clip_inst.timeline_start).seconds_to_f64();
+                                let clip_time = ((self.ctx.playback_time - start_secs) * clip_inst.playback_speed) + clip_inst.trim_start;
                                 let content_bounds = if let Some(vector_clip) = self.ctx.document.get_vector_clip(&clip_inst.clip_id) {
                                     vector_clip.calculate_content_bounds(&self.ctx.document, clip_time)
                                 } else if let Some(video_clip) = self.ctx.document.get_video_clip(&clip_inst.clip_id) {
@@ -2293,15 +2298,19 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         // Also draw selection outlines for clip instances
                         for &clip_id in self.ctx.selection.clip_instances() {
                             if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == clip_id) {
-                                // Skip clip instances not active at current time
-                                let clip_dur = self.ctx.document.get_clip_duration(&clip_instance.clip_id).unwrap_or(0.0);
-                                let instance_end = clip_instance.timeline_start + clip_instance.effective_duration(clip_dur, self.ctx.document.tempo_map());
-                                if self.ctx.playback_time < clip_instance.timeline_start || self.ctx.playback_time >= instance_end {
+                                // Skip clip instances not active at current time (compare in seconds).
+                                let clip_dur = self.ctx.document.get_clip_duration(&clip_instance.clip_id).unwrap_or(Seconds::ZERO);
+                                let tempo_map = self.ctx.document.tempo_map();
+                                let start_secs = tempo_map.beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
+                                let instance_end = tempo_map.beats_to_seconds(
+                                    clip_instance.timeline_start + clip_instance.effective_duration(clip_dur, tempo_map)
+                                ).seconds_to_f64();
+                                if self.ctx.playback_time < start_secs || self.ctx.playback_time >= instance_end {
                                     continue;
                                 }
 
                                 // Calculate clip-local time
-                                let clip_time = ((self.ctx.playback_time - clip_instance.timeline_start) * clip_instance.playback_speed) + clip_instance.trim_start;
+                                let clip_time = ((self.ctx.playback_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start;
 
                                 // Get dynamic clip bounds from content at current time
                                 let bbox = if let Some(vector_clip) = self.ctx.document.get_vector_clip(&clip_instance.clip_id) {
@@ -2671,9 +2680,11 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                         // Find clip instance visible at playback time
                         let visible_clip = video_layer.clip_instances.iter().find(|inst| {
-                            let clip_duration = self.ctx.document.get_clip_duration(&inst.clip_id).unwrap_or(0.0);
-                            let effective_duration = inst.effective_duration(clip_duration, self.ctx.document.tempo_map());
-                            playback_time >= inst.timeline_start && playback_time < inst.timeline_start + effective_duration
+                            let clip_duration = self.ctx.document.get_clip_duration(&inst.clip_id).unwrap_or(Seconds::ZERO);
+                            let tempo_map = self.ctx.document.tempo_map();
+                            let start_secs = tempo_map.beats_to_seconds(inst.timeline_start).seconds_to_f64();
+                            let end_secs = tempo_map.beats_to_seconds(inst.timeline_start + inst.effective_duration(clip_duration, tempo_map)).seconds_to_f64();
+                            playback_time >= start_secs && playback_time < end_secs
                         });
 
                     if let Some(clip_inst) = visible_clip {
@@ -10130,7 +10141,8 @@ impl StagePane {
                 for &clip_id in shared.selection.clip_instances() {
                     if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == clip_id) {
                         // Calculate clip-local time
-                        let clip_time = ((*shared.playback_time - clip_instance.timeline_start) * clip_instance.playback_speed) + clip_instance.trim_start;
+                        let start_secs = shared.action_executor.document().tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
+                        let clip_time = ((*shared.playback_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start;
 
                         // Get dynamic clip bounds from content at current time
                         use vello::kurbo::Rect as KurboRect;
@@ -10330,7 +10342,8 @@ impl StagePane {
                 // Try clip instance
                 if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == object_id) {
                     // Calculate clip-local time
-                    let clip_time = ((*shared.playback_time - clip_instance.timeline_start) * clip_instance.playback_speed) + clip_instance.trim_start;
+                    let start_secs = shared.action_executor.document().tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
+                    let clip_time = ((*shared.playback_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start;
 
                     // Get dynamic clip bounds from content at current time
                     let local_bbox = if let Some(vector_clip) = shared.action_executor.document().get_vector_clip(&clip_instance.clip_id) {
@@ -11046,9 +11059,11 @@ impl StagePane {
             let document = shared.action_executor.document();
             if let Some(AnyLayer::Video(video_layer)) = document.get_layer(layer_id) {
                 video_layer.clip_instances.iter().find(|inst| {
-                    let clip_duration = document.get_clip_duration(&inst.clip_id).unwrap_or(0.0);
-                    let effective_duration = inst.effective_duration(clip_duration, document.tempo_map());
-                    playback_time >= inst.timeline_start && playback_time < inst.timeline_start + effective_duration
+                    let clip_duration = document.get_clip_duration(&inst.clip_id).unwrap_or(Seconds::ZERO);
+                    let tempo_map = document.tempo_map();
+                    let start_secs = tempo_map.beats_to_seconds(inst.timeline_start).seconds_to_f64();
+                    let end_secs = tempo_map.beats_to_seconds(inst.timeline_start + inst.effective_duration(clip_duration, tempo_map)).seconds_to_f64();
+                    playback_time >= start_secs && playback_time < end_secs
                 }).map(|inst| inst.id)
             } else {
                 None
@@ -12487,8 +12502,14 @@ impl PaneRenderer for StagePane {
                         let canvas_pos = pointer_pos - rect.min;
                         let world_pos = (canvas_pos - self.pan_offset) / self.zoom;
 
-                        // Use playhead time
+                        // Use playhead time (seconds); the beats placement position for clips.
                         let drop_time = *shared.playback_time;
+                        let drop_beats = shared.action_executor.document().tempo_map().seconds_to_beats(Seconds(drop_time));
+                        // 5-second default effect duration as a beats span at the drop point.
+                        let effect_dur_beats = {
+                            let tmap = shared.action_executor.document().tempo_map();
+                            tmap.seconds_to_beats(tmap.beats_to_seconds(drop_beats) + Seconds(5.0)) - drop_beats
+                        };
 
                         // Find or create a compatible layer
                         let document = shared.action_executor.document();
@@ -12559,8 +12580,8 @@ impl PaneRenderer for StagePane {
 
                                     // Create clip instance for effect with 5 second default duration
                                     let clip_instance = ClipInstance::new(def.id)
-                                        .with_timeline_start(drop_time)
-                                        .with_timeline_duration(5.0);
+                                        .with_timeline_start(drop_beats)
+                                        .with_timeline_duration(effect_dur_beats);
 
                                     // Use AddEffectAction for effect layers
                                     let action = lightningbeam_core::actions::AddEffectAction::new(
@@ -12572,7 +12593,7 @@ impl PaneRenderer for StagePane {
                             } else {
                                 // For clips, create a clip instance
                                 let mut clip_instance = ClipInstance::new(dragging.clip_id)
-                                    .with_timeline_start(drop_time);
+                                    .with_timeline_start(drop_beats);
 
                                 // For video clips, scale to fit and center in document
                                 if dragging.clip_type == DragClipType::Video {
@@ -12642,7 +12663,7 @@ impl PaneRenderer for StagePane {
 
                                     // Create audio clip instance at same timeline position
                                     let audio_instance = ClipInstance::new(linked_audio_clip_id)
-                                        .with_timeline_start(drop_time);
+                                        .with_timeline_start(drop_beats);
                                     let audio_instance_id = audio_instance.id;
 
                                     eprintln!("DEBUG STAGE: Created audio instance: {} for clip: {}", audio_instance_id, linked_audio_clip_id);

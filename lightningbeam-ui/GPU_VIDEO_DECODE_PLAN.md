@@ -67,15 +67,47 @@ at the requested target res. This fixes the 4K decode wall, the 8 MB upload, *an
 - Result: software exports are full-quality at any export res, and document resizes re-target decode.
   No hardware needed; this is the correctness fix for the codecs HW can't handle anyway.
 
-### Stage 2 — hardware decode primitive (headless-testable here, like the 8 encode tests)
-- In `gpu-video-encoder` (rename → `gpu-video-codec`): `h264_vaapi`-style **decode** → VAAPI surface →
-  export DMA-BUF → import as a wgpu texture. Hardware test: decode a known file, verify dims/contents.
+### Stage 2 — hardware decode primitive (DONE, commit 255e164)
+`decoder::VaapiDecoder` in `gpu-video-encoder`: decode → VAAPI surface → DRM-PRIME DMA-BUF →
+`dmabuf::import_raw` → wgpu textures. Round-trip test (encode gray → decode → readback Y≈128) passes.
 
-### Stage 3 — wire hardware decode into `get_frame` (blind; user-verifies)
-- When the source codec/driver is HW-decodable, `get_frame` returns a **GPU texture** (native res)
-  instead of `Arc<Vec<u8>>`; the compositor uses it directly (no `write_texture`), GPU-scaling to the
-  target. For the zero-copy export the frame never leaves the GPU: **decode → composite → encode** on
-  one device. Software path is the fallback for everything else.
+### The device-affinity problem (drives the whole rest of the design)
+wgpu textures can't cross devices, and a decoded frame is a wgpu texture imported from a DMA-BUF —
+which **requires a device with the DMA-BUF-import extensions** (`VK_EXT_image_drm_format_modifier`
++ external-memory), built via wgpu-hal `device_from_raw` (the safe `DeviceDescriptor` can't add
+them). So a hardware-decoded frame is only usable by a compositor running on **such** a device.
+- **Export** composites on the encoder's custom device → already fine.
+- **Preview** composites on eframe's *normal* device → can't import DMA-BUFs → can't use HW frames.
+
+Since **preview must HW-decode 4K** (software 4K decode ≈19 ms/frame), the resolution is a **single
+shared custom device** used by eframe + preview compositor + decoder + encoder. eframe 0.33 (local
+`egui-fork`) accepts it via `WgpuSetup::Existing { instance, adapter, device, queue }` — confirmed.
+The earlier "separate export device" becomes redundant once this lands.
+
+### Stage 3a — windowed shared `DrmDevice`, injected into eframe (highest-risk; blind)
+Today `vk_device::create()` is **headless**. Make a windowed variant (or extend it) that is a
+**superset** device: DMA-BUF import ext **+** `VK_KHR_swapchain` (device) and the WSI surface
+instance extensions, **+** everything eframe/egui/vello need — `adapter.limits()` (already; Vello
+needs `max_storage_buffers_per_shader_stage` ≥ 5), `max_texture_dimension_2d` 8192, and the optional
+features main.rs requests (`SHADER_F16`, `TIMESTAMP_QUERY[_INSIDE_ENCODERS]`). Pick the adapter that
+is the **VAAPI GPU** (the render node must match libva's, or DMA-BUF sharing fails on multi-GPU).
+- main.rs: try to build the shared device; on success pass `WgpuSetup::Existing`, else fall back to
+  the current `WgpuSetupCreateNew` (software decode only). Gate on Linux + VAAPI + a config/env
+  override; **must be bulletproof** — this device now renders *every* frame of *every* session for
+  Linux/VAAPI users, video or not. Milestone: editor runs normally on it with no video involved.
+
+### Stage 3b — VideoManager hardware decode on the shared device (blind)
+- `VideoManager` holds a `VaapiDecoder` per HW-decodable clip (built on the shared device), plus the
+  software `VideoDecoder` fallback. `get_frame` gains a GPU-returning variant: yields an imported NV12
+  texture pair (native res) instead of `Arc<Vec<u8>>`. Probe HW support per source; non-VAAPI /
+  unsupported codecs / non-Linux → software path (Stage 1, target-res).
+- Cache native GPU textures keyed by (clip, ts); revisit the byte budget (4K NV12 ≈ 12 MB each).
+
+### Stage 3c — compositor consumes the GPU frame (blind; user-verifies)
+- The video-instance composite path takes an NV12 texture (or a small NV12→RGB GPU pass) and blits it
+  to the target with the existing bilinear blit — **no `write_texture` upload**. GPU scales native→
+  target (preview res or export res). Both preview and the zero-copy export become
+  decode→composite(→encode) with no CPU frame. Software frames still upload as today.
 
 ## Critical files
 - `lightningbeam-core/src/video.rs` — `VideoDecoder` (per-request output size, scaler cache),
@@ -86,13 +118,21 @@ at the requested target res. This fixes the 4K decode wall, the 8 MB upload, *an
 - `gpu-video-encoder/` (→ `gpu-video-codec`) — `dmabuf.rs`/`vk_device.rs` reused for the decode import.
 
 ## Risks
+- **Shared custom device is the editor's main device (BIGGEST risk)** — Stage 3a makes a hand-built
+  wgpu-hal Vulkan device render every frame for Linux/VAAPI users. It must satisfy eframe + egui +
+  vello + winit presentation across varied Intel/AMD/Mesa stacks, or the editor won't start. Mitigate
+  with a strict try-and-fall-back-to-normal-device path + an env/config kill switch. Test broadly.
+- **Multi-GPU** — the shared render device must be the *same* GPU as libva's VAAPI device, or DMA-BUF
+  import fails. Adapter selection must match the render node to the VAAPI node (laptops with iGPU +
+  dGPU, PRIME).
 - **Codec coverage** — only some codecs are HW-decodable per GPU/driver; software must stay correct
-  and well-tested. Selection must probe support per source, not assume.
-- **Cache memory** — native-res GPU textures (esp. 4K) are large; the frame cache budget needs revisiting.
-- **Colorspace/format** — VAAPI decode surfaces are NV12/tiled; the existing import handles NV12, but
-  10-bit/HDR sources (P010) need format handling.
-- **Preview vs export sharing** — two live targets (preview res + export res) from the same source; the
-  cache/scaler design must serve both without thrashing.
+  and well-tested. Probe support per source, don't assume.
+- **Cache memory** — native-res GPU textures (esp. 4K NV12 ≈12 MB) are large; revisit the frame cache
+  budget, and the two live targets (preview res + export res) shouldn't thrash.
+- **Colorspace/format** — VAAPI decode surfaces are NV12/tiled; import handles NV12, but 10-bit/HDR
+  (P010) needs format handling. Decoded NV12 also needs the right BT.601/709 + range on the NV12→RGB
+  read (mirror the encoder's color tags, [[gpu-video-decode]] color-range work).
+- **Non-Linux / no-VAAPI** — must cleanly run on the normal eframe device with software decode.
 
 ## Verification
 - Stage 0/1: visual — export above document res is now full-quality (not upscaled); profile shows

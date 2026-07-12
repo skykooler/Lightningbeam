@@ -351,7 +351,7 @@ impl EffectDefinition {
     ///
     /// * `timeline_start` - When the effect starts on the timeline (seconds)
     /// * `duration` - How long the effect appears on the timeline (seconds)
-    pub fn create_instance(&self, timeline_start: f64, duration: f64) -> ClipInstance {
+    pub fn create_instance(&self, timeline_start: daw_backend::Beats, duration: daw_backend::Beats) -> ClipInstance {
         ClipInstance::new(self.id)
             .with_timeline_start(timeline_start)
             .with_timeline_duration(duration)

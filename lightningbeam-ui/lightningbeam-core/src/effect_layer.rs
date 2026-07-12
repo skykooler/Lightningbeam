@@ -148,11 +148,11 @@ impl EffectLayer {
     /// `timeline_start` (beats) to seconds for comparison.
     pub fn active_clip_instances_at(&self, time_secs: f64, tempo_map: &crate::tempo_map::TempoMap) -> Vec<&ClipInstance> {
         use crate::effect::EFFECT_DURATION;
-        let time_beats = tempo_map.inverse_transform(time_secs);
+        let time_beats = tempo_map.seconds_to_beats(daw_backend::Seconds(time_secs));
         self.clip_instances
             .iter()
             .filter(|e| {
-                let end = e.timeline_start + e.effective_duration(EFFECT_DURATION, tempo_map);
+                let end = e.timeline_start + e.effective_duration(daw_backend::Seconds(EFFECT_DURATION), tempo_map);
                 time_beats >= e.timeline_start && time_beats < end
             })
             .collect()
@@ -218,7 +218,7 @@ mod tests {
     fn test_add_effect() {
         let mut layer = EffectLayer::new("Effects");
         let def = create_test_effect_def();
-        let effect = def.create_instance(0.0, 10.0);
+        let effect = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let effect_id = effect.id;
 
         let id = layer.add_clip_instance(effect);
@@ -233,11 +233,11 @@ mod tests {
         let def = create_test_effect_def();
 
         // Effect 1: active from 0 to 5
-        let effect1 = def.create_instance(0.0, 5.0);
+        let effect1 = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(5.0));
         layer.add_clip_instance(effect1);
 
         // Effect 2: active from 3 to 10
-        let effect2 = def.create_instance(3.0, 7.0); // 3.0 + 7.0 = 10.0 end
+        let effect2 = def.create_instance(daw_backend::Beats(3.0), daw_backend::Beats(7.0)); // 3.0 + 7.0 = 10.0 end
         layer.add_clip_instance(effect2);
 
         // At 60 BPM the tempo map is identity (1 beat == 1 second), so the
@@ -259,11 +259,11 @@ mod tests {
         let mut layer = EffectLayer::new("Effects");
         let def = create_test_effect_def();
 
-        let effect1 = def.create_instance(0.0, 10.0);
+        let effect1 = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let id1 = effect1.id;
         layer.add_clip_instance(effect1);
 
-        let effect2 = def.create_instance(0.0, 10.0);
+        let effect2 = def.create_instance(daw_backend::Beats(0.0), daw_backend::Beats(10.0));
         let id2 = effect2.id;
         layer.add_clip_instance(effect2);
 

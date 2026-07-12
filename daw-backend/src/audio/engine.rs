@@ -1001,20 +1001,20 @@ impl Engine {
                 let _ = self.event_tx.push(AudioEvent::AudioFileAdded(pool_index, path));
             }
             Command::AddAudioClip(track_id, clip_id, pool_index, start_time, duration, offset) => {
-                // Create a new clip instance with the pre-assigned clip_id
-                // start_time and duration are in beats; offset (internal_start) is seconds
-                let start_beats = Beats(start_time);
-                let end_beats = Beats(start_time + duration);
+                // Create a new clip instance with the pre-assigned clip_id.
+                // start_time/duration are beats; offset (internal_start) is seconds.
+                let start_beats = start_time;
+                let end_beats = start_time + duration;
                 let start_secs = self.tempo_map.beats_to_seconds(start_beats);
                 let end_secs = self.tempo_map.beats_to_seconds(end_beats);
                 let content_dur_secs = (end_secs - start_secs).seconds_to_f64();
                 let mut clip = AudioClipInstance::new(
                     clip_id,
                     pool_index,
-                    Seconds(offset),
-                    Seconds(offset + content_dur_secs),
+                    offset,
+                    offset + Seconds(content_dur_secs),
                     start_beats,
-                    Beats(duration),
+                    duration,
                 );
 
                 // If the source is streamed (a compressed audio file, or a video's
@@ -3348,8 +3348,8 @@ impl EngineController {
     }
 
     /// Seek to a specific position in seconds
-    pub fn seek(&mut self, seconds: f64) {
-        let _ = self.command_tx.push(Command::Seek(seconds));
+    pub fn seek(&mut self, seconds: Seconds) {
+        let _ = self.command_tx.push(Command::Seek(seconds.seconds_to_f64()));
     }
 
     /// Set track volume (0.0 = silence, 1.0 = unity gain)
@@ -3380,19 +3380,23 @@ impl EngineController {
     }
 
     /// Move a clip to a new timeline position (changes external_start)
-    pub fn move_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: f64) {
-        let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time));
+    pub fn move_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: Beats) {
+        let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time.beats_to_f64()));
     }
 
     /// Trim a clip's internal boundaries (changes which portion of source content is used)
     /// This also resets external_duration to match internal duration (disables looping)
+    /// Trim a clip's internal content bounds. The units are content-domain and depend on the
+    /// track type: SECONDS for a sampled-audio clip, BEATS for a MIDI clip (see the TrimClip
+    /// handler). Left as raw f64 because a single newtype can't express both; callers pass the
+    /// clip's own `trim_start`/`trim_end`, which already match its content domain.
     pub fn trim_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_internal_start: f64, new_internal_end: f64) {
         let _ = self.command_tx.push(Command::TrimClip(track_id, clip_id, new_internal_start, new_internal_end));
     }
 
     /// Extend or shrink a clip's external duration (enables looping if > internal duration)
-    pub fn extend_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_external_duration: f64) {
-        let _ = self.command_tx.push(Command::ExtendClip(track_id, clip_id, new_external_duration));
+    pub fn extend_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_external_duration: Beats) {
+        let _ = self.command_tx.push(Command::ExtendClip(track_id, clip_id, new_external_duration.beats_to_f64()));
     }
 
     /// Send a generic command to the audio thread
@@ -3440,8 +3444,8 @@ impl EngineController {
 
     /// Set metatrack time offset in seconds
     /// Positive = shift content later, negative = shift earlier
-    pub fn set_offset(&mut self, track_id: TrackId, offset: f64) {
-        let _ = self.command_tx.push(Command::SetOffset(track_id, offset));
+    pub fn set_offset(&mut self, track_id: TrackId, offset: Seconds) {
+        let _ = self.command_tx.push(Command::SetOffset(track_id, offset.seconds_to_f64()));
     }
 
     /// Set metatrack pitch shift in semitones (for future use)
@@ -3450,13 +3454,13 @@ impl EngineController {
     }
 
     /// Set metatrack trim start in seconds
-    pub fn set_trim_start(&mut self, track_id: TrackId, trim_start: f64) {
-        let _ = self.command_tx.push(Command::SetTrimStart(track_id, trim_start));
+    pub fn set_trim_start(&mut self, track_id: TrackId, trim_start: Seconds) {
+        let _ = self.command_tx.push(Command::SetTrimStart(track_id, trim_start.seconds_to_f64()));
     }
 
     /// Set metatrack trim end in seconds (None = no end trim)
-    pub fn set_trim_end(&mut self, track_id: TrackId, trim_end: Option<f64>) {
-        let _ = self.command_tx.push(Command::SetTrimEnd(track_id, trim_end));
+    pub fn set_trim_end(&mut self, track_id: TrackId, trim_end: Option<Seconds>) {
+        let _ = self.command_tx.push(Command::SetTrimEnd(track_id, trim_end.map(|s| s.seconds_to_f64())));
     }
 
     /// Create a new audio track
@@ -3525,14 +3529,14 @@ impl EngineController {
 
     /// Add a clip to an audio track (async, fire-and-forget)
     /// Returns the pre-assigned clip instance ID so callers can track the clip without a sync round-trip
-    pub fn add_audio_clip(&mut self, track_id: TrackId, pool_index: usize, start_time: f64, duration: f64, offset: f64) -> AudioClipInstanceId {
+    pub fn add_audio_clip(&mut self, track_id: TrackId, pool_index: usize, start_time: Beats, duration: Beats, offset: Seconds) -> AudioClipInstanceId {
         let clip_id = self.next_audio_clip_id.fetch_add(1, Ordering::Relaxed);
         let _ = self.command_tx.push(Command::AddAudioClip(track_id, clip_id, pool_index, start_time, duration, offset));
         clip_id
     }
 
     /// Add a clip to an audio track with a pre-assigned ID (for undo/redo, restoring deleted clips)
-    pub fn add_audio_clip_with_id(&mut self, track_id: TrackId, clip_id: AudioClipInstanceId, pool_index: usize, start_time: f64, duration: f64, offset: f64) {
+    pub fn add_audio_clip_with_id(&mut self, track_id: TrackId, clip_id: AudioClipInstanceId, pool_index: usize, start_time: Beats, duration: Beats, offset: Seconds) {
         let _ = self.command_tx.push(Command::AddAudioClip(track_id, clip_id, pool_index, start_time, duration, offset));
     }
 
@@ -3607,25 +3611,26 @@ impl EngineController {
     }
 
     /// Create a new MIDI clip on a track
-    pub fn create_midi_clip(&mut self, track_id: TrackId, start_time: f64, duration: f64) -> MidiClipId {
+    pub fn create_midi_clip(&mut self, track_id: TrackId, start_time: Beats, duration: Beats) -> MidiClipId {
         // Peek at the next clip ID that will be used
         let clip_id = self.next_midi_clip_id.load(Ordering::Relaxed);
-        let _ = self.command_tx.push(Command::CreateMidiClip(track_id, start_time, duration));
+        let _ = self.command_tx.push(Command::CreateMidiClip(track_id, start_time.beats_to_f64(), duration.beats_to_f64()));
         clip_id
     }
 
     /// Add a MIDI note to a clip
-    pub fn add_midi_note(&mut self, track_id: TrackId, clip_id: MidiClipId, time_offset: f64, note: u8, velocity: u8, duration: f64) {
-        let _ = self.command_tx.push(Command::AddMidiNote(track_id, clip_id, time_offset, note, velocity, duration));
+    pub fn add_midi_note(&mut self, track_id: TrackId, clip_id: MidiClipId, time_offset: Beats, note: u8, velocity: u8, duration: Beats) {
+        let _ = self.command_tx.push(Command::AddMidiNote(track_id, clip_id, time_offset.beats_to_f64(), note, velocity, duration.beats_to_f64()));
     }
 
-    /// Add a pre-loaded MIDI clip to a track at the given timeline position
-    pub fn add_loaded_midi_clip(&mut self, track_id: TrackId, clip: MidiClip, start_time: f64) {
-        let _ = self.command_tx.push(Command::AddLoadedMidiClip(track_id, clip, start_time));
+    /// Add a pre-loaded MIDI clip to a track at the given timeline position (beats)
+    pub fn add_loaded_midi_clip(&mut self, track_id: TrackId, clip: MidiClip, start_time: Beats) {
+        let _ = self.command_tx.push(Command::AddLoadedMidiClip(track_id, clip, start_time.beats_to_f64()));
     }
 
-    /// Update all notes in a MIDI clip
-    pub fn update_midi_clip_notes(&mut self, track_id: TrackId, clip_id: MidiClipId, notes: Vec<(f64, u8, u8, f64)>) {
+    /// Update all notes in a MIDI clip. Note tuples are (start [beats], note, velocity, duration [beats]).
+    pub fn update_midi_clip_notes(&mut self, track_id: TrackId, clip_id: MidiClipId, notes: Vec<(Beats, u8, u8, Beats)>) {
+        let notes = notes.into_iter().map(|(t, n, v, d)| (t.beats_to_f64(), n, v, d.beats_to_f64())).collect();
         let _ = self.command_tx.push(Command::UpdateMidiClipNotes(track_id, clip_id, notes));
     }
 
@@ -3661,25 +3666,25 @@ impl EngineController {
         &mut self,
         track_id: TrackId,
         lane_id: crate::audio::AutomationLaneId,
-        time: f64,
+        time: Beats,
         value: f32,
         curve: crate::audio::CurveType,
     ) {
         let _ = self.command_tx.push(Command::AddAutomationPoint(
-            track_id, lane_id, time, value, curve,
+            track_id, lane_id, time.beats_to_f64(), value, curve,
         ));
     }
 
-    /// Remove an automation point at a specific time
+    /// Remove an automation point at a specific time (beats); tolerance is a beats delta
     pub fn remove_automation_point(
         &mut self,
         track_id: TrackId,
         lane_id: crate::audio::AutomationLaneId,
-        time: f64,
-        tolerance: f64,
+        time: Beats,
+        tolerance: Beats,
     ) {
         let _ = self.command_tx.push(Command::RemoveAutomationPoint(
-            track_id, lane_id, time, tolerance,
+            track_id, lane_id, time.beats_to_f64(), tolerance.beats_to_f64(),
         ));
     }
 
@@ -3715,16 +3720,16 @@ impl EngineController {
 
     /// Add a keyframe to an AutomationInput node
     pub fn automation_add_keyframe(&mut self, track_id: TrackId, node_id: u32,
-        time: f64, value: f32, interpolation: String,
+        time: Beats, value: f32, interpolation: String,
         ease_out: (f32, f32), ease_in: (f32, f32)) {
         let _ = self.command_tx.push(Command::AutomationAddKeyframe(
-            track_id, node_id, time, value, interpolation, ease_out, ease_in));
+            track_id, node_id, time.beats_to_f64(), value, interpolation, ease_out, ease_in));
     }
 
     /// Remove a keyframe from an AutomationInput node
-    pub fn automation_remove_keyframe(&mut self, track_id: TrackId, node_id: u32, time: f64) {
+    pub fn automation_remove_keyframe(&mut self, track_id: TrackId, node_id: u32, time: Beats) {
         let _ = self.command_tx.push(Command::AutomationRemoveKeyframe(
-            track_id, node_id, time));
+            track_id, node_id, time.beats_to_f64()));
     }
 
     /// Set the display name of an AutomationInput node
@@ -3739,8 +3744,8 @@ impl EngineController {
     }
 
     /// Start recording on a track
-    pub fn start_recording(&mut self, track_id: TrackId, start_time: f64) {
-        let _ = self.command_tx.push(Command::StartRecording(track_id, Beats(start_time)));
+    pub fn start_recording(&mut self, track_id: TrackId, start_time: Beats) {
+        let _ = self.command_tx.push(Command::StartRecording(track_id, start_time));
     }
 
     /// Stop the current recording
@@ -3759,8 +3764,8 @@ impl EngineController {
     }
 
     /// Start MIDI recording on a track
-    pub fn start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: f64) {
-        let _ = self.command_tx.push(Command::StartMidiRecording(track_id, clip_id, Beats(start_time)));
+    pub fn start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: Beats) {
+        let _ = self.command_tx.push(Command::StartMidiRecording(track_id, clip_id, start_time));
     }
 
     /// Stop the current MIDI recording
