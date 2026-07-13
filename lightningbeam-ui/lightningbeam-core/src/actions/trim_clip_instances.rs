@@ -366,7 +366,7 @@ impl Action for TrimClipInstancesAction {
 
     fn execute_backend(&mut self, backend: &mut crate::action::BackendContext, document: &Document) -> Result<(), String> {
         use crate::layer::AnyLayer;
-        use crate::clip::AudioClipType;
+        use crate::clip::ResolvedContent;
 
         // Get audio controller
         let controller = match backend.audio_controller.as_mut() {
@@ -427,24 +427,24 @@ impl Action for TrimClipInstancesAction {
                 let internal_end = instance.trim_end.unwrap_or(clip.content_duration().native());
 
                 // Handle trim based on clip type
-                match &clip.clip_type {
-                    AudioClipType::Midi { midi_clip_id } => {
+                match &clip.resolve(instance.active_take) {
+                    ResolvedContent::Midi { midi_clip_id } => {
                         // For MIDI: trim_clip expects the pool clip ID
-                        controller.trim_clip(*track_id, *midi_clip_id, internal_start, internal_end);
+                        controller.trim_clip(*track_id, *midi_clip_id, clip.trim_range(internal_start, internal_end));
                     }
-                    AudioClipType::Sampled { .. } => {
+                    ResolvedContent::Audio { .. } => {
                         // For sampled audio: trim_clip expects the instance ID
                         let backend_instance_id = backend.clip_instance_to_backend_map.get(instance_id)
                             .ok_or_else(|| format!("Clip instance {} not mapped to backend", instance_id))?;
 
                         match backend_instance_id {
                             crate::action::BackendClipInstanceId::Audio(audio_id) => {
-                                controller.trim_clip(*track_id, *audio_id, internal_start, internal_end);
+                                controller.trim_clip(*track_id, *audio_id, clip.trim_range(internal_start, internal_end));
                             }
                             _ => return Err("Expected audio instance ID for sampled clip".to_string()),
                         }
                     }
-                    AudioClipType::Recording => {
+                    ResolvedContent::Recording => {
                         // Recording clips cannot be trimmed - skip
                     }
                 }
@@ -456,7 +456,7 @@ impl Action for TrimClipInstancesAction {
 
     fn rollback_backend(&mut self, backend: &mut crate::action::BackendContext, document: &Document) -> Result<(), String> {
         use crate::layer::AnyLayer;
-        use crate::clip::AudioClipType;
+        use crate::clip::ResolvedContent;
 
         // Get audio controller
         let controller = match backend.audio_controller.as_mut() {
@@ -522,24 +522,24 @@ impl Action for TrimClipInstancesAction {
                 };
 
                 // Handle trim based on clip type
-                match &clip.clip_type {
-                    AudioClipType::Midi { midi_clip_id } => {
+                match &clip.resolve(instance.active_take) {
+                    ResolvedContent::Midi { midi_clip_id } => {
                         // For MIDI: trim_clip expects the pool clip ID
-                        controller.trim_clip(*track_id, *midi_clip_id, internal_start, internal_end);
+                        controller.trim_clip(*track_id, *midi_clip_id, clip.trim_range(internal_start, internal_end));
                     }
-                    AudioClipType::Sampled { .. } => {
+                    ResolvedContent::Audio { .. } => {
                         // For sampled audio: trim_clip expects the instance ID
                         let backend_instance_id = backend.clip_instance_to_backend_map.get(instance_id)
                             .ok_or_else(|| format!("Clip instance {} not mapped to backend", instance_id))?;
 
                         match backend_instance_id {
                             crate::action::BackendClipInstanceId::Audio(audio_id) => {
-                                controller.trim_clip(*track_id, *audio_id, internal_start, internal_end);
+                                controller.trim_clip(*track_id, *audio_id, clip.trim_range(internal_start, internal_end));
                             }
                             _ => return Err("Expected audio instance ID for sampled clip".to_string()),
                         }
                     }
-                    AudioClipType::Recording => {
+                    ResolvedContent::Recording => {
                         // Recording clips cannot be trimmed - skip
                     }
                 }

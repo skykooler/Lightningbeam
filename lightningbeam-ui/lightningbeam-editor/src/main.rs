@@ -6490,6 +6490,25 @@ impl eframe::App for EditorApp {
                                         })
                                 };
 
+                                // While cycling, the recording keeps running but the clip only ever
+                                // occupies ONE region — each further pass is a new take layered on
+                                // the same span, not more length. Cap the preview there so the bar
+                                // doesn't grow off past the loop end while the playhead wraps.
+                                let cycle_cap = {
+                                    let doc = self.action_executor.document();
+                                    match (doc.cycle_enabled, doc.cycle_region) {
+                                        (true, Some((ls, le))) if le > ls => {
+                                            let tm = doc.tempo_map();
+                                            Some(tm.beats_to_seconds(le) - tm.beats_to_seconds(ls))
+                                        }
+                                        _ => None,
+                                    }
+                                };
+                                let duration = match cycle_cap {
+                                    Some(cap) if duration > cap => cap,
+                                    _ => duration,
+                                };
+
                                 // Then update the clip duration (mutable borrow)
                                 if let Some(doc_clip_id) = doc_clip_id {
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
@@ -6500,6 +6519,116 @@ impl eframe::App for EditorApp {
                                 }
                             }
                             ctx.request_repaint();
+                        }
+                        AudioEvent::CycleRecordingStopped { clip_id: backend_clip_id, takes, loop_start, loop_len_beats, loop_len_seconds } => {
+                            eprintln!("[STOP] CycleRecordingStopped: {} takes", takes.len());
+
+                            // Clean up the live-recording waveform cache (keyed usize::MAX).
+                            self.raw_audio_cache.remove(&usize::MAX);
+                            self.waveform_gpu_dirty.remove(&usize::MAX);
+
+                            // Pull every take's samples in for waveform rendering — the user can
+                            // switch to any of them, not just the active one.
+                            if let Some(ref controller_arc) = self.audio_controller {
+                                let mut controller = controller_arc.lock().unwrap();
+                                for &(pool_index, _) in &takes {
+                                    match controller.get_pool_audio_samples(pool_index) {
+                                        Ok((samples, sr, ch)) => {
+                                            self.raw_audio_cache.insert(pool_index, (Arc::new(samples), sr, ch));
+                                            self.waveform_gpu_dirty.insert(pool_index);
+                                            self.audio_pools_with_new_waveforms.insert(pool_index);
+                                        }
+                                        Err(e) => eprintln!("Failed to fetch take audio: {}", e),
+                                    }
+                                    self.audio_duration_cache.insert(pool_index, loop_len_seconds.seconds_to_f64());
+                                }
+                            }
+
+                            let recording_layer = self.recording_clips.iter()
+                                .find(|(_, &cid)| cid == backend_clip_id)
+                                .map(|(&lid, _)| lid);
+
+                            if let (Some(layer_id), false) = (recording_layer, takes.is_empty()) {
+                                let (clip_id, instance_id) = {
+                                    let document = self.action_executor.document();
+                                    document.get_layer(&layer_id)
+                                        .and_then(|layer| {
+                                            if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                                                audio_layer.clip_instances.last().map(|i| (i.clip_id, i.id))
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .unwrap_or((uuid::Uuid::nil(), uuid::Uuid::nil()))
+                                };
+
+                                if !clip_id.is_nil() {
+                                    self.autosave.pending_event = true;
+                                    let last_take = takes.len() - 1;
+
+                                    // Promote the in-progress recording clip to a take folder.
+                                    {
+                                        let doc = self.action_executor.document_mut();
+                                        if let Some(clip) = doc.audio_clips.get_mut(&clip_id) {
+                                            clip.clip_type = lightningbeam_core::clip::AudioClipType::TakeFolder {
+                                                takes: takes.iter().enumerate().map(|(i, &(pool_index, _))| {
+                                                    lightningbeam_core::clip::AudioTake {
+                                                        name: format!("Take {}", i + 1),
+                                                        content: lightningbeam_core::clip::TakeContent::Audio { audio_pool_index: pool_index },
+                                                    }
+                                                }).collect(),
+                                                recorded_loop_beats: loop_len_beats,
+                                            };
+                                            // Audio takes are seconds-domain, and every take is
+                                            // exactly one cycle region long.
+                                            clip.set_content_duration(ClipDuration::Seconds(loop_len_seconds));
+                                            clip.name = format!("Cycle recording ({} takes)", takes.len());
+                                        }
+
+                                        // Anchor the instance to the region and select the most
+                                        // recent take, GarageBand-style.
+                                        //
+                                        // timeline_duration stays None on purpose: pinning it would
+                                        // make a later tempo change loop/repeat the take's content
+                                        // to fill the span instead of letting it drift naturally.
+                                        if let Some(lightningbeam_core::layer::AnyLayer::Audio(al)) = doc.get_layer_mut(&layer_id) {
+                                            if let Some(inst) = al.clip_instances.iter_mut().find(|ci| ci.id == instance_id) {
+                                                inst.timeline_start = loop_start;
+                                                inst.timeline_duration = None;
+                                                inst.trim_start = 0.0;
+                                                inst.trim_end = Some(loop_len_seconds.seconds_to_f64());
+                                                inst.active_take = Some(last_take);
+                                            }
+                                        }
+                                    }
+
+                                    // The backend already has a clip for the active take (the engine
+                                    // pointed it at the last take on stop), so map to it rather than
+                                    // adding a duplicate.
+                                    let backend_id = lightningbeam_core::action::BackendClipInstanceId::Audio(backend_clip_id);
+                                    self.clip_instance_to_backend_map.insert(instance_id, backend_id);
+
+                                    // Commit the whole cycle-record session as ONE undoable action.
+                                    let clip_instance = self.layer_to_track_map.get(&layer_id).copied().and_then(|track_id| {
+                                        self.action_executor.document()
+                                            .get_layer(&layer_id)
+                                            .and_then(|l| if let AnyLayer::Audio(al) = l {
+                                                al.clip_instances.iter().find(|ci| ci.id == instance_id).cloned()
+                                            } else { None })
+                                            .map(|ci| (track_id, ci))
+                                    });
+                                    if let Some((track_id, clip_instance)) = clip_instance {
+                                        let action = lightningbeam_core::actions::AddClipInstanceAction::already_applied(
+                                            layer_id, clip_instance, track_id, backend_id,
+                                        );
+                                        self.action_executor.push_applied(Box::new(action));
+                                    } else {
+                                        self.media_modified = true;
+                                    }
+                                }
+                            }
+
+                            self.recording_clips.retain(|_, &mut cid| cid != backend_clip_id);
                         }
                         AudioEvent::RecordingStopped(_backend_clip_id, pool_index, _waveform) => {
                             eprintln!("[STOP] AudioEvent::RecordingStopped received (pool_index={})", pool_index);

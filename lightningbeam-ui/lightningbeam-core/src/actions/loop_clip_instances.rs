@@ -91,7 +91,7 @@ impl Action for LoopClipInstancesAction {
 
 impl LoopClipInstancesAction {
     fn sync_backend(&self, backend: &mut crate::action::BackendContext, document: &Document, rollback: bool) -> Result<(), String> {
-        use crate::clip::AudioClipType;
+        use crate::clip::ResolvedContent;
 
         let controller = match backend.audio_controller.as_mut() {
             Some(c) => c,
@@ -145,9 +145,9 @@ impl LoopClipInstancesAction {
                 let external_start = instance.timeline_start - left_duration;
 
                 let get_backend_clip_id = |inst_id: &Uuid| -> Result<u32, String> {
-                    match &clip.clip_type {
-                        AudioClipType::Midi { midi_clip_id } => Ok(*midi_clip_id),
-                        AudioClipType::Sampled { .. } => {
+                    match &clip.resolve(instance.active_take) {
+                        ResolvedContent::Midi { midi_clip_id } => Ok(*midi_clip_id),
+                        ResolvedContent::Audio { .. } => {
                             let backend_id = backend.clip_instance_to_backend_map.get(inst_id)
                                 .ok_or_else(|| format!("Clip instance {} not mapped to backend", inst_id))?;
                             match backend_id {
@@ -155,7 +155,7 @@ impl LoopClipInstancesAction {
                                 _ => Err("Expected audio instance ID for sampled clip".to_string()),
                             }
                         }
-                        AudioClipType::Recording => Err("Cannot sync recording clip".to_string()),
+                        ResolvedContent::Recording => Err("Cannot sync recording clip".to_string()),
                     }
                 };
 

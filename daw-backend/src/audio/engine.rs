@@ -543,6 +543,17 @@ impl Engine {
                             rec.wrap_at_cycle(le_beats, ls_beats);
                         }
 
+                        // An audio recording in progress just completed a pass. This only decides
+                        // *whether* the recording becomes multi-take — the takes themselves are cut
+                        // geometrically at stop, since the playhead advances before the capture
+                        // block below, so the wrap instant isn't sample-exact against the buffer
+                        // that was just captured. The geometry is.
+                        if let Some(ref mut rec) = self.recording_state {
+                            if let Some(ref mut cycle) = rec.cycle {
+                                cycle.wrap_count += 1;
+                            }
+                        }
+
                         if let Some(ref mut dr) = self.disk_reader {
                             dr.send(crate::audio::disk_reader::DiskReaderCommand::Seek {
                                 frame: self.playhead.max(0) as u64,
@@ -944,35 +955,55 @@ impl Engine {
                 match self.project.get_track_mut(track_id) {
                     Some(crate::audio::track::TrackNode::Audio(track)) => {
                         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            clip.external_start = Beats(new_start_time);
+                            clip.external_start = new_start_time;
                         }
                     }
                     Some(crate::audio::track::TrackNode::Midi(track)) => {
                         if let Some(instance) = track.clip_instances.iter_mut().find(|c| c.id == clip_id) {
-                            instance.external_start = Beats(new_start_time);
+                            instance.external_start = new_start_time;
                         }
                     }
                     _ => {}
                 }
                 self.refresh_clip_snapshot();
             }
-            Command::TrimClip(track_id, clip_id, new_internal_start, new_internal_end) => {
-                // Trim changes which portion of the source content is used
-                // Also updates external_duration to match internal duration (no looping after trim)
-                match self.project.get_track_mut(track_id) {
-                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+            Command::TrimClip(track_id, clip_id, range) => {
+                // Trim changes which portion of the source content is used.
+                // Also collapses external_duration to the trimmed content length (no looping after
+                // a trim).
+                let tempo_map = self.tempo_map.clone();
+                match (self.project.get_track_mut(track_id), range) {
+                    (
+                        Some(crate::audio::track::TrackNode::Audio(track)),
+                        crate::command::TrimRange::Seconds { start, end },
+                    ) => {
                         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            clip.internal_start = Seconds(new_internal_start);
-                            clip.internal_end = Seconds(new_internal_end);
-                            clip.external_duration = Beats(new_internal_end - new_internal_start);
+                            clip.internal_start = start;
+                            clip.internal_end = end;
+                            // external_duration is BEATS while the trims are SECONDS, so the span
+                            // has to be converted at the clip's position on the timeline — NOT
+                            // reinterpreted as `Beats(end - start)`, which played a 1-second trim
+                            // back as half a second at 120 BPM.
+                            clip.external_duration = tempo_map.seconds_to_beats(
+                                tempo_map.beats_to_seconds(clip.external_start) + (end - start),
+                            ) - clip.external_start;
                         }
                     }
-                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                    (
+                        Some(crate::audio::track::TrackNode::Midi(track)),
+                        crate::command::TrimRange::Beats { start, end },
+                    ) => {
                         if let Some(instance) = track.clip_instances.iter_mut().find(|c| c.clip_id == clip_id) {
-                            instance.internal_start = Beats(new_internal_start);
-                            instance.internal_end = Beats(new_internal_end);
-                            instance.external_duration = Beats(new_internal_end - new_internal_start);
+                            instance.internal_start = start;
+                            instance.internal_end = end;
+                            // MIDI content time IS beats, so the span carries over directly.
+                            instance.external_duration = end - start;
                         }
+                    }
+                    // A domain that doesn't match the track kind (seconds at a MIDI track, or vice
+                    // versa) is a caller bug, not something to guess at.
+                    (Some(_), _) => {
+                        debug_assert!(false, "TrimClip domain does not match the track kind");
                     }
                     _ => {}
                 }
@@ -3212,8 +3243,28 @@ impl Engine {
                     self.recording_state = Some(recording_state);
                     self.recording_progress_counter = 0; // Reset progress counter
 
+                    // Arm cycle recording. `start_time` is the region start (the editor anchors a
+                    // cycle recording there, for punch-in too), while capture actually begins at
+                    // the current playhead — the gap between them is the lead pad that take 1 gets
+                    // prepended as silence so it still spans the whole region.
+                    let cycle_info = if self.loop_enabled {
+                        self.loop_region.map(|(ls_beats, le_beats)| {
+                            let (ls, le) = self.loop_bounds_samples(ls_beats, le_beats);
+                            crate::audio::recording::CycleRecordInfo {
+                                loop_start: ls_beats,
+                                loop_len_beats: le_beats - ls_beats,
+                                loop_len_frames: (le - ls).max(0) as usize,
+                                lead_pad_frames: (self.playhead - ls).max(0) as usize,
+                                wrap_count: 0,
+                            }
+                        })
+                    } else {
+                        None
+                    };
+
                     // Set samples to skip (drained incrementally across callbacks)
                     if let Some(recording) = &mut self.recording_state {
+                        recording.cycle = cycle_info;
                         recording.samples_to_skip = samples_in_buffer;
                         if self.debug_audio && samples_in_buffer > 0 {
                             eprintln!("[AUDIO DEBUG] Will skip {} stale samples from input buffer", samples_in_buffer);
@@ -3236,6 +3287,40 @@ impl Engine {
                 format!("Track {} not found or is not an audio track", track_id)
             ));
         }
+    }
+
+    /// Write one cycle take to a temp WAV, add it to the audio pool, and return its pool index.
+    ///
+    /// Mirrors what the single-recording path does with its own buffer: the pool file is backed by
+    /// the in-memory samples, and the temp WAV is written and then removed (the pool only reads the
+    /// path opportunistically, e.g. to keep original bytes on save).
+    fn write_take_to_pool(
+        &mut self,
+        samples: Vec<f32>,
+        sample_rate: u32,
+        channels: u32,
+        clip_id: ClipId,
+        take_index: usize,
+    ) -> Result<usize, std::io::Error> {
+        use crate::io::WavWriter;
+
+        let path = std::env::temp_dir()
+            .join(format!("daw_take_{}_{}.wav", clip_id, take_index));
+
+        let mut writer = WavWriter::create(&path, sample_rate, channels)?;
+        writer.write_samples(&samples)?;
+        writer.finalize()?;
+
+        let pool_file = crate::audio::pool::AudioFile::with_format(
+            path.clone(),
+            samples,
+            channels,
+            sample_rate,
+            Some("wav".to_string()),
+        );
+        let pool_index = self.audio_pool.add_file(pool_file);
+        let _ = std::fs::remove_file(&path);
+        Ok(pool_index)
     }
 
     /// Handle stopping a recording
@@ -3261,11 +3346,74 @@ impl Engine {
 
             eprintln!("[STOP_RECORDING] Stopping recording for clip_id={}, track_id={}", clip_id, track_id);
 
+            // Slice cycle takes BEFORE finalize consumes the recording. `None` here means the
+            // transport never wrapped, which stays an ordinary single recording on the path below.
+            let cycle = recording.cycle;
+            let frames_per_peak = recording.frames_per_peak;
+            let cycle_takes = recording.slice_takes();
+
             // Finalize the recording (flush buffers, close file, get waveform and audio data)
             let frames_recorded = recording.frames_written;
             eprintln!("[STOP_RECORDING] Calling finalize() - frames_recorded={}", frames_recorded);
             match recording.finalize() {
                 Ok((temp_file_path, waveform, audio_data)) => {
+                    // ---- Cycle recording: one take per pass, each spanning the whole region ----
+                    if let (Some(takes), Some(cycle)) = (cycle_takes, cycle) {
+                        eprintln!(
+                            "[STOP_RECORDING] Cycle recording: {} wraps -> {} takes of {} frames",
+                            cycle.wrap_count, takes.len(), cycle.loop_len_frames
+                        );
+                        let _ = std::fs::remove_file(&temp_file_path);
+
+                        let mut pool_takes: Vec<(usize, Vec<crate::io::WaveformPeak>)> = Vec::new();
+                        for (i, take) in takes.into_iter().enumerate() {
+                            let peaks = crate::audio::recording::compute_peaks(
+                                &take,
+                                channels,
+                                frames_per_peak,
+                            );
+                            match self.write_take_to_pool(take, sample_rate, channels, clip_id, i) {
+                                Ok(pool_index) => pool_takes.push((pool_index, peaks)),
+                                Err(e) => {
+                                    let _ = self.event_tx.push(AudioEvent::RecordingError(
+                                        format!("Failed to store take {}: {}", i + 1, e),
+                                    ));
+                                    return;
+                                }
+                            }
+                        }
+
+                        // Point the engine's clip at the take the editor will make active (the last
+                        // one, GarageBand-style) and stretch it to cover the whole cycle region —
+                        // the clip was created at the punch-in point with zero length.
+                        let loop_len_secs =
+                            Seconds(cycle.loop_len_frames as f64 / sample_rate as f64);
+                        if let Some(&(last_pool_index, _)) = pool_takes.last() {
+                            if let Some(crate::audio::track::TrackNode::Audio(track)) =
+                                self.project.get_track_mut(track_id)
+                            {
+                                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id)
+                                {
+                                    clip.audio_pool_index = last_pool_index;
+                                    clip.internal_start = Seconds(0.0);
+                                    clip.internal_end = loop_len_secs;
+                                    clip.external_start = cycle.loop_start;
+                                    clip.external_duration = cycle.loop_len_beats;
+                                }
+                            }
+                            self.refresh_clip_snapshot();
+                        }
+
+                        let _ = self.event_tx.push(AudioEvent::CycleRecordingStopped {
+                            clip_id,
+                            takes: pool_takes,
+                            loop_start: cycle.loop_start,
+                            loop_len_beats: cycle.loop_len_beats,
+                            loop_len_seconds: loop_len_secs,
+                        });
+                        return;
+                    }
+
                     eprintln!("[STOP_RECORDING] Finalize succeeded: {} frames written to {:?}, {} waveform peaks generated, {} samples in memory",
                               frames_recorded, temp_file_path, waveform.len(), audio_data.len());
 
@@ -3357,7 +3505,13 @@ impl Engine {
             let track_id = recording.track_id;
             let notes = recording.get_notes().to_vec();
             let note_count = notes.len();
-            let recording_duration = end_time - recording.start_time;
+            // A cycle MIDI recording is anchored at the region start and every pass overdubs into
+            // the same clip (MERGE), so the clip is exactly one region long — not however long the
+            // user held the record button, which would run past the loop end.
+            let recording_duration = match recording.cycle_loop_len {
+                Some(loop_len) => loop_len,
+                None => end_time - recording.start_time,
+            };
 
             eprintln!("[MIDI_RECORDING] Stopping MIDI recording for clip_id={}, track_id={}, captured {} notes, duration={:.3} beats",
                       clip_id, track_id, note_count, recording_duration.0);
@@ -3522,17 +3676,17 @@ impl EngineController {
 
     /// Move a clip to a new timeline position (changes external_start)
     pub fn move_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: Beats) {
-        let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time.beats_to_f64()));
+        let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time));
     }
 
-    /// Trim a clip's internal boundaries (changes which portion of source content is used)
-    /// This also resets external_duration to match internal duration (disables looping)
-    /// Trim a clip's internal content bounds. The units are content-domain and depend on the
-    /// track type: SECONDS for a sampled-audio clip, BEATS for a MIDI clip (see the TrimClip
-    /// handler). Left as raw f64 because a single newtype can't express both; callers pass the
-    /// clip's own `trim_start`/`trim_end`, which already match its content domain.
-    pub fn trim_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_internal_start: f64, new_internal_end: f64) {
-        let _ = self.command_tx.push(Command::TrimClip(track_id, clip_id, new_internal_start, new_internal_end));
+    /// Trim a clip's internal content bounds — which portion of the source content plays.
+    ///
+    /// Collapses external_duration to the trimmed length (disables looping). The bounds are
+    /// content-domain, which differs by clip kind, so they're passed as a [`TrimRange`] that names
+    /// the domain: `Seconds` for sampled audio, `Beats` for MIDI. The engine rejects a range whose
+    /// domain doesn't match the track.
+    pub fn trim_clip(&mut self, track_id: TrackId, clip_id: ClipId, range: crate::command::TrimRange) {
+        let _ = self.command_tx.push(Command::TrimClip(track_id, clip_id, range));
     }
 
     /// Extend or shrink a clip's external duration (enables looping if > internal duration)

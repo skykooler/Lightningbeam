@@ -780,16 +780,18 @@ impl Document {
     }
 
     /// Find the document audio clip (UUID + ref) that owns the given backend pool index.
+    /// A take folder owns one pool file per take, so any of them maps back to the folder.
     pub fn audio_clip_by_pool_index(&self, pool_index: usize) -> Option<(Uuid, &AudioClip)> {
         self.audio_clips.iter()
-            .find(|(_, c)| c.audio_pool_index() == Some(pool_index))
+            .find(|(_, c)| c.owns_audio_pool_index(pool_index))
             .map(|(&id, c)| (id, c))
     }
 
     /// Find the document audio clip (UUID + ref) that owns the given backend MIDI clip ID.
+    /// As above, a take folder owns one MIDI clip per take.
     pub fn audio_clip_by_midi_clip_id(&self, midi_clip_id: u32) -> Option<(Uuid, &AudioClip)> {
         self.audio_clips.iter()
-            .find(|(_, c)| c.midi_clip_id() == Some(midi_clip_id))
+            .find(|(_, c)| c.owns_midi_clip_id(midi_clip_id))
             .map(|(&id, c)| (id, c))
     }
 
@@ -911,6 +913,23 @@ impl Document {
     /// Searches through all clip libraries to find the clip and return its duration.
     /// For effect definitions, returns `EFFECT_DURATION` (f64::MAX) since effects
     /// have infinite internal duration.
+    /// A clip's content duration **in the domain its `trim_start`/`trim_end` are measured in**.
+    ///
+    /// `ClipInstance::trim_*` is domain-polymorphic exactly like `AudioClip::duration`: SECONDS for
+    /// sampled audio, video and vector, but BEATS for MIDI (the backend takes MIDI trims as
+    /// `Beats`). Anything doing arithmetic against a trim value — mapping a timeline position into
+    /// the clip's content, say — has to work in that same domain, and [`Self::get_clip_duration`]
+    /// can't tell it which: that one always converts to seconds.
+    ///
+    /// Returns `None` for unknown clips.
+    pub fn clip_trim_duration(&self, clip_id: &Uuid) -> Option<crate::clip::ClipDuration> {
+        if let Some(clip) = self.audio_clips.get(clip_id) {
+            return Some(clip.content_duration());
+        }
+        // Everything else measures its content in wall-clock seconds.
+        self.get_clip_duration(clip_id).map(crate::clip::ClipDuration::Seconds)
+    }
+
     pub fn get_clip_duration(&self, clip_id: &Uuid) -> Option<Seconds> {
         if let Some(clip) = self.vector_clips.get(clip_id) {
             if clip.is_group {

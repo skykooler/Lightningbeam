@@ -146,27 +146,37 @@ impl Action for SplitClipInstanceAction {
         self.original_trim_end = instance.trim_end;
         self.original_timeline_duration = instance.timeline_duration;
 
-        // Check if this is a looping clip. `content_duration` is a trim-domain
-        // span (seconds), so `clip_duration` must be unwrapped as seconds.
+        // The clip's content duration in the SAME domain as its trims — seconds for audio/video/
+        // vector, beats for MIDI. All the content math below is trim-domain, so it has to be done
+        // in whichever domain this clip uses; `clip_duration` above is always seconds and would
+        // silently add a seconds delta to a MIDI clip's beats trim.
+        let trim_duration = document
+            .clip_trim_duration(&instance.clip_id)
+            .ok_or_else(|| format!("Clip {} not found", instance.clip_id))?;
+
         let is_looping = instance.timeline_duration.is_some();
-        let content_duration = instance.trim_end.unwrap_or(clip_duration.seconds_to_f64()) - instance.trim_start;
+        let content_duration = instance.trim_end.unwrap_or(trim_duration.native()) - instance.trim_start;
 
         // Timeline split point (beats).
         let time_into_clip = self.split_time - instance.timeline_start;
         let left_duration = time_into_clip;
         let right_duration = effective_duration - left_duration;
 
-        // How far the split lands into the clip's *content* (seconds, trim domain).
+        // How far the split lands into the clip's *content*, expressed in the trim domain.
         let tempo_map = document.tempo_map();
-        let time_into_clip_secs = (tempo_map.beats_to_seconds(self.split_time)
-            - tempo_map.beats_to_seconds(instance.timeline_start)).seconds_to_f64();
+        let time_into_content = match trim_duration {
+            crate::clip::ClipDuration::Beats(_) => time_into_clip.beats_to_f64(),
+            crate::clip::ClipDuration::Seconds(_) => (tempo_map.beats_to_seconds(self.split_time)
+                - tempo_map.beats_to_seconds(instance.timeline_start))
+            .seconds_to_f64(),
+        };
 
-        // Calculate content split time (seconds)
-        let content_split_time = if is_looping {
+        // Calculate the content split point (trim domain).
+        let content_split_time = if is_looping && content_duration > 0.0 {
             // For looping clips, wrap around content
-            instance.trim_start + (time_into_clip_secs % content_duration)
+            instance.trim_start + (time_into_content % content_duration)
         } else {
-            instance.trim_start + time_into_clip_secs
+            instance.trim_start + time_into_content
         };
 
         // Clone the instance for the right side
@@ -370,9 +380,9 @@ impl Action for SplitClipInstanceAction {
             .ok_or_else(|| "Audio controller not available".to_string())?;
 
         // Handle different clip types
-        use crate::clip::AudioClipType;
-        match &clip.clip_type {
-            AudioClipType::Midi { midi_clip_id } => {
+        use crate::clip::ResolvedContent;
+        match &clip.resolve(original_instance.active_take) {
+            ResolvedContent::Midi { midi_clip_id } => {
                 use daw_backend::command::{Query, QueryResponse};
 
                 // 1. Trim the original (left) instance
@@ -383,7 +393,7 @@ impl Action for SplitClipInstanceAction {
                 if let Some(crate::action::BackendClipInstanceId::Midi(orig_backend_id)) =
                     backend.clip_instance_to_backend_map.get(&self.instance_id)
                 {
-                    controller.trim_clip(*backend_track_id, *orig_backend_id, orig_internal_start, orig_internal_end);
+                    controller.trim_clip(*backend_track_id, *orig_backend_id, clip.trim_range(orig_internal_start, orig_internal_end));
                 }
 
                 // 2. Add the new (right) instance
@@ -422,7 +432,7 @@ impl Action for SplitClipInstanceAction {
                     _ => Err("Unexpected query response".to_string()),
                 }
             }
-            AudioClipType::Sampled { audio_pool_index } => {
+            ResolvedContent::Audio { audio_pool_index } => {
                 // 1. Trim the original (left) instance
                 let orig_internal_start = original_instance.trim_start;
                 let orig_internal_end = original_instance.trim_end.unwrap_or(clip.content_duration().native());
@@ -431,7 +441,7 @@ impl Action for SplitClipInstanceAction {
                 if let Some(crate::action::BackendClipInstanceId::Audio(orig_backend_id)) =
                     backend.clip_instance_to_backend_map.get(&self.instance_id)
                 {
-                    controller.trim_clip(*backend_track_id, *orig_backend_id, orig_internal_start, orig_internal_end);
+                    controller.trim_clip(*backend_track_id, *orig_backend_id, clip.trim_range(orig_internal_start, orig_internal_end));
                 }
 
                 // 2. Add the new (right) instance
@@ -465,7 +475,7 @@ impl Action for SplitClipInstanceAction {
 
                 Ok(())
             }
-            AudioClipType::Recording => {
+            ResolvedContent::Recording => {
                 // Recording clips cannot be split
                 Err("Cannot split a clip that is currently recording".to_string())
             }
@@ -502,23 +512,23 @@ impl Action for SplitClipInstanceAction {
                             let orig_internal_end = self.original_trim_end.unwrap_or(clip.content_duration().native());
 
                             // Restore based on clip type
-                            use crate::clip::AudioClipType;
-                            match &clip.clip_type {
-                                AudioClipType::Midi { .. } => {
+                            use crate::clip::ResolvedContent;
+                            match &clip.resolve(instance.active_take) {
+                                ResolvedContent::Midi { .. } => {
                                     if let Some(crate::action::BackendClipInstanceId::Midi(orig_backend_id)) =
                                         backend.clip_instance_to_backend_map.get(&self.instance_id)
                                     {
-                                        controller.trim_clip(track_id, *orig_backend_id, orig_internal_start, orig_internal_end);
+                                        controller.trim_clip(track_id, *orig_backend_id, clip.trim_range(orig_internal_start, orig_internal_end));
                                     }
                                 }
-                                AudioClipType::Sampled { .. } => {
+                                ResolvedContent::Audio { .. } => {
                                     if let Some(crate::action::BackendClipInstanceId::Audio(orig_backend_id)) =
                                         backend.clip_instance_to_backend_map.get(&self.instance_id)
                                     {
-                                        controller.trim_clip(track_id, *orig_backend_id, orig_internal_start, orig_internal_end);
+                                        controller.trim_clip(track_id, *orig_backend_id, clip.trim_range(orig_internal_start, orig_internal_end));
                                     }
                                 }
-                                AudioClipType::Recording => {
+                                ResolvedContent::Recording => {
                                     // Recording clips - nothing to rollback
                                 }
                             }
@@ -574,5 +584,43 @@ mod tests {
     fn test_split_action_description() {
         let action = SplitClipInstanceAction::new(Uuid::new_v4(), Uuid::new_v4(), daw_backend::Beats(5.0));
         assert_eq!(action.description(), "Split clip instance");
+    }
+
+    #[test]
+    fn splitting_a_midi_clip_stays_in_the_beats_domain() {
+        // Regression: `trim_start`/`trim_end` are domain-polymorphic — SECONDS for audio/video/
+        // vector, but BEATS for MIDI (the backend takes MIDI trims as `Beats`). Split used to map
+        // the split point into the clip's content in seconds unconditionally, so on a MIDI clip it
+        // added a seconds delta to a beats offset. At anything but 60 BPM the right half started at
+        // the wrong place in the content.
+        //
+        // At 120 BPM, beat 4 is 2 SECONDS in. The right half must trim to beat 4, not "4 seconds"
+        // (= beat 8) and not 2 (the seconds value).
+        let mut document = Document::new("Test");
+        document.set_bpm(120.0);
+
+        // 8-beat MIDI clip at the timeline origin.
+        let clip = crate::clip::AudioClip::new_midi("Midi", 1, daw_backend::Beats(8.0));
+        let clip_id = document.add_audio_clip(clip);
+
+        let mut audio_layer = crate::layer::AudioLayer::new("Layer 1");
+        let mut instance = ClipInstance::new(clip_id);
+        instance.timeline_start = daw_backend::Beats::ZERO;
+        instance.trim_start = 0.0;
+        instance.trim_end = Some(8.0); // beats
+        let instance_id = instance.id;
+        audio_layer.clip_instances.push(instance);
+        let layer_id = document.root.add_child(AnyLayer::Audio(audio_layer));
+
+        let mut action = SplitClipInstanceAction::new(layer_id, instance_id, daw_backend::Beats(4.0));
+        action.execute(&mut document).expect("split");
+        let new_id = action.new_instance_id().expect("right instance");
+
+        let AnyLayer::Audio(al) = document.get_layer(&layer_id).unwrap() else { panic!() };
+        let right = al.clip_instances.iter().find(|ci| ci.id == new_id).unwrap();
+        let left = al.clip_instances.iter().find(|ci| ci.id == instance_id).unwrap();
+
+        assert_eq!(right.trim_start, 4.0, "right half must start 4 BEATS into the content");
+        assert_eq!(left.trim_end, Some(4.0), "left half must end 4 BEATS into the content");
     }
 }

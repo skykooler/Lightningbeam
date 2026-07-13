@@ -8,6 +8,21 @@ use crate::audio::node_graph::nodes::LoopMode;
 use crate::io::WaveformPeak;
 use crate::time::{Beats, Seconds};
 
+/// A clip's internal (content) boundaries, tagged with the domain they're measured in.
+///
+/// A clip's content time is SECONDS for sampled audio but BEATS for MIDI — the same polymorphism
+/// `ClipInstance::trim_start`/`trim_end` carry. Passing these as bare `f64`s meant the caller and
+/// the engine could disagree about the unit with nothing to catch it: an audio trim of "1.0" was
+/// once stored as `Beats(1.0)` for the clip's external duration, so a 1-second split played back as
+/// half a second at 120 BPM. Tagging the domain makes that a type error instead of a bug report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrimRange {
+    /// Sampled-audio content time.
+    Seconds { start: Seconds, end: Seconds },
+    /// MIDI content time.
+    Beats { start: Beats, end: Beats },
+}
+
 /// Commands sent from UI/control thread to audio thread
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -31,10 +46,9 @@ pub enum Command {
 
     // Clip management commands
     /// Move a clip to a new timeline position (track_id, clip_id, new_external_start)
-    MoveClip(TrackId, ClipId, f64),
-    /// Trim a clip's internal boundaries (track_id, clip_id, new_internal_start, new_internal_end)
-    /// This changes which portion of the source content is used
-    TrimClip(TrackId, ClipId, f64, f64),
+    MoveClip(TrackId, ClipId, Beats),
+    /// Trim a clip's internal boundaries — which portion of the source content is used.
+    TrimClip(TrackId, ClipId, TrimRange),
     /// Extend/shrink a clip's external duration (track_id, clip_id, new_external_duration)
     /// If duration > internal duration, the clip will loop
     ExtendClip(TrackId, ClipId, f64),
@@ -299,6 +313,22 @@ pub enum AudioEvent {
     RecordingProgress(ClipId, Seconds),
     /// Recording stopped (clip_id, pool_index, waveform)
     RecordingStopped(ClipId, usize, Vec<WaveformPeak>),
+    /// A recording that wrapped the cycle region at least once, and so became multi-take.
+    ///
+    /// Each take spans the full region and they're all the same length (partial passes are padded
+    /// with silence), so the editor can promote the recording clip straight to a take folder.
+    CycleRecordingStopped {
+        clip_id: ClipId,
+        /// One entry per pass: (audio pool index, waveform peaks), in recording order.
+        takes: Vec<(usize, Vec<WaveformPeak>)>,
+        /// Where the takes sit on the timeline — the cycle region's start, not the punch-in point.
+        loop_start: Beats,
+        /// The region's length in beats (what the take folder stores as `recorded_loop_beats`).
+        loop_len_beats: Beats,
+        /// The same length in seconds — the take folder's content duration, which is seconds-domain
+        /// for audio.
+        loop_len_seconds: Seconds,
+    },
     /// Recording error (error_message)
     RecordingError(String),
     /// MIDI recording stopped (track_id, clip_id, note_count)

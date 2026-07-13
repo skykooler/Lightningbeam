@@ -286,6 +286,15 @@ pub struct TimelinePane {
     /// during the last `render_layers`. Used by `handle_input` (next frame) to snap the
     /// playhead exactly to a keyframe when its diamond is clicked.
     keyframe_diamond_hits: Vec<(egui::Rect, f64)>,
+    /// Take-badge click targets recorded during render: (badge rect, layer, instance, active take,
+    /// take count). Collected while painting, dispatched after — the usual two-phase pattern.
+    take_badge_hits: Vec<(egui::Rect, uuid::Uuid, uuid::Uuid, usize, usize)>,
+    /// The take-folder instance whose take menu is open, if any.
+    open_take_menu: Option<(uuid::Uuid, uuid::Uuid)>,
+    /// Seconds between the cycle region's start and where the current recording actually began.
+    /// Zero unless the user punched in mid-region. Used to line the live waveform preview up with
+    /// the region on each pass.
+    cycle_record_lead_secs: f64,
 
     /// Total duration of the animation
     duration: f64,
@@ -723,6 +732,9 @@ impl TimelinePane {
             viewport_start_time: 0.0,
             viewport_scroll_y: 0.0,
             keyframe_diamond_hits: Vec::new(),
+            take_badge_hits: Vec::new(),
+            open_take_menu: None,
+            cycle_record_lead_secs: 0.0,
             duration: 10.0,  // Default 10 seconds
             is_scrubbing: false,
             cycle_drag: None,
@@ -1049,7 +1061,41 @@ impl TimelinePane {
             true
         });
 
-        let start_time = *shared.playback_time;
+        let mut start_time = *shared.playback_time;
+
+        // With a cycle region armed, a recording is anchored at the REGION start rather than the
+        // playhead: every take spans the whole region, so the clip has to as well.
+        //
+        // Two ways in. From stopped, we also move the playhead to the region start, so recording
+        // begins with the loop (the count-in below then rolls in from a measure before it). Punching
+        // in while already rolling leaves the playhead where it is — the backend prepends silence to
+        // take 1's head to fill the gap back to the region start.
+        let cycle_start_secs = {
+            let doc = shared.action_executor.document();
+            match (doc.cycle_enabled, doc.cycle_region) {
+                (true, Some((ls, le))) if le > ls => {
+                    Some(doc.tempo_map().beats_to_seconds(ls).seconds_to_f64())
+                }
+                _ => None,
+            }
+        };
+        if let Some(ls_secs) = cycle_start_secs {
+            // How far into the region we punched in (zero when starting from stopped, since we jump
+            // the playhead to the region start below). The live waveform preview needs this to know
+            // where each pass begins inside the recording buffer.
+            self.cycle_record_lead_secs = if *shared.is_playing {
+                (*shared.playback_time - ls_secs).max(0.0)
+            } else {
+                0.0
+            };
+            start_time = ls_secs;
+            if !*shared.is_playing {
+                if let Some(controller_arc) = shared.audio_controller {
+                    controller_arc.lock().unwrap().seek(Seconds(ls_secs));
+                }
+                *shared.playback_time = ls_secs;
+            }
+        }
 
         // Count-in: seek back N beats, start transport + metronome, defer ALL recording commands.
         // Must happen before Step 4 so no clips or backend recordings are created yet.
@@ -1592,6 +1638,101 @@ impl TimelinePane {
             egui::pos2((ruler_rect.min.x + ex).min(ruler_rect.max.x), lane.max.y),
         );
         painter.rect_filled(band, 2.0, fill);
+    }
+
+    /// Click handling + dropdown for the take badge painted on take-folder clips.
+    ///
+    /// Runs after rendering, off the hit rects collected during it: clicking a badge opens (or
+    /// closes) a list of the clip's takes, and picking one dispatches `SetActiveTakeAction`.
+    /// Selection is per-*instance*, so doing this to one half of a split clip and something else to
+    /// the other half is exactly how you comp.
+    fn render_take_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        document: &lightningbeam_core::document::Document,
+        pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
+    ) {
+        let click = ui.input(|i| {
+            i.pointer
+                .primary_pressed()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        });
+
+        if let Some(pos) = click {
+            if let Some((_, layer_id, instance_id, _, _)) =
+                self.take_badge_hits.iter().find(|(r, ..)| r.contains(pos))
+            {
+                let key = (*layer_id, *instance_id);
+                // Clicking the badge of the open menu closes it again.
+                self.open_take_menu = (self.open_take_menu != Some(key)).then_some(key);
+            }
+        }
+
+        let Some((layer_id, instance_id)) = self.open_take_menu else {
+            return;
+        };
+        // The badge is only in the hit list while it's on screen; if the clip scrolled away, the
+        // menu has nothing to hang off, so drop it.
+        let Some((badge, _, _, active, count)) = self
+            .take_badge_hits
+            .iter()
+            .find(|(_, l, i, _, _)| *l == layer_id && *i == instance_id)
+            .copied()
+        else {
+            self.open_take_menu = None;
+            return;
+        };
+
+        // The instance's *stored* selection, which is what rollback must restore — not `active`,
+        // which is that value clamped for display.
+        let old_take = document
+            .get_layer(&layer_id)
+            .and_then(|l| match l {
+                lightningbeam_core::layer::AnyLayer::Audio(al) => {
+                    al.clip_instances.iter().find(|ci| ci.id == instance_id)
+                }
+                _ => None,
+            })
+            .and_then(|ci| ci.active_take);
+
+        let mut close = false;
+        let area = egui::Area::new(ui.id().with(("take_menu", instance_id)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(badge.min.x, badge.max.y + 2.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    for i in 0..count {
+                        let is_active = i == active;
+                        if ui
+                            .selectable_label(is_active, format!("Take {}", i + 1))
+                            .clicked()
+                        {
+                            if !is_active {
+                                pending_actions.push(Box::new(
+                                    lightningbeam_core::actions::SetActiveTakeAction::new(
+                                        layer_id,
+                                        instance_id,
+                                        i,
+                                        old_take,
+                                    ),
+                                ));
+                            }
+                            close = true;
+                        }
+                    }
+                });
+            });
+
+        // A press anywhere outside the menu (and outside the badge, which toggles) dismisses it.
+        if let Some(pos) = click {
+            if !badge.contains(pos) && !area.response.rect.contains(pos) {
+                close = true;
+            }
+        }
+        if close {
+            self.open_take_menu = None;
+        }
     }
 
     /// Convert time (seconds) to pixel x-coordinate
@@ -2896,6 +3037,7 @@ impl TimelinePane {
         let mut pending_lane_renders: Vec<AutomationLaneRender> = Vec::new();
         // Rebuilt each frame; consumed by handle_input (next frame) for click-to-seek.
         self.keyframe_diamond_hits.clear();
+        self.take_badge_hits.clear();
 
         // Collect video clip rects for hover detection (to avoid borrow conflicts)
         let mut video_clip_hovers: Vec<(egui::Rect, uuid::Uuid, f64, f32)> = Vec::new();
@@ -3801,9 +3943,11 @@ impl TimelinePane {
                         // AUDIO VISUALIZATION: Draw piano roll or waveform overlay
                         if let lightningbeam_core::layer::AnyLayer::Audio(_) = layer {
                             if let Some(clip) = document.get_audio_clip(&clip_instance.clip_id) {
-                                match &clip.clip_type {
+                                // Resolve through the instance's active take, so a take folder draws
+                                // whichever take it actually plays.
+                                match &clip.resolve(clip_instance.active_take) {
                                     // MIDI: Draw piano roll (with loop iterations)
-                                    lightningbeam_core::clip::AudioClipType::Midi { midi_clip_id } => {
+                                    lightningbeam_core::clip::ResolvedContent::Midi { midi_clip_id } => {
                                         if let Some(events) = midi_event_cache.get(midi_clip_id) {
                                             // Calculate content window for loop detection
                                             // preview_clip_duration accounts for TrimLeft/TrimRight drag previews
@@ -3862,7 +4006,7 @@ impl TimelinePane {
                                         }
                                     }
                                     // Sampled Audio: Draw waveform via GPU
-                                    lightningbeam_core::clip::AudioClipType::Sampled { audio_pool_index } => {
+                                    lightningbeam_core::clip::ResolvedContent::Audio { audio_pool_index } => {
                                         if let Some((samples, sr, ch)) = raw_audio_cache.get(audio_pool_index) {
                                             // Min/max overview pools: 4 f32/texel at rate sr/B.
                                             let minmax_b = waveform_minmax_pools.get(audio_pool_index).copied();
@@ -3991,7 +4135,7 @@ impl TimelinePane {
                                         }
                                     }
                                     // Recording in progress: show live waveform
-                                    lightningbeam_core::clip::AudioClipType::Recording => {
+                                    lightningbeam_core::clip::ResolvedContent::Recording => {
                                         let rec_pool_idx = usize::MAX;
                                         if let Some((samples, sr, ch)) = raw_audio_cache.get(&rec_pool_idx) {
                                             let total_frames = samples.len() / (*ch).max(1) as usize;
@@ -4026,6 +4170,36 @@ impl TimelinePane {
                                                     egui::pos2(clip_screen_end.min(clip_rect.max.x), clip_rect.max.y),
                                                 );
 
+                                                // Cycle recording: the clip covers ONE region, but the
+                                                // recorded buffer keeps growing across passes. Show the
+                                                // *current* pass by offsetting into the buffer to where
+                                                // that pass began, so the waveform restarts at the region
+                                                // start on each wrap and fills in behind the playhead —
+                                                // rather than running on past the clip's end.
+                                                //
+                                                // The playhead gives the position within the region
+                                                // directly, so a punch-in (whose first pass starts partway
+                                                // in) needs no extra bookkeeping here.
+                                                let mut rec_trim_start = preview_trim_start;
+                                                if let (true, Some((ls, le))) = (document.cycle_enabled, document.cycle_region) {
+                                                    let tm = document.tempo_map();
+                                                    let loop_len = (tm.beats_to_seconds(le)
+                                                        - tm.beats_to_seconds(ls))
+                                                    .seconds_to_f64();
+                                                    if loop_len > 0.0 {
+                                                        // Which pass we're on, straight from how much
+                                                        // audio has been captured. Deriving this from
+                                                        // the playhead instead would jitter: the
+                                                        // playhead and the recording buffer advance on
+                                                        // different clocks, so their difference wobbles
+                                                        // frame to frame and the waveform slides
+                                                        // horizontally.
+                                                        let lead = self.cycle_record_lead_secs;
+                                                        let pass = ((lead + audio_file_duration) / loop_len).floor();
+                                                        rec_trim_start = (pass * loop_len - lead).max(0.0);
+                                                    }
+                                                }
+
                                                 if waveform_rect.width() > 0.0 && waveform_rect.height() > 0.0 {
                                                     let instance_id = clip_instance.id.as_u128() as u64;
                                                     let callback = crate::waveform_gpu::WaveformCallback {
@@ -4038,7 +4212,7 @@ impl TimelinePane {
                                                             audio_duration: audio_file_duration as f32,
                                                             sample_rate: *sr as f32,
                                                             clip_start_time: clip_screen_start,
-                                                            trim_start: preview_trim_start as f32,
+                                                            trim_start: rec_trim_start as f32,
                                                             tex_width: crate::waveform_gpu::tex_width() as f32,
                                                             total_frames: total_frames as f32,
                                                             segment_start_frame: 0.0,
@@ -4150,6 +4324,68 @@ impl TimelinePane {
                                     egui::FontId::proportional(11.0),
                                     egui::Color32::WHITE,
                                 );
+                            }
+                        }
+
+                        // Take badge — "Take 2/4" in the clip's bottom-left, on take-folder clips
+                        // only. Records a hit rect so the click that opens the take menu can be
+                        // dispatched after rendering (the usual two-phase pattern), rather than
+                        // mutating the document mid-paint.
+                        if let Some(take_count) = document
+                            .get_audio_clip(&clip_instance.clip_id)
+                            .and_then(|c| c.takes().map(|t| t.len()))
+                            .filter(|n| *n > 0)
+                        {
+                            let active = clip_instance.active_take.unwrap_or(0).min(take_count - 1);
+                            let label = format!("Take {}/{}", active + 1, take_count);
+                            let text_color = theme.text_color(
+                                &["#timeline", ".take-badge"],
+                                ui.ctx(),
+                                egui::Color32::WHITE,
+                            );
+                            let galley = painter.layout_no_wrap(
+                                label,
+                                egui::FontId::proportional(10.0),
+                                text_color,
+                            );
+                            let pad = egui::vec2(4.0, 2.0);
+                            let size = galley.size() + pad * 2.0;
+                            // Bottom-left of the clip, but only when the clip is wide enough that
+                            // the badge wouldn't swamp it.
+                            if clip_rect.width() > size.x + 10.0 && clip_rect.height() > size.y + 4.0 {
+                                let badge = egui::Rect::from_min_size(
+                                    egui::pos2(
+                                        clip_rect.min.x + 4.0,
+                                        clip_rect.max.y - size.y - 3.0,
+                                    ),
+                                    size,
+                                );
+                                let hovered = ui
+                                    .ctx()
+                                    .pointer_hover_pos()
+                                    .is_some_and(|p| badge.contains(p));
+                                let bg = if hovered {
+                                    theme.bg_color(
+                                        &["#timeline", ".take-badge:hover"],
+                                        ui.ctx(),
+                                        egui::Color32::from_black_alpha(210),
+                                    )
+                                } else {
+                                    theme.bg_color(
+                                        &["#timeline", ".take-badge"],
+                                        ui.ctx(),
+                                        egui::Color32::from_black_alpha(150),
+                                    )
+                                };
+                                painter.rect_filled(badge, 3.0, bg);
+                                painter.galley(badge.min + pad, galley, text_color);
+                                self.take_badge_hits.push((
+                                    badge,
+                                    layer.id(),
+                                    clip_instance.id,
+                                    active,
+                                    take_count,
+                                ));
                             }
                         }
                     }
@@ -4631,7 +4867,12 @@ impl TimelinePane {
         if !alt_held && !self.is_scrubbing && !self.is_panning {
             if response.drag_started() {
                 // Use cached mousedown position for edge detection
-                if let Some(mousedown_pos) = self.mousedown_pos {
+                if let Some(mousedown_pos) = self
+                    .mousedown_pos
+                    // A press that landed on a take badge is opening the take menu, not grabbing
+                    // the clip it sits on.
+                    .filter(|p| !self.take_badge_hits.iter().any(|(r, ..)| r.contains(*p)))
+                {
                     if let Some((drag_type, clip_id)) = self.detect_clip_at_pointer(
                         mousedown_pos,
                         document,
@@ -6050,6 +6291,8 @@ impl PaneRenderer for TimelinePane {
             &context_layers,
             editing_clip_id.as_ref(),
         );
+
+        self.render_take_menu(ui, document, shared.pending_actions);
 
         // Render automation lanes AFTER handle_input so our ui.interact registers last and wins
         // egui's interaction priority over handle_input's full-content-area allocation.

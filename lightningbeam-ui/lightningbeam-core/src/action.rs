@@ -47,6 +47,123 @@ pub struct BackendContext<'a> {
     // Future: pub video_controller: Option<&'a mut VideoController>,
 }
 
+impl BackendContext<'_> {
+    /// Hand a clip instance to the audio engine and record it in the instance→backend map.
+    ///
+    /// Take folders are resolved through the instance's `active_take`, so the backend gets whichever
+    /// take is selected. Returns the backend track and instance IDs, or `None` when there's nothing
+    /// to sync yet (a recording in progress, or an empty take folder).
+    ///
+    /// Lives here rather than in any one action because more than one action needs it: adding an
+    /// instance, and switching a take folder's active take (which is a remove + re-add, there being
+    /// no in-place pool-swap command). Keeping one implementation keeps the trim/duration
+    /// conversions — the easy thing to get subtly wrong, since `trim_*` is SECONDS while
+    /// `timeline_*` is BEATS — from drifting between copies.
+    pub fn add_clip_instance(
+        &mut self,
+        document: &Document,
+        layer_id: &Uuid,
+        instance: &crate::clip::ClipInstance,
+    ) -> Result<Option<(daw_backend::TrackId, BackendClipInstanceId)>, String> {
+        use crate::clip::ResolvedContent;
+
+        let clip = document
+            .get_audio_clip(&instance.clip_id)
+            .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
+
+        let track_id = *self
+            .layer_to_track_map
+            .get(layer_id)
+            .ok_or_else(|| format!("Layer {} not mapped to backend track", layer_id))?;
+
+        let resolved = clip.resolve(instance.active_take);
+        let content_duration = clip.content_duration().native();
+        let internal_start = instance.trim_start;
+        let internal_end = instance.trim_end.unwrap_or(content_duration);
+        let start_time = instance.timeline_start;
+
+        let controller = self
+            .audio_controller
+            .as_mut()
+            .ok_or_else(|| "Audio controller not available".to_string())?;
+
+        let backend_id = match resolved {
+            ResolvedContent::Midi { midi_clip_id } => {
+                use daw_backend::command::{Query, QueryResponse};
+
+                // MIDI trims are in the BEATS domain, so the fallback span is beats too.
+                let external_duration = instance
+                    .timeline_duration
+                    .unwrap_or(daw_backend::Beats(internal_end - internal_start));
+
+                let midi_instance = daw_backend::MidiClipInstance::new(
+                    0, // assigned by the backend
+                    midi_clip_id,
+                    daw_backend::Beats(internal_start),
+                    daw_backend::Beats(internal_end),
+                    start_time,
+                    external_duration,
+                );
+
+                match controller
+                    .send_query(Query::AddMidiClipInstanceSync(track_id, midi_instance))?
+                {
+                    QueryResponse::MidiClipInstanceAdded(Ok(id)) => BackendClipInstanceId::Midi(id),
+                    QueryResponse::MidiClipInstanceAdded(Err(e)) => return Err(e),
+                    _ => return Err("Unexpected query response".to_string()),
+                }
+            }
+            ResolvedContent::Audio { audio_pool_index } => {
+                // `trim_*` and the clip's content duration are SECONDS (audio content time); the
+                // backend's start/duration are BEATS.
+                //
+                // When `timeline_duration` is set it's already beats; otherwise the clip occupies
+                // its natural content length, so convert that seconds-span to beats *at the clip's
+                // start* (NOT `internal_end - internal_start`, which is seconds — that was the
+                // seconds-as-beats bug that made clips stop early at anything but 60 BPM).
+                let effective_duration = instance.timeline_duration.unwrap_or_else(|| {
+                    let tempo_map = document.tempo_map();
+                    let content_secs = daw_backend::Seconds(internal_end - internal_start);
+                    tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(start_time) + content_secs)
+                        - start_time
+                });
+
+                let id = controller.add_audio_clip(
+                    track_id,
+                    audio_pool_index,
+                    start_time,
+                    effective_duration,
+                    daw_backend::Seconds(internal_start),
+                );
+                BackendClipInstanceId::Audio(id)
+            }
+            // Nothing to sync until it has content.
+            ResolvedContent::Recording => return Ok(None),
+        };
+
+        self.clip_instance_to_backend_map
+            .insert(instance.id, backend_id);
+
+        Ok(Some((track_id, backend_id)))
+    }
+
+    /// Remove a clip instance's backend clip and drop it from the instance→backend map.
+    pub fn remove_clip_instance(
+        &mut self,
+        track_id: daw_backend::TrackId,
+        backend_id: BackendClipInstanceId,
+        instance_id: Uuid,
+    ) {
+        if let Some(controller) = self.audio_controller.as_mut() {
+            match backend_id {
+                BackendClipInstanceId::Midi(id) => controller.remove_midi_clip(track_id, id),
+                BackendClipInstanceId::Audio(id) => controller.remove_audio_clip(track_id, id),
+            }
+        }
+        self.clip_instance_to_backend_map.remove(&instance_id);
+    }
+}
+
 /// Action trait for undo/redo operations
 ///
 /// Each action must be able to execute (apply changes) and rollback (undo changes).

@@ -138,7 +138,7 @@ impl Action for RemoveClipInstancesAction {
         backend: &mut BackendContext,
         document: &Document,
     ) -> Result<(), String> {
-        use crate::clip::AudioClipType;
+        use crate::clip::ResolvedContent;
 
         let controller = match backend.audio_controller.as_mut() {
             Some(c) => c,
@@ -165,8 +165,8 @@ impl Action for RemoveClipInstancesAction {
                 None => continue,
             };
 
-            match &clip.clip_type {
-                AudioClipType::Midi { midi_clip_id } => {
+            match &clip.resolve(instance.active_take) {
+                ResolvedContent::Midi { midi_clip_id } => {
                     use daw_backend::command::{Query, QueryResponse};
 
                     let internal_start = instance.trim_start;
@@ -196,7 +196,7 @@ impl Action for RemoveClipInstancesAction {
                         );
                     }
                 }
-                AudioClipType::Sampled { audio_pool_index } => {
+                ResolvedContent::Audio { audio_pool_index } => {
                     let internal_start = instance.trim_start;
                     let internal_end = instance.trim_end.unwrap_or(clip.content_duration().native());
                     let start_time = instance.timeline_start;
@@ -221,7 +221,7 @@ impl Action for RemoveClipInstancesAction {
                         BackendClipInstanceId::Audio(new_id),
                     );
                 }
-                AudioClipType::Recording => {}
+                ResolvedContent::Recording => {}
             }
         }
 

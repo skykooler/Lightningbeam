@@ -466,6 +466,44 @@ pub enum AudioClipType {
     /// Placeholder for a clip that is currently being recorded.
     /// The audio_pool_index will be assigned when recording stops.
     Recording,
+    /// A folder of alternate takes, produced by cycle recording.
+    ///
+    /// Each pass of the transport around the cycle region becomes one take. Every take spans the
+    /// **full** cycle region (partial passes are padded with silence at capture time), so all takes
+    /// are the same length and share this clip's `duration` — which in turn means switching takes
+    /// never changes the clip's geometry, and splitting a take-folder instance yields two halves
+    /// whose takes still line up. Which take actually sounds is per-*instance*
+    /// ([`ClipInstance::active_take`]), not per-clip, so a split can play take 1 on the left and
+    /// take 3 on the right. That's comping.
+    TakeFolder {
+        /// The takes, in the order they were recorded. Never empty in practice.
+        takes: Vec<AudioTake>,
+        /// The cycle region's length in beats at the time of recording.
+        ///
+        /// Audio takes are segmented geometrically (by sample count), so they're only meaningful
+        /// against the tempo they were cut at. Keeping the recorded length lets a future
+        /// time-stretch/conform feature reconcile the takes if the tempo changes underneath them.
+        recorded_loop_beats: Beats,
+    },
+}
+
+/// One take in a [`AudioClipType::TakeFolder`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AudioTake {
+    /// Display name, e.g. "Take 1".
+    pub name: String,
+    /// The recorded content this take points at.
+    pub content: TakeContent,
+}
+
+/// What a take actually holds. A folder's takes are all the same kind — one cycle-record session
+/// captures either audio or MIDI, never a mix.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum TakeContent {
+    /// Sampled audio: index into the audio pool.
+    Audio { audio_pool_index: usize },
+    /// MIDI: backend MIDI clip ID.
+    Midi { midi_clip_id: u32 },
 }
 
 /// A clip's content duration, tagged by its native unit.
@@ -532,11 +570,10 @@ impl AudioClip {
     /// The clip's content duration, tagged with its native domain (seconds for sampled/recording,
     /// beats for MIDI). This is the only sanctioned way to read the raw `duration` field.
     pub fn content_duration(&self) -> ClipDuration {
-        match self.clip_type {
-            AudioClipType::Midi { .. } => ClipDuration::Beats(Beats(self.duration)),
-            AudioClipType::Sampled { .. } | AudioClipType::Recording => {
-                ClipDuration::Seconds(Seconds(self.duration))
-            }
+        if self.is_midi_domain() {
+            ClipDuration::Beats(Beats(self.duration))
+        } else {
+            ClipDuration::Seconds(Seconds(self.duration))
         }
     }
 
@@ -545,13 +582,27 @@ impl AudioClip {
     pub fn set_content_duration(&mut self, duration: ClipDuration) {
         debug_assert!(
             matches!(
-                (&self.clip_type, duration),
-                (AudioClipType::Midi { .. }, ClipDuration::Beats(_))
-                    | (AudioClipType::Sampled { .. } | AudioClipType::Recording, ClipDuration::Seconds(_))
+                (self.is_midi_domain(), duration),
+                (true, ClipDuration::Beats(_)) | (false, ClipDuration::Seconds(_))
             ),
             "clip duration domain must match clip type",
         );
         self.duration = duration.native();
+    }
+
+    /// Whether this clip's `duration` is measured in beats (MIDI) rather than seconds.
+    ///
+    /// A take folder inherits the domain of its takes, which are all the same kind — one
+    /// cycle-record session captures either audio or MIDI, never a mix. An empty folder can't
+    /// happen in practice; call it seconds so the fallback is the common case.
+    fn is_midi_domain(&self) -> bool {
+        match &self.clip_type {
+            AudioClipType::Midi { .. } => true,
+            AudioClipType::Sampled { .. } | AudioClipType::Recording => false,
+            AudioClipType::TakeFolder { takes, .. } => {
+                matches!(takes.first().map(|t| &t.content), Some(TakeContent::Midi { .. }))
+            }
+        }
     }
 
     /// Create a new sampled audio clip
@@ -637,6 +688,125 @@ impl AudioClip {
             _ => None,
         }
     }
+
+    /// The clip's takes, if it's a take folder.
+    pub fn takes(&self) -> Option<&[AudioTake]> {
+        match &self.clip_type {
+            AudioClipType::TakeFolder { takes, .. } => Some(takes),
+            _ => None,
+        }
+    }
+
+    /// The take an instance's `active_take` actually selects.
+    ///
+    /// `None` means take 0, which is also what an out-of-range index falls back to — an index can
+    /// go stale (an old `.beam`, an undo that shrank the folder), and silently playing the first
+    /// take beats refusing to play anything.
+    fn take_for(&self, active_take: Option<usize>) -> Option<&AudioTake> {
+        let takes = self.takes()?;
+        takes
+            .get(active_take.unwrap_or(0))
+            .or_else(|| takes.first())
+    }
+
+    /// What this clip plays *for a given instance*, with take folders collapsed to the instance's
+    /// active take.
+    ///
+    /// This is the sanctioned way to ask "what content do I hand the backend for this instance?".
+    /// Matching on `clip_type` directly will see a `TakeFolder` and have to handle it separately;
+    /// matching on this won't, because a folder is never a distinct case here — it's just an audio
+    /// or MIDI clip whose identity depends on which take is active.
+    pub fn resolve(&self, active_take: Option<usize>) -> ResolvedContent {
+        match &self.clip_type {
+            AudioClipType::Sampled { audio_pool_index } => ResolvedContent::Audio {
+                audio_pool_index: *audio_pool_index,
+            },
+            AudioClipType::Midi { midi_clip_id } => ResolvedContent::Midi {
+                midi_clip_id: *midi_clip_id,
+            },
+            AudioClipType::Recording => ResolvedContent::Recording,
+            AudioClipType::TakeFolder { .. } => match self.take_for(active_take).map(|t| &t.content) {
+                Some(TakeContent::Audio { audio_pool_index }) => ResolvedContent::Audio {
+                    audio_pool_index: *audio_pool_index,
+                },
+                Some(TakeContent::Midi { midi_clip_id }) => ResolvedContent::Midi {
+                    midi_clip_id: *midi_clip_id,
+                },
+                // An empty folder has nothing to play. Treat it like a recording placeholder:
+                // the backend gets nothing, rather than a bogus pool index.
+                None => ResolvedContent::Recording,
+            },
+        }
+    }
+
+    /// Tag a pair of raw trim bounds with this clip's content domain, ready for the backend.
+    ///
+    /// `ClipInstance::trim_start`/`trim_end` are bare `f64`s whose unit depends on the clip —
+    /// SECONDS for sampled audio, BEATS for MIDI. Building the [`TrimRange`] from the clip means a
+    /// caller can't reach for the wrong variant: the clip is the one thing that knows.
+    pub fn trim_range(&self, start: f64, end: f64) -> daw_backend::command::TrimRange {
+        if self.is_midi_domain() {
+            daw_backend::command::TrimRange::Beats {
+                start: Beats(start),
+                end: Beats(end),
+            }
+        } else {
+            daw_backend::command::TrimRange::Seconds {
+                start: Seconds(start),
+                end: Seconds(end),
+            }
+        }
+    }
+
+    /// Whether this clip owns the given audio pool index — either as a plain sampled clip, or as
+    /// *any* take of a take folder. Reverse lookups (backend resource → document clip) must use
+    /// this: a folder owns one pool file per take, not just the active one.
+    pub fn owns_audio_pool_index(&self, pool_index: usize) -> bool {
+        match &self.clip_type {
+            AudioClipType::Sampled { audio_pool_index } => *audio_pool_index == pool_index,
+            AudioClipType::TakeFolder { takes, .. } => takes.iter().any(|t| {
+                matches!(t.content, TakeContent::Audio { audio_pool_index } if audio_pool_index == pool_index)
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether this clip owns the given backend MIDI clip ID. See [`Self::owns_audio_pool_index`].
+    pub fn owns_midi_clip_id(&self, id: u32) -> bool {
+        match &self.clip_type {
+            AudioClipType::Midi { midi_clip_id } => *midi_clip_id == id,
+            AudioClipType::TakeFolder { takes, .. } => takes.iter().any(|t| {
+                matches!(t.content, TakeContent::Midi { midi_clip_id } if midi_clip_id == id)
+            }),
+            _ => false,
+        }
+    }
+
+    /// The audio pool index this *instance* should play. See [`Self::resolve`].
+    pub fn resolved_audio_pool_index(&self, active_take: Option<usize>) -> Option<usize> {
+        match self.resolve(active_take) {
+            ResolvedContent::Audio { audio_pool_index } => Some(audio_pool_index),
+            _ => None,
+        }
+    }
+
+    /// The backend MIDI clip ID this *instance* should play. See [`Self::resolve`].
+    pub fn resolved_midi_clip_id(&self, active_take: Option<usize>) -> Option<u32> {
+        match self.resolve(active_take) {
+            ResolvedContent::Midi { midi_clip_id } => Some(midi_clip_id),
+            _ => None,
+        }
+    }
+}
+
+/// What a clip instance actually plays, once take folders are resolved to their active take.
+/// Produced by [`AudioClip::resolve`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ResolvedContent {
+    Audio { audio_pool_index: usize },
+    Midi { midi_clip_id: u32 },
+    /// A recording in progress (or an empty take folder) — no backend content yet.
+    Recording,
 }
 
 /// Unified clip enum for polymorphic handling
@@ -741,6 +911,15 @@ pub struct ClipInstance {
     /// Default: None (no pre-loop)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_before: Option<Beats>,
+
+    /// Which take of a [`AudioClipType::TakeFolder`] clip this instance plays.
+    ///
+    /// Per-instance rather than per-clip so two instances of the same folder — e.g. the two halves
+    /// of a split — can play different takes. That's how comping works. `None` means take 0;
+    /// meaningless (and ignored) on non-folder clips.
+    /// Default: None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_take: Option<usize>,
 }
 
 /// High 64-bit sentinel used to identify UUIDs that encode a backend audio clip instance ID.
@@ -799,6 +978,7 @@ impl ClipInstance {
             playback_speed: 1.0,
             gain: 1.0,
             loop_before: None,
+            active_take: None,
         }
     }
 
@@ -817,6 +997,7 @@ impl ClipInstance {
             playback_speed: 1.0,
             gain: 1.0,
             loop_before: None,
+            active_take: None,
         }
     }
 
@@ -1069,5 +1250,100 @@ mod tests {
         assert_eq!(instance.name, Some("My Instance".to_string()));
         assert_eq!(instance.playback_speed, 2.0);
         assert_eq!(instance.gain, 0.8);
+    }
+
+    /// Build a take folder of `n` audio takes with the given pool indices.
+    fn take_folder(pool_indices: &[usize]) -> AudioClip {
+        let mut clip = AudioClip::new_sampled("Cycle rec", 0, 2.0);
+        clip.clip_type = AudioClipType::TakeFolder {
+            takes: pool_indices
+                .iter()
+                .enumerate()
+                .map(|(i, &audio_pool_index)| AudioTake {
+                    name: format!("Take {}", i + 1),
+                    content: TakeContent::Audio { audio_pool_index },
+                })
+                .collect(),
+            recorded_loop_beats: Beats(8.0),
+        };
+        clip
+    }
+
+    #[test]
+    fn active_take_selects_the_pool_file() {
+        let clip = take_folder(&[10, 11, 12]);
+        assert_eq!(clip.resolved_audio_pool_index(Some(0)), Some(10));
+        assert_eq!(clip.resolved_audio_pool_index(Some(2)), Some(12));
+        // None means take 0.
+        assert_eq!(clip.resolved_audio_pool_index(None), Some(10));
+    }
+
+    #[test]
+    fn out_of_range_take_falls_back_to_the_first() {
+        // An index can go stale (an old .beam, an undo that shrank the folder). Playing the first
+        // take beats playing nothing.
+        let clip = take_folder(&[10, 11]);
+        assert_eq!(clip.resolved_audio_pool_index(Some(99)), Some(10));
+    }
+
+    #[test]
+    fn take_folder_owns_every_takes_pool_file() {
+        // Reverse lookups (backend resource -> document clip) must find the folder via ANY take,
+        // not just the active one.
+        let clip = take_folder(&[10, 11, 12]);
+        assert!(clip.owns_audio_pool_index(10));
+        assert!(clip.owns_audio_pool_index(12));
+        assert!(!clip.owns_audio_pool_index(13));
+    }
+
+    #[test]
+    fn midi_take_folder_measures_duration_in_beats() {
+        // A folder inherits its takes' domain: MIDI takes mean the duration is beats, not seconds.
+        let mut clip = AudioClip::new_sampled("Cycle rec", 0, 4.0);
+        clip.clip_type = AudioClipType::TakeFolder {
+            takes: vec![AudioTake {
+                name: "Take 1".into(),
+                content: TakeContent::Midi { midi_clip_id: 7 },
+            }],
+            recorded_loop_beats: Beats(4.0),
+        };
+        assert_eq!(clip.content_duration(), ClipDuration::Beats(Beats(4.0)));
+        assert_eq!(clip.resolved_midi_clip_id(Some(0)), Some(7));
+        assert_eq!(clip.resolved_audio_pool_index(Some(0)), None);
+    }
+
+    #[test]
+    fn takes_are_per_instance_so_a_split_can_comp() {
+        // The whole point of putting active_take on the instance: two instances of the same folder
+        // (which is what a split produces) can play different takes.
+        let clip = take_folder(&[10, 11, 12]);
+        let mut left = ClipInstance::new(clip.id);
+        let mut right = left.clone();
+        right.id = Uuid::new_v4();
+        left.active_take = Some(0);
+        right.active_take = Some(2);
+
+        assert_eq!(clip.resolved_audio_pool_index(left.active_take), Some(10));
+        assert_eq!(clip.resolved_audio_pool_index(right.active_take), Some(12));
+    }
+
+    #[test]
+    fn clip_instance_without_active_take_deserializes() {
+        // Back-compat: .beam files written before take folders have no `active_take` field.
+        let json = r#"{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "clip_id": "550e8400-e29b-41d4-a716-446655440001",
+            "transform": {"x": 0.0, "y": 0.0, "rotation": 0.0, "scale_x": 1.0, "scale_y": 1.0, "skew_x": 0.0, "skew_y": 0.0},
+            "opacity": 1.0,
+            "name": null,
+            "timeline_start": 0.0,
+            "timeline_duration": null,
+            "trim_start": 0.0,
+            "trim_end": null,
+            "playback_speed": 1.0,
+            "gain": 1.0
+        }"#;
+        let instance: ClipInstance = serde_json::from_str(json).expect("old instances must load");
+        assert_eq!(instance.active_take, None);
     }
 }

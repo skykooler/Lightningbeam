@@ -5,6 +5,50 @@ use crate::time::{Beats, Seconds};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Cycle-recording bookkeeping attached to a recording that started with a cycle region armed.
+///
+/// Takes are sliced **geometrically** at stop, in exact `loop_len_frames` multiples — not at the
+/// instant the wrap was detected. The playhead advances before the capture block in `process()`, so
+/// the wrap instant isn't sample-exact against the buffer that was just captured, but the geometry
+/// is. `wrap_count` therefore only decides *whether* this is a multi-take recording, never where the
+/// cuts land.
+#[derive(Debug, Clone, Copy)]
+pub struct CycleRecordInfo {
+    /// Where the cycle region starts, in beats. Takes are laid down here, not at the punch-in point.
+    pub loop_start: Beats,
+    /// The cycle region's length in beats — what the take folder records as `recorded_loop_beats`.
+    pub loop_len_beats: Beats,
+    /// One cycle pass, in frames. The take size.
+    pub loop_len_frames: usize,
+    /// Frames between the region start and where capture actually began. Non-zero only for a
+    /// punch-in (record while already rolling); take 1 gets this much silence prepended so it still
+    /// spans the whole region.
+    pub lead_pad_frames: usize,
+    /// How many times the transport wrapped during this recording. Zero means the user stopped
+    /// before completing a pass, which stays an ordinary single recording.
+    pub wrap_count: usize,
+}
+
+/// Min/max waveform peaks for a finished buffer of interleaved samples.
+///
+/// The live recording path builds its peaks incrementally as samples arrive; cycle takes don't
+/// exist until the recording is sliced at stop, so they get theirs in one pass here.
+pub fn compute_peaks(samples: &[f32], channels: u32, frames_per_peak: usize) -> Vec<WaveformPeak> {
+    let samples_per_peak = (frames_per_peak * channels.max(1) as usize).max(1);
+    samples
+        .chunks(samples_per_peak)
+        .map(|chunk| {
+            let mut min = 0.0f32;
+            let mut max = 0.0f32;
+            for s in chunk {
+                min = min.min(*s);
+                max = max.max(*s);
+            }
+            WaveformPeak { min, max }
+        })
+        .collect()
+}
+
 /// State of an active recording session
 pub struct RecordingState {
     /// Track being recorded to
@@ -35,6 +79,8 @@ pub struct RecordingState {
     pub frames_per_peak: usize,
     /// All recorded audio data accumulated in memory (written to disk at finalization)
     pub audio_data: Vec<f32>,
+    /// Cycle-recording bookkeeping, when a cycle region was armed at record start.
+    pub cycle: Option<CycleRecordInfo>,
 }
 
 impl RecordingState {
@@ -69,7 +115,67 @@ impl RecordingState {
             waveform_buffer: Vec::new(),
             frames_per_peak,
             audio_data: Vec::new(),
+            cycle: None,
         }
+    }
+
+    /// Slice the recording into cycle takes: one per pass, each spanning the FULL cycle region.
+    ///
+    /// Partial passes are padded with silence — the head of take 1 for a punch-in, the tail of the
+    /// last take when the user stops mid-pass — so every take is the same length and aligned to the
+    /// region. That uniformity is what makes comping-via-split work: take 1 on the left half and
+    /// take 3 on the right always line up.
+    ///
+    /// Returns `None` if this wasn't a cycle recording or the transport never wrapped (an ordinary
+    /// single recording, which keeps the existing path untouched).
+    pub fn slice_takes(&self) -> Option<Vec<Vec<f32>>> {
+        let cycle = self.cycle?;
+        if cycle.wrap_count == 0 || cycle.loop_len_frames == 0 {
+            return None;
+        }
+
+        let ch = self.channels.max(1) as usize;
+        let take_len = cycle.loop_len_frames * ch;
+        let lead = cycle.lead_pad_frames * ch;
+
+        // The recording as positioned *within the region*: silence for the gap between the region
+        // start and the punch-in, then the captured audio. Slicing this at whole-take boundaries is
+        // the whole trick — take 1 comes out short-by-`lead` at the front, already padded.
+        let virtual_len = lead + self.audio_data.len();
+        let take_count = virtual_len.div_ceil(take_len);
+
+        let mut takes: Vec<Vec<f32>> = Vec::with_capacity(take_count);
+        for i in 0..take_count {
+            let mut take = vec![0.0f32; take_len];
+            let take_begin = i * take_len;
+            for slot in 0..take_len {
+                // Position in the virtual (lead-padded) buffer.
+                let v = take_begin + slot;
+                if v < lead {
+                    continue; // still in the punch-in silence
+                }
+                match self.audio_data.get(v - lead) {
+                    Some(s) => take[slot] = *s,
+                    None => break, // past the end of capture; the rest stays silent
+                }
+            }
+            takes.push(take);
+        }
+
+        // A final take holding only a sliver of real audio is a stop artifact (the user hit stop a
+        // moment after the wrap), not a performance. Drop it — but only if it's actually a PARTIAL
+        // pass, and never the only take. A pass that filled the region is a real take no matter how
+        // short the region is.
+        const MIN_TAKE_SECONDS: f64 = 0.05;
+        if takes.len() > 1 {
+            let last_real_samples = virtual_len - (takes.len() - 1) * take_len;
+            let last_real_seconds = (last_real_samples / ch) as f64 / self.sample_rate as f64;
+            if last_real_samples < take_len && last_real_seconds < MIN_TAKE_SECONDS {
+                takes.pop();
+            }
+        }
+
+        Some(takes)
     }
 
     /// Add samples to the accumulation buffer
@@ -189,6 +295,13 @@ pub struct MidiRecordingState {
     active_notes: HashMap<u8, ActiveMidiNote>,
     /// Completed notes: (time_offset, note, velocity, duration) — all times in beats
     pub completed_notes: Vec<(Beats, u8, u8, Beats)>,
+    /// The cycle region's length in beats, when recording into a cycle.
+    ///
+    /// A cycle MIDI recording is anchored at the region start (`start_time == loop_start`), which is
+    /// what makes MERGE fall out for free: the transport always wraps back into the region, so every
+    /// note's offset already lands inside `[0, loop_len)` and successive passes overdub onto each
+    /// other with no folding needed. Set only if the transport actually wrapped.
+    pub cycle_loop_len: Option<Beats>,
 }
 
 impl MidiRecordingState {
@@ -199,6 +312,7 @@ impl MidiRecordingState {
             start_time,
             active_notes: HashMap::new(),
             completed_notes: Vec::new(),
+            cycle_loop_len: None,
         }
     }
 
@@ -283,5 +397,108 @@ impl MidiRecordingState {
         for (note, velocity) in held {
             self.note_on(note, velocity, region_start);
         }
+
+        // The transport wrapped, so this is a cycle recording: the clip spans the whole region
+        // rather than however long the user happened to hold the record button.
+        self.cycle_loop_len = Some(region_end - region_start);
+    }
+}
+
+#[cfg(test)]
+mod cycle_tests {
+    use super::*;
+
+    /// A recording state holding `audio_data`, armed for cycle recording. Mono, 100 Hz, so a frame
+    /// is a sample and 5 frames is 50 ms (exactly the min-take threshold).
+    fn rec(audio: Vec<f32>, loop_len_frames: usize, lead_pad_frames: usize, wraps: usize) -> RecordingState {
+        let mut r = RecordingState::new(
+            0,
+            0,
+            PathBuf::from("/dev/null"),
+            WavWriter::create(&PathBuf::from("/dev/null"), 100, 1).expect("wav writer"),
+            100,
+            1,
+            Beats(0.0),
+            1.0,
+        );
+        r.audio_data = audio;
+        r.cycle = Some(CycleRecordInfo {
+            loop_start: Beats(0.0),
+            loop_len_beats: Beats(4.0),
+            loop_len_frames,
+            lead_pad_frames,
+            wrap_count: wraps,
+        });
+        r
+    }
+
+    #[test]
+    fn no_wrap_is_not_a_cycle_recording() {
+        // Stopping before the transport ever wraps stays an ordinary single recording — the whole
+        // point of triggering on the wrap rather than on the cycle region merely existing.
+        let r = rec(vec![1.0; 10], 4, 0, 0);
+        assert!(r.slice_takes().is_none());
+    }
+
+    #[test]
+    fn takes_are_cut_at_exact_loop_multiples() {
+        // 12 frames of audio, 4-frame loop, started at the region start => 3 clean takes.
+        let audio: Vec<f32> = (1..=12).map(|i| i as f32).collect();
+        let takes = rec(audio, 4, 0, 2).slice_takes().expect("cycle takes");
+        assert_eq!(takes.len(), 3);
+        assert_eq!(takes[0], vec![1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(takes[1], vec![5.0, 6.0, 7.0, 8.0]);
+        assert_eq!(takes[2], vec![9.0, 10.0, 11.0, 12.0]);
+    }
+
+    #[test]
+    fn punch_in_pads_the_head_of_take_one() {
+        // Punched in 2 frames into the region: take 1 gets 2 frames of silence at the FRONT so it
+        // still spans the whole region and lines up with every other take.
+        let audio: Vec<f32> = (1..=10).map(|i| i as f32).collect();
+        let takes = rec(audio, 4, 2, 2).slice_takes().expect("cycle takes");
+        assert_eq!(takes.len(), 3);
+        assert_eq!(takes[0], vec![0.0, 0.0, 1.0, 2.0]);
+        assert_eq!(takes[1], vec![3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(takes[2], vec![7.0, 8.0, 9.0, 10.0]);
+    }
+
+    #[test]
+    fn stopping_mid_pass_pads_the_tail_of_the_last_take() {
+        // 13 frames, 8-frame loop => the second take holds 5 real frames (50 ms at 100 Hz, right at
+        // the keep threshold) and 3 of silence.
+        let audio: Vec<f32> = (1..=13).map(|i| i as f32).collect();
+        let takes = rec(audio, 8, 0, 1).slice_takes().expect("cycle takes");
+        assert_eq!(takes.len(), 2);
+        assert_eq!(takes[1], vec![9.0, 10.0, 11.0, 12.0, 13.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn every_take_is_the_same_length() {
+        // Uniform length is the invariant comping-via-split depends on.
+        let audio: Vec<f32> = (1..=23).map(|i| i as f32).collect();
+        let takes = rec(audio, 8, 3, 3).slice_takes().expect("cycle takes");
+        assert!(takes.iter().all(|t| t.len() == 8), "takes must be uniform");
+    }
+
+    #[test]
+    fn a_sliver_of_a_final_take_is_dropped() {
+        // Stopped 1 frame (10 ms at 100 Hz) after the wrap — below the 50 ms floor, so that stub of
+        // a take is a stop artifact and goes.
+        let audio: Vec<f32> = (1..=9).map(|i| i as f32).collect();
+        let takes = rec(audio, 8, 0, 1).slice_takes().expect("cycle takes");
+        assert_eq!(takes.len(), 1, "a 10ms tail take should be dropped");
+        assert_eq!(takes[0].len(), 8);
+    }
+
+    #[test]
+    fn a_full_final_take_is_never_dropped() {
+        // Regression: the sliver rule must only fire on a PARTIAL pass. A pass that filled the
+        // region is a real take however short the region is — an earlier version compared a full
+        // take's duration to the floor and silently ate it.
+        let audio: Vec<f32> = (1..=8).map(|i| i as f32).collect();
+        let takes = rec(audio, 4, 0, 1).slice_takes().expect("cycle takes");
+        assert_eq!(takes.len(), 2, "both passes filled the region");
+        assert_eq!(takes[1], vec![5.0, 6.0, 7.0, 8.0]);
     }
 }

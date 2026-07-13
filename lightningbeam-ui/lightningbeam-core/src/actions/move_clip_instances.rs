@@ -190,7 +190,7 @@ impl Action for MoveClipInstancesAction {
 
     fn execute_backend(&mut self, backend: &mut crate::action::BackendContext, document: &Document) -> Result<(), String> {
         use crate::layer::AnyLayer;
-        use crate::clip::AudioClipType;
+        use crate::clip::ResolvedContent;
 
         // Get audio controller
         let controller = match backend.audio_controller.as_mut() {
@@ -246,12 +246,12 @@ impl Action for MoveClipInstancesAction {
                     .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
 
                 // Handle move based on clip type
-                match &clip.clip_type {
-                    AudioClipType::Midi { midi_clip_id } => {
+                match &clip.resolve(instance.active_take) {
+                    ResolvedContent::Midi { midi_clip_id } => {
                         // For MIDI: move_clip expects the pool clip ID
                         controller.move_clip(*track_id, *midi_clip_id, *new_start);
                     }
-                    AudioClipType::Sampled { .. } => {
+                    ResolvedContent::Audio { .. } => {
                         // For sampled audio: move_clip expects the instance ID
                         let backend_instance_id = backend.clip_instance_to_backend_map.get(instance_id)
                             .ok_or_else(|| format!("Clip instance {} not mapped to backend", instance_id))?;
@@ -263,7 +263,7 @@ impl Action for MoveClipInstancesAction {
                             _ => return Err("Expected audio instance ID for sampled clip".to_string()),
                         }
                     }
-                    AudioClipType::Recording => {
+                    ResolvedContent::Recording => {
                         // Recording clips cannot be moved - skip
                     }
                 }
@@ -275,7 +275,7 @@ impl Action for MoveClipInstancesAction {
 
     fn rollback_backend(&mut self, backend: &mut crate::action::BackendContext, document: &Document) -> Result<(), String> {
         use crate::layer::AnyLayer;
-        use crate::clip::AudioClipType;
+        use crate::clip::ResolvedContent;
 
         // Get audio controller
         let controller = match backend.audio_controller.as_mut() {
@@ -330,12 +330,12 @@ impl Action for MoveClipInstancesAction {
                     .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
 
                 // Handle move based on clip type (restore old position)
-                match &clip.clip_type {
-                    AudioClipType::Midi { midi_clip_id } => {
+                match &clip.resolve(instance.active_take) {
+                    ResolvedContent::Midi { midi_clip_id } => {
                         // For MIDI: move_clip expects the pool clip ID
                         controller.move_clip(*track_id, *midi_clip_id, *old_start);
                     }
-                    AudioClipType::Sampled { .. } => {
+                    ResolvedContent::Audio { .. } => {
                         // For sampled audio: move_clip expects the instance ID
                         let backend_instance_id = backend.clip_instance_to_backend_map.get(instance_id)
                             .ok_or_else(|| format!("Clip instance {} not mapped to backend", instance_id))?;
@@ -347,7 +347,7 @@ impl Action for MoveClipInstancesAction {
                             _ => return Err("Expected audio instance ID for sampled clip".to_string()),
                         }
                     }
-                    AudioClipType::Recording => {
+                    ResolvedContent::Recording => {
                         // Recording clips cannot be moved - skip
                     }
                 }
