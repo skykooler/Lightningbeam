@@ -113,6 +113,13 @@ pub enum Command {
     /// Enable/disable an automation lane (track_id, lane_id, enabled)
     SetAutomationLaneEnabled(TrackId, AutomationLaneId, bool),
 
+    // Transport cycle (loop) region
+    /// Set the cycle region the transport loops over, in beats (None clears it).
+    /// Authored in beats so it survives tempo changes.
+    SetLoopRegion(Option<(Beats, Beats)>),
+    /// Enable/disable wrapping at the cycle region's end.
+    SetLoopEnabled(bool),
+
     // Recording commands
     /// Start recording on a track (track_id, start_time)
     StartRecording(TrackId, Beats),

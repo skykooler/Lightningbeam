@@ -261,4 +261,27 @@ impl MidiRecordingState {
             ));
         }
     }
+
+    /// Handle a transport cycle wrap during MIDI recording.
+    ///
+    /// Note times are stored as offsets from `start_time`, and the playhead jumps *backwards* at a
+    /// wrap — so a note still held across the boundary would otherwise get a nonsensical (negative)
+    /// duration, or never be closed at all. Write its note-off at `region_end` (exactly as
+    /// `close_active_notes` does when recording stops), then re-open it at `region_start` so a key
+    /// the player is still physically holding keeps being captured in the next pass. Mirrors the
+    /// way `handle_start_midi_recording` re-injects already-held notes at the recording start.
+    pub fn wrap_at_cycle(&mut self, region_end: Beats, region_start: Beats) {
+        // Snapshot the held notes (close_active_notes drains them and loses the velocities).
+        let held: Vec<(u8, u8)> = self
+            .active_notes
+            .values()
+            .map(|n| (n.note, n.velocity))
+            .collect();
+
+        self.close_active_notes(region_end);
+
+        for (note, velocity) in held {
+            self.note_on(note, velocity, region_start);
+        }
+    }
 }

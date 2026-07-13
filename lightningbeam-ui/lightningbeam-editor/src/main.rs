@@ -2039,6 +2039,22 @@ impl EditorApp {
     fn sync_audio_layers_to_backend(&mut self) {
         use lightningbeam_core::layer::{AnyLayer, AudioLayerType};
 
+        // Push the document's cycle region to the engine. Needed on load/new: the region is
+        // document state, but the engine starts blank (and is cleared on Reset), so without this a
+        // loaded project would show its cycle strip while the transport never actually looped.
+        // Changes made later go through SetCycleRegionAction's execute_backend.
+        {
+            let (region, enabled) = {
+                let doc = self.action_executor.document();
+                (doc.cycle_region, doc.cycle_enabled)
+            };
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                controller.set_loop_region(region);
+                controller.set_loop_enabled(enabled);
+            }
+        }
+
         // Ensure the master layer has a backend group track.
         let master_layer_id = self.action_executor.document().master_layer.layer.id;
         if !self.layer_to_track_map.contains_key(&master_layer_id) {

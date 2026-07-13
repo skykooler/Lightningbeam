@@ -20,6 +20,18 @@ const MOBILE_LAYER_HEADER_WIDTH: f32 = LAYER_HEIGHT * 0.5;
 const MIN_PIXELS_PER_SECOND: f32 = 1.0;  // Allow zooming out to see 10+ minutes
 const MAX_PIXELS_PER_SECOND: f32 = 500.0;
 const EDGE_DETECTION_PIXELS: f32 = 8.0; // Distance from edge to detect trim handles
+/// Height of the cycle lane carved off the *bottom* of the ruler. Dragging here edits the cycle
+/// region; the ruler above it still scrubs the playhead as before. It goes at the bottom so the
+/// bar numbers (which are drawn at the top of the ruler) stay legible.
+const CYCLE_LANE_HEIGHT: f32 = 11.0;
+
+// Snap "visual coarseness" profiles — the minimum on-screen spacing a grid line may have.
+// See `Timeline::quantize_grid_size`.
+/// Playhead scrubbing and clip edges: snap fine, down to 16ths when there's room.
+const SNAP_PX_FINE: f64 = 15.0;
+/// Cycle region: snap coarse, so loops land on whole bars rather than odd subdivisions.
+/// Only drops to beats once you're zoomed in far enough to clearly be asking for it.
+const SNAP_PX_CYCLE: f64 = 60.0;
 const LOOP_CORNER_SIZE: f32 = 12.0; // Size of loop corner hotzone at top-right of clip
 const MIN_CLIP_WIDTH_PX: f32 = 8.0; // Minimum visible width for very short clips (e.g. groups)
 const AUTOMATION_LANE_HEIGHT: f32 = 40.0;
@@ -230,6 +242,20 @@ enum ClipDragType {
     LoopExtendLeft,
 }
 
+/// A drag on the cycle strip (the thin lane at the top of the ruler).
+///
+/// Mirrors `ClipDragType`'s three-zone model (left edge / body / right edge), reusing
+/// `EDGE_DETECTION_PIXELS` for the handles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CycleDrag {
+    /// Dragging out a brand-new region; `anchor` is the beat the drag started from.
+    Create { anchor: Beats },
+    /// Sliding the whole region; `grab_offset` is where inside it the user grabbed.
+    Move { grab_offset: Beats },
+    ResizeStart,
+    ResizeEnd,
+}
+
 use lightningbeam_core::document::TimelineMode;
 
 /// State for an in-progress layer header drag-to-reorder operation.
@@ -266,6 +292,12 @@ pub struct TimelinePane {
 
     /// Is the user currently dragging the playhead?
     is_scrubbing: bool,
+
+    /// In-flight drag on the cycle strip, if any.
+    cycle_drag: Option<CycleDrag>,
+    /// Live preview of the cycle region while dragging. The document is only updated on release
+    /// (via one `SetCycleRegionAction`), so a drag doesn't spam the undo stack — same as clip drags.
+    cycle_preview: Option<(Beats, Beats)>,
 
     /// Is the user panning the timeline?
     is_panning: bool,
@@ -693,6 +725,8 @@ impl TimelinePane {
             keyframe_diamond_hits: Vec::new(),
             duration: 10.0,  // Default 10 seconds
             is_scrubbing: false,
+            cycle_drag: None,
+            cycle_preview: None,
             is_panning: false,
             last_pan_pos: None,
             lp_time: None,
@@ -856,6 +890,35 @@ impl TimelinePane {
         }
 
         self.automation_cache.insert(layer_id, lanes);
+    }
+
+    /// Toggle the transport cycle (loop) on/off.
+    ///
+    /// This is the only way to arm looping; the cycle strip on the ruler is shown (and draggable)
+    /// only while armed. Arming with no region set seeds a default one at the playhead so the
+    /// button does something immediately rather than revealing an empty strip.
+    pub(crate) fn toggle_cycle(&mut self, shared: &mut SharedPaneState) {
+        let document = shared.action_executor.document();
+        let arming = !document.cycle_enabled;
+
+        let region = if arming && document.cycle_region.is_none() {
+            let tempo_map = document.tempo_map();
+            let beats_per_bar = (document.time_signature.numerator.max(1)) as f64;
+            // Start at the bar containing the playhead, and run for a few bars.
+            let playhead_beats = tempo_map.seconds_to_beats(Seconds(*shared.playback_time));
+            let bar = (playhead_beats.beats_to_f64() / beats_per_bar).floor().max(0.0);
+            let start = Beats(bar * beats_per_bar);
+            const DEFAULT_BARS: f64 = 4.0;
+            Some((start, start + Beats(beats_per_bar * DEFAULT_BARS)))
+        } else {
+            document.cycle_region
+        };
+
+        let action =
+            lightningbeam_core::actions::SetCycleRegionAction::new(document, region, arming);
+        if !action.is_noop() {
+            shared.pending_actions.push(Box::new(action));
+        }
     }
 
     /// Toggle recording on/off
@@ -1418,6 +1481,119 @@ impl TimelinePane {
         self.viewport_start_time = (self.viewport_start_time + time_delta as f64).max(0.0);
     }
 
+    /// The cycle lane: a thin band carved off the *bottom* of the ruler. Dragging here edits the
+    /// cycle region; the ruler above it still scrubs the playhead. Bottom rather than top so it
+    /// doesn't sit on the bar numbers.
+    fn cycle_lane_rect(ruler_rect: egui::Rect) -> egui::Rect {
+        let h = CYCLE_LANE_HEIGHT.min(ruler_rect.height());
+        egui::Rect::from_min_max(
+            egui::pos2(ruler_rect.min.x, ruler_rect.max.y - h),
+            ruler_rect.max,
+        )
+    }
+
+    /// The cycle region currently being shown: the live drag preview if one is in flight,
+    /// otherwise whatever the document has.
+    fn shown_cycle_region(
+        &self,
+        document: &lightningbeam_core::document::Document,
+    ) -> Option<(Beats, Beats)> {
+        self.cycle_preview.or(document.cycle_region)
+    }
+
+    /// Three-zone hit test on the cycle lane: left edge / body / right edge of the existing region,
+    /// mirroring how clips detect their trim handles. Anywhere else draws a fresh region.
+    ///
+    /// `pos_x` is in screen coords; `content_min_x` is the content area's left edge (which the
+    /// ruler shares, so beats→x lands in the same space).
+    fn cycle_drag_at(
+        &self,
+        pos_x: f32,
+        beat: Beats,
+        content_min_x: f32,
+        document: &lightningbeam_core::document::Document,
+    ) -> CycleDrag {
+        let Some((s, e)) = document.cycle_region else {
+            return CycleDrag::Create { anchor: beat };
+        };
+        let sx = content_min_x + self.beats_to_x(s, document.tempo_map());
+        let ex = content_min_x + self.beats_to_x(e, document.tempo_map());
+        if (pos_x - sx).abs() <= EDGE_DETECTION_PIXELS {
+            CycleDrag::ResizeStart
+        } else if (pos_x - ex).abs() <= EDGE_DETECTION_PIXELS {
+            CycleDrag::ResizeEnd
+        } else if pos_x > sx && pos_x < ex {
+            CycleDrag::Move { grab_offset: beat - s }
+        } else {
+            CycleDrag::Create { anchor: beat }
+        }
+    }
+
+    /// Pixel x (relative to the content area) → beats, snapped on the coarse cycle grid.
+    fn x_to_beats_cycle_snapped(
+        &self,
+        x: f32,
+        document: &lightningbeam_core::document::Document,
+    ) -> Beats {
+        let secs = self.snap_to_grid(
+            self.x_to_time(x.max(0.0)).max(0.0),
+            document.tempo_map(),
+            &document.time_signature,
+            document.framerate,
+            SNAP_PX_CYCLE,
+        );
+        document.tempo_map().seconds_to_beats(Seconds(secs.max(0.0)))
+    }
+
+    /// Paint the cycle lane and the cycle region band, *inside* the ruler.
+    ///
+    /// Called from `render_ruler` right after the ruler's background and before its ticks/labels,
+    /// so the tick marks read through the band and the bar numbers (up top) are never covered.
+    ///
+    /// The lane only exists while looping is armed — with cycle off there's no lane and the ruler
+    /// is entirely the playhead scrubber, exactly as before this feature.
+    fn paint_cycle_lane(
+        &self,
+        ui: &egui::Ui,
+        ruler_rect: egui::Rect,
+        theme: &crate::theme::Theme,
+        tempo_map: &daw_backend::TempoMap,
+        region: Option<(Beats, Beats)>,
+    ) {
+        let painter = ui.painter();
+        let lane = Self::cycle_lane_rect(ruler_rect);
+
+        // A faint bed, so the lane still reads as a drag target when there's no region to grab.
+        painter.rect_filled(
+            lane,
+            0.0,
+            theme.bg_color(&["#timeline", ".cycle-lane"], ui.ctx(), egui::Color32::from_gray(48)),
+        );
+
+        let Some((start, end)) = region else { return };
+        if end <= start {
+            return;
+        }
+
+        let sx = self.beats_to_x(start, tempo_map);
+        let ex = self.beats_to_x(end, tempo_map);
+        if ex < 0.0 || sx > ruler_rect.width() {
+            return; // off-screen
+        }
+
+        let fill = theme.bg_color(
+            &["#timeline", ".cycle-region"],
+            ui.ctx(),
+            egui::Color32::from_rgb(230, 190, 60),
+        );
+
+        let band = egui::Rect::from_min_max(
+            egui::pos2((ruler_rect.min.x + sx).max(ruler_rect.min.x), lane.min.y),
+            egui::pos2((ruler_rect.min.x + ex).min(ruler_rect.max.x), lane.max.y),
+        );
+        painter.rect_filled(band, 2.0, fill);
+    }
+
     /// Convert time (seconds) to pixel x-coordinate
     fn time_to_x(&self, time: f64) -> f32 {
         ((time - self.viewport_start_time) * self.pixels_per_second as f64) as f32
@@ -1459,11 +1635,19 @@ impl TimelinePane {
     /// - Measures mode: zoom-adaptive (coarser when zoomed out, None when very zoomed in)
     /// - Frames mode: always 1/framerate regardless of zoom
     /// - Seconds mode: no snapping
+    ///
+    /// `min_grid_px` is the **visual coarseness**: the smallest on-screen spacing a grid line is
+    /// allowed to have. The finest musical subdivision at least that wide wins, so a larger value
+    /// snaps to coarser units at the same zoom. Callers pick a profile: [`SNAP_PX_FINE`] for the
+    /// playhead and clip edges, [`SNAP_PX_CYCLE`] for the cycle region (you nearly always want to
+    /// loop whole bars — "four bars and an eighth" is essentially never intended; zoom in if you
+    /// really do want it).
     fn quantize_grid_size(
         &self,
         tempo_map: &daw_backend::TempoMap,
         time_sig: &lightningbeam_core::document::TimeSignature,
         framerate: f64,
+        min_grid_px: f64,
     ) -> Option<f64> {
         match self.time_display_format {
             TimelineMode::Frames => Some(1.0 / framerate),
@@ -1472,17 +1656,17 @@ impl TimelinePane {
                 let beat = beat_duration(0.0, tempo_map);
                 let measure = measure_duration(0.0, tempo_map, time_sig);
                 let pps = self.pixels_per_second as f64;
-                // Very zoomed in: 16th note > 40px → no snap
-                if pps * beat / 4.0 > 40.0 { return None; }
-                // Find finest subdivision with >= 15px spacing (finest → coarsest)
-                const MIN_PX: f64 = 15.0;
+                // So zoomed in that even the finest subdivision is a huge target → free positioning.
+                // Scaled off the coarseness so a coarse profile doesn't give up snapping early.
+                if pps * beat / 4.0 > min_grid_px * 2.5 { return None; }
+                // Find the finest subdivision with >= min_grid_px spacing (finest → coarsest)
                 for &sub in &[beat / 4.0, beat / 2.0, beat, beat * 2.0, measure] {
-                    if pps * sub >= MIN_PX { return Some(sub); }
+                    if pps * sub >= min_grid_px { return Some(sub); }
                 }
                 // Very zoomed out: try 2x, 4x, ... multiples of a measure
                 let mut m = measure * 2.0;
                 for _ in 0..10 {
-                    if pps * m >= MIN_PX { return Some(m); }
+                    if pps * m >= min_grid_px { return Some(m); }
                     m *= 2.0;
                 }
                 Some(measure)
@@ -1492,14 +1676,16 @@ impl TimelinePane {
     }
 
     /// Snap a time value to the nearest quantization grid point (or return unchanged).
+    /// See [`Self::quantize_grid_size`] for `min_grid_px` (the visual coarseness).
     fn snap_to_grid(
         &self,
         t: f64,
         tempo_map: &daw_backend::TempoMap,
         time_sig: &lightningbeam_core::document::TimeSignature,
         framerate: f64,
+        min_grid_px: f64,
     ) -> f64 {
-        match self.quantize_grid_size(tempo_map, time_sig, framerate) {
+        match self.quantize_grid_size(tempo_map, time_sig, framerate, min_grid_px) {
             Some(grid) => (t / grid).round() * grid,
             None => t,
         }
@@ -1516,7 +1702,7 @@ impl TimelinePane {
         framerate: f64,
     ) -> Beats {
         let anchor = self.drag_anchor_start; // seconds
-        let target = match self.quantize_grid_size(tempo_map, time_sig, framerate) {
+        let target = match self.quantize_grid_size(tempo_map, time_sig, framerate, SNAP_PX_FINE) {
             Some(grid) => ((anchor + self.drag_offset) / grid).round() * grid,
             None => anchor + self.drag_offset,
         };
@@ -1564,13 +1750,20 @@ impl TimelinePane {
 
     /// Render the time ruler at the top
     fn render_ruler(&self, ui: &mut egui::Ui, rect: egui::Rect, theme: &crate::theme::Theme,
-                    tempo_map: &daw_backend::TempoMap, time_sig: &lightningbeam_core::document::TimeSignature, framerate: f64) {
+                    tempo_map: &daw_backend::TempoMap, time_sig: &lightningbeam_core::document::TimeSignature, framerate: f64,
+                    cycle: Option<Option<(Beats, Beats)>>) {
         let painter = ui.painter();
 
         // Background
         let bg_style = theme.style(".timeline-background", ui.ctx());
         let bg_color = bg_style.background_color().unwrap_or(egui::Color32::from_rgb(34, 34, 34));
         painter.rect_filled(rect, 0.0, bg_color);
+
+        // Cycle lane goes under the ticks/labels: `Some(region)` when looping is armed (the region
+        // itself may still be `None`), `None` when it's off and the lane shouldn't exist at all.
+        if let Some(region) = cycle {
+            self.paint_cycle_lane(ui, rect, theme, tempo_map, region);
+        }
 
         let text_style = theme.style(".text-primary", ui.ctx());
         let text_color = text_style.text_color.unwrap_or(egui::Color32::from_gray(200));
@@ -3265,7 +3458,7 @@ impl TimelinePane {
                                     }
                                 }
                                 ClipDragType::TrimLeft => {
-                                    let new_trim = self.snap_to_grid(ci.trim_start + self.drag_offset, tmap, &document.time_signature, document.framerate).max(0.0).min(clip_dur_secs);
+                                    let new_trim = self.snap_to_grid(ci.trim_start + self.drag_offset, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE).max(0.0).min(clip_dur_secs);
                                     let trim_offset_secs = new_trim - ci.trim_start;
                                     start = shift_beats(ci.timeline_start, trim_offset_secs).max(Beats::ZERO);
                                     let dur_secs = if let Some(trim_end) = ci.trim_end {
@@ -3277,7 +3470,7 @@ impl TimelinePane {
                                 }
                                 ClipDragType::TrimRight => {
                                     let old_trim_end = ci.trim_end.unwrap_or(clip_dur_secs);
-                                    let new_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, tmap, &document.time_signature, document.framerate).max(ci.trim_start).min(clip_dur_secs);
+                                    let new_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE).max(ci.trim_start).min(clip_dur_secs);
                                     let dur_secs = (new_trim_end - ci.trim_start).max(0.0);
                                     duration = secs_to_beats_at(start, dur_secs);
                                 }
@@ -3287,7 +3480,7 @@ impl TimelinePane {
                                     let content_window = secs_to_beats_at(ci.timeline_start, content_window_secs);
                                     let current_right = ci.timeline_duration.unwrap_or(content_window);
                                     let right_edge_secs = tmap.beats_to_seconds(ci.timeline_start + current_right).seconds_to_f64() + self.drag_offset;
-                                    let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate);
+                                    let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE);
                                     let snapped_edge = tmap.seconds_to_beats(Seconds(snapped_edge_secs));
                                     let new_right = (snapped_edge - ci.timeline_start).max(content_window);
                                     let loop_before = ci.loop_before.unwrap_or(Beats::ZERO);
@@ -3371,7 +3564,7 @@ impl TimelinePane {
                                 }
                                 ClipDragType::TrimLeft => {
                                     // Trim left: calculate new trim_start with snap to adjacent clips
-                                    let desired_trim_start = self.snap_to_grid(clip_instance.trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate)
+                                    let desired_trim_start = self.snap_to_grid(clip_instance.trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE)
                                         .max(0.0)
                                         .min(clip_duration.seconds_to_f64());
 
@@ -3411,7 +3604,7 @@ impl TimelinePane {
                                 ClipDragType::TrimRight => {
                                     // Trim right: extend or reduce duration with snap to adjacent clips
                                     let old_trim_end = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
-                                    let desired_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate)
+                                    let desired_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE)
                                         .max(clip_instance.trim_start)
                                         .min(clip_duration.seconds_to_f64());
 
@@ -3454,7 +3647,7 @@ impl TimelinePane {
                                     let current_right = clip_instance.timeline_duration.unwrap_or(content_window);
                                     // Snap the right edge in the seconds/pixel domain (drag_offset is seconds).
                                     let right_edge_secs = tmap.beats_to_seconds(ts + current_right).seconds_to_f64() + self.drag_offset;
-                                    let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate);
+                                    let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE);
                                     let snapped_edge = tmap.seconds_to_beats(Seconds(snapped_edge_secs));
                                     let desired_right = (snapped_edge - ts).max(content_window);
 
@@ -4585,7 +4778,7 @@ impl TimelinePane {
 
                                                     // New trim_start is snapped then clamped to valid range
                                                     let desired_trim_start = self.snap_to_grid(
-                                                        old_trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate,
+                                                        old_trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE,
                                                     ).max(0.0).min(clip_duration.seconds_to_f64());
 
                                                     // Apply overlap prevention when extending left (content-seconds gap).
@@ -4633,7 +4826,7 @@ impl TimelinePane {
                                                         clip_instance.effective_duration(clip_duration, document.tempo_map());
                                                     let old_trim_end_val = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
                                                     let desired_trim_end = self.snap_to_grid(
-                                                        old_trim_end_val + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate,
+                                                        old_trim_end_val + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE,
                                                     ).max(clip_instance.trim_start).min(clip_duration.seconds_to_f64());
 
                                                     // Apply overlap prevention when extending right (content-seconds gap).
@@ -4715,7 +4908,7 @@ impl TimelinePane {
                                             let current_right = clip_instance.timeline_duration.unwrap_or(content_window);
                                             // Snap the right edge in the seconds/pixel domain.
                                             let right_edge_secs = tmap.beats_to_seconds(ts + current_right).seconds_to_f64() + self.drag_offset;
-                                            let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate);
+                                            let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE);
                                             let desired_right = tmap.seconds_to_beats(Seconds(snapped_edge_secs)) - ts;
 
                                             let new_right = if desired_right > current_right {
@@ -4917,14 +5110,120 @@ impl TimelinePane {
         let visible_height = content_rect.height();
         let max_scroll_y = (total_content_height - visible_height).max(0.0);
 
-        // Scrubbing (clicking/dragging on ruler, but only when not panning)
-        let cursor_over_ruler = ruler_rect.contains(ui.input(|i| i.pointer.hover_pos().unwrap_or_default()));
+        // ---- Cycle region (the lane along the bottom of the ruler) ----
+        // The lane only exists while looping is armed; with cycle off the ruler is entirely the
+        // playhead scrubber, as it was before this feature.
+        //
+        // The lane is driven straight off raw pointer state rather than an egui `Response`. It sits
+        // inside the timeline's content response — which spans the whole ruler + content and already
+        // drives scrubbing, clip drags and panning — so registering a second widget on the same
+        // pixels just makes the two contest hover every frame (the cursor visibly flickers and
+        // neither reliably owns the press). Reading the pointer directly sidesteps egui's widget
+        // layering entirely. The lane is also carved out of the scrub area below, so a loop drag
+        // never also yanks the playhead.
+        let cycle_armed = document.cycle_enabled;
+        let cycle_lane = Self::cycle_lane_rect(ruler_rect);
+        let hover_pos = ui.input(|i| i.pointer.hover_pos());
+        let (primary_pressed, primary_down, interact_pos) = ui.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.interact_pos(),
+            )
+        });
+
+        if cycle_armed {
+            // Begin: press inside the lane. Three-zone hit test picks resize / move / draw-new.
+            if self.cycle_drag.is_none() && !alt_held && !self.is_panning && primary_pressed {
+                if let Some(pos) = interact_pos.filter(|p| cycle_lane.contains(*p)) {
+                    let beat = self.x_to_beats_cycle_snapped(pos.x - content_rect.min.x, document);
+                    self.cycle_drag =
+                        Some(self.cycle_drag_at(pos.x, beat, content_rect.min.x, document));
+                    self.cycle_preview = document.cycle_region;
+                }
+            }
+
+            // Telegraph what a press would do: resize at the edges, move over the body.
+            if let Some(pos) = hover_pos.filter(|p| cycle_lane.contains(*p)) {
+                let zone = self.cycle_drag.unwrap_or_else(|| {
+                    let beat = self.x_to_beats_cycle_snapped(pos.x - content_rect.min.x, document);
+                    self.cycle_drag_at(pos.x, beat, content_rect.min.x, document)
+                });
+                ui.output_mut(|o| {
+                    o.cursor_icon = match zone {
+                        CycleDrag::ResizeStart | CycleDrag::ResizeEnd => {
+                            egui::CursorIcon::ResizeHorizontal
+                        }
+                        CycleDrag::Move { .. } => egui::CursorIcon::Grab,
+                        CycleDrag::Create { .. } => egui::CursorIcon::Crosshair,
+                    }
+                });
+            }
+
+            if let Some(drag) = self.cycle_drag {
+                if primary_down {
+                    // Track the pointer even when it leaves the lane, like any other drag.
+                    if let Some(pos) = interact_pos {
+                        let beat =
+                            self.x_to_beats_cycle_snapped(pos.x - content_rect.min.x, document);
+                        let base = self.cycle_preview.or(document.cycle_region);
+                        self.cycle_preview = match drag {
+                            CycleDrag::Create { anchor } => {
+                                let (a, b) =
+                                    if beat < anchor { (beat, anchor) } else { (anchor, beat) };
+                                Some((a, b))
+                            }
+                            CycleDrag::ResizeStart => base.map(|(_, e)| (beat.min(e), e)),
+                            CycleDrag::ResizeEnd => base.map(|(s, _)| (s, beat.max(s))),
+                            CycleDrag::Move { grab_offset } => base.map(|(s, e)| {
+                                let len = e - s;
+                                let ns = (beat - grab_offset).max(Beats::ZERO);
+                                (ns, ns + len)
+                            }),
+                        };
+                    }
+                } else {
+                    // Released — commit the gesture as ONE undoable action (the drag itself only
+                    // ever touched `cycle_preview`, so the undo stack doesn't get a frame-by-frame
+                    // trail). Looping is already armed (the lane wouldn't be there otherwise), so
+                    // `cycle_enabled` is left alone.
+                    let preview = self.cycle_preview.take();
+                    let collapsed = preview.map_or(true, |(s, e)| e <= s);
+                    let drawing_new = matches!(drag, CycleDrag::Create { .. });
+                    self.cycle_drag = None;
+
+                    // A bare click on empty lane is a zero-width "draw" — treat it as nothing
+                    // happened rather than silently wiping the region out from under the user.
+                    // Collapsing an *existing* region by dragging an edge past the other one is
+                    // still a deliberate "clear it".
+                    if !(collapsed && drawing_new) {
+                        let action = lightningbeam_core::actions::SetCycleRegionAction::new(
+                            document,
+                            preview.filter(|(s, e)| e > s),
+                            document.cycle_enabled,
+                        );
+                        if !action.is_noop() {
+                            pending_actions.push(Box::new(action));
+                        }
+                    }
+                }
+            }
+        } else if self.cycle_drag.is_some() {
+            // Looping was disarmed mid-drag — abandon the gesture rather than commit it.
+            self.cycle_drag = None;
+            self.cycle_preview = None;
+        }
+
+        // Scrubbing (clicking/dragging on ruler, but only when not panning).
+        let cursor_over_ruler = hover_pos.map_or(false, |p| {
+            ruler_rect.contains(p) && !(cycle_armed && cycle_lane.contains(p))
+        }) && self.cycle_drag.is_none();
 
         // Start scrubbing if cursor is over ruler and we click/drag
         if cursor_over_ruler && !alt_held && (response.clicked() || (response.dragged() && !self.is_panning)) {
             if let Some(pos) = response.interact_pointer_pos() {
                 let x = (pos.x - content_rect.min.x).max(0.0);
-                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.tempo_map(), &document.time_signature, document.framerate);
+                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE);
                 *playback_time = new_time;
                 self.is_scrubbing = true;
                 // Seek immediately so it works while playing
@@ -4938,7 +5237,7 @@ impl TimelinePane {
         else if self.is_scrubbing && response.dragged() && !self.is_panning {
             if let Some(pos) = response.interact_pointer_pos() {
                 let x = (pos.x - content_rect.min.x).max(0.0);
-                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.tempo_map(), &document.time_signature, document.framerate);
+                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE);
                 *playback_time = new_time;
                 if let Some(controller_arc) = audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
@@ -5177,6 +5476,27 @@ impl PaneRenderer for TimelinePane {
 
                 if ui.add_sized(button_size, record_button).clicked() {
                     self.toggle_recording(shared);
+                }
+
+                // Cycle (loop) toggle. This is the only way to arm looping — the cycle strip on the
+                // ruler is only shown (and only draggable) while it's armed.
+                let cycle_on = shared.action_executor.document().cycle_enabled;
+                let cycle_color = if cycle_on {
+                    egui::Color32::from_rgb(230, 190, 60)
+                } else {
+                    egui::Color32::from_gray(140)
+                };
+                let cycle_button = egui::Button::new(
+                    egui::RichText::new(crate::mobile::icons::REPEAT)
+                        .font(crate::mobile::icons::font(15.0))
+                        .color(cycle_color),
+                );
+                if ui
+                    .add_sized(button_size, cycle_button)
+                    .on_hover_text("Cycle (loop region)")
+                    .clicked()
+                {
+                    self.toggle_cycle(shared);
                 }
 
                 // Request repaint while recording for pulse animation
@@ -5530,7 +5850,10 @@ impl PaneRenderer for TimelinePane {
 
         // Render time ruler (clip to ruler rect)
         ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
-        self.render_ruler(ui, ruler_rect, shared.theme, document.tempo_map(), &document.time_signature, document.framerate);
+        let cycle = document
+            .cycle_enabled
+            .then(|| self.shown_cycle_region(document));
+        self.render_ruler(ui, ruler_rect, shared.theme, document.tempo_map(), &document.time_signature, document.framerate, cycle);
 
         // Render layer rows with clipping
         ui.set_clip_rect(content_rect.intersect(original_clip_rect));
