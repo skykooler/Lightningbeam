@@ -201,6 +201,17 @@ pub struct Document {
     #[serde(default)]
     pub time_signature: TimeSignature,
 
+    /// Transport cycle (loop) region, as `(start, end)` in **beats**.
+    ///
+    /// Authored in beats so it stays put musically when the tempo changes. `None` = no region set.
+    /// Saved with the project; `#[serde(default)]` keeps older `.beam` files loading.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle_region: Option<(Beats, Beats)>,
+
+    /// Whether the transport loops over `cycle_region`.
+    #[serde(default)]
+    pub cycle_enabled: bool,
+
     /// Master track (master bus + tempo automation lane).
     /// Stored separately from the root layer tree; shown in timeline when
     /// `show_master_track` is enabled in the editor state.
@@ -297,6 +308,8 @@ impl Default for Document {
             height: 1080.0,
             framerate: 60.0,
             time_signature: TimeSignature::default(),
+            cycle_region: None,
+            cycle_enabled: false,
             master_layer: {
                 let mut ml = GroupLayer::new_master(120.0);
                 ml.layer.id = uuid::Uuid::new_v4();

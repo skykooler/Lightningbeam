@@ -14,6 +14,7 @@ pub mod move_clip_instances;
 pub mod reorder_clip_instances;
 pub mod paint_bucket;
 pub mod remove_effect;
+pub mod set_cycle_region;
 pub mod set_document_properties;
 pub mod set_instance_properties;
 pub mod set_layer_properties;
@@ -50,6 +51,7 @@ pub mod set_text_content;
 pub mod resize_text_box;
 
 pub use add_clip_instance::AddClipInstanceAction;
+pub use set_cycle_region::SetCycleRegionAction;
 pub use add_effect::AddEffectAction;
 pub use add_layer::AddLayerAction;
 pub use add_shape::AddShapeAction;

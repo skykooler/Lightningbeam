@@ -42,6 +42,7 @@ pub const GRIP_HORIZONTAL: &str = "\u{e0ea}";
 pub const CHEVRONS_UP: &str = "\u{e074}";
 pub const PLAY: &str = "\u{e13c}";
 pub const PAUSE: &str = "\u{e12e}";
+pub const REPEAT: &str = "\u{e146}"; // cycle / loop region toggle
 pub const SETTINGS: &str = "\u{e154}";
 pub const SEARCH: &str = "\u{e151}";
 pub const PLUS: &str = "\u{e13d}";

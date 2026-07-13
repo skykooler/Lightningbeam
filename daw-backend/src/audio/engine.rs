@@ -33,6 +33,15 @@ pub struct Engine {
     playing: bool,
     channels: u32,
 
+    /// Transport cycle (loop) region, authored in BEATS so it survives tempo changes.
+    /// Sample bounds are derived from the tempo map at the wrap check.
+    loop_region: Option<(Beats, Beats)>,
+    /// Whether the transport wraps at the end of `loop_region`.
+    loop_enabled: bool,
+    /// Cycle-region sample bounds frozen for the duration of an **audio** recording.
+    /// See `loop_bounds_samples` for why. `None` = derive live from the tempo map.
+    loop_bounds_frozen: Option<(i64, i64)>,
+
     // Lock-free communication
     command_rx: rtrb::Consumer<Command>,
     midi_command_rx: Option<rtrb::Consumer<Command>>,
@@ -155,6 +164,9 @@ impl Engine {
             sample_rate,
             playing: false,
             channels,
+            loop_region: None,
+            loop_enabled: false,
+            loop_bounds_frozen: None,
             command_rx,
             midi_command_rx: None,
             event_tx,
@@ -508,6 +520,38 @@ impl Engine {
             // Update playhead (convert total samples to frames)
             self.playhead += (output.len() / self.channels as usize) as i64;
 
+            // Cycle/loop wrap. Gated on playhead >= 0 so a count-in pre-roll never wraps.
+            // Sounding voices are deliberately left alone — no `stop_all_notes()` /
+            // `reset_all_graphs()` like Command::Seek does, since that would chop sustain and
+            // reverb tails at every wrap.
+            if self.loop_enabled && self.playhead >= 0 {
+                if let Some((ls_beats, le_beats)) = self.loop_region {
+                    // Sample bounds are frozen while audio is recording (see loop_bounds_samples).
+                    let (ls, le) = self.loop_bounds_samples(ls_beats, le_beats);
+                    if le > ls && self.playhead >= le {
+                        // Phase-preserving wrap. Modulo (not a single subtraction) so an overshoot
+                        // larger than the loop — e.g. after a tempo change shrank it — can't strand
+                        // the playhead outside the region.
+                        self.playhead = ls + (self.playhead - ls) % (le - ls);
+
+                        // A MIDI recording in progress stores note times as offsets from its
+                        // start, and the playhead just jumped backwards — so any note still held
+                        // across the boundary needs its note-off written at the region end (and
+                        // re-opened at the region start if the key is still down). Otherwise it
+                        // would get a negative duration, or never close at all.
+                        if let Some(ref mut rec) = self.midi_recording_state {
+                            rec.wrap_at_cycle(le_beats, ls_beats);
+                        }
+
+                        if let Some(ref mut dr) = self.disk_reader {
+                            dr.send(crate::audio::disk_reader::DiskReaderCommand::Seek {
+                                frame: self.playhead.max(0) as u64,
+                            });
+                        }
+                    }
+                }
+            }
+
             // Update atomic playhead for UI reads (clamped to 0; negative = count-in pre-roll)
             self.playhead_atomic
                 .store(self.playhead.max(0) as u64, Ordering::Relaxed);
@@ -679,6 +723,8 @@ impl Engine {
                                     format!("Recording write error: {}", e)
                                 ));
                                 self.recording_state = None;
+                                // Audio recording is over — let the cycle region track tempo again.
+                                self.loop_bounds_frozen = None;
                             }
                         }
                     }
@@ -783,11 +829,70 @@ impl Engine {
         None
     }
 
+    /// Convert a beats position to a sample position using the current tempo map.
+    ///
+    /// The cycle region is authored in beats (so it survives tempo changes); its sample bounds are
+    /// derived here at the wrap check rather than cached, which keeps it correct across tempo edits
+    /// with no invalidation bookkeeping.
+    fn beats_to_samples(&self, beats: Beats) -> i64 {
+        (self.tempo_map.beats_to_seconds(beats).seconds_to_f64() * self.sample_rate as f64) as i64
+    }
+
+    /// Sample bounds of the cycle region.
+    ///
+    /// These are FROZEN while an audio recording is in flight (see `loop_bounds_frozen`, captured
+    /// in `handle_start_recording`), so a tempo change mid-take cannot resize the loop.
+    ///
+    /// Why freeze only for audio: take segmentation for audio is geometric in samples — every pass
+    /// is exactly `loop_len` frames, which is what lets us pad all takes to a uniform length and
+    /// comp between them. A tempo change would resize `loop_len` mid-session and break that. And
+    /// since we have no time-stretching, audio takes captured at two different tempos could never
+    /// be comped together anyway, so honoring the change would buy nothing and cost the invariant.
+    ///
+    /// MIDI is deliberately unaffected: it is segmented in *beats*, which are tempo-invariant, so
+    /// changing tempo during a MIDI-only recording is fully supported (slow down a hard passage and
+    /// keep stacking takes). The freeze is keyed on *audio* being recorded, not on "not MIDI", so
+    /// when multi-track recording lands it will correctly freeze if ANY recorded track is audio.
+    fn loop_bounds_samples(&self, ls_beats: Beats, le_beats: Beats) -> (i64, i64) {
+        if let Some(frozen) = self.loop_bounds_frozen {
+            return frozen;
+        }
+        (self.beats_to_samples(ls_beats), self.beats_to_samples(le_beats))
+    }
+
     /// Handle a command from the UI thread
     fn handle_command(&mut self, cmd: Command) {
         match cmd {
             Command::Play => {
+                // Starting playback from outside the cycle region jumps to its start — otherwise
+                // you'd play forward from wherever the playhead happened to be and only fall into
+                // the loop if you happened to cross its end. Inside the region we start where we
+                // are, so you can still audition from the middle of a loop.
+                //
+                // A negative playhead is a count-in pre-roll that was deliberately placed *before*
+                // the region, so leave it alone.
+                if self.loop_enabled && self.playhead >= 0 {
+                    if let Some((ls_beats, le_beats)) = self.loop_region {
+                        let (ls, le) = self.loop_bounds_samples(ls_beats, le_beats);
+                        if le > ls && (self.playhead < ls || self.playhead >= le) {
+                            self.playhead = ls;
+                            self.playhead_atomic.store(ls.max(0) as u64, Ordering::Relaxed);
+                            if let Some(ref mut dr) = self.disk_reader {
+                                dr.send(crate::audio::disk_reader::DiskReaderCommand::Seek {
+                                    frame: ls.max(0) as u64,
+                                });
+                            }
+                        }
+                    }
+                }
                 self.playing = true;
+            }
+            Command::SetLoopRegion(region) => {
+                // Stored in beats; sample bounds are derived at the wrap check.
+                self.loop_region = region;
+            }
+            Command::SetLoopEnabled(enabled) => {
+                self.loop_enabled = enabled;
             }
             Command::Stop => {
                 self.playing = false;
@@ -1308,6 +1413,12 @@ impl Engine {
 
                 // Stop any active recording
                 self.recording_state = None;
+
+                // Clear the cycle region — it's a document property, and the new document will
+                // push its own (or none) once loaded.
+                self.loop_region = None;
+                self.loop_enabled = false;
+                self.loop_bounds_frozen = None;
 
                 // Clear all project data
                 self.project = Project::new(self.sample_rate);
@@ -3034,6 +3145,19 @@ impl Engine {
         use crate::io::WavWriter;
         use std::env;
 
+        // Freeze the cycle region's sample bounds for the duration of this AUDIO recording, so a
+        // tempo change mid-take can't resize the loop and break the uniform-take invariant that
+        // take segmentation and comping depend on. See `loop_bounds_samples`. (MIDI-only
+        // recordings never take this path, so they stay free to change tempo.)
+        if self.loop_enabled {
+            if let Some((ls_beats, le_beats)) = self.loop_region {
+                self.loop_bounds_frozen = Some((
+                    self.beats_to_samples(ls_beats),
+                    self.beats_to_samples(le_beats),
+                ));
+            }
+        }
+
         // Check if track exists and is an audio track
         if let Some(crate::audio::track::TrackNode::Audio(_)) = self.project.get_track_mut(track_id) {
             // Generate a unique temp file path
@@ -3117,6 +3241,9 @@ impl Engine {
     /// Handle stopping a recording
     fn handle_stop_recording(&mut self) {
         eprintln!("[STOP_RECORDING] handle_stop_recording called");
+
+        // Audio is no longer recording, so the cycle region can track the tempo map again.
+        self.loop_bounds_frozen = None;
 
         // Check if we have an active MIDI recording first
         if self.midi_recording_state.is_some() {
@@ -3340,6 +3467,20 @@ impl EngineController {
     /// Pause playback
     pub fn pause(&mut self) {
         let _ = self.command_tx.push(Command::Pause);
+    }
+
+    /// Set the cycle region the transport loops over (None clears it).
+    ///
+    /// Authored in beats so it survives tempo changes. Note the region's sample bounds are frozen
+    /// while an audio recording is in flight, so a call made mid-take won't resize the loop until
+    /// recording stops (see `Engine::loop_bounds_samples`).
+    pub fn set_loop_region(&mut self, region: Option<(Beats, Beats)>) {
+        let _ = self.command_tx.push(Command::SetLoopRegion(region));
+    }
+
+    /// Enable/disable wrapping at the end of the cycle region.
+    pub fn set_loop_enabled(&mut self, enabled: bool) {
+        let _ = self.command_tx.push(Command::SetLoopEnabled(enabled));
     }
 
     /// Stop playback and reset to beginning
