@@ -543,6 +543,47 @@ impl Engine {
                             rec.wrap_at_cycle(le_beats, ls_beats);
                         }
 
+                        // Overdub monitoring. In merge mode every pass layers onto the same clip, so
+                        // the next pass has to PLAY BACK what was just laid down — otherwise you're
+                        // overdubbing against silence, which defeats the point of merging (you can't
+                        // put a hi-hat on a kick you can't hear).
+                        //
+                        // The notes only reach the pool clip at stop otherwise, so fold what's been
+                        // captured so far into it now, at the boundary. Disjoint field borrows:
+                        // `midi_recording_state` read, `project` written.
+                        if let Some(rec) = self.midi_recording_state.as_ref() {
+                            if let Some(clip) =
+                                self.project.midi_clip_pool.get_clip_mut(rec.clip_id)
+                            {
+                                // Note offsets are relative to `start_time`, which for a cycle
+                                // recording IS the region start — so they're already region-relative
+                                // and drop straight in.
+                                clip.duration = le_beats - ls_beats;
+                                // Reusing the existing Vec keeps this allocation-free after the
+                                // first wrap, which matters on the audio thread. (Mutating the pool
+                                // here is the same thing `Command::UpdateMidiClipNotes` already does
+                                // from this thread.)
+                                clip.events.clear();
+                                for (start, note, velocity, duration) in rec.get_notes() {
+                                    clip.events.push(MidiEvent::note_on(*start, 0, *note, *velocity));
+                                    clip.events.push(MidiEvent::note_off(
+                                        *start + *duration,
+                                        0,
+                                        *note,
+                                        64,
+                                    ));
+                                }
+                                clip.events.sort_by(|a, b| {
+                                    a.timestamp.partial_cmp(&b.timestamp).unwrap()
+                                });
+                            }
+                        }
+                        // The clip INSTANCE is sized by the recording-progress block above, which
+                        // now pins it to the whole region once `cycle_loop_len` is set (this wrap
+                        // sets it). That's what lets the sequencer actually schedule the events we
+                        // just wrote — an instance sized to the elapsed-since-start playhead would
+                        // have collapsed back to nothing here.
+
                         // An audio recording in progress just completed a pass. This only decides
                         // *whether* the recording becomes multi-take — the takes themselves are cut
                         // geometrically at stop, since the playhead advances before the capture
@@ -582,7 +623,16 @@ impl Engine {
                 if let Some(recording) = &self.midi_recording_state {
                     let current_time_secs = Seconds(self.playhead as f64 / self.sample_rate as f64);
                     let current_time = self.tempo_map.seconds_to_beats(current_time_secs);
-                    let duration = current_time - recording.start_time;
+                    // Once the transport has wrapped, the recording covers the WHOLE cycle region and
+                    // stays there — every further pass merges into the same clip rather than
+                    // extending it. Measuring from the playhead instead would reset to zero at each
+                    // wrap (the playhead jumps back), which both made the clip bar restart from zero
+                    // every pass and — because this block also resizes the backend clip instance
+                    // below — shrank the instance back to nothing, so the notes just merged into it
+                    // were never scheduled and you overdubbed against silence.
+                    let duration = recording
+                        .cycle_loop_len
+                        .unwrap_or(current_time - recording.start_time);
                     let notes = recording.get_notes_with_active(current_time);
                     let _ = self.event_tx.push(AudioEvent::MidiRecordingProgress(
                         recording.track_id,

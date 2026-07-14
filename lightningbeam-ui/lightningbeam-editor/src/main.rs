@@ -6820,7 +6820,11 @@ impl eframe::App for EditorApp {
                                             );
                                         }
                                     }
-                                    // Update the clip's duration so the timeline bar grows
+                                    // Update the clip's duration so the timeline bar grows. Once the
+                                    // transport has wrapped, the backend reports the whole cycle
+                                    // region here and keeps reporting it, so the bar grows through
+                                    // the first pass and then holds — every further pass merges into
+                                    // the same clip rather than extending it.
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
                                         clip.set_content_duration(ClipDuration::Beats(duration));
                                     }
