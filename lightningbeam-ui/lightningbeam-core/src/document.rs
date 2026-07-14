@@ -464,8 +464,11 @@ impl Document {
             let end_beats: Beats = if let Some(timeline_duration) = instance.timeline_duration {
                 instance.timeline_start + timeline_duration
             } else {
-                let trim_end = instance.trim_end.unwrap_or(clip_duration);
-                let trimmed_secs = ((trim_end - instance.trim_start) / instance.playback_speed).max(0.0);
+                // `clip_duration` arrives as seconds (the recursive helper's signature), so this
+                // path is the wall-clock one; MIDI content would need resolving against its clip.
+                let trim_end = instance.trim_end.map_or(clip_duration, |t| t.raw());
+                let trimmed_secs =
+                    ((trim_end - instance.trim_start.raw()) / instance.playback_speed).max(0.0);
                 let start_secs = tempo_map.beats_to_seconds(instance.timeline_start);
                 tempo_map.seconds_to_beats(start_secs + Seconds(trimmed_secs))
             };
@@ -915,11 +918,10 @@ impl Document {
     /// have infinite internal duration.
     /// A clip's content duration **in the domain its `trim_start`/`trim_end` are measured in**.
     ///
-    /// `ClipInstance::trim_*` is domain-polymorphic exactly like `AudioClip::duration`: SECONDS for
-    /// sampled audio, video and vector, but BEATS for MIDI (the backend takes MIDI trims as
-    /// `Beats`). Anything doing arithmetic against a trim value — mapping a timeline position into
-    /// the clip's content, say — has to work in that same domain, and [`Self::get_clip_duration`]
-    /// can't tell it which: that one always converts to seconds.
+    /// Content time is domain-polymorphic exactly like `AudioClip::duration`: SECONDS for sampled
+    /// audio, video and vector, but BEATS for MIDI. Anything doing arithmetic against a trim value —
+    /// mapping a timeline position into the clip's content, say — has to work in that same domain,
+    /// and [`Self::get_clip_duration`] can't tell it which: that one always converts to seconds.
     ///
     /// Returns `None` for unknown clips.
     pub fn clip_trim_duration(&self, clip_id: &Uuid) -> Option<crate::clip::ClipDuration> {
@@ -928,6 +930,29 @@ impl Document {
         }
         // Everything else measures its content in wall-clock seconds.
         self.get_clip_duration(clip_id).map(crate::clip::ClipDuration::Seconds)
+    }
+
+    /// Resolve a [`ContentTime`] (a trim bound) against the clip it belongs to.
+    ///
+    /// The clip is the only thing that knows whether its content is measured in seconds or beats, so
+    /// this is the sanctioned exit from `ContentTime`. Works for every clip kind, not just audio.
+    /// Returns `None` for unknown clips.
+    pub fn resolve_content_time(
+        &self,
+        clip_id: &Uuid,
+        t: daw_backend::ContentTime,
+    ) -> Option<crate::clip::ClipDuration> {
+        if let Some(clip) = self.audio_clips.get(clip_id) {
+            return Some(clip.resolve_content_time(t));
+        }
+        if self.vector_clips.contains_key(clip_id)
+            || self.video_clips.contains_key(clip_id)
+            || self.effect_definitions.contains_key(clip_id)
+        {
+            // Wall-clock content.
+            return Some(crate::clip::ClipDuration::Seconds(Seconds(t.raw())));
+        }
+        None
     }
 
     pub fn get_clip_duration(&self, clip_id: &Uuid) -> Option<Seconds> {
@@ -983,9 +1008,9 @@ impl Document {
         };
 
         let instance = instances.iter().find(|inst| &inst.id == instance_id)?;
-        let clip_duration = self.get_clip_duration(&instance.clip_id)?;
-        // End position on the timeline, in beats (convert the seconds content window via tempo map).
-        Some(instance.timeline_start + instance.effective_duration_beats(clip_duration, self.tempo_map()))
+        // The clip's content duration in ITS OWN domain, so the trims resolve correctly for MIDI.
+        let clip_content = self.clip_trim_duration(&instance.clip_id)?;
+        Some(instance.timeline_start + instance.effective_duration_beats(clip_content, self.tempo_map()))
     }
 
     /// Check if a time range overlaps with any existing clip on the layer
@@ -1025,13 +1050,14 @@ impl Document {
                 continue;
             }
 
-            // Calculate instance extent (accounting for loop_before)
-            let Some(clip_duration) = self.get_clip_duration(&instance.clip_id) else {
+            // Calculate instance extent (accounting for loop_before). Content duration in the clip's
+            // own domain, so the trims resolve correctly for MIDI.
+            let Some(clip_content) = self.clip_trim_duration(&instance.clip_id) else {
                 continue;
             };
 
             let instance_start = instance.effective_start();
-            let instance_end = instance.timeline_start + instance.effective_duration(clip_duration, self.tempo_map());
+            let instance_end = instance.timeline_start + instance.effective_duration(clip_content, self.tempo_map());
 
             // Check overlap: start_a < end_b AND start_b < end_a
             if start_time < instance_end && instance_start < end_time {
@@ -1088,7 +1114,7 @@ impl Document {
                 continue;
             }
 
-            if let Some(clip_dur) = self.get_clip_duration(&instance.clip_id) {
+            if let Some(clip_dur) = self.clip_trim_duration(&instance.clip_id) {
                 let inst_start = instance.effective_start();
                 let inst_end = instance.timeline_start + instance.effective_duration(clip_dur, self.tempo_map());
                 occupied_ranges.push((inst_start, inst_end, instance.id));
@@ -1184,7 +1210,7 @@ impl Document {
             if group_ids.contains(&inst.id) {
                 continue;
             }
-            if let Some(dur) = self.get_clip_duration(&inst.clip_id) {
+            if let Some(dur) = self.clip_trim_duration(&inst.clip_id) {
                 let start = inst.effective_start();
                 let end = inst.timeline_start + inst.effective_duration(dur, self.tempo_map());
                 non_group.push((start, end));
@@ -1258,9 +1284,8 @@ impl Document {
             }
 
             // Calculate other clip's extent (accounting for loop_before)
-            if let Some(clip_duration) = self.get_clip_duration(&other.clip_id) {
+            if let Some(clip_duration) = self.clip_trim_duration(&other.clip_id) {
                 let other_end = other.timeline_start + other.effective_duration(clip_duration, self.tempo_map());
-                // (clip_duration is Seconds via get_clip_duration; effective_duration converts.)
 
                 // If this clip is to the left and closer than current nearest
                 if other_end <= current_timeline_start && other_end > nearest_end {
@@ -1358,7 +1383,7 @@ impl Document {
                 continue;
             }
 
-            if let Some(clip_duration) = self.get_clip_duration(&other.clip_id) {
+            if let Some(clip_duration) = self.clip_trim_duration(&other.clip_id) {
                 let other_end = other.timeline_start + other.effective_duration(clip_duration, self.tempo_map());
 
                 if other_end <= current_effective_start && other_end > nearest_end {

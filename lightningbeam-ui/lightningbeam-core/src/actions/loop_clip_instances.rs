@@ -128,17 +128,13 @@ impl LoopClipInstancesAction {
                     (new_dur, new_lb)
                 };
 
-                let content_window = {
-                    let trim_end = instance.trim_end.unwrap_or(clip.content_duration().native());
-                    (trim_end - instance.trim_start).max(0.0) // seconds
-                };
-                // Natural content length as a beats span at the clip's start (the
-                // fallback when no explicit timeline_duration is set).
-                let tempo_map = document.tempo_map();
-                let content_window_beats = tempo_map.seconds_to_beats(
-                    tempo_map.beats_to_seconds(instance.timeline_start)
-                        + daw_backend::Seconds(content_window),
-                ) - instance.timeline_start;
+                // Natural content length as a beats span (the fallback when no explicit
+                // timeline_duration is set). Resolved in the clip's own domain, so MIDI's beats
+                // content carries over directly rather than being read as seconds.
+                let content_window_beats = instance.effective_duration_beats(
+                    clip.content_duration(),
+                    document.tempo_map(),
+                );
                 let right_duration = target_duration.unwrap_or(content_window_beats);
                 let left_duration = target_loop_before.unwrap_or(daw_backend::Beats::ZERO);
                 let external_duration = left_duration + right_duration;

@@ -20,7 +20,7 @@ pub use audio::{
     TrackNode,
 };
 pub use audio::node_graph::{GraphPreset, AudioGraph, PresetMetadata, SerializedConnection, SerializedNode};
-pub use time::{Beats, Seconds};
+pub use time::{Beats, ContentTime, Seconds};
 pub use tempo_map::{TempoEntry, TempoInterpolation, TempoMap, beats_to_seconds_stack, seconds_to_beats_stack};
 pub use command::{AudioEvent, Command, OscilloscopeData};
 pub use command::types::AutomationKeyframeData;

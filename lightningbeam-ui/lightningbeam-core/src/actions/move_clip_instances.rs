@@ -105,7 +105,7 @@ impl Action for MoveClipInstancesAction {
 
             let group: Vec<(Uuid, Beats, Beats)> = moves.iter().filter_map(|(id, old_start, _)| {
                 let inst = clip_instances.iter().find(|ci| &ci.id == id)?;
-                let dur = document.get_clip_duration(&inst.clip_id)?;
+                let dur = document.clip_trim_duration(&inst.clip_id)?;
                 let eff = inst.effective_duration_beats(dur, document.tempo_map());
                 Some((*id, *old_start, eff))
             }).collect();
@@ -211,8 +211,9 @@ impl Action for MoveClipInstancesAction {
                         // Check if this clip has a metatrack
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(*new_start));
-                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
-                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
+                            // A vector clip's content is wall-clock, so its content times ARE seconds.
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start.raw()));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(|t| daw_backend::Seconds(t.raw())));
                         }
                     }
                 }
@@ -295,8 +296,9 @@ impl Action for MoveClipInstancesAction {
                     if let Some(instance) = vl.clip_instances.iter().find(|ci| ci.id == *instance_id) {
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(*old_start));
-                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
-                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
+                            // A vector clip's content is wall-clock, so its content times ARE seconds.
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start.raw()));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(|t| daw_backend::Seconds(t.raw())));
                         }
                     }
                 }

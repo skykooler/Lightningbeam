@@ -6,7 +6,7 @@ use crate::action::Action;
 use crate::clip::ClipInstance;
 use crate::document::Document;
 use crate::layer::AnyLayer;
-use daw_backend::{Beats, Seconds};
+use daw_backend::{Beats, ContentTime, Seconds};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -32,15 +32,57 @@ pub struct TrimClipInstancesAction {
 pub struct TrimData {
     /// For TrimLeft: trim_start value
     /// For TrimRight: trim_end value (Option because it can be None)
-    pub trim_value: Option<f64>,
+    ///
+    /// A content time — measured in the clip's own domain (seconds for audio/video/vector, beats
+    /// for MIDI), so it must be resolved against the clip before meeting a timeline position.
+    pub trim_value: Option<ContentTime>,
     /// For TrimLeft: timeline_start value (where the clip appears on timeline, beats)
     /// For TrimRight: unused (None)
     pub timeline_start: Option<Beats>,
 }
 
+/// A wall-clock gap on the timeline, expressed in a clip's content domain.
+///
+/// Trim validation clamps how far a clip may be dragged against the empty space next to it, and that
+/// space is measured on the timeline (seconds) while the trim lives in the clip's content domain. For
+/// wall-clock content they're the same number; for MIDI (beats content) the gap has to be converted
+/// at the clip's position, or a seconds gap silently clamps a beats trim.
+fn gap_to_content(
+    gap: Seconds,
+    clip_content: crate::clip::ClipDuration,
+    timeline_start: Beats,
+    tempo_map: &crate::tempo_map::TempoMap,
+) -> ContentTime {
+    match clip_content {
+        crate::clip::ClipDuration::Seconds(_) => ContentTime(gap.seconds_to_f64()),
+        crate::clip::ClipDuration::Beats(_) => {
+            let beats = tempo_map
+                .seconds_to_beats(tempo_map.beats_to_seconds(timeline_start) + gap)
+                - timeline_start;
+            ContentTime(beats.beats_to_f64())
+        }
+    }
+}
+
+/// The inverse: a content-domain span as wall-clock seconds at the clip's position.
+fn content_to_secs(
+    span: ContentTime,
+    clip_content: crate::clip::ClipDuration,
+    timeline_start: Beats,
+    tempo_map: &crate::tempo_map::TempoMap,
+) -> Seconds {
+    match clip_content {
+        crate::clip::ClipDuration::Seconds(_) => Seconds(span.raw()),
+        crate::clip::ClipDuration::Beats(_) => {
+            tempo_map.beats_to_seconds(timeline_start + Beats(span.raw()))
+                - tempo_map.beats_to_seconds(timeline_start)
+        }
+    }
+}
+
 impl TrimData {
     /// Create TrimData for left trim
-    pub fn left(trim_start: f64, timeline_start: Beats) -> Self {
+    pub fn left(trim_start: ContentTime, timeline_start: Beats) -> Self {
         Self {
             trim_value: Some(trim_start),
             timeline_start: Some(timeline_start),
@@ -48,7 +90,7 @@ impl TrimData {
     }
 
     /// Create TrimData for right trim
-    pub fn right(trim_end: Option<f64>) -> Self {
+    pub fn right(trim_end: Option<ContentTime>) -> Self {
         Self {
             trim_value: trim_end,
             timeline_start: None,
@@ -192,7 +234,8 @@ impl Action for TrimClipInstancesAction {
                     .find(|ci| &ci.id == instance_id)
                     .ok_or_else(|| format!("Instance {} not found", instance_id))?;
 
-                let clip_duration = document.get_clip_duration(&instance.clip_id)
+                // The clip's content duration in ITS OWN domain, so trims resolve correctly for MIDI.
+                let clip_content = document.clip_trim_duration(&instance.clip_id)
                     .ok_or_else(|| format!("Clip {} not found", instance.clip_id))?;
 
                 let mut clamped_new = new.clone();
@@ -204,23 +247,34 @@ impl Action for TrimClipInstancesAction {
                         {
                             // If extending to the left (new_trim < old_trim)
                             if should_validate && new_trim < old_trim {
-                                // Max leftward extension as content seconds (the gap's wall-clock span).
-                                let max_extend_secs = document.find_max_trim_extend_left(
-                                    layer_id,
-                                    instance_id,
-                                    instance.timeline_start,
-                                ).seconds_to_f64();
-
-                                // Calculate how much we want to extend (content seconds)
-                                let desired_extend = old_trim - new_trim;
-
-                                // Clamp to max allowed
-                                let actual_extend = desired_extend.min(max_extend_secs);
-                                let clamped_trim_start = old_trim - actual_extend;
-                                // Move the timeline left by the same wall-clock seconds.
                                 let tempo_map = document.tempo_map();
+
+                                // Max leftward extension: the gap's wall-clock span, converted into
+                                // the clip's content domain so it can clamp a content-domain trim.
+                                let max_extend = gap_to_content(
+                                    document.find_max_trim_extend_left(
+                                        layer_id,
+                                        instance_id,
+                                        instance.timeline_start,
+                                    ),
+                                    clip_content,
+                                    instance.timeline_start,
+                                    tempo_map,
+                                );
+
+                                let desired_extend = old_trim - new_trim;
+                                let actual_extend = desired_extend.min(max_extend);
+                                let clamped_trim_start = old_trim - actual_extend;
+
+                                // Move the timeline left by the same span, as wall-clock seconds.
+                                let shift = content_to_secs(
+                                    actual_extend,
+                                    clip_content,
+                                    instance.timeline_start,
+                                    tempo_map,
+                                );
                                 let clamped_timeline_start = tempo_map
-                                    .seconds_to_beats(tempo_map.beats_to_seconds(old_timeline) - Seconds(actual_extend))
+                                    .seconds_to_beats(tempo_map.beats_to_seconds(old_timeline) - shift)
                                     .max(Beats::ZERO);
 
                                 clamped_new = TrimData::left(clamped_trim_start, clamped_timeline_start);
@@ -228,36 +282,39 @@ impl Action for TrimClipInstancesAction {
                         }
                     }
                     TrimType::TrimRight => {
-                        let old_trim_end = old.trim_value.unwrap_or(clip_duration.seconds_to_f64());
-                        let new_trim_end = new.trim_value.unwrap_or(clip_duration.seconds_to_f64());
+                        let content_end = ContentTime(clip_content.native());
+                        let old_trim_end = old.trim_value.unwrap_or(content_end);
+                        let new_trim_end = new.trim_value.unwrap_or(content_end);
 
                         // If extending to the right (new_trim_end > old_trim_end)
                         if should_validate && new_trim_end > old_trim_end {
                             let tempo_map = document.tempo_map();
-                            // Current effective duration in beats (content seconds
-                            // converted to beats at the clip's start).
-                            let content_secs = Seconds(old_trim_end - instance.trim_start);
-                            let current_effective_duration = tempo_map.seconds_to_beats(
-                                tempo_map.beats_to_seconds(instance.timeline_start) + content_secs,
-                            ) - instance.timeline_start;
 
-                            // Max rightward extension as content seconds (the gap's wall-clock span).
-                            let max_extend_secs = document.find_max_trim_extend_right(
-                                layer_id,
-                                instance_id,
+                            // How long the clip currently occupies the timeline, in beats. Resolved
+                            // in the clip's own domain, so a MIDI clip's beats content isn't run
+                            // through the seconds→beats conversion a second time.
+                            let current_effective_duration = instance
+                                .effective_duration_beats(clip_content, tempo_map);
+
+                            // Max rightward extension: the gap's wall-clock span, in content domain.
+                            let max_extend = gap_to_content(
+                                document.find_max_trim_extend_right(
+                                    layer_id,
+                                    instance_id,
+                                    instance.timeline_start,
+                                    current_effective_duration,
+                                ),
+                                clip_content,
                                 instance.timeline_start,
-                                current_effective_duration,
-                            ).seconds_to_f64();
+                                tempo_map,
+                            );
 
-                            // Calculate how much we want to extend (content seconds)
                             let desired_extend = new_trim_end - old_trim_end;
-
-                            // Clamp to max allowed
-                            let actual_extend = desired_extend.min(max_extend_secs);
+                            let actual_extend = desired_extend.min(max_extend);
                             let clamped_trim_end = old_trim_end + actual_extend;
 
-                            // Don't exceed clip duration
-                            let final_trim_end = clamped_trim_end.min(clip_duration.seconds_to_f64());
+                            // Don't exceed the clip's content.
+                            let final_trim_end = clamped_trim_end.min(content_end);
 
                             clamped_new = TrimData::right(Some(final_trim_end));
                         }
@@ -387,8 +444,9 @@ impl Action for TrimClipInstancesAction {
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             // Instance already has new values after execute()
                             controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(instance.timeline_start));
-                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
-                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
+                            // A vector clip's content is wall-clock, so its content times ARE seconds.
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start.raw()));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(|t| daw_backend::Seconds(t.raw())));
                         }
                     }
                 }
@@ -424,7 +482,9 @@ impl Action for TrimClipInstancesAction {
                 // Calculate new internal_start and internal_end for backend
                 // Note: instance already has the new trim values after execute()
                 let internal_start = instance.trim_start;
-                let internal_end = instance.trim_end.unwrap_or(clip.content_duration().native());
+                let internal_end = instance
+                    .trim_end
+                    .unwrap_or(ContentTime(clip.content_duration().native()));
 
                 // Handle trim based on clip type
                 match &clip.resolve(instance.active_take) {
@@ -477,8 +537,9 @@ impl Action for TrimClipInstancesAction {
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             // Instance already has old values after rollback()
                             controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(instance.timeline_start));
-                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
-                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
+                            // A vector clip's content is wall-clock, so its content times ARE seconds.
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start.raw()));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(|t| daw_backend::Seconds(t.raw())));
                         }
                     }
                 }
@@ -512,13 +573,14 @@ impl Action for TrimClipInstancesAction {
                     .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
 
                 // Calculate old internal_start and internal_end for backend
+                let content_end = ContentTime(clip.content_duration().native());
                 let internal_start = match trim_type {
-                    TrimType::TrimLeft => old.trim_value.unwrap_or(0.0),
+                    TrimType::TrimLeft => old.trim_value.unwrap_or(ContentTime::ZERO),
                     TrimType::TrimRight => instance.trim_start, // trim_start wasn't changed
                 };
                 let internal_end = match trim_type {
-                    TrimType::TrimLeft => instance.trim_end.unwrap_or(clip.content_duration().native()), // trim_end wasn't changed
-                    TrimType::TrimRight => old.trim_value.unwrap_or(clip.content_duration().native()),
+                    TrimType::TrimLeft => instance.trim_end.unwrap_or(content_end), // trim_end wasn't changed
+                    TrimType::TrimRight => old.trim_value.unwrap_or(content_end),
                 };
 
                 // Handle trim based on clip type
@@ -569,7 +631,7 @@ mod tests {
 
         let mut clip_instance = ClipInstance::new(clip_id);
         clip_instance.timeline_start = Beats::ZERO;
-        clip_instance.trim_start = 0.0;
+        clip_instance.trim_start = ContentTime::ZERO;
         let instance_id = clip_instance.id;
         vector_layer.clip_instances.push(clip_instance);
 
@@ -582,8 +644,8 @@ mod tests {
             vec![(
                 instance_id,
                 TrimType::TrimLeft,
-                TrimData::left(0.0, Beats::ZERO),
-                TrimData::left(2.0, Beats(2.0)),
+                TrimData::left(ContentTime::ZERO, Beats::ZERO),
+                TrimData::left(ContentTime(2.0), Beats(2.0)),
             )],
         );
 
@@ -599,7 +661,7 @@ mod tests {
                 .iter()
                 .find(|ci| ci.id == instance_id)
                 .unwrap();
-            assert_eq!(instance.trim_start, 2.0);
+            assert_eq!(instance.trim_start, ContentTime(2.0));
             assert_eq!(instance.timeline_start, Beats(2.0));
         }
 
@@ -613,7 +675,7 @@ mod tests {
                 .iter()
                 .find(|ci| ci.id == instance_id)
                 .unwrap();
-            assert_eq!(instance.trim_start, 0.0);
+            assert_eq!(instance.trim_start, ContentTime::ZERO);
             assert_eq!(instance.timeline_start, Beats::ZERO);
         }
     }
@@ -644,7 +706,7 @@ mod tests {
                 instance_id,
                 TrimType::TrimRight,
                 TrimData::right(None),
-                TrimData::right(Some(8.0)),
+                TrimData::right(Some(ContentTime(8.0))),
             )],
         );
 
@@ -660,7 +722,7 @@ mod tests {
                 .iter()
                 .find(|ci| ci.id == instance_id)
                 .unwrap();
-            assert_eq!(instance.trim_end, Some(8.0));
+            assert_eq!(instance.trim_end, Some(ContentTime(8.0)));
         }
 
         // Rollback

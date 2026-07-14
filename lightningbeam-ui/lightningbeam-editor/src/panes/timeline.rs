@@ -7,8 +7,8 @@
 /// - Basic layer visualization
 
 use eframe::egui;
-use daw_backend::{Beats, Seconds};
-use lightningbeam_core::clip::ClipInstance;
+use daw_backend::{Beats, ContentTime, Seconds};
+use lightningbeam_core::clip::{ClipDuration, ClipInstance};
 use lightningbeam_core::layer::{AnyLayer, AudioLayerType, GroupLayer, LayerTrait};
 use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
 
@@ -89,7 +89,7 @@ fn compute_clip_stacking(
     let tempo_map = document.tempo_map();
     // Stacking only needs relative overlap, so compare in the beats domain.
     let ranges: Vec<(f64, f64)> = clip_instances.iter().map(|ci| {
-        let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(Seconds::ZERO);
+        let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(ClipDuration::Seconds(Seconds::ZERO));
         let start = ci.effective_start();
         let end = start + ci.total_duration(clip_dur, tempo_map);
         (start.beats_to_f64(), end.beats_to_f64())
@@ -203,11 +203,14 @@ fn draw_video_thumbnail_strip(
 /// Get the effective clip duration for a clip instance on a given layer.
 /// For groups on vector layers, the duration spans all consecutive keyframes
 /// where the group is present. For regular clips, returns the clip's internal duration.
+/// A clip's content duration **in its own domain** — seconds for vector/video/effect and sampled
+/// audio, BEATS for MIDI. Returning a `ClipDuration` rather than bare `Seconds` is what lets the
+/// instance's trim bounds (which are content times, in that same domain) be resolved correctly.
 fn effective_clip_duration(
     document: &lightningbeam_core::document::Document,
     layer: &AnyLayer,
     clip_instance: &ClipInstance,
-) -> Option<Seconds> {
+) -> Option<ClipDuration> {
     match layer {
         AnyLayer::Vector(vl) => {
             let vc = document.get_vector_clip(&clip_instance.clip_id)?;
@@ -215,17 +218,21 @@ fn effective_clip_duration(
                 let frame_duration = 1.0 / document.framerate;
                 let start_secs = document.tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
                 let end = vl.group_visibility_end(&clip_instance.id, start_secs, frame_duration);
-                Some(Seconds((end - start_secs).max(0.0)))
+                Some(ClipDuration::Seconds(Seconds((end - start_secs).max(0.0))))
             } else {
                 // Movie clips: duration based on all internal content (keyframes + clip instances)
-                document.get_clip_duration(&clip_instance.clip_id)
+                document.get_clip_duration(&clip_instance.clip_id).map(ClipDuration::Seconds)
             }
         }
-        // Delegate to get_clip_duration so MIDI clips (whose `duration` is stored in beats,
-        // not seconds) are converted correctly rather than read as raw seconds.
-        AnyLayer::Audio(_) => document.get_clip_duration(&clip_instance.clip_id),
-        AnyLayer::Video(_) => document.get_video_clip(&clip_instance.clip_id).map(|c| Seconds(c.duration)),
-        AnyLayer::Effect(_) => Some(Seconds(lightningbeam_core::effect::EFFECT_DURATION)),
+        // An audio layer can hold a sampled clip (seconds content) or a MIDI clip (beats content),
+        // so ask the clip which it is rather than flattening both to seconds.
+        AnyLayer::Audio(_) => document.clip_trim_duration(&clip_instance.clip_id),
+        AnyLayer::Video(_) => document
+            .get_video_clip(&clip_instance.clip_id)
+            .map(|c| ClipDuration::Seconds(Seconds(c.duration))),
+        AnyLayer::Effect(_) => Some(ClipDuration::Seconds(Seconds(
+            lightningbeam_core::effect::EFFECT_DURATION,
+        ))),
         AnyLayer::Group(_) => None,
         AnyLayer::Raster(_) => None,
         AnyLayer::Text(_) => None,
@@ -859,7 +866,9 @@ impl TimelinePane {
                 .unwrap_or_default()
                 .iter()
                 .map(|k| crate::curve_editor::CurvePoint {
-                    time: k.time,  // beats (backend stores beats; curve editor x-axis is beats)
+                    // The curve editor's x-axis is beats, same as the backend — unwrap at this
+                    // boundary because CurvePoint stores a plain f64.
+                    time: k.time.beats_to_f64(),
                     value: k.value,
                     interpolation: match k.interpolation.as_str() {
                         "bezier" => crate::curve_editor::CurveInterpolation::Bezier,
@@ -1441,8 +1450,10 @@ impl TimelinePane {
 
         let tempo_map = document.tempo_map();
         for (_child_layer_id, ci) in &child_clips {
-            let clip_dur = document.get_clip_duration(&ci.clip_id).unwrap_or_else(|| {
-                Seconds(ci.trim_end.unwrap_or(1.0) - ci.trim_start)
+            let clip_dur = document.clip_trim_duration(&ci.clip_id).unwrap_or_else(|| {
+                ClipDuration::Seconds(Seconds(
+                    (ci.trim_end.unwrap_or(ContentTime(1.0)) - ci.trim_start).raw(),
+                ))
             });
             let start = ci.effective_start();
             let end = start + ci.total_duration(clip_dur, tempo_map);
@@ -1756,15 +1767,18 @@ impl TimelinePane {
     /// Effective on-timeline duration for a clip instance, in seconds.
     ///
     /// `total_duration` is in beats; converts to seconds using the current (preview) BPM.
-    fn instance_display_duration(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_dur_secs: Seconds, tempo_map: &daw_backend::TempoMap) -> f64 {
-        (tempo_map.beats_to_seconds(ci.timeline_start + ci.total_duration(clip_dur_secs, tempo_map))
+    fn instance_display_duration(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_content: ClipDuration, tempo_map: &daw_backend::TempoMap) -> f64 {
+        (tempo_map.beats_to_seconds(ci.timeline_start + ci.total_duration(clip_content, tempo_map))
             - tempo_map.beats_to_seconds(ci.effective_start())).seconds_to_f64()
     }
 
-    /// Returns the clip content start (trim_start) and duration in display seconds.
-    fn content_display_range(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_dur_secs: Seconds, _bpm: f64) -> (f64, f64) {
-        let trim_end = ci.trim_end.unwrap_or(clip_dur_secs.seconds_to_f64());
-        (ci.trim_start, (trim_end - ci.trim_start).max(0.0))
+    /// The clip's content start (trim_start) and window length, as raw magnitudes in the clip's own
+    /// content domain — seconds for audio/video/vector, beats for MIDI. The drag/preview math below
+    /// works in that domain throughout, converting to the timeline only at the edges.
+    fn content_display_range(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_content: ClipDuration, _bpm: f64) -> (f64, f64) {
+        let trim_end = ci.trim_end.map_or(clip_content.native(), |t| t.raw());
+        let start = ci.trim_start.raw();
+        (start, (trim_end - start).max(0.0))
     }
 
     /// Convert pixel x-coordinate to time (seconds)
@@ -3255,8 +3269,10 @@ impl TimelinePane {
                 let is_move_drag = self.clip_drag_state == Some(ClipDragType::Move);
                 let mut ranges: Vec<(Beats, Beats)> = Vec::new();
                 for (_child_layer_id, ci) in &child_clips {
-                    let clip_dur = document.get_clip_duration(&ci.clip_id).unwrap_or_else(|| {
-                        Seconds(ci.trim_end.unwrap_or(1.0) - ci.trim_start)
+                    let clip_dur = document.clip_trim_duration(&ci.clip_id).unwrap_or_else(|| {
+                        ClipDuration::Seconds(Seconds(
+                            (ci.trim_end.unwrap_or(ContentTime(1.0)) - ci.trim_start).raw(),
+                        ))
                     });
                     let mut start = ci.effective_start();
                     let dur = ci.total_duration(clip_dur, document.tempo_map());
@@ -3329,8 +3345,10 @@ impl TimelinePane {
                     if let Some(video_child) = g.children.iter().find(|c| matches!(c, AnyLayer::Video(_))) {
                         if let AnyLayer::Video(vl) = video_child {
                             for ci in &vl.clip_instances {
-                                let clip_dur = document.get_clip_duration(&ci.clip_id)
-                                    .unwrap_or_else(|| Seconds(ci.trim_end.unwrap_or(1.0) - ci.trim_start));
+                                let clip_dur = document.clip_trim_duration(&ci.clip_id)
+                                    .unwrap_or_else(|| ClipDuration::Seconds(Seconds(
+                                        (ci.trim_end.unwrap_or(ContentTime(1.0)) - ci.trim_start).raw(),
+                                    )));
                                 let mut ci_start = ci.effective_start();
                                 if is_move_drag && selection.contains_clip_instance(&ci.id) {
                                     ci_start = self.moved_start(ci_start, document.tempo_map(), &document.time_signature, document.framerate);
@@ -3357,7 +3375,8 @@ impl TimelinePane {
                                 );
                                 // 4th elem = clip's TRUE (unclamped) origin x, for correct
                                 // hover content time when scrolled partly off the left.
-                                video_clip_hovers.push((hover_rect, ci.clip_id, ci.trim_start, rect.min.x + sx));
+                                // Video content is wall-clock, so its content time IS seconds.
+                                video_clip_hovers.push((hover_rect, ci.clip_id, ci.trim_start.raw(), rect.min.x + sx));
 
                                 let thumb_display_height = (thumb_y_max - span_y_min) - 4.0;
                                 if thumb_display_height > 8.0 {
@@ -3370,7 +3389,7 @@ impl TimelinePane {
                                         &video_mgr,
                                         &mut self.video_thumbnail_textures,
                                         ci.clip_id,
-                                        ci.trim_start,
+                                        ci.trim_start.raw(),
                                         rect.min.x + sx,
                                         ex - sx,
                                         ci_rect,
@@ -3419,7 +3438,7 @@ impl TimelinePane {
                                 };
                                 let audio_file_duration = total_frames as f64 / eff_sr as f64;
 
-                                let clip_dur = audio_clip.content_duration().to_seconds(document.tempo_map());
+                                let clip_dur = audio_clip.content_duration();
                                 let mut ci_start = ci.effective_start();
                                 if is_move_drag && selection.contains_clip_instance(&ci.id) {
                                     ci_start = self.moved_start(ci_start, document.tempo_map(), &document.time_signature, document.framerate);
@@ -3470,7 +3489,8 @@ impl TimelinePane {
                                             audio_duration: audio_file_duration as f32,
                                             sample_rate: eff_sr,
                                             clip_start_time: ci_screen_start,
-                                            trim_start: ci.trim_start as f32,
+                                            // A sampled clip's content time is seconds.
+                                            trim_start: ci.trim_start.raw() as f32,
                                             tex_width: crate::waveform_gpu::tex_width() as f32,
                                             total_frames: total_frames as f32,
                                             segment_start_frame: 0.0,
@@ -3553,7 +3573,7 @@ impl TimelinePane {
                 let group: Vec<(uuid::Uuid, Beats, Beats)> = clip_instances.iter()
                     .filter(|ci| selection.contains_clip_instance(&ci.id))
                     .filter_map(|ci| {
-                        let dur = document.get_clip_duration(&ci.clip_id)?;
+                        let dur = document.clip_trim_duration(&ci.clip_id)?;
                         Some((ci.id, ci.effective_start(), ci.total_duration(dur, document.tempo_map())))
                     })
                     .collect();
@@ -3577,8 +3597,11 @@ impl TimelinePane {
                     let shift_beats = |anchor: Beats, secs: f64|
                         tmap.seconds_to_beats(tmap.beats_to_seconds(anchor) + Seconds(secs));
 
-                    let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(Seconds::ZERO);
-                    let clip_dur_secs = clip_dur.seconds_to_f64();
+                    let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(ClipDuration::Seconds(Seconds::ZERO));
+                    // Raw magnitudes in the clip's own content domain — the drag math below stays in
+                    // that domain and only converts at the timeline edges.
+                    let clip_dur_secs = clip_dur.native();
+                    let ci_trim_start = ci.trim_start.raw();
                     let mut start = ci.effective_start();
                     let mut duration = ci.total_duration(clip_dur, tmap);
 
@@ -3600,25 +3623,25 @@ impl TimelinePane {
                                     }
                                 }
                                 ClipDragType::TrimLeft => {
-                                    let new_trim = self.snap_to_grid(ci.trim_start + self.drag_offset, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE).max(0.0).min(clip_dur_secs);
-                                    let trim_offset_secs = new_trim - ci.trim_start;
+                                    let new_trim = self.snap_to_grid(ci_trim_start + self.drag_offset, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE).max(0.0).min(clip_dur_secs);
+                                    let trim_offset_secs = new_trim - ci_trim_start;
                                     start = shift_beats(ci.timeline_start, trim_offset_secs).max(Beats::ZERO);
                                     let dur_secs = if let Some(trim_end) = ci.trim_end {
-                                        (trim_end - new_trim).max(0.0)
+                                        (trim_end.raw() - new_trim).max(0.0)
                                     } else {
                                         (clip_dur_secs - new_trim).max(0.0)
                                     };
                                     duration = secs_to_beats_at(start, dur_secs);
                                 }
                                 ClipDragType::TrimRight => {
-                                    let old_trim_end = ci.trim_end.unwrap_or(clip_dur_secs);
-                                    let new_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE).max(ci.trim_start).min(clip_dur_secs);
-                                    let dur_secs = (new_trim_end - ci.trim_start).max(0.0);
+                                    let old_trim_end = ci.trim_end.map_or(clip_dur_secs, |t| t.raw());
+                                    let new_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE).max(ci_trim_start).min(clip_dur_secs);
+                                    let dur_secs = (new_trim_end - ci_trim_start).max(0.0);
                                     duration = secs_to_beats_at(start, dur_secs);
                                 }
                                 ClipDragType::LoopExtendRight => {
-                                    let trim_end = ci.trim_end.unwrap_or(clip_dur_secs);
-                                    let content_window_secs = (trim_end - ci.trim_start).max(0.0);
+                                    let trim_end = ci.trim_end.map_or(clip_dur_secs, |t| t.raw());
+                                    let content_window_secs = (trim_end - ci_trim_start).max(0.0);
                                     let content_window = secs_to_beats_at(ci.timeline_start, content_window_secs);
                                     let current_right = ci.timeline_duration.unwrap_or(content_window);
                                     let right_edge_secs = tmap.beats_to_seconds(ci.timeline_start + current_right).seconds_to_f64() + self.drag_offset;
@@ -3629,8 +3652,8 @@ impl TimelinePane {
                                     duration = loop_before + new_right;
                                 }
                                 ClipDragType::LoopExtendLeft => {
-                                    let trim_end = ci.trim_end.unwrap_or(clip_dur_secs);
-                                    let content_window_secs = (trim_end - ci.trim_start).max(0.001);
+                                    let trim_end = ci.trim_end.map_or(clip_dur_secs, |t| t.raw());
+                                    let content_window_secs = (trim_end - ci_trim_start).max(0.001);
                                     let content_window = secs_to_beats_at(ci.timeline_start, content_window_secs);
                                     let current_loop_before = ci.loop_before.unwrap_or(Beats::ZERO);
                                     // drag_offset (seconds) as a beats delta at this clip's start.
@@ -3691,6 +3714,9 @@ impl TimelinePane {
                     // Track preview trim values for note/waveform rendering.
                     // In Measures mode, derive from beats so they track BPM during live drag.
                     let (base_trim_start, base_clip_duration) = self.content_display_range(clip_instance, clip_duration, document.bpm());
+                    // The instance's trim start as a raw magnitude in the clip's content domain; the
+                    // preview math below stays in that domain.
+                    let ci_trim_start = clip_instance.trim_start.raw();
                     let mut preview_trim_start = base_trim_start;
                     let mut preview_clip_duration = base_clip_duration;
 
@@ -3706,11 +3732,11 @@ impl TimelinePane {
                                 }
                                 ClipDragType::TrimLeft => {
                                     // Trim left: calculate new trim_start with snap to adjacent clips
-                                    let desired_trim_start = self.snap_to_grid(clip_instance.trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE)
+                                    let desired_trim_start = self.snap_to_grid(ci_trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE)
                                         .max(0.0)
-                                        .min(clip_duration.seconds_to_f64());
+                                        .min(clip_duration.native());
 
-                                    let new_trim_start = if desired_trim_start < clip_instance.trim_start {
+                                    let new_trim_start = if desired_trim_start < ci_trim_start {
                                         // Extending left - limit is the content-seconds gap to the previous clip.
                                         let max_extend_secs = document.find_max_trim_extend_left(
                                             &layer.id(),
@@ -3718,25 +3744,25 @@ impl TimelinePane {
                                             clip_instance.effective_start(),
                                         ).seconds_to_f64();
 
-                                        let desired_extend = clip_instance.trim_start - desired_trim_start;
+                                        let desired_extend = ci_trim_start - desired_trim_start;
                                         let actual_extend = desired_extend.min(max_extend_secs);
-                                        clip_instance.trim_start - actual_extend
+                                        ci_trim_start - actual_extend
                                     } else {
                                         // Shrinking - no snap needed
                                         desired_trim_start
                                     };
 
-                                    let actual_offset = new_trim_start - clip_instance.trim_start;
+                                    let actual_offset = new_trim_start - ci_trim_start;
 
                                     // Move start (display seconds) and reduce duration by the clamped offset.
                                     instance_start = (document.tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64() + actual_offset)
                                         .max(0.0);
 
-                                    instance_duration = (clip_duration.seconds_to_f64() - new_trim_start).max(0.0);
+                                    instance_duration = (clip_duration.native() - new_trim_start).max(0.0);
 
                                     // Adjust for existing trim_end
                                     if let Some(trim_end) = clip_instance.trim_end {
-                                        instance_duration = (trim_end - new_trim_start).max(0.0);
+                                        instance_duration = (trim_end.raw() - new_trim_start).max(0.0);
                                     }
 
                                     // Update preview trim for waveform rendering
@@ -3745,14 +3771,14 @@ impl TimelinePane {
                                 }
                                 ClipDragType::TrimRight => {
                                     // Trim right: extend or reduce duration with snap to adjacent clips
-                                    let old_trim_end = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
+                                    let old_trim_end = clip_instance.trim_end.map_or(clip_duration.native(), |t| t.raw());
                                     let desired_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE)
-                                        .max(clip_instance.trim_start)
-                                        .min(clip_duration.seconds_to_f64());
+                                        .max(ci_trim_start)
+                                        .min(clip_duration.native());
 
                                     let new_trim_end = if desired_trim_end > old_trim_end {
                                         // Extending right - limit is the content-seconds gap to the next clip.
-                                        let current_duration_secs = old_trim_end - clip_instance.trim_start;
+                                        let current_duration_secs = old_trim_end - ci_trim_start;
                                         let tmap = document.tempo_map();
                                         let current_duration = tmap.seconds_to_beats(
                                             tmap.beats_to_seconds(clip_instance.timeline_start) + Seconds(current_duration_secs)
@@ -3772,7 +3798,7 @@ impl TimelinePane {
                                         desired_trim_end
                                     };
 
-                                    instance_duration = (new_trim_end - clip_instance.trim_start).max(0.0);
+                                    instance_duration = (new_trim_end - ci_trim_start).max(0.0);
 
                                     // Update preview clip duration for waveform rendering
                                     // (the waveform system uses clip_duration to determine visible range)
@@ -3780,8 +3806,8 @@ impl TimelinePane {
                                 }
                                 ClipDragType::LoopExtendRight => {
                                     // Loop extend right: extend clip beyond content window
-                                    let trim_end = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
-                                    let content_window_secs = (trim_end - clip_instance.trim_start).max(0.0);
+                                    let trim_end = clip_instance.trim_end.map_or(clip_duration.native(), |t| t.raw());
+                                    let content_window_secs = (trim_end - ci_trim_start).max(0.0);
                                     let tmap = document.tempo_map();
                                     let ts = clip_instance.timeline_start;
                                     // content window and right-duration are beats-domain timeline spans.
@@ -3816,8 +3842,8 @@ impl TimelinePane {
                                 ClipDragType::LoopExtendLeft => {
                                     // Loop extend left: extend loop_before (pre-loop region)
                                     // Snap to multiples of content_window so iterations align with backend
-                                    let trim_end = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
-                                    let content_window_secs = (trim_end - clip_instance.trim_start).max(0.001);
+                                    let trim_end = clip_instance.trim_end.map_or(clip_duration.native(), |t| t.raw());
+                                    let content_window_secs = (trim_end - ci_trim_start).max(0.001);
                                     let tmap = document.tempo_map();
                                     let ts = clip_instance.timeline_start;
                                     // content window is a beats-domain span; guard against zero for division.
@@ -4057,7 +4083,7 @@ impl TimelinePane {
 
                                             // Calculate content window for loop detection
                                             // Use trimmed content window (preview_trim_start accounts for TrimLeft drag)
-                                            let preview_trim_end = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
+                                            let preview_trim_end = clip_instance.trim_end.map_or(clip_duration.native(), |t| t.raw());
                                             let content_window = (preview_trim_end - preview_trim_start).max(0.0);
                                             let is_looping = instance_duration > content_window + 0.001;
 
@@ -4254,7 +4280,7 @@ impl TimelinePane {
                                     &video_mgr,
                                     &mut self.video_thumbnail_textures,
                                     clip_instance.clip_id,
-                                    clip_instance.trim_start,
+                                    clip_instance.trim_start.raw(),
                                     rect.min.x + start_x,
                                     end_x - start_x,
                                     clip_rect,
@@ -4269,7 +4295,7 @@ impl TimelinePane {
                         // clip's TRUE (unclamped) origin x so the hover content time is
                         // correct even when the clip is scrolled partly off the left.
                         if let lightningbeam_core::layer::AnyLayer::Video(_) = layer {
-                            video_clip_hovers.push((clip_rect, clip_instance.clip_id, clip_instance.trim_start, rect.min.x + start_x));
+                            video_clip_hovers.push((clip_rect, clip_instance.clip_id, clip_instance.trim_start.raw(), rect.min.x + start_x));
                         }
 
                         // Draw border per segment (per loop iteration for looping clips)
@@ -5009,18 +5035,23 @@ impl TimelinePane {
                                 for clip_instance in clip_instances {
                                     if selection.contains_clip_instance(&clip_instance.id) {
                                         let clip_duration = effective_clip_duration(document, layer, clip_instance);
+                                        // Raw magnitude in the clip's content domain; re-tagged as a
+                                        // ContentTime when it goes back into TrimData.
+                                        let ci_trim_start = clip_instance.trim_start.raw();
 
                                         if let Some(clip_duration) = clip_duration {
                                             match drag_type {
                                                 ClipDragType::TrimLeft => {
-                                                    let old_trim_start = clip_instance.trim_start;
+                                                    // Raw magnitude in the clip's content domain; re-tagged as a
+                                                    // ContentTime when it goes back into TrimData below.
+                                                    let old_trim_start = clip_instance.trim_start.raw();
                                                     let old_timeline_start =
                                                         clip_instance.timeline_start;
 
                                                     // New trim_start is snapped then clamped to valid range
                                                     let desired_trim_start = self.snap_to_grid(
                                                         old_trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE,
-                                                    ).max(0.0).min(clip_duration.seconds_to_f64());
+                                                    ).max(0.0).min(clip_duration.native());
 
                                                     // Apply overlap prevention when extending left (content-seconds gap).
                                                     let new_trim_start = if desired_trim_start < old_trim_start {
@@ -5050,11 +5081,11 @@ impl TimelinePane {
                                                             clip_instance.id,
                                                             lightningbeam_core::actions::TrimType::TrimLeft,
                                                             lightningbeam_core::actions::TrimData::left(
-                                                                old_trim_start,
+                                                                ContentTime(old_trim_start),
                                                                 old_timeline_start,
                                                             ),
                                                             lightningbeam_core::actions::TrimData::left(
-                                                                new_trim_start,
+                                                                ContentTime(new_trim_start),
                                                                 new_timeline_start,
                                                             ),
                                                         ));
@@ -5065,10 +5096,10 @@ impl TimelinePane {
                                                     // Calculate new trim_end based on current duration
                                                     let current_duration =
                                                         clip_instance.effective_duration(clip_duration, document.tempo_map());
-                                                    let old_trim_end_val = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
+                                                    let old_trim_end_val = clip_instance.trim_end.map_or(clip_duration.native(), |t| t.raw());
                                                     let desired_trim_end = self.snap_to_grid(
                                                         old_trim_end_val + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE,
-                                                    ).max(clip_instance.trim_start).min(clip_duration.seconds_to_f64());
+                                                    ).max(ci_trim_start).min(clip_duration.native());
 
                                                     // Apply overlap prevention when extending right (content-seconds gap).
                                                     let new_trim_end_val = if desired_trim_end > old_trim_end_val {
@@ -5085,13 +5116,15 @@ impl TimelinePane {
                                                         desired_trim_end
                                                     };
 
-                                                    let new_duration = (new_trim_end_val - clip_instance.trim_start).max(0.0);
+                                                    let new_duration = (new_trim_end_val - ci_trim_start).max(0.0);
 
                                                     // Convert new duration back to trim_end value
-                                                    let new_trim_end = if new_duration >= clip_duration.seconds_to_f64() {
+                                                    let new_trim_end = if new_duration >= clip_duration.native() {
                                                         None // Use full clip duration
                                                     } else {
-                                                        Some((clip_instance.trim_start + new_duration).min(clip_duration.seconds_to_f64()))
+                                                        Some(ContentTime(
+                                                            (ci_trim_start + new_duration).min(clip_duration.native()),
+                                                        ))
                                                     };
 
                                                     layer_trims
@@ -5143,8 +5176,9 @@ impl TimelinePane {
                                         if let Some(clip_duration) = clip_duration {
                                             let tmap = document.tempo_map();
                                             let ts = clip_instance.timeline_start;
-                                            let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
-                                            let content_window_secs = (trim_end - clip_instance.trim_start).max(0.0);
+                                            let ci_trim_start = clip_instance.trim_start.raw();
+                                            let trim_end = clip_instance.trim_end.map_or(clip_duration, |t| t.raw());
+                                            let content_window_secs = (trim_end - ci_trim_start).max(0.0);
                                             let content_window = tmap.seconds_to_beats(tmap.beats_to_seconds(ts) + Seconds(content_window_secs)) - ts;
                                             let current_right = clip_instance.timeline_duration.unwrap_or(content_window);
                                             // Snap the right edge in the seconds/pixel domain.
@@ -5217,8 +5251,9 @@ impl TimelinePane {
                                         if let Some(clip_duration) = clip_duration {
                                             let tmap = document.tempo_map();
                                             let ts = clip_instance.timeline_start;
-                                            let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
-                                            let content_window_secs = (trim_end - clip_instance.trim_start).max(0.001);
+                                            let ci_trim_start = clip_instance.trim_start.raw();
+                                            let trim_end = clip_instance.trim_end.map_or(clip_duration, |t| t.raw());
+                                            let content_window_secs = (trim_end - ci_trim_start).max(0.001);
                                             let content_window = tmap.seconds_to_beats(tmap.beats_to_seconds(ts) + Seconds(content_window_secs)) - ts;
                                             let cw = content_window.beats_to_f64().max(1e-9);
                                             let current_loop_before = clip_instance.loop_before.unwrap_or(Beats::ZERO);
@@ -6461,7 +6496,7 @@ impl PaneRenderer for TimelinePane {
                         let instances = layer_clips(layer);
                         for inst in instances {
                             if !shared.selection.contains_clip_instance(&inst.id) { continue; }
-                            if let Some(dur) = document.get_clip_duration(&inst.clip_id) {
+                            if let Some(dur) = document.clip_trim_duration(&inst.clip_id) {
                                 let eff = inst.effective_duration(dur, document.tempo_map());
                                 let start = document.tempo_map().beats_to_seconds(inst.timeline_start).seconds_to_f64();
                                 let end = document.tempo_map().beats_to_seconds(inst.timeline_start + eff).seconds_to_f64();
@@ -6487,7 +6522,7 @@ impl PaneRenderer for TimelinePane {
                         enabled = instances.iter()
                             .filter(|ci| shared.selection.contains_clip_instance(&ci.id))
                             .all(|ci| {
-                                if let Some(dur) = document.get_clip_duration(&ci.clip_id) {
+                                if let Some(dur) = document.clip_trim_duration(&ci.clip_id) {
                                     let eff = ci.effective_duration(dur, document.tempo_map());
                                     // Room to duplicate = seconds gap to the right ≥ this clip's own length.
                                     let max_extend_secs = document.find_max_trim_extend_right(
@@ -6532,7 +6567,7 @@ impl PaneRenderer for TimelinePane {
 
                                         enabled = instances.iter().all(|ci| {
                                             let paste_start = (ci.timeline_start + offset).max(Beats::ZERO);
-                                            if let Some(dur) = document.get_clip_duration(&ci.clip_id) {
+                                            if let Some(dur) = document.clip_trim_duration(&ci.clip_id) {
                                                 let eff = ci.effective_duration(dur, document.tempo_map());
                                                 document
                                                     .find_nearest_valid_position(

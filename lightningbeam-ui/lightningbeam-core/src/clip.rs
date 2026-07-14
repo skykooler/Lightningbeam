@@ -14,7 +14,7 @@
 use crate::layer::AnyLayer;
 use crate::layer_tree::LayerTree;
 use crate::object::Transform;
-use daw_backend::{Beats, Seconds};
+use daw_backend::{Beats, ContentTime, Seconds};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -130,10 +130,14 @@ impl VectorClip {
                 let end_beats: Beats = if let Some(td_beats) = ci.timeline_duration {
                     ci.timeline_start + td_beats
                 } else if let Some(te) = ci.trim_end {
-                    let secs = (te - ci.trim_start).max(0.0);
+                    // `clip_duration_fn` hands back seconds, so this whole path treats nested
+                    // content as wall-clock. That's right for the vector/video/audio clips a vector
+                    // clip actually nests; a nested MIDI clip (beats content) would need resolving
+                    // against its clip, which this callback can't do. Pre-existing limitation.
+                    let secs = (te - ci.trim_start).raw().max(0.0);
                     tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(ci.timeline_start) + Seconds(secs))
                 } else if let Some(clip_dur_secs) = clip_duration_fn(&ci.clip_id) {
-                    let secs = (clip_dur_secs - ci.trim_start).max(0.0);
+                    let secs = (clip_dur_secs - ci.trim_start.raw()).max(0.0);
                     tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(ci.timeline_start) + Seconds(secs))
                 } else {
                     continue;
@@ -201,7 +205,9 @@ impl VectorClip {
                     // Convert parent clip time (seconds) to nested clip local time (seconds).
                     // timeline_start is in beats; convert to seconds using document BPM.
                     let start_secs = document.tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
-                    let nested_clip_time = ((clip_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start;
+                    // Nested clips here are vector clips, whose content is wall-clock seconds.
+                    let nested_clip_time =
+                        ((clip_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start.raw();
 
                     // Look up the nested clip definition
                     let nested_bounds = if let Some(nested_clip) = document.get_vector_clip(&clip_instance.clip_id) {
@@ -535,6 +541,17 @@ impl ClipDuration {
             ClipDuration::Beats(b) => b.beats_to_f64(),
         }
     }
+
+    /// Tag a [`ContentTime`] with *this* duration's domain.
+    ///
+    /// Handy when you already hold a clip's content duration (so you know the domain) and need to
+    /// resolve one of its trim bounds, without going back to the clip.
+    pub fn same_domain(self, t: ContentTime) -> ClipDuration {
+        match self {
+            ClipDuration::Seconds(_) => ClipDuration::Seconds(Seconds(t.raw())),
+            ClipDuration::Beats(_) => ClipDuration::Beats(Beats(t.raw())),
+        }
+    }
 }
 
 /// Audio clip
@@ -739,21 +756,33 @@ impl AudioClip {
         }
     }
 
-    /// Tag a pair of raw trim bounds with this clip's content domain, ready for the backend.
+    /// Resolve a content time against this clip's domain.
     ///
-    /// `ClipInstance::trim_start`/`trim_end` are bare `f64`s whose unit depends on the clip —
-    /// SECONDS for sampled audio, BEATS for MIDI. Building the [`TrimRange`] from the clip means a
-    /// caller can't reach for the wrong variant: the clip is the one thing that knows.
-    pub fn trim_range(&self, start: f64, end: f64) -> daw_backend::command::TrimRange {
+    /// This is the ONLY sanctioned way to turn a [`ContentTime`] into a real duration — the type has
+    /// no `.to_seconds()` of its own precisely so that the clip, which is the one thing that knows
+    /// whether its content is measured in seconds or beats, has to be consulted.
+    pub fn resolve_content_time(&self, t: ContentTime) -> ClipDuration {
+        if self.is_midi_domain() {
+            ClipDuration::Beats(Beats(t.raw()))
+        } else {
+            ClipDuration::Seconds(Seconds(t.raw()))
+        }
+    }
+
+    /// Tag a pair of trim bounds with this clip's content domain, ready for the backend.
+    ///
+    /// Building the [`TrimRange`] from the clip means a caller can't reach for the wrong variant:
+    /// the clip is the one thing that knows the domain.
+    pub fn trim_range(&self, start: ContentTime, end: ContentTime) -> daw_backend::command::TrimRange {
         if self.is_midi_domain() {
             daw_backend::command::TrimRange::Beats {
-                start: Beats(start),
-                end: Beats(end),
+                start: Beats(start.raw()),
+                end: Beats(end.raw()),
             }
         } else {
             daw_backend::command::TrimRange::Seconds {
-                start: Seconds(start),
-                end: Seconds(end),
+                start: Seconds(start.raw()),
+                end: Seconds(end.raw()),
             }
         }
     }
@@ -885,16 +914,17 @@ pub struct ClipInstance {
     /// Default: None (use trimmed clip duration, no looping)
     pub timeline_duration: Option<Beats>,
 
-    /// Trim start: offset into the clip's internal content, in **seconds**.
-    /// - For audio: byte-offset into the audio file
-    /// - For video: seek position in the video file
-    /// - For vector: time offset into the animation
+    /// Trim start: offset into the clip's internal content.
+    ///
+    /// A [`ContentTime`] — measured in the CLIP's content domain, which is seconds for sampled
+    /// audio/video/vector but BEATS for MIDI. Resolve it against the clip
+    /// ([`Document::resolve_content_time`]) before combining it with anything on the timeline.
     /// Default: 0.0
-    pub trim_start: f64,
+    pub trim_start: ContentTime,
 
-    /// Trim end: offset into the clip's internal content, in **seconds**.
+    /// Trim end: offset into the clip's internal content. See [`Self::trim_start`].
     /// Default: None (use full clip duration)
-    pub trim_end: Option<f64>,
+    pub trim_end: Option<ContentTime>,
 
     /// Playback speed multiplier
     /// 1.0 = normal speed, 0.5 = half speed, 2.0 = double speed
@@ -973,7 +1003,7 @@ impl ClipInstance {
             name: None,
             timeline_start: Beats::ZERO,
             timeline_duration: None,
-            trim_start: 0.0,
+            trim_start: ContentTime::ZERO,
             trim_end: None,
             playback_speed: 1.0,
             gain: 1.0,
@@ -992,7 +1022,7 @@ impl ClipInstance {
             name: None,
             timeline_start: Beats::ZERO,
             timeline_duration: None,
-            trim_start: 0.0,
+            trim_start: ContentTime::ZERO,
             trim_end: None,
             playback_speed: 1.0,
             gain: 1.0,
@@ -1033,7 +1063,7 @@ impl ClipInstance {
     }
 
     /// Set trimming (start and end time within the clip's internal content)
-    pub fn with_trimming(mut self, trim_start: f64, trim_end: Option<f64>) -> Self {
+    pub fn with_trimming(mut self, trim_start: ContentTime, trim_end: Option<ContentTime>) -> Self {
         self.trim_start = trim_start;
         self.trim_end = trim_end;
         self
@@ -1057,24 +1087,40 @@ impl ClipInstance {
         self
     }
 
-    /// Content window size in seconds: `trim_end - trim_start`.
+    /// Content window (`trim_end - trim_start`) in the clip's own content domain.
     /// Used for internal looping calculations.
-    pub fn content_window_secs(&self, clip_duration_secs: Seconds) -> Seconds {
-        let end = self.trim_end.unwrap_or(clip_duration_secs.seconds_to_f64());
-        Seconds((end - self.trim_start).max(0.0))
+    pub fn content_window(&self, clip_content: ClipDuration) -> ClipDuration {
+        let end = self.trim_end.map_or(clip_content.native(), |t| t.raw());
+        let window = (end - self.trim_start.raw()).max(0.0);
+        match clip_content {
+            ClipDuration::Beats(_) => ClipDuration::Beats(Beats(window)),
+            ClipDuration::Seconds(_) => ClipDuration::Seconds(Seconds(window)),
+        }
     }
 
     /// How long this instance appears on the timeline, in **beats**.
     ///
-    /// If `timeline_duration` is set, returns that (enabling content looping).
-    /// Otherwise converts the content window from seconds to beats using the tempo map.
-    pub fn effective_duration_beats(&self, clip_duration_secs: Seconds, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
+    /// If `timeline_duration` is set, returns that (enabling content looping). Otherwise the clip
+    /// occupies its content window — converted to beats *in the clip's own domain*:
+    ///
+    /// - MIDI content is already beats and is tempo-invariant, so it carries over directly.
+    /// - Wall-clock content (audio/video/vector) is a seconds span, so it converts at the clip's
+    ///   position on the timeline.
+    ///
+    /// Taking a `ClipDuration` rather than a bare `Seconds` is what keeps those apart: this used to
+    /// take seconds and subtract `trim_start` from it, which for a TRIMMED MIDI clip subtracted a
+    /// beats offset from a seconds duration and got the clip's length wrong.
+    pub fn effective_duration_beats(&self, clip_content: ClipDuration, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
         if let Some(td) = self.timeline_duration {
             return td;
         }
-        let window = self.content_window_secs(clip_duration_secs);
-        let start_secs = tempo_map.beats_to_seconds(self.timeline_start);
-        tempo_map.seconds_to_beats(start_secs + window) - self.timeline_start
+        match self.content_window(clip_content) {
+            ClipDuration::Beats(b) => b,
+            ClipDuration::Seconds(s) => {
+                let start_secs = tempo_map.beats_to_seconds(self.timeline_start);
+                tempo_map.seconds_to_beats(start_secs + s) - self.timeline_start
+            }
+        }
     }
 
     /// Left edge of the clip's visual extent on the timeline, in **beats**.
@@ -1083,27 +1129,32 @@ impl ClipInstance {
     }
 
     /// Total visual duration (loop_before + effective_duration), in **beats**.
-    pub fn total_duration(&self, clip_duration_secs: Seconds, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
-        self.loop_before.unwrap_or(Beats::ZERO) + self.effective_duration_beats(clip_duration_secs, tempo_map)
+    pub fn total_duration(&self, clip_content: ClipDuration, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
+        self.loop_before.unwrap_or(Beats::ZERO) + self.effective_duration_beats(clip_content, tempo_map)
     }
 
     /// Map a playback time (in **seconds**) to clip-local content time (in **seconds**).
     ///
-    /// Returns `None` if the clip instance is not active at `time_secs`.
-    pub fn remap_time_secs(&self, time: Seconds, clip_duration_secs: Seconds, tempo_map: &crate::tempo_map::TempoMap) -> Option<Seconds> {
+    /// The trim bounds are resolved through `clip_content`'s domain first, so a MIDI clip's beats
+    /// trims are converted rather than read as seconds. Callers are the wall-clock consumers (video
+    /// seek, vector/raster rendering), which want seconds regardless of how the clip stores content.
+    ///
+    /// Returns `None` if the clip instance is not active at `time`.
+    pub fn remap_time_secs(&self, time: Seconds, clip_content: ClipDuration, tempo_map: &crate::tempo_map::TempoMap) -> Option<Seconds> {
         let start_secs = tempo_map.beats_to_seconds(self.timeline_start);
-        let dur_beats = self.effective_duration_beats(clip_duration_secs, tempo_map);
+        let dur_beats = self.effective_duration_beats(clip_content, tempo_map);
         let end_secs = tempo_map.beats_to_seconds(self.timeline_start + dur_beats);
 
         if time < start_secs || time >= end_secs {
             return None;
         }
 
+        let trim_start_secs = clip_content.same_domain(self.trim_start).to_seconds(tempo_map);
         let content_time = (time - start_secs) * self.playback_speed;
-        let content_window = self.content_window_secs(clip_duration_secs);
+        let content_window = self.content_window(clip_content).to_seconds(tempo_map);
 
         if content_window == Seconds::ZERO {
-            return Some(Seconds(self.trim_start));
+            return Some(trim_start_secs);
         }
 
         let looped = if content_time > content_window {
@@ -1112,19 +1163,19 @@ impl ClipInstance {
             content_time
         };
 
-        Some(Seconds(self.trim_start) + looped)
+        Some(trim_start_secs + looped)
     }
 
     /// Alias for `remap_time_secs`.
     #[inline]
-    pub fn remap_time(&self, time: Seconds, clip_duration_secs: Seconds, tempo_map: &crate::tempo_map::TempoMap) -> Option<Seconds> {
-        self.remap_time_secs(time, clip_duration_secs, tempo_map)
+    pub fn remap_time(&self, time: Seconds, clip_content: ClipDuration, tempo_map: &crate::tempo_map::TempoMap) -> Option<Seconds> {
+        self.remap_time_secs(time, clip_content, tempo_map)
     }
 
     /// Alias for `effective_duration_beats`.
     #[inline]
-    pub fn effective_duration(&self, clip_duration_secs: Seconds, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
-        self.effective_duration_beats(clip_duration_secs, tempo_map)
+    pub fn effective_duration(&self, clip_content: ClipDuration, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
+        self.effective_duration_beats(clip_content, tempo_map)
     }
 
     /// Convert to affine transform
@@ -1201,7 +1252,7 @@ mod tests {
         assert_eq!(instance.clip_id, clip_id);
         assert_eq!(instance.opacity, 1.0);
         assert_eq!(instance.timeline_start, Beats::ZERO);
-        assert_eq!(instance.trim_start, 0.0);
+        assert_eq!(instance.trim_start, ContentTime::ZERO);
         assert_eq!(instance.trim_end, None);
         assert_eq!(instance.playback_speed, 1.0);
         assert_eq!(instance.gain, 1.0);
@@ -1211,27 +1262,52 @@ mod tests {
     fn test_clip_instance_trimming() {
         let clip_id = Uuid::new_v4();
         let instance = ClipInstance::new(clip_id)
-            .with_trimming(2.0, Some(8.0));
+            .with_trimming(ContentTime(2.0), Some(ContentTime(8.0)));
 
-        assert_eq!(instance.trim_start, 2.0);
-        assert_eq!(instance.trim_end, Some(8.0));
+        assert_eq!(instance.trim_start, ContentTime(2.0));
+        assert_eq!(instance.trim_end, Some(ContentTime(8.0)));
         // At 60 BPM the tempo map is identity (1 beat == 1 second), so the
         // beats-domain effective duration equals the seconds content window.
         let tempo_map = crate::tempo_map::TempoMap::constant(60.0);
-        assert_eq!(instance.effective_duration(Seconds(10.0), &tempo_map), Beats(6.0));
+        let content = ClipDuration::Seconds(Seconds(10.0));
+        assert_eq!(instance.effective_duration(content, &tempo_map), Beats(6.0));
     }
 
     #[test]
     fn test_clip_instance_no_end_trim() {
         let clip_id = Uuid::new_v4();
         let instance = ClipInstance::new(clip_id)
-            .with_trimming(2.0, None);
+            .with_trimming(ContentTime(2.0), None);
 
-        assert_eq!(instance.trim_start, 2.0);
+        assert_eq!(instance.trim_start, ContentTime(2.0));
         assert_eq!(instance.trim_end, None);
         // At 60 BPM the tempo map is identity (1 beat == 1 second).
         let tempo_map = crate::tempo_map::TempoMap::constant(60.0);
-        assert_eq!(instance.effective_duration(Seconds(10.0), &tempo_map), Beats(8.0));
+        let content = ClipDuration::Seconds(Seconds(10.0));
+        assert_eq!(instance.effective_duration(content, &tempo_map), Beats(8.0));
+    }
+
+    #[test]
+    fn trimmed_midi_clip_keeps_its_beats_length_across_tempo() {
+        // Regression: `effective_duration_beats` used to take a SECONDS clip duration and subtract
+        // `trim_start` from it. For a TRIMMED MIDI clip that subtracted a beats offset from a
+        // seconds duration, so the clip's timeline length came out wrong at any tempo but 60 BPM.
+        //
+        // MIDI content is beats and tempo-invariant: a clip trimmed to beats 2..6 is 4 beats long
+        // whatever the tempo says.
+        let clip_id = Uuid::new_v4();
+        let instance = ClipInstance::new(clip_id)
+            .with_trimming(ContentTime(2.0), Some(ContentTime(6.0)));
+        let content = ClipDuration::Beats(Beats(8.0));
+
+        for bpm in [60.0, 120.0, 90.0] {
+            let tempo_map = crate::tempo_map::TempoMap::constant(bpm);
+            assert_eq!(
+                instance.effective_duration(content, &tempo_map),
+                Beats(4.0),
+                "a MIDI clip trimmed to beats 2..6 is 4 beats long at {bpm} BPM",
+            );
+        }
     }
 
     #[test]

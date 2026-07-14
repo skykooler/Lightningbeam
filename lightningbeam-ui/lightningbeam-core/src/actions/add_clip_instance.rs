@@ -89,10 +89,11 @@ impl Action for AddClipInstanceAction {
         // `get_clip_duration` is the content length in seconds; the placement span
         // must be beats (the timeline is beats-domain), so convert via the clip's
         // typed helper rather than treating the seconds span as beats.
-        let clip_duration = document.get_clip_duration(&self.clip_instance.clip_id)
+        // The clip's content duration in ITS OWN domain, so the trims resolve correctly for MIDI.
+        let clip_content = document.clip_trim_duration(&self.clip_instance.clip_id)
             .ok_or_else(|| format!("Clip {} not found", self.clip_instance.clip_id))?;
         let effective_duration = self.clip_instance
-            .effective_duration_beats(clip_duration, document.tempo_map());
+            .effective_duration_beats(clip_content, document.tempo_map());
 
         // Auto-adjust position for audio/video layers to avoid overlaps
         let adjusted_start = document.find_nearest_valid_position(

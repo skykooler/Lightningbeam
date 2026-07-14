@@ -6,7 +6,7 @@
 use eframe::egui;
 use daw_backend::Seconds;
 use lightningbeam_core::action::Action;
-use lightningbeam_core::clip::ClipInstance;
+use lightningbeam_core::clip::{ClipDuration, ClipInstance};
 use lightningbeam_core::gpu::{BufferPool, BufferFormat, BufferSpec, Compositor, EffectProcessor, SrgbToLinearConverter};
 use lightningbeam_core::layer::{AnyLayer, AudioLayer};
 use lightningbeam_core::renderer::RenderedLayerType;
@@ -1854,7 +1854,10 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                             // For now, create a simple effect instance with default parameters
                             let tempo_map = self.ctx.document.tempo_map();
                             let effect_end_beats = effect_instance.timeline_start
-                                + effect_instance.effective_duration(Seconds(lightningbeam_core::effect::EFFECT_DURATION), tempo_map);
+                                + effect_instance.effective_duration(
+            ClipDuration::Seconds(Seconds(lightningbeam_core::effect::EFFECT_DURATION)),
+            tempo_map,
+        );
                             let effect_inst = lightningbeam_core::effect::EffectInstance::new(
                                 effect_def,
                                 tempo_map.beats_to_seconds(effect_instance.timeline_start).seconds_to_f64(),
@@ -2209,7 +2212,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                                 // Calculate clip bounds for preview
                                 let start_secs = self.ctx.document.tempo_map().beats_to_seconds(clip_inst.timeline_start).seconds_to_f64();
-                                let clip_time = ((self.ctx.playback_time - start_secs) * clip_inst.playback_speed) + clip_inst.trim_start;
+                                let clip_time = ((self.ctx.playback_time - start_secs) * clip_inst.playback_speed) + clip_inst.trim_start.raw();
                                 let content_bounds = if let Some(vector_clip) = self.ctx.document.get_vector_clip(&clip_inst.clip_id) {
                                     vector_clip.calculate_content_bounds(&self.ctx.document, clip_time)
                                 } else if let Some(video_clip) = self.ctx.document.get_video_clip(&clip_inst.clip_id) {
@@ -2299,7 +2302,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                         for &clip_id in self.ctx.selection.clip_instances() {
                             if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == clip_id) {
                                 // Skip clip instances not active at current time (compare in seconds).
-                                let clip_dur = self.ctx.document.get_clip_duration(&clip_instance.clip_id).unwrap_or(Seconds::ZERO);
+                                let clip_dur = ClipDuration::Seconds(
+                                    self.ctx.document.get_clip_duration(&clip_instance.clip_id).unwrap_or(Seconds::ZERO),
+                                );
                                 let tempo_map = self.ctx.document.tempo_map();
                                 let start_secs = tempo_map.beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
                                 let instance_end = tempo_map.beats_to_seconds(
@@ -2310,7 +2315,7 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
                                 }
 
                                 // Calculate clip-local time
-                                let clip_time = ((self.ctx.playback_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start;
+                                let clip_time = ((self.ctx.playback_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start.raw();
 
                                 // Get dynamic clip bounds from content at current time
                                 let bbox = if let Some(vector_clip) = self.ctx.document.get_vector_clip(&clip_instance.clip_id) {
@@ -2680,7 +2685,9 @@ impl egui_wgpu::CallbackTrait for VelloCallback {
 
                         // Find clip instance visible at playback time
                         let visible_clip = video_layer.clip_instances.iter().find(|inst| {
-                            let clip_duration = self.ctx.document.get_clip_duration(&inst.clip_id).unwrap_or(Seconds::ZERO);
+                            let clip_duration = ClipDuration::Seconds(
+                                self.ctx.document.get_clip_duration(&inst.clip_id).unwrap_or(Seconds::ZERO),
+                            );
                             let tempo_map = self.ctx.document.tempo_map();
                             let start_secs = tempo_map.beats_to_seconds(inst.timeline_start).seconds_to_f64();
                             let end_secs = tempo_map.beats_to_seconds(inst.timeline_start + inst.effective_duration(clip_duration, tempo_map)).seconds_to_f64();
@@ -10142,7 +10149,7 @@ impl StagePane {
                     if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == clip_id) {
                         // Calculate clip-local time
                         let start_secs = shared.action_executor.document().tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
-                        let clip_time = ((*shared.playback_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start;
+                        let clip_time = ((*shared.playback_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start.raw();
 
                         // Get dynamic clip bounds from content at current time
                         use vello::kurbo::Rect as KurboRect;
@@ -10343,7 +10350,7 @@ impl StagePane {
                 if let Some(clip_instance) = vector_layer.clip_instances.iter().find(|ci| ci.id == object_id) {
                     // Calculate clip-local time
                     let start_secs = shared.action_executor.document().tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
-                    let clip_time = ((*shared.playback_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start;
+                    let clip_time = ((*shared.playback_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start.raw();
 
                     // Get dynamic clip bounds from content at current time
                     let local_bbox = if let Some(vector_clip) = shared.action_executor.document().get_vector_clip(&clip_instance.clip_id) {
@@ -11059,7 +11066,9 @@ impl StagePane {
             let document = shared.action_executor.document();
             if let Some(AnyLayer::Video(video_layer)) = document.get_layer(layer_id) {
                 video_layer.clip_instances.iter().find(|inst| {
-                    let clip_duration = document.get_clip_duration(&inst.clip_id).unwrap_or(Seconds::ZERO);
+                    let clip_duration = ClipDuration::Seconds(
+                        document.get_clip_duration(&inst.clip_id).unwrap_or(Seconds::ZERO),
+                    );
                     let tempo_map = document.tempo_map();
                     let start_secs = tempo_map.beats_to_seconds(inst.timeline_start).seconds_to_f64();
                     let end_secs = tempo_map.beats_to_seconds(inst.timeline_start + inst.effective_duration(clip_duration, tempo_map)).seconds_to_f64();

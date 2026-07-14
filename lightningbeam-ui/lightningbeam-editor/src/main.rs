@@ -2387,7 +2387,7 @@ impl EditorApp {
         ) -> Vec<uuid::Uuid> {
             let mut result = Vec::new();
             for instance in clip_instances {
-                if let Some(clip_duration) = document.get_clip_duration(&instance.clip_id) {
+                if let Some(clip_duration) = document.clip_trim_duration(&instance.clip_id) {
                     let effective_duration = instance.effective_duration(clip_duration, document.tempo_map());
                     let timeline_end = instance.timeline_start + effective_duration;
 
@@ -3276,7 +3276,9 @@ impl EditorApp {
             let duplicates: Vec<lightningbeam_core::clip::ClipInstance> = clips_to_duplicate.iter().map(|original| {
                 let mut duplicate = original.clone();
                 duplicate.id = uuid::Uuid::new_v4();
-                let clip_duration = document.get_clip_duration(&original.clip_id).unwrap_or(Seconds(1.0));
+                let clip_duration = document
+                    .clip_trim_duration(&original.clip_id)
+                    .unwrap_or(ClipDuration::Seconds(Seconds(1.0)));
                 let effective_duration = original.effective_duration(clip_duration, document.tempo_map());
                 duplicate.timeline_start = original.timeline_start + effective_duration;
                 if let Some((new_clip_def_id, _)) = midi_clip_replacements.get(&original.clip_id) {
@@ -5477,7 +5479,7 @@ impl EditorApp {
                     // matches the video clip exactly).
                     let (_dur, sample_rate, channels) = controller
                         .get_pool_file_info(pool_index)
-                        .unwrap_or((video_duration, 0, 0));
+                        .unwrap_or((Seconds(video_duration), 0, 0));
                     drop(controller);
 
                     let audio_clip_name = format!("{} (Audio)", video_name);
@@ -6384,7 +6386,9 @@ impl eframe::App for EditorApp {
                     use daw_backend::AudioEvent;
                     match event {
                         AudioEvent::PlaybackPosition(time) => {
-                            self.playback_time = time;
+                            // `playback_time` is the UI's seconds playhead (see the timeline's
+                            // seconds/beats model); unwrap at this boundary, not before it.
+                            self.playback_time = time.seconds_to_f64();
                         }
                         AudioEvent::PlaybackStopped => {
                             self.is_playing = false;
@@ -6595,8 +6599,11 @@ impl eframe::App for EditorApp {
                                             if let Some(inst) = al.clip_instances.iter_mut().find(|ci| ci.id == instance_id) {
                                                 inst.timeline_start = loop_start;
                                                 inst.timeline_duration = None;
-                                                inst.trim_start = 0.0;
-                                                inst.trim_end = Some(loop_len_seconds.seconds_to_f64());
+                                                // Audio take content is seconds, and each take spans
+                                                // exactly one cycle region.
+                                                inst.trim_start = daw_backend::ContentTime::ZERO;
+                                                inst.trim_end =
+                                                    Some(daw_backend::ContentTime(loop_len_seconds.seconds_to_f64()));
                                                 inst.active_take = Some(last_take);
                                             }
                                         }
@@ -6655,6 +6662,7 @@ impl eframe::App for EditorApp {
                                 let mut controller = controller_arc.lock().unwrap();
                                 match controller.get_pool_file_info(pool_index) {
                                     Ok((dur, _, _)) => {
+                                        let dur = dur.seconds_to_f64();
                                         eprintln!("[AUDIO] Got duration from backend: {:.4}s", dur);
                                         self.audio_duration_cache.insert(pool_index, dur);
                                         dur
@@ -6688,7 +6696,7 @@ impl eframe::App for EditorApp {
                                                 None
                                             }
                                         })
-                                        .unwrap_or((uuid::Uuid::nil(), uuid::Uuid::nil(), Beats::ZERO, 0.0))
+                                        .unwrap_or((uuid::Uuid::nil(), uuid::Uuid::nil(), Beats::ZERO, daw_backend::ContentTime::ZERO))
                                 };
 
                                 if !clip_id.is_nil() {
@@ -6850,7 +6858,7 @@ impl eframe::App for EditorApp {
                                             .map(|(id, _)| id);
                                         if let Some(doc_clip_id) = doc_clip_id {
                                             if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
-                                                clip.set_content_duration(ClipDuration::Beats(Beats(midi_clip_data.duration)));
+                                                clip.set_content_duration(ClipDuration::Beats(midi_clip_data.duration));
                                                 clip.name = format!("MIDI Recording {}", clip_id);
                                             }
                                         }

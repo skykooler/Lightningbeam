@@ -1612,8 +1612,12 @@ impl InfopanelPane {
                                 ui.label(format!("{:.2}s", document.tempo_map().beats_to_seconds(ci.effective_start()).seconds_to_f64()));
                             });
 
-                            let clip_dur = document.get_clip_duration(&ci.clip_id)
-                                .unwrap_or_else(|| daw_backend::Seconds(ci.trim_end.unwrap_or(1.0) - ci.trim_start));
+                            let clip_dur = document.clip_trim_duration(&ci.clip_id)
+                                .unwrap_or_else(|| lightningbeam_core::clip::ClipDuration::Seconds(
+                                    daw_backend::Seconds(
+                                        (ci.trim_end.unwrap_or(daw_backend::ContentTime(1.0)) - ci.trim_start).raw(),
+                                    ),
+                                ));
                             let total_dur = ci.total_duration(clip_dur, document.tempo_map());
                             let total_dur_secs = (document.tempo_map().beats_to_seconds(ci.effective_start() + total_dur)
                                 - document.tempo_map().beats_to_seconds(ci.effective_start())).seconds_to_f64();
@@ -1622,10 +1626,16 @@ impl InfopanelPane {
                                 ui.label(format!("{:.2}s", total_dur_secs));
                             });
 
-                            if ci.trim_start > 0.0 {
+                            if ci.trim_start > daw_backend::ContentTime::ZERO {
                                 ui.horizontal(|ui| {
                                     ui.label("Trim Start:");
-                                    ui.label(format!("{:.2}s", ci.trim_start));
+                                    // Content time in the clip's own domain: seconds for sampled
+                                    // audio/video/vector, beats for MIDI. Label it accordingly.
+                                    let unit = match clip_dur {
+                                        lightningbeam_core::clip::ClipDuration::Beats(_) => "beats",
+                                        lightningbeam_core::clip::ClipDuration::Seconds(_) => "s",
+                                    };
+                                    ui.label(format!("{:.2}{}", ci.trim_start.raw(), unit));
                                 });
                             }
 

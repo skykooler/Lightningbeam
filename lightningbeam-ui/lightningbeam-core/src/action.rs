@@ -77,10 +77,17 @@ impl BackendContext<'_> {
             .ok_or_else(|| format!("Layer {} not mapped to backend track", layer_id))?;
 
         let resolved = clip.resolve(instance.active_take);
-        let content_duration = clip.content_duration().native();
+        let content = clip.content_duration();
         let internal_start = instance.trim_start;
-        let internal_end = instance.trim_end.unwrap_or(content_duration);
+        let internal_end = instance
+            .trim_end
+            .unwrap_or(daw_backend::ContentTime(content.native()));
         let start_time = instance.timeline_start;
+
+        // How long the clip occupies the timeline, in BEATS. `effective_duration_beats` resolves the
+        // content window in the clip's own domain — beats content carries over directly, wall-clock
+        // content converts at the clip's position — so neither kind can be read as the other here.
+        let effective_duration = instance.effective_duration_beats(content, document.tempo_map());
 
         let controller = self
             .audio_controller
@@ -91,18 +98,14 @@ impl BackendContext<'_> {
             ResolvedContent::Midi { midi_clip_id } => {
                 use daw_backend::command::{Query, QueryResponse};
 
-                // MIDI trims are in the BEATS domain, so the fallback span is beats too.
-                let external_duration = instance
-                    .timeline_duration
-                    .unwrap_or(daw_backend::Beats(internal_end - internal_start));
-
+                // MIDI content time IS beats, so the trims carry straight over.
                 let midi_instance = daw_backend::MidiClipInstance::new(
                     0, // assigned by the backend
                     midi_clip_id,
-                    daw_backend::Beats(internal_start),
-                    daw_backend::Beats(internal_end),
+                    daw_backend::Beats(internal_start.raw()),
+                    daw_backend::Beats(internal_end.raw()),
                     start_time,
-                    external_duration,
+                    effective_duration,
                 );
 
                 match controller
@@ -114,26 +117,13 @@ impl BackendContext<'_> {
                 }
             }
             ResolvedContent::Audio { audio_pool_index } => {
-                // `trim_*` and the clip's content duration are SECONDS (audio content time); the
-                // backend's start/duration are BEATS.
-                //
-                // When `timeline_duration` is set it's already beats; otherwise the clip occupies
-                // its natural content length, so convert that seconds-span to beats *at the clip's
-                // start* (NOT `internal_end - internal_start`, which is seconds — that was the
-                // seconds-as-beats bug that made clips stop early at anything but 60 BPM).
-                let effective_duration = instance.timeline_duration.unwrap_or_else(|| {
-                    let tempo_map = document.tempo_map();
-                    let content_secs = daw_backend::Seconds(internal_end - internal_start);
-                    tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(start_time) + content_secs)
-                        - start_time
-                });
-
+                // Sampled-audio content time is SECONDS; the backend's start/duration are BEATS.
                 let id = controller.add_audio_clip(
                     track_id,
                     audio_pool_index,
                     start_time,
                     effective_duration,
-                    daw_backend::Seconds(internal_start),
+                    daw_backend::Seconds(internal_start.raw()),
                 );
                 BackendClipInstanceId::Audio(id)
             }
