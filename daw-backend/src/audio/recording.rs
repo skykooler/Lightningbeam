@@ -302,6 +302,13 @@ pub struct MidiRecordingState {
     /// note's offset already lands inside `[0, loop_len)` and successive passes overdub onto each
     /// other with no folding needed. Set only if the transport actually wrapped.
     pub cycle_loop_len: Option<Beats>,
+    /// Which cycle pass is currently being recorded (0-based). Bumped at each wrap.
+    current_pass: usize,
+    /// The pass each completed note belongs to, parallel to `completed_notes`.
+    ///
+    /// Only meaningful in "separate takes" mode, where each pass becomes its own MIDI clip. Merge
+    /// mode ignores it — all passes fold into one clip, which is the whole point.
+    note_pass: Vec<usize>,
 }
 
 impl MidiRecordingState {
@@ -313,7 +320,23 @@ impl MidiRecordingState {
             active_notes: HashMap::new(),
             completed_notes: Vec::new(),
             cycle_loop_len: None,
+            current_pass: 0,
+            note_pass: Vec::new(),
         }
+    }
+
+    /// Record a finished note, tagging it with the pass it was played in.
+    ///
+    /// Every completion goes through here so `completed_notes` and `note_pass` can't drift apart.
+    fn push_completed(&mut self, note: &ActiveMidiNote, end_time: Beats) {
+        let note_start = note.start_time.max(self.start_time);
+        self.completed_notes.push((
+            note_start - self.start_time,
+            note.note,
+            note.velocity,
+            end_time - note_start,
+        ));
+        self.note_pass.push(self.current_pass);
     }
 
     pub fn note_on(&mut self, note: u8, velocity: u8, absolute_time: Beats) {
@@ -325,14 +348,36 @@ impl MidiRecordingState {
             if absolute_time <= self.start_time {
                 return;
             }
-            let note_start = active_note.start_time.max(self.start_time);
-            self.completed_notes.push((
-                note_start - self.start_time,
-                active_note.note,
-                active_note.velocity,
-                absolute_time - note_start,
-            ));
+            self.push_completed(&active_note, absolute_time);
         }
+    }
+
+    /// Completed notes grouped by cycle pass — one bucket per pass, in recording order.
+    ///
+    /// Used by "separate takes" mode, where each pass becomes its own MIDI clip.
+    ///
+    /// An *interior* pass in which nothing was played still yields an empty take, so take N in the
+    /// folder is always pass N on the transport — otherwise the numbering would silently shift and
+    /// "take 3" would stop meaning "the third time round". A *trailing* empty pass is dropped
+    /// though: that's what you get by hitting stop shortly after a wrap, and it's a stop artifact
+    /// rather than a take you played. (Same reasoning as the audio path's short-final-take rule.)
+    pub fn notes_by_pass(&self, passes: usize) -> Vec<Vec<(Beats, u8, u8, Beats)>> {
+        let mut buckets = vec![Vec::new(); passes.max(1)];
+        for (note, &pass) in self.completed_notes.iter().zip(self.note_pass.iter()) {
+            if let Some(bucket) = buckets.get_mut(pass) {
+                bucket.push(*note);
+            }
+        }
+        // Never drop the only take.
+        while buckets.len() > 1 && buckets.last().is_some_and(|b| b.is_empty()) {
+            buckets.pop();
+        }
+        buckets
+    }
+
+    /// How many cycle passes this recording covered (1 if the transport never wrapped).
+    pub fn pass_count(&self) -> usize {
+        self.current_pass + 1
     }
 
     pub fn get_notes(&self) -> &[(Beats, u8, u8, Beats)] {
@@ -343,18 +388,28 @@ impl MidiRecordingState {
         self.completed_notes.len()
     }
 
+    /// The still-held notes, given a provisional duration running to `current_time`.
+    ///
+    /// These belong to whatever pass is in progress, so a per-pass view can append them as-is.
+    pub fn active_notes_with_provisional_end(&self, current_time: Beats) -> Vec<(Beats, u8, u8, Beats)> {
+        self.active_notes
+            .values()
+            .map(|active| {
+                let note_start = active.start_time.max(self.start_time);
+                (
+                    note_start - self.start_time,
+                    active.note,
+                    active.velocity,
+                    (current_time - note_start).max(Beats::ZERO),
+                )
+            })
+            .collect()
+    }
+
     /// Get all completed notes plus currently-held notes with a provisional duration.
     pub fn get_notes_with_active(&self, current_time: Beats) -> Vec<(Beats, u8, u8, Beats)> {
         let mut notes = self.completed_notes.clone();
-        for active in self.active_notes.values() {
-            let note_start = active.start_time.max(self.start_time);
-            notes.push((
-                note_start - self.start_time,
-                active.note,
-                active.velocity,
-                (current_time - note_start).max(Beats::ZERO),
-            ));
-        }
+        notes.extend(self.active_notes_with_provisional_end(current_time));
         notes
     }
 
@@ -366,13 +421,7 @@ impl MidiRecordingState {
         let active_notes: Vec<_> = self.active_notes.drain().collect();
 
         for (_note_num, active_note) in active_notes {
-            let note_start = active_note.start_time.max(self.start_time);
-            self.completed_notes.push((
-                note_start - self.start_time,
-                active_note.note,
-                active_note.velocity,
-                end_time - note_start,
-            ));
+            self.push_completed(&active_note, end_time);
         }
     }
 
@@ -392,7 +441,10 @@ impl MidiRecordingState {
             .map(|n| (n.note, n.velocity))
             .collect();
 
+        // Close first, so a note held across the boundary has its tail attributed to the pass that's
+        // ending; then advance, so the re-opened half belongs to the pass that's beginning.
         self.close_active_notes(region_end);
+        self.current_pass += 1;
 
         for (note, velocity) in held {
             self.note_on(note, velocity, region_start);
@@ -500,5 +552,106 @@ mod cycle_tests {
         let takes = rec(audio, 4, 0, 1).slice_takes().expect("cycle takes");
         assert_eq!(takes.len(), 2, "both passes filled the region");
         assert_eq!(takes[1], vec![5.0, 6.0, 7.0, 8.0]);
+    }
+}
+
+#[cfg(test)]
+mod midi_cycle_tests {
+    use super::*;
+
+    /// A MIDI recording anchored at the region start (beat 0), region 4 beats long.
+    fn rec() -> MidiRecordingState {
+        MidiRecordingState::new(0, 0, Beats(0.0))
+    }
+
+    /// One pass of the transport around a 4-beat region.
+    fn wrap(r: &mut MidiRecordingState) {
+        r.wrap_at_cycle(Beats(4.0), Beats(0.0));
+    }
+
+    #[test]
+    fn notes_are_bucketed_by_the_pass_they_were_played_in() {
+        let mut r = rec();
+        r.note_on(60, 100, Beats(1.0));
+        r.note_off(60, Beats(2.0)); // pass 0
+        wrap(&mut r);
+        r.note_on(62, 100, Beats(1.0));
+        r.note_off(62, Beats(2.0)); // pass 1
+        wrap(&mut r);
+        r.note_on(64, 100, Beats(1.0));
+        r.note_off(64, Beats(2.0)); // pass 2
+
+        assert_eq!(r.pass_count(), 3);
+        let by_pass = r.notes_by_pass(r.pass_count());
+        let pitches: Vec<Vec<u8>> = by_pass
+            .iter()
+            .map(|p| p.iter().map(|n| n.1).collect())
+            .collect();
+        assert_eq!(pitches, vec![vec![60], vec![62], vec![64]]);
+    }
+
+    #[test]
+    fn a_note_held_across_a_wrap_splits_between_the_two_passes() {
+        // The key is still down at the boundary: the sounding half belongs to the pass that's
+        // ending, and the re-opened half to the pass that's beginning. Getting the pass bump on the
+        // wrong side of close_active_notes would file the whole note under one pass.
+        let mut r = rec();
+        r.note_on(60, 100, Beats(3.0));
+        wrap(&mut r); // still held
+        r.note_off(60, Beats(1.0)); // released 1 beat into the next pass
+
+        assert_eq!(r.pass_count(), 2);
+        let by_pass = r.notes_by_pass(r.pass_count());
+        assert_eq!(by_pass[0].len(), 1, "the held half lands in the pass that ended");
+        assert_eq!(by_pass[1].len(), 1, "the re-opened half lands in the next pass");
+        // Pass 0's half runs from beat 3 to the region end at 4.
+        assert_eq!(by_pass[0][0].0, Beats(3.0));
+        assert_eq!(by_pass[0][0].3, Beats(1.0));
+        // Pass 1's half starts at the region start and runs to the release.
+        assert_eq!(by_pass[1][0].0, Beats(0.0));
+        assert_eq!(by_pass[1][0].3, Beats(1.0));
+    }
+
+    #[test]
+    fn a_silent_interior_pass_still_yields_an_empty_take() {
+        // Take N in the folder must be pass N on the transport, even if nothing was played — else
+        // the take numbering silently shifts under the user.
+        let mut r = rec();
+        r.note_on(60, 100, Beats(1.0));
+        r.note_off(60, Beats(2.0)); // pass 0
+        wrap(&mut r);
+        wrap(&mut r); // pass 1: played nothing
+        r.note_on(64, 100, Beats(1.0));
+        r.note_off(64, Beats(2.0)); // pass 2
+
+        let by_pass = r.notes_by_pass(r.pass_count());
+        assert_eq!(by_pass.len(), 3);
+        assert_eq!(by_pass[1].len(), 0, "the silent pass is still take 2");
+        assert_eq!(by_pass[2][0].1, 64);
+    }
+
+    #[test]
+    fn a_trailing_empty_pass_is_dropped() {
+        // Hitting stop shortly after a wrap leaves a pass you never played into. That's a stop
+        // artifact, not a take — unlike a silent pass in the middle, which was a deliberate rest.
+        let mut r = rec();
+        r.note_on(60, 100, Beats(1.0));
+        r.note_off(60, Beats(2.0)); // pass 0
+        wrap(&mut r);
+        r.note_on(62, 100, Beats(1.0));
+        r.note_off(62, Beats(2.0)); // pass 1
+        wrap(&mut r); // pass 2 begins... and the user hits stop
+
+        assert_eq!(r.pass_count(), 3);
+        let by_pass = r.notes_by_pass(r.pass_count());
+        assert_eq!(by_pass.len(), 2, "the empty trailing pass is not a take");
+    }
+
+    #[test]
+    fn an_empty_recording_still_yields_one_take() {
+        let mut r = rec();
+        wrap(&mut r);
+        wrap(&mut r);
+        assert_eq!(r.notes_by_pass(r.pass_count()).len(), 1);
     }
 }

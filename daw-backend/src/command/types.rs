@@ -133,6 +133,12 @@ pub enum Command {
     SetLoopRegion(Option<(Beats, Beats)>),
     /// Enable/disable wrapping at the cycle region's end.
     SetLoopEnabled(bool),
+    /// How a cycle MIDI recording treats its passes.
+    ///
+    /// `false` (default) = MERGE: every pass overdubs into one clip. `true` = SEPARATE TAKES: each
+    /// pass becomes its own MIDI clip, and the editor folds them into a take folder — the same shape
+    /// audio always gets.
+    SetCycleMidiSeparateTakes(bool),
 
     // Recording commands
     /// Start recording on a track (track_id, start_time)
@@ -313,6 +319,19 @@ pub enum AudioEvent {
     RecordingProgress(ClipId, Seconds),
     /// Recording stopped (clip_id, pool_index, waveform)
     RecordingStopped(ClipId, usize, Vec<WaveformPeak>),
+    /// A MIDI recording that wrapped the cycle region at least once, in SEPARATE TAKES mode.
+    ///
+    /// One MIDI clip per pass, in recording order. (Merge mode emits the ordinary
+    /// `MidiRecordingStopped` instead — all passes are already folded into the one clip.)
+    MidiCycleRecordingStopped {
+        track_id: TrackId,
+        /// One pool MIDI clip per pass. The first is the clip the recording started on.
+        clip_ids: Vec<MidiClipId>,
+        /// Where the takes sit on the timeline — the cycle region's start.
+        loop_start: Beats,
+        /// The region's length in beats: every take spans exactly this.
+        loop_len_beats: Beats,
+    },
     /// A recording that wrapped the cycle region at least once, and so became multi-take.
     ///
     /// Each take spans the full region and they're all the same length (partial passes are padded

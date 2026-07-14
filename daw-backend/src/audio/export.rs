@@ -211,6 +211,7 @@ pub fn render_to_memory(
             settings.sample_rate,
             settings.channels,
             false,
+            None, // export never runs with a recording in flight
         );
 
         // Calculate how many samples we actually need from this chunk
@@ -557,6 +558,7 @@ fn export_mp3<P: AsRef<Path>>(
             settings.sample_rate,
             settings.channels,
             false,
+            None, // export never runs with a recording in flight
         );
 
         // Calculate how many samples we need from this chunk
@@ -727,6 +729,7 @@ fn export_aac<P: AsRef<Path>>(
             settings.sample_rate,
             settings.channels,
             false,
+            None, // export never runs with a recording in flight
         );
 
         // Calculate how many samples we need from this chunk

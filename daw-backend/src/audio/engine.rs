@@ -41,6 +41,9 @@ pub struct Engine {
     /// Cycle-region sample bounds frozen for the duration of an **audio** recording.
     /// See `loop_bounds_samples` for why. `None` = derive live from the tempo map.
     loop_bounds_frozen: Option<(i64, i64)>,
+    /// How a cycle MIDI recording treats its passes: merge into one clip (default), or one clip per
+    /// pass for the editor to fold into a take folder.
+    cycle_midi_separate_takes: bool,
 
     // Lock-free communication
     command_rx: rtrb::Consumer<Command>,
@@ -167,6 +170,7 @@ impl Engine {
             loop_region: None,
             loop_enabled: false,
             loop_bounds_frozen: None,
+            cycle_midi_separate_takes: false,
             command_rx,
             midi_command_rx: None,
             event_tx,
@@ -494,6 +498,11 @@ impl Engine {
             self.project.reset_read_ahead_targets();
 
             // Render the entire project hierarchy into the mix buffer
+            // Silence everything else on the track being recorded into (see RenderContext).
+            let recording_midi = self
+                .midi_recording_state
+                .as_ref()
+                .map(|rec| (rec.track_id, rec.clip_id));
             self.project.render(
                 &mut self.mix_buffer,
                 &self.audio_pool,
@@ -503,6 +512,7 @@ impl Engine {
                 self.sample_rate,
                 self.channels,
                 false,
+                recording_midi,
             );
 
             // Copy mix to output
@@ -543,7 +553,7 @@ impl Engine {
                             rec.wrap_at_cycle(le_beats, ls_beats);
                         }
 
-                        // Overdub monitoring. In merge mode every pass layers onto the same clip, so
+                        // Overdub monitoring. In MERGE mode every pass layers onto the same clip, so
                         // the next pass has to PLAY BACK what was just laid down — otherwise you're
                         // overdubbing against silence, which defeats the point of merging (you can't
                         // put a hi-hat on a kick you can't hear).
@@ -551,7 +561,12 @@ impl Engine {
                         // The notes only reach the pool clip at stop otherwise, so fold what's been
                         // captured so far into it now, at the boundary. Disjoint field borrows:
                         // `midi_recording_state` read, `project` written.
-                        if let Some(rec) = self.midi_recording_state.as_ref() {
+                        //
+                        // Deliberately NOT done in separate-takes mode: there, each pass is an
+                        // alternative rather than a layer, so hearing the previous take play back
+                        // under you would just be confusing — you'd be playing along with the take
+                        // you're trying to replace.
+                        if let Some(rec) = self.midi_recording_state.as_ref().filter(|_| !self.cycle_midi_separate_takes) {
                             if let Some(clip) =
                                 self.project.midi_clip_pool.get_clip_mut(rec.clip_id)
                             {
@@ -633,7 +648,19 @@ impl Engine {
                     let duration = recording
                         .cycle_loop_len
                         .unwrap_or(current_time - recording.start_time);
-                    let notes = recording.get_notes_with_active(current_time);
+                    // In separate-takes mode the preview shows only the pass being played now — the
+                    // earlier passes are alternative takes, not layers, so drawing them all on top of
+                    // each other would misrepresent what's being recorded.
+                    let notes = if self.cycle_midi_separate_takes && recording.cycle_loop_len.is_some() {
+                        let mut current = recording
+                            .notes_by_pass(recording.pass_count())
+                            .pop()
+                            .unwrap_or_default();
+                        current.extend(recording.active_notes_with_provisional_end(current_time));
+                        current
+                    } else {
+                        recording.get_notes_with_active(current_time)
+                    };
                     let _ = self.event_tx.push(AudioEvent::MidiRecordingProgress(
                         recording.track_id,
                         recording.clip_id,
@@ -671,6 +698,7 @@ impl Engine {
                 self.sample_rate,
                 self.channels,
                 true, // live_only
+                None, // no clips are scheduled at all in live_only, so nothing to mute
             );
             output.copy_from_slice(&self.mix_buffer);
         }
@@ -954,6 +982,9 @@ impl Engine {
             }
             Command::SetLoopEnabled(enabled) => {
                 self.loop_enabled = enabled;
+            }
+            Command::SetCycleMidiSeparateTakes(separate) => {
+                self.cycle_midi_separate_takes = separate;
             }
             Command::Stop => {
                 self.playing = false;
@@ -3564,6 +3595,76 @@ impl Engine {
 
             let clip_id = recording.clip_id;
             let track_id = recording.track_id;
+
+            // ---- Separate takes: one pool clip per cycle pass ----
+            //
+            // Only when the transport actually wrapped; a recording that stopped inside the first
+            // pass is an ordinary single recording and falls through to the merge path below, just
+            // as it does for audio.
+            if let (true, Some(loop_len)) =
+                (self.cycle_midi_separate_takes, recording.cycle_loop_len)
+            {
+                let loop_start = recording.start_time; // a cycle recording is anchored at the region
+                let passes = recording.pass_count();
+                let buckets = recording.notes_by_pass(passes);
+                eprintln!(
+                    "[MIDI_RECORDING] Cycle recording (separate takes): {} passes",
+                    passes
+                );
+
+                let mut clip_ids: Vec<MidiClipId> = Vec::with_capacity(buckets.len());
+                for (i, bucket) in buckets.iter().enumerate() {
+                    // Pass 0 reuses the clip the recording started on; later passes get fresh ones.
+                    let take_clip_id = if i == 0 {
+                        clip_id
+                    } else {
+                        let id = self.next_midi_clip_id_atomic.fetch_add(1, Ordering::Relaxed);
+                        let clip = MidiClip::empty(id, loop_len, format!("Take {}", i + 1));
+                        self.project.midi_clip_pool.add_existing_clip(clip);
+                        id
+                    };
+
+                    if let Some(clip) = self.project.midi_clip_pool.get_clip_mut(take_clip_id) {
+                        clip.events.clear();
+                        clip.duration = loop_len;
+                        for (start, note, velocity, duration) in bucket {
+                            clip.events.push(MidiEvent::note_on(*start, 0, *note, *velocity));
+                            clip.events.push(MidiEvent::note_off(*start + *duration, 0, *note, 64));
+                        }
+                        clip.events
+                            .sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                    }
+                    clip_ids.push(take_clip_id);
+                }
+
+                // Point the track's instance at the take the editor will make active (the last one,
+                // GarageBand-style) and stretch it over the region.
+                if let Some(&last) = clip_ids.last() {
+                    if let Some(crate::audio::track::TrackNode::Midi(track)) =
+                        self.project.get_track_mut(track_id)
+                    {
+                        if let Some(instance) =
+                            track.clip_instances.iter_mut().find(|i| i.clip_id == clip_id)
+                        {
+                            instance.clip_id = last;
+                            instance.internal_start = Beats::ZERO;
+                            instance.internal_end = loop_len;
+                            instance.external_start = loop_start;
+                            instance.external_duration = loop_len;
+                        }
+                    }
+                }
+                self.refresh_clip_snapshot();
+
+                let _ = self.event_tx.push(AudioEvent::MidiCycleRecordingStopped {
+                    track_id,
+                    clip_ids,
+                    loop_start,
+                    loop_len_beats: loop_len,
+                });
+                return;
+            }
+
             let notes = recording.get_notes().to_vec();
             let note_count = notes.len();
             // A cycle MIDI recording is anchored at the region start and every pass overdubs into
@@ -3696,6 +3797,12 @@ impl EngineController {
     /// Enable/disable wrapping at the end of the cycle region.
     pub fn set_loop_enabled(&mut self, enabled: bool) {
         let _ = self.command_tx.push(Command::SetLoopEnabled(enabled));
+    }
+
+    /// How a cycle MIDI recording treats its passes: merge into one clip (false, the default), or
+    /// one clip per pass (true) for the editor to fold into a take folder.
+    pub fn set_cycle_midi_separate_takes(&mut self, separate: bool) {
+        let _ = self.command_tx.push(Command::SetCycleMidiSeparateTakes(separate));
     }
 
     /// Stop playback and reset to beginning

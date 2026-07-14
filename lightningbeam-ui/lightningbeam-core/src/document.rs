@@ -932,6 +932,46 @@ impl Document {
         self.get_clip_duration(clip_id).map(crate::clip::ClipDuration::Seconds)
     }
 
+    /// Find an existing take folder on `layer_id` that a new cycle recording should be appended to.
+    ///
+    /// Cycle-recording over a region that already holds a take folder should ADD to that folder
+    /// rather than drop a second clip on top of it — otherwise the new takes are stranded in a
+    /// separate, overlapping clip and can't be auditioned against the ones already there.
+    ///
+    /// "The same region" means the instance starts at `loop_start` and its folder was recorded
+    /// against the same loop length. Matching the length too means resizing the cycle region starts
+    /// a fresh folder rather than appending takes of a different length to an existing one, which
+    /// would break the uniform-take invariant comping depends on.
+    ///
+    /// `exclude` is the in-progress recording's own instance, which is on the layer but isn't a
+    /// candidate. Returns (instance id, clip id).
+    pub fn take_folder_at(
+        &self,
+        layer_id: &Uuid,
+        loop_start: Beats,
+        loop_len: Beats,
+        exclude: &Uuid,
+    ) -> Option<(Uuid, Uuid)> {
+        let Some(AnyLayer::Audio(audio_layer)) = self.get_layer(layer_id) else {
+            return None;
+        };
+        const EPS: f64 = 1e-6;
+        audio_layer.clip_instances.iter().find_map(|ci| {
+            if ci.id == *exclude || (ci.timeline_start - loop_start).beats_to_f64().abs() > EPS {
+                return None;
+            }
+            let clip = self.audio_clips.get(&ci.clip_id)?;
+            match clip.clip_type {
+                crate::clip::AudioClipType::TakeFolder { recorded_loop_beats, .. }
+                    if (recorded_loop_beats - loop_len).beats_to_f64().abs() < EPS =>
+                {
+                    Some((ci.id, ci.clip_id))
+                }
+                _ => None,
+            }
+        })
+    }
+
     /// Resolve a [`ContentTime`] (a trim bound) against the clip it belongs to.
     ///
     /// The clip is the only thing that knows whether its content is measured in seconds or beats, so

@@ -465,7 +465,9 @@ impl PianoRollPane {
             if let Some(AnyLayer::Audio(audio_layer)) = document.get_layer(&layer_id) {
                 for instance in &audio_layer.clip_instances {
                     if let Some(clip) = document.audio_clips.get(&instance.clip_id) {
-                        if let AudioClipType::Midi { midi_clip_id } = clip.clip_type {
+                        // Resolve through the instance's active take, so a MIDI take folder edits
+                        // whichever take it's actually playing.
+                        if let Some(midi_clip_id) = clip.resolved_midi_clip_id(instance.active_take) {
                             let duration = instance.effective_duration(clip.content_duration(), document.tempo_map());
                             // A MIDI clip's content time IS beats, which is what the piano roll's
                             // x-axis uses.
