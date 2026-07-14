@@ -54,6 +54,27 @@ jobs:
         with:
           targets: ${{ matrix.target != '' && matrix.target || '' }}
 
+      # A [patch.crates-io] whose version doesn't satisfy the dependency requirement is silently
+      # IGNORED by cargo: it warns "patch ... was not used in the crate graph" and builds against the
+      # real crates.io crate instead. That's how a stale egui fork got us a `cannot find type
+      # CursorImage` error four minutes into the build, in a file that had nothing to do with the
+      # cause. Fail here instead, with the actual reason.
+      - name: Verify egui fork patch applies
+        shell: bash
+        working-directory: ./lightningbeam-ui
+        run: |
+          unused=$(cargo metadata --format-version 1 2>&1 >/dev/null | grep "was not used in the crate graph" || true)
+          if [ -n "$unused" ]; then
+            echo "::error::The egui fork's [patch.crates-io] entries are being ignored — cargo is building against stock crates.io egui, not the fork."
+            echo "$unused"
+            echo ""
+            echo "The fork's version must SATISFY the requirement in lightningbeam-ui/Cargo.toml."
+            echo "Fork workspace version: $(grep -m1 '^version' ../egui-fork/Cargo.toml)"
+            echo "Required by us:         $(grep -m1 '^eframe' Cargo.toml)"
+            exit 1
+          fi
+          echo "egui fork patch applies cleanly."
+
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
