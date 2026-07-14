@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use eframe::egui;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, TabletButtonAction};
 use crate::keymap::{self, AppAction, KeymapManager};
 use crate::menu::{MenuSystem, Shortcut, ShortcutKey};
 use crate::theme::{Theme, ThemeMode};
@@ -61,6 +61,8 @@ struct PreferencesState {
     waveform_stereo: bool,
     theme_mode: ThemeMode,
     large_media_default: LargeMediaMode,
+    tablet_button_lower: TabletButtonAction,
+    tablet_button_upper: TabletButtonAction,
 }
 
 impl From<(&AppConfig, &Theme)> for PreferencesState {
@@ -78,6 +80,8 @@ impl From<(&AppConfig, &Theme)> for PreferencesState {
             waveform_stereo: config.waveform_stereo,
             theme_mode: theme.mode(),
             large_media_default: config.large_media_default,
+            tablet_button_lower: config.tablet_button_lower,
+            tablet_button_upper: config.tablet_button_upper,
         }
     }
 }
@@ -97,6 +101,8 @@ impl Default for PreferencesState {
             waveform_stereo: false,
             theme_mode: ThemeMode::System,
             large_media_default: LargeMediaMode::default(),
+            tablet_button_lower: TabletButtonAction::Pan,
+            tablet_button_upper: TabletButtonAction::Eyedropper,
         }
     }
 }
@@ -238,6 +244,8 @@ impl PreferencesDialog {
                     self.render_appearance_section(ui);
                     ui.add_space(8.0);
                     self.render_startup_section(ui);
+                    ui.add_space(8.0);
+                    self.render_tablet_section(ui);
                     ui.add_space(8.0);
                     self.render_advanced_section(ui);
                 });
@@ -591,6 +599,41 @@ impl PreferencesDialog {
             });
     }
 
+    fn render_tablet_section(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Tablet")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label("What each barrel button on the stylus does while held:");
+                ui.add_space(4.0);
+
+                let button_row = |ui: &mut egui::Ui, label: &str, id: &str, value: &mut TabletButtonAction| {
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        egui::ComboBox::from_id_salt(id)
+                            .selected_text(value.label())
+                            .show_ui(ui, |ui| {
+                                for action in TabletButtonAction::ALL {
+                                    ui.selectable_value(value, action, action.label());
+                                }
+                            });
+                    });
+                };
+
+                button_row(
+                    ui,
+                    "Lower button:",
+                    "tablet_button_lower",
+                    &mut self.working_prefs.tablet_button_lower,
+                );
+                button_row(
+                    ui,
+                    "Upper button:",
+                    "tablet_button_upper",
+                    &mut self.working_prefs.tablet_button_upper,
+                );
+            });
+    }
+
     fn render_advanced_section(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Advanced")
             .default_open(false)
@@ -646,6 +689,8 @@ impl PreferencesDialog {
         temp_config.debug = self.working_prefs.debug;
         temp_config.waveform_stereo = self.working_prefs.waveform_stereo;
         temp_config.theme_mode = self.working_prefs.theme_mode.to_string_lower();
+        temp_config.tablet_button_lower = self.working_prefs.tablet_button_lower;
+        temp_config.tablet_button_upper = self.working_prefs.tablet_button_upper;
 
         // Validate
         if let Err(err) = temp_config.validate() {
@@ -681,10 +726,16 @@ impl PreferencesDialog {
         config.waveform_stereo = self.working_prefs.waveform_stereo;
         config.theme_mode = self.working_prefs.theme_mode.to_string_lower();
         config.large_media_default = self.working_prefs.large_media_default;
+        config.tablet_button_lower = self.working_prefs.tablet_button_lower;
+        config.tablet_button_upper = self.working_prefs.tablet_button_upper;
         config.keybindings = keybinding_config;
 
         // Apply theme immediately
         theme.set_mode(self.working_prefs.theme_mode);
+        crate::tablet::set_button_actions(
+            self.working_prefs.tablet_button_lower,
+            self.working_prefs.tablet_button_upper,
+        );
 
         // Save to disk
         config.save();

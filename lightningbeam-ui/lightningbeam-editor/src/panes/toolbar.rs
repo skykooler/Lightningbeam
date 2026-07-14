@@ -29,10 +29,48 @@ impl PaneRenderer for ToolbarPane {
         path: &NodePath,
         shared: &mut SharedPaneState,
     ) {
-        let button_size = 60.0;
-        let button_padding = 8.0;
-        let button_spacing = 4.0;
+        // `ui` spans the whole window, not this pane — bind a child Ui to the pane's content rect
+        // first, or the ScrollArea would start at the window's top (under the pane header) and
+        // size itself against the window's height (so it would never need to scroll).
+        // Salt by path: widget ids inside are auto-generated from the Ui's id, so two toolbar
+        // panes would otherwise fight over the same ids.
+        let mut content_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(("toolbar", path))
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
 
+        egui::ScrollArea::vertical()
+            .id_salt(("toolbar_scroll", path))
+            .auto_shrink([false; 2])
+            .show(&mut content_ui, |ui| {
+                self.render_toolbar(ui, path, shared);
+            });
+    }
+
+    fn name(&self) -> &str {
+        "Toolbar"
+    }
+}
+
+const BUTTON_SIZE: f32 = 60.0;
+const BUTTON_PADDING: f32 = 8.0;
+const BUTTON_SPACING: f32 = 4.0;
+const COLOR_BUTTON_SIZE: f32 = 50.0;
+const COLOR_LABEL_WIDTH: f32 = 40.0;
+
+impl ToolbarPane {
+    /// Laid out with real egui widgets (`horizontal_wrapped` for the tool grid) rather than
+    /// absolute rect math, so the ScrollArea above can measure the content and scroll it when the
+    /// pane is too short. Buttons are still painted by hand — `allocate_exact_size` reserves the
+    /// space and gives us the Response, and we draw into the rect egui hands back.
+    fn render_toolbar(
+        &mut self,
+        ui: &mut egui::Ui,
+        path: &NodePath,
+        shared: &mut SharedPaneState,
+    ) {
         // Determine which tools to show based on the active layer type
         let active_layer_type: Option<LayerType> = shared.active_layer_id
             .and_then(|id| shared.action_executor.document().get_layer(&id))
@@ -52,320 +90,273 @@ impl PaneRenderer for ToolbarPane {
             *shared.selected_tool = Tool::Select;
         }
 
-        // Calculate how many columns we can fit
-        let available_width = rect.width() - (button_padding * 2.0);
-        let columns =
-            ((available_width + button_spacing) / (button_size + button_spacing)).floor() as usize;
-        let columns = columns.max(1); // At least 1 column
-        let total_tools = tools.len();
-        let total_rows = (total_tools + columns - 1) / columns;
-
-        let mut y = rect.top() + button_padding;
-
-        // Process tools row by row for centered layout
-        for row in 0..total_rows {
-            let start_idx = row * columns;
-            let end_idx = (start_idx + columns).min(total_tools);
-            let buttons_in_row = end_idx - start_idx;
-
-            // Calculate the total width of buttons in this row
-            let row_width = (buttons_in_row as f32 * button_size)
-                          + ((buttons_in_row.saturating_sub(1)) as f32 * button_spacing);
-
-            // Center the row
-            let mut x = rect.left() + (rect.width() - row_width) / 2.0;
-
-            for tool_idx in start_idx..end_idx {
-                let tool = &tools[tool_idx];
-            let button_rect =
-                egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(button_size, button_size));
-
-            // Check if this is the selected tool
-            let is_selected = *shared.selected_tool == *tool;
-
-            // Button background
-            let bg_color = if is_selected {
-                shared.theme.bg_color(&["#toolbar", ".tool-button", ".selected"], ui.ctx(), egui::Color32::from_rgb(70, 100, 150))
-            } else {
-                shared.theme.bg_color(&["#toolbar", ".tool-button"], ui.ctx(), egui::Color32::from_rgb(50, 50, 50))
-            };
-            ui.painter().rect_filled(button_rect, 4.0, bg_color);
-
-            // Load and render tool icon
-            if let Some(icon) = shared.tool_icon_cache.get_or_load(*tool, ui.ctx()) {
-                let icon_rect = button_rect.shrink(8.0); // Padding inside button
-                ui.painter().image(
-                    icon.id(),
-                    icon_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
-            }
-
-            // Draw sub-tool arrow indicator for tools with modes
-            let has_sub_tools = matches!(tool, Tool::RegionSelect | Tool::SelectLasso);
-            if has_sub_tools {
-                let arrow_size = 6.0;
-                let margin = 4.0;
-                let corner = button_rect.right_bottom() - egui::vec2(margin, margin);
-                let tri = [
-                    corner,
-                    corner - egui::vec2(arrow_size, 0.0),
-                    corner - egui::vec2(0.0, arrow_size),
-                ];
-                ui.painter().add(egui::Shape::convex_polygon(
-                    tri.to_vec(),
-                    shared.theme.text_color(&["#toolbar", ".tool-button"], ui.ctx(), egui::Color32::from_gray(200)),
-                    egui::Stroke::NONE,
-                ));
-            }
-
-            // Make button interactive (include path to ensure unique IDs across panes)
-            let button_id = ui.id().with(("tool_button", path, *tool as usize));
-            let response = ui.interact(button_rect, button_id, egui::Sense::click());
-
-            // Check for click first
-            if response.clicked() {
-                *shared.selected_tool = *tool;
-                // Preset-backed tools: auto-select the matching bundled brush.
-                let preset_name = match tool {
-                    Tool::Pencil   => Some("Pencil"),
-                    Tool::Pen      => Some("Pen"),
-                    Tool::Airbrush => Some("Airbrush"),
-                    _ => None,
-                };
-                if let Some(name) = preset_name {
-                    if let Some(preset) = bundled_brushes().iter().find(|p| p.name == name) {
-                        let s = &preset.settings;
-                        shared.raster_settings.brush_opacity  = s.opaque.clamp(0.0, 1.0);
-                        shared.raster_settings.brush_hardness = s.hardness.clamp(0.0, 1.0);
-                        shared.raster_settings.brush_spacing  = s.dabs_per_radius;
-                        shared.raster_settings.active_brush_settings = s.clone();
-                    }
-                }
-            }
-
-            // Right-click context menu for tools with sub-options
-            if has_sub_tools {
-                response.context_menu(|ui| {
-                    match tool {
-                        Tool::RegionSelect => {
-                            ui.set_min_width(120.0);
-                            if ui.selectable_label(
-                                *shared.region_select_mode == RegionSelectMode::Rectangle,
-                                "Rectangle",
-                            ).clicked() {
-                                *shared.region_select_mode = RegionSelectMode::Rectangle;
-                                *shared.selected_tool = Tool::RegionSelect;
-                                ui.close();
-                            }
-                            if ui.selectable_label(
-                                *shared.region_select_mode == RegionSelectMode::Lasso,
-                                "Lasso",
-                            ).clicked() {
-                                *shared.region_select_mode = RegionSelectMode::Lasso;
-                                *shared.selected_tool = Tool::RegionSelect;
-                                ui.close();
-                            }
-                        }
-                        Tool::SelectLasso => {
-                            ui.set_min_width(130.0);
-                            if ui.selectable_label(
-                                *shared.lasso_mode == LassoMode::Freehand,
-                                "Freehand",
-                            ).clicked() {
-                                *shared.lasso_mode = LassoMode::Freehand;
-                                *shared.selected_tool = Tool::SelectLasso;
-                                ui.close();
-                            }
-                            if ui.selectable_label(
-                                *shared.lasso_mode == LassoMode::Polygonal,
-                                "Polygonal",
-                            ).clicked() {
-                                *shared.lasso_mode = LassoMode::Polygonal;
-                                *shared.selected_tool = Tool::SelectLasso;
-                                ui.close();
-                            }
-                            if ui.selectable_label(
-                                *shared.lasso_mode == LassoMode::Magnetic,
-                                "Magnetic",
-                            ).clicked() {
-                                *shared.lasso_mode = LassoMode::Magnetic;
-                                *shared.selected_tool = Tool::SelectLasso;
-                                ui.close();
-                            }
-                        }
-                        _ => {}
-                    }
-                });
-            }
-
-            if response.hovered() {
-                ui.painter().rect_stroke(
-                    button_rect,
-                    4.0,
-                    egui::Stroke::new(2.0, shared.theme.border_color(&["#toolbar", ".tool-button", ".hover"], ui.ctx(), egui::Color32::from_gray(180))),
-                    egui::StrokeKind::Middle,
-                );
-            }
-
-            // Show tooltip with tool name and shortcut (consumes response).
-            // Hint text is pulled from the live keymap so it reflects user remappings.
-            let hint = tool_app_action(*tool)
-                .and_then(|action| shared.keymap.get(action))
-                .map(|s| format!(" ({})", s.hint_text()))
-                .unwrap_or_default();
-            let tooltip = if *tool == Tool::RegionSelect {
-                let mode = match *shared.region_select_mode {
-                    RegionSelectMode::Rectangle => "Rectangle",
-                    RegionSelectMode::Lasso => "Lasso",
-                };
-                format!("{} - {}{}\nRight-click for options", tool.display_name(), mode, hint)
-            } else if *tool == Tool::SelectLasso {
-                let mode = match *shared.lasso_mode {
-                    LassoMode::Freehand  => "Freehand",
-                    LassoMode::Polygonal => "Polygonal",
-                    LassoMode::Magnetic  => "Magnetic",
-                };
-                format!("{} - {}{}\nRight-click for options", tool.display_name(), mode, hint)
-            } else {
-                format!("{}{}", tool.display_name(), hint)
-            };
-            response.on_hover_text(tooltip);
-
-            // Draw selection border
-            if is_selected {
-                ui.painter().rect_stroke(
-                    button_rect,
-                    4.0,
-                    egui::Stroke::new(2.0, shared.theme.border_color(&["#toolbar", ".tool-button", ".selected"], ui.ctx(), egui::Color32::from_rgb(100, 150, 255))),
-                    egui::StrokeKind::Middle,
-                );
-            }
-
-                // Move to next column in this row
-                x += button_size + button_spacing;
-            }
-
-            // Move to next row
-            y += button_size + button_spacing;
-        }
-
         let is_raster = matches!(active_layer_type, Some(LayerType::Raster));
         let show_colors = matches!(active_layer_type, None | Some(LayerType::Vector) | Some(LayerType::Raster));
 
-        // Add color pickers below the tool buttons
-        if show_colors {
-        y += button_spacing * 2.0; // Extra spacing
+        ui.spacing_mut().item_spacing = egui::vec2(BUTTON_SPACING, BUTTON_SPACING);
+        ui.add_space(BUTTON_PADDING);
 
-        let fill_label_width = 40.0;
-        let color_button_size = 50.0;
-        let color_row_width = fill_label_width + color_button_size + button_spacing;
-        let color_x = rect.left() + (rect.width() - color_row_width) / 2.0;
+        // Centre the grid as a block. Work out how many columns fit, then lay the buttons out in
+        // a band of exactly that width, positioned to centre it. The band has to be an explicit
+        // max_rect on the child Ui — a `horizontal_wrapped` nested inside a `horizontal` inherits
+        // the parent's available width and wraps against that, not against the width we set.
+        let full_width = ui.available_width();
+        let avail = full_width - BUTTON_PADDING * 2.0;
+        let columns = (((avail + BUTTON_SPACING) / (BUTTON_SIZE + BUTTON_SPACING)).floor() as usize)
+            .max(1)
+            .min(tools.len().max(1));
+        let grid_width =
+            columns as f32 * BUTTON_SIZE + (columns.saturating_sub(1)) as f32 * BUTTON_SPACING;
+        let indent = ((full_width - grid_width) / 2.0).max(0.0);
+        let rows = (tools.len() + columns - 1) / columns;
 
-        // Two color swatches:
+        let cursor = ui.cursor().min;
+        let band = egui::Rect::from_min_size(
+            egui::pos2(cursor.x + indent, cursor.y),
+            egui::vec2(grid_width, rows as f32 * (BUTTON_SIZE + BUTTON_SPACING)),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new().max_rect(band).layout(
+                egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
+            ),
+            |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(BUTTON_SPACING, BUTTON_SPACING);
+                for tool in tools.iter() {
+                    self.render_tool_button(ui, tool, shared);
+                }
+            },
+        );
+
+        // Colour swatches below the tools.
         // Stroke/FG always on top, Fill/BG always on bottom.
         // Raster layers label them "FG" / "BG"; vector layers label them "Stroke" / "Fill".
-        {
-            let stroke_label = if is_raster { "FG" } else { "Stroke" };
-            let label_color = shared.theme.text_color(&["#toolbar", ".text-secondary"], ui.ctx(), egui::Color32::from_gray(200));
-            ui.painter().text(
-                egui::pos2(color_x + fill_label_width / 2.0, y + color_button_size / 2.0),
-                egui::Align2::CENTER_CENTER,
-                stroke_label,
-                egui::FontId::proportional(14.0),
-                label_color,
-            );
+        if show_colors {
+            ui.add_space(BUTTON_SPACING * 2.0);
 
-            let stroke_button_rect = egui::Rect::from_min_size(
-                egui::pos2(color_x + fill_label_width + button_spacing, y),
-                egui::vec2(color_button_size, color_button_size),
-            );
-            let stroke_button_id = ui.id().with(("stroke_color_button", path));
-            let stroke_response = ui.interact(stroke_button_rect, stroke_button_id, egui::Sense::click());
-            draw_color_button(ui, stroke_button_rect, *shared.stroke_color);
-            egui::containers::Popup::from_toggle_button_response(&stroke_response)
-                .show(|ui| {
-                    ui.spacing_mut().slider_width = 275.0;
-                    let changed = egui::color_picker::color_picker_color32(ui, shared.stroke_color, egui::color_picker::Alpha::OnlyBlend);
-                    if changed {
-                        *shared.active_color_mode = super::ColorMode::Stroke;
-                    }
+            let row_width = COLOR_LABEL_WIDTH + COLOR_BUTTON_SIZE + BUTTON_SPACING;
+            let color_indent = ((ui.available_width() - row_width) / 2.0).max(0.0);
+
+            for (label, is_stroke) in [
+                (if is_raster { "FG" } else { "Stroke" }, true),
+                (if is_raster { "BG" } else { "Fill" }, false),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.add_space(color_indent);
+
+                    let (label_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(COLOR_LABEL_WIDTH, COLOR_BUTTON_SIZE),
+                        egui::Sense::hover(),
+                    );
+                    let label_color = shared.theme.text_color(
+                        &["#toolbar", ".text-secondary"],
+                        ui.ctx(),
+                        egui::Color32::from_gray(200),
+                    );
+                    ui.painter().text(
+                        label_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(14.0),
+                        label_color,
+                    );
+
+                    let (swatch_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(COLOR_BUTTON_SIZE, COLOR_BUTTON_SIZE),
+                        egui::Sense::hover(),
+                    );
+                    let (id_key, color) = if is_stroke {
+                        ("stroke_color_button", &mut *shared.stroke_color)
+                    } else {
+                        ("fill_color_button", &mut *shared.fill_color)
+                    };
+                    let button_id = ui.id().with((id_key, path));
+                    crate::widgets::color_swatch::color_swatch(ui, button_id, swatch_rect, color);
                 });
-
-            y += color_button_size + button_spacing;
+            }
         }
 
-        // Fill/BG color swatch
-        {
-            let fill_label = if is_raster { "BG" } else { "Fill" };
-            let label_color = shared.theme.text_color(&["#toolbar", ".text-secondary"], ui.ctx(), egui::Color32::from_gray(200));
+        ui.add_space(BUTTON_PADDING);
+    }
+
+    fn render_tool_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        tool: &Tool,
+        shared: &mut SharedPaneState,
+    ) {
+        let (button_rect, response) = ui.allocate_exact_size(
+            egui::vec2(BUTTON_SIZE, BUTTON_SIZE),
+            egui::Sense::click(),
+        );
+
+        let is_selected = *shared.selected_tool == *tool;
+
+        // Button background
+        let bg_color = if is_selected {
+            shared.theme.bg_color(&["#toolbar", ".tool-button", ".selected"], ui.ctx(), egui::Color32::from_rgb(70, 100, 150))
+        } else {
+            shared.theme.bg_color(&["#toolbar", ".tool-button"], ui.ctx(), egui::Color32::from_rgb(50, 50, 50))
+        };
+        ui.painter().rect_filled(button_rect, 4.0, bg_color);
+
+        // Tool icon: tools without a bundled SVG fall back to a Lucide glyph rather than the
+        // shared TODO placeholder.
+        if let Some(glyph) = crate::mobile::icons::tool_glyph(*tool) {
             ui.painter().text(
-                egui::pos2(color_x + fill_label_width / 2.0, y + color_button_size / 2.0),
+                button_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                fill_label,
-                egui::FontId::proportional(14.0),
-                label_color,
-            );
-
-            let fill_button_rect = egui::Rect::from_min_size(
-                egui::pos2(color_x + fill_label_width + button_spacing, y),
-                egui::vec2(color_button_size, color_button_size),
-            );
-            let fill_button_id = ui.id().with(("fill_color_button", path));
-            let fill_response = ui.interact(fill_button_rect, fill_button_id, egui::Sense::click());
-            draw_color_button(ui, fill_button_rect, *shared.fill_color);
-            egui::containers::Popup::from_toggle_button_response(&fill_response)
-                .show(|ui| {
-                    ui.spacing_mut().slider_width = 275.0;
-                    let changed = egui::color_picker::color_picker_color32(ui, shared.fill_color, egui::color_picker::Alpha::OnlyBlend);
-                    if changed {
-                        *shared.active_color_mode = super::ColorMode::Fill;
-                    }
-                });
-        }
-        } // end color pickers
-    }
-
-    fn name(&self) -> &str {
-        "Toolbar"
-    }
-}
-
-/// Draw a color button with checkerboard background for alpha channel
-fn draw_color_button(ui: &mut egui::Ui, rect: egui::Rect, color: egui::Color32) {
-    // Draw checkerboard background
-    let checker_size = 5.0;
-    let cols = (rect.width() / checker_size).ceil() as usize;
-    let rows = (rect.height() / checker_size).ceil() as usize;
-
-    for row in 0..rows {
-        for col in 0..cols {
-            let is_light = (row + col) % 2 == 0;
-            let checker_color = if is_light {
-                egui::Color32::from_gray(180)
-            } else {
-                egui::Color32::from_gray(120)
-            };
-            let checker_rect = egui::Rect::from_min_size(
-                egui::pos2(
-                    rect.min.x + col as f32 * checker_size,
-                    rect.min.y + row as f32 * checker_size,
+                glyph,
+                crate::mobile::icons::font(26.0),
+                shared.theme.text_color(
+                    &["#toolbar", ".tool-button"],
+                    ui.ctx(),
+                    egui::Color32::from_gray(220),
                 ),
-                egui::vec2(checker_size, checker_size),
-            ).intersect(rect);
-            ui.painter().rect_filled(checker_rect, 0.0, checker_color);
+            );
+        } else if let Some(icon) = shared.tool_icon_cache.get_or_load(*tool, ui.ctx()) {
+            let icon_rect = button_rect.shrink(8.0); // Padding inside button
+            ui.painter().image(
+                icon.id(),
+                icon_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
         }
+
+        // Draw sub-tool arrow indicator for tools with modes
+        let has_sub_tools = matches!(tool, Tool::RegionSelect | Tool::SelectLasso);
+        if has_sub_tools {
+            let arrow_size = 6.0;
+            let margin = 4.0;
+            let corner = button_rect.right_bottom() - egui::vec2(margin, margin);
+            let tri = [
+                corner,
+                corner - egui::vec2(arrow_size, 0.0),
+                corner - egui::vec2(0.0, arrow_size),
+            ];
+            ui.painter().add(egui::Shape::convex_polygon(
+                tri.to_vec(),
+                shared.theme.text_color(&["#toolbar", ".tool-button"], ui.ctx(), egui::Color32::from_gray(200)),
+                egui::Stroke::NONE,
+            ));
+        }
+
+        if response.clicked() {
+            *shared.selected_tool = *tool;
+            // Preset-backed tools: auto-select the matching bundled brush.
+            let preset_name = match tool {
+                Tool::Pencil   => Some("Pencil"),
+                Tool::Pen      => Some("Pen"),
+                Tool::Airbrush => Some("Airbrush"),
+                _ => None,
+            };
+            if let Some(name) = preset_name {
+                if let Some(idx) = bundled_brushes().iter().position(|p| p.name == name) {
+                    let settings = bundled_brushes()[idx].settings.clone();
+                    shared
+                        .raster_settings
+                        .brush_mut(crate::tools::BrushKind::Paint)
+                        .apply_preset(idx, &settings);
+                }
+            }
+        }
+
+        // Right-click context menu for tools with sub-options
+        if has_sub_tools {
+            response.context_menu(|ui| {
+                match tool {
+                    Tool::RegionSelect => {
+                        ui.set_min_width(120.0);
+                        if ui.selectable_label(
+                            *shared.region_select_mode == RegionSelectMode::Rectangle,
+                            "Rectangle",
+                        ).clicked() {
+                            *shared.region_select_mode = RegionSelectMode::Rectangle;
+                            *shared.selected_tool = Tool::RegionSelect;
+                            ui.close();
+                        }
+                        if ui.selectable_label(
+                            *shared.region_select_mode == RegionSelectMode::Lasso,
+                            "Lasso",
+                        ).clicked() {
+                            *shared.region_select_mode = RegionSelectMode::Lasso;
+                            *shared.selected_tool = Tool::RegionSelect;
+                            ui.close();
+                        }
+                    }
+                    Tool::SelectLasso => {
+                        ui.set_min_width(130.0);
+                        if ui.selectable_label(
+                            *shared.lasso_mode == LassoMode::Freehand,
+                            "Freehand",
+                        ).clicked() {
+                            *shared.lasso_mode = LassoMode::Freehand;
+                            *shared.selected_tool = Tool::SelectLasso;
+                            ui.close();
+                        }
+                        if ui.selectable_label(
+                            *shared.lasso_mode == LassoMode::Polygonal,
+                            "Polygonal",
+                        ).clicked() {
+                            *shared.lasso_mode = LassoMode::Polygonal;
+                            *shared.selected_tool = Tool::SelectLasso;
+                            ui.close();
+                        }
+                        if ui.selectable_label(
+                            *shared.lasso_mode == LassoMode::Magnetic,
+                            "Magnetic",
+                        ).clicked() {
+                            *shared.lasso_mode = LassoMode::Magnetic;
+                            *shared.selected_tool = Tool::SelectLasso;
+                            ui.close();
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }
+
+        if response.hovered() {
+            ui.painter().rect_stroke(
+                button_rect,
+                4.0,
+                egui::Stroke::new(2.0, shared.theme.border_color(&["#toolbar", ".tool-button", ".hover"], ui.ctx(), egui::Color32::from_gray(180))),
+                egui::StrokeKind::Middle,
+            );
+        }
+
+        // Draw selection border
+        if is_selected {
+            ui.painter().rect_stroke(
+                button_rect,
+                4.0,
+                egui::Stroke::new(2.0, shared.theme.border_color(&["#toolbar", ".tool-button", ".selected"], ui.ctx(), egui::Color32::from_rgb(100, 150, 255))),
+                egui::StrokeKind::Middle,
+            );
+        }
+
+        // Show tooltip with tool name and shortcut (consumes response).
+        // Hint text is pulled from the live keymap so it reflects user remappings.
+        let hint = tool_app_action(*tool)
+            .and_then(|action| shared.keymap.get(action))
+            .map(|s| format!(" ({})", s.hint_text()))
+            .unwrap_or_default();
+        let tooltip = if *tool == Tool::RegionSelect {
+            let mode = match *shared.region_select_mode {
+                RegionSelectMode::Rectangle => "Rectangle",
+                RegionSelectMode::Lasso => "Lasso",
+            };
+            format!("{} - {}{}\nRight-click for options", tool.display_name(), mode, hint)
+        } else if *tool == Tool::SelectLasso {
+            let mode = match *shared.lasso_mode {
+                LassoMode::Freehand  => "Freehand",
+                LassoMode::Polygonal => "Polygonal",
+                LassoMode::Magnetic  => "Magnetic",
+            };
+            format!("{} - {}{}\nRight-click for options", tool.display_name(), mode, hint)
+        } else {
+            format!("{}{}", tool.display_name(), hint)
+        };
+        response.on_hover_text(tooltip);
     }
-
-    // Draw color on top
-    ui.painter().rect_filled(rect, 2.0, color);
-
-    // Draw border
-    ui.painter().rect_stroke(
-        rect,
-        2.0,
-        egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
-        egui::StrokeKind::Middle,
-    );
 }

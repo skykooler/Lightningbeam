@@ -10,7 +10,34 @@ use eframe::egui;
 use daw_backend::{Beats, Seconds};
 use lightningbeam_core::clip::ClipInstance;
 use lightningbeam_core::layer::{AnyLayer, AudioLayerType, GroupLayer, LayerTrait};
+use crate::mobile::icons;
 use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
+
+/// A layer-row toggle button drawn as a Lucide glyph.
+fn icon_button(glyph: &str) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(glyph).font(icons::font(13.0)))
+}
+
+/// Label a layer-row slider with a Lucide glyph just to its left — the sliders are unlabelled
+/// otherwise, and volume vs. opacity are indistinguishable on layers that have both.
+fn draw_slider_icon(
+    ui: &egui::Ui,
+    theme: &crate::theme::Theme,
+    slider_rect: egui::Rect,
+    glyph: &str,
+) {
+    ui.painter().text(
+        egui::pos2(slider_rect.min.x - 5.0, slider_rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        glyph,
+        icons::font(12.0),
+        theme.text_color(
+            &["#timeline", ".slider-icon"],
+            ui.ctx(),
+            egui::Color32::from_gray(140),
+        ),
+    );
+}
 
 const RULER_HEIGHT: f32 = 30.0;
 const LAYER_HEIGHT: f32 = 60.0;
@@ -2363,32 +2390,53 @@ impl TimelinePane {
 
             let Some(layer_for_controls) = any_layer_for_controls else { continue; };
 
-            // Layer controls: volume slider top-right, buttons below it
+            // Layer controls, right-aligned in three stacked tiers: volume, opacity, buttons.
+            // A layer only shows the sliders that mean something for it (a raster layer has no
+            // volume; an audio layer has no opacity), but the buttons sit at a fixed offset so
+            // they line up across rows regardless of which sliders are present.
             let controls_right = header_rect.max.x - 8.0;
             let button_size = egui::vec2(20.0, 20.0);
             let slider_width = 60.0;
+            let slider_height = 14.0;
 
             let volume_slider_rect = egui::Rect::from_min_size(
-                egui::pos2(controls_right - slider_width, header_rect.min.y + 4.0),
-                egui::vec2(slider_width, 20.0),
+                egui::pos2(controls_right - slider_width, header_rect.min.y + 2.0),
+                egui::vec2(slider_width, slider_height),
+            );
+            let opacity_slider_rect = egui::Rect::from_min_size(
+                egui::pos2(controls_right - slider_width, header_rect.min.y + 17.0),
+                egui::vec2(slider_width, slider_height),
             );
 
-            // Buttons sit below the slider, right-aligned to match it
-            let buttons_top = volume_slider_rect.max.y + 4.0;
-            let lock_button_rect = egui::Rect::from_min_size(
-                egui::pos2(controls_right - button_size.x, buttons_top),
-                button_size,
-            );
+            // Which controls apply to this layer. Vector and Video layers can hold movie clips
+            // with audio *and* draw pixels, so they get both.
+            let (has_volume, has_opacity) = match layer_for_controls {
+                lightningbeam_core::layer::AnyLayer::Raster(_)
+                | lightningbeam_core::layer::AnyLayer::Text(_) => (false, true),
+                lightningbeam_core::layer::AnyLayer::Audio(_) => (true, false),
+                _ => (true, true),
+            };
+            let is_video_layer =
+                matches!(layer_for_controls, lightningbeam_core::layer::AnyLayer::Video(_));
 
-            let solo_button_rect = egui::Rect::from_min_size(
-                egui::pos2(lock_button_rect.min.x - button_size.x - 4.0, buttons_top),
-                button_size,
-            );
+            // Buttons are laid out right-to-left, and a layer only gets the ones that mean
+            // something for it: [eye] [mute | camera] [solo] [lock].
+            let buttons_top = header_rect.min.y + 34.0;
+            let mut next_x = controls_right;
+            let mut next_button_rect = || {
+                next_x -= button_size.x;
+                let r = egui::Rect::from_min_size(egui::pos2(next_x, buttons_top), button_size);
+                next_x -= 4.0;
+                r
+            };
 
-            let mute_button_rect = egui::Rect::from_min_size(
-                egui::pos2(solo_button_rect.min.x - button_size.x - 4.0, buttons_top),
-                button_size,
-            );
+            let lock_button_rect = next_button_rect();
+            let solo_button_rect = has_volume.then(&mut next_button_rect);
+            // Video layers use this slot for the camera toggle instead of a mute button.
+            let mute_button_rect =
+                (has_volume && !is_video_layer).then(&mut next_button_rect);
+            let camera_button_rect = is_video_layer.then(&mut next_button_rect);
+            let visibility_button_rect = has_opacity.then(&mut next_button_rect);
 
             // Get layer ID and current property values from the layer we already have
             // Check if there's a Volume automation lane; use it to drive the slider
@@ -2416,30 +2464,66 @@ impl TimelinePane {
             let is_soloed = layer_for_controls.soloed();
             let is_locked = layer_for_controls.locked();
 
-            // Mute button — or camera toggle for video layers
-            let is_video_layer = matches!(layer_for_controls, lightningbeam_core::layer::AnyLayer::Video(_));
-            let camera_enabled = if let lightningbeam_core::layer::AnyLayer::Video(v) = layer_for_controls {
-                v.camera_enabled
-            } else {
-                false
-            };
+            // Visibility toggle — on any layer that draws something.
+            if let Some(rect) = visibility_button_rect {
+                let is_visible = layer_for_controls.visible();
+                let response = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    let button = icon_button(if is_visible { icons::EYE } else { icons::EYE_OFF })
+                        .fill(if is_visible {
+                            theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
+                        } else {
+                            theme.bg_color(&["#timeline", ".btn-hidden", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(120, 120, 120, 100))
+                        })
+                        .stroke(egui::Stroke::NONE);
+                    ui.add(button)
+                        .on_hover_text(if is_visible { "Hide layer" } else { "Show layer" })
+                }).inner;
 
-            let first_btn_response = ui.scope_builder(egui::UiBuilder::new().max_rect(mute_button_rect), |ui| {
-                if is_video_layer {
-                    // Camera toggle for video layers
-                    let cam_text = if camera_enabled { "📹" } else { "📷" };
-                    let button = egui::Button::new(cam_text)
+                if response.clicked() {
+                    self.layer_control_clicked = true;
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                            layer_id,
+                            lightningbeam_core::actions::LayerProperty::Visible(!is_visible),
+                        )
+                    ));
+                }
+            }
+
+            // Camera toggle — video layers only.
+            if let Some(rect) = camera_button_rect {
+                let camera_enabled =
+                    matches!(layer_for_controls, lightningbeam_core::layer::AnyLayer::Video(v) if v.camera_enabled);
+                let response = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    let button = icon_button(if camera_enabled { icons::VIDEO } else { icons::VIDEO_OFF })
                         .fill(if camera_enabled {
                             theme.bg_color(&["#timeline", ".btn-toggle", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100))
                         } else {
                             theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
                         })
                         .stroke(egui::Stroke::NONE);
-                    ui.add(button)
-                } else {
-                    // Mute button for non-video layers
-                    let mute_text = if is_muted { "🔇" } else { "🔊" };
-                    let button = egui::Button::new(mute_text)
+                    ui.add(button).on_hover_text(if camera_enabled {
+                        "Disable camera preview"
+                    } else {
+                        "Enable camera preview"
+                    })
+                }).inner;
+
+                if response.clicked() {
+                    self.layer_control_clicked = true;
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                            layer_id,
+                            lightningbeam_core::actions::LayerProperty::CameraEnabled(!camera_enabled),
+                        )
+                    ));
+                }
+            }
+
+            // Mute button — only where there's audio to mute.
+            if let Some(rect) = mute_button_rect {
+                let response = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    let button = icon_button(if is_muted { icons::VOLUME_X } else { icons::VOLUME_2 })
                         .fill(if is_muted {
                             theme.bg_color(&["#timeline", ".btn-mute", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(255, 100, 100, 100))
                         } else {
@@ -2447,19 +2531,11 @@ impl TimelinePane {
                         })
                         .stroke(egui::Stroke::NONE);
                     ui.add(button)
-                }
-            }).inner;
+                        .on_hover_text(if is_muted { "Unmute layer" } else { "Mute layer" })
+                }).inner;
 
-            if first_btn_response.clicked() {
-                self.layer_control_clicked = true;
-                if is_video_layer {
-                    pending_actions.push(Box::new(
-                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
-                            layer_id,
-                            lightningbeam_core::actions::LayerProperty::CameraEnabled(!camera_enabled),
-                        )
-                    ));
-                } else {
+                if response.clicked() {
+                    self.layer_control_clicked = true;
                     pending_actions.push(Box::new(
                         lightningbeam_core::actions::SetLayerPropertiesAction::new(
                             layer_id,
@@ -2470,33 +2546,34 @@ impl TimelinePane {
             }
 
             // Solo button
-            // TODO: Replace with SVG headphones icon
-            let solo_response = ui.scope_builder(egui::UiBuilder::new().max_rect(solo_button_rect), |ui| {
-                let button = egui::Button::new("🎧")
-                    .fill(if is_soloed {
-                        theme.bg_color(&["#timeline", ".btn-solo", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100))
-                    } else {
-                        theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
-                    })
-                    .stroke(egui::Stroke::NONE);
-                ui.add(button)
-            }).inner;
+            // Solo is an audio control, so it follows mute: only where there's audio.
+            if let Some(rect) = solo_button_rect {
+                let solo_response = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    let button = icon_button(icons::HEADPHONES)
+                        .fill(if is_soloed {
+                            theme.bg_color(&["#timeline", ".btn-solo", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100))
+                        } else {
+                            theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
+                        })
+                        .stroke(egui::Stroke::NONE);
+                    ui.add(button)
+                        .on_hover_text(if is_soloed { "Unsolo layer" } else { "Solo layer" })
+                }).inner;
 
-            if solo_response.clicked() {
-                self.layer_control_clicked = true;
-                pending_actions.push(Box::new(
-                    lightningbeam_core::actions::SetLayerPropertiesAction::new(
-                        layer_id,
-                        lightningbeam_core::actions::LayerProperty::Soloed(!is_soloed),
-                    )
-                ));
+                if solo_response.clicked() {
+                    self.layer_control_clicked = true;
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                            layer_id,
+                            lightningbeam_core::actions::LayerProperty::Soloed(!is_soloed),
+                        )
+                    ));
+                }
             }
 
             // Lock button
-            // TODO: Replace with SVG lock/lock-open icons
             let lock_response = ui.scope_builder(egui::UiBuilder::new().max_rect(lock_button_rect), |ui| {
-                let lock_text = if is_locked { "🔒" } else { "🔓" };
-                let button = egui::Button::new(lock_text)
+                let button = icon_button(if is_locked { icons::LOCK } else { icons::LOCK_OPEN })
                     .fill(if is_locked {
                         theme.bg_color(&["#timeline", ".btn-lock", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(200, 150, 100, 100))
                     } else {
@@ -2504,6 +2581,7 @@ impl TimelinePane {
                     })
                     .stroke(egui::Stroke::NONE);
                 ui.add(button)
+                    .on_hover_text(if is_locked { "Unlock layer" } else { "Lock layer (prevent edits)" })
             }).inner;
 
             if lock_response.clicked() {
@@ -2516,9 +2594,40 @@ impl TimelinePane {
                 ));
             }
 
+            // Opacity slider.
+            if has_opacity {
+                draw_slider_icon(ui, theme, opacity_slider_rect, icons::BLEND);
+                let current_opacity = layer_for_controls.opacity() as f32;
+                let mut new_opacity = current_opacity;
+                let opacity_response = ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(opacity_slider_rect),
+                    |ui| {
+                        ui.spacing_mut().slider_width = slider_width;
+                        ui.add(egui::Slider::new(&mut new_opacity, 0.0..=1.0).show_value(false))
+                    },
+                ).inner
+                    .on_hover_text(format!("Opacity: {:.0}%", current_opacity * 100.0));
+
+                // Block layer drag while interacting with the slider
+                if opacity_response.dragged() || opacity_response.has_focus() {
+                    self.layer_control_clicked = true;
+                }
+                if opacity_response.changed() {
+                    self.layer_control_clicked = true;
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                            layer_id,
+                            lightningbeam_core::actions::LayerProperty::Opacity(new_opacity as f64),
+                        )
+                    ));
+                }
+            }
+
             // Volume slider (nonlinear: 0-70% slider = 0-100% volume, 70-100% slider = 100-200% volume)
             // Disabled when the user has edited the Volume automation curve beyond the default single keyframe
-            let volume_response = ui.scope_builder(egui::UiBuilder::new().max_rect(volume_slider_rect), |ui| {
+            if has_volume {
+            draw_slider_icon(ui, theme, volume_slider_rect, icons::VOLUME_2);
+            let mut volume_response = ui.scope_builder(egui::UiBuilder::new().max_rect(volume_slider_rect), |ui| {
                 ui.spacing_mut().slider_width = slider_width;
                 // Map volume (0.0-2.0) to slider position (0.0-1.0)
                 let slider_value = if current_volume <= 1.0 {
@@ -2536,6 +2645,12 @@ impl TimelinePane {
                 let response = ui.add_enabled(!volume_is_automated, slider);
                 (response, temp_slider_value)
             }).inner;
+
+            volume_response.0 = volume_response.0.on_hover_text(if volume_is_automated {
+                format!("Volume: {:.0}% (automated)", current_volume * 100.0)
+            } else {
+                format!("Volume: {:.0}%", current_volume * 100.0)
+            });
 
             // Block layer drag while interacting with the slider
             if volume_response.0.dragged() || volume_response.0.has_focus() {
@@ -2590,13 +2705,11 @@ impl TimelinePane {
                 }
             }
 
-            // Input gain slider for sampled audio layers (below volume slider)
+            // Input gain slider for sampled audio layers. Audio layers have no opacity, so this
+            // takes the opacity tier.
             if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer_for_controls {
                 if audio_layer.audio_layer_type == lightningbeam_core::layer::AudioLayerType::Sampled {
-                    let gain_slider_rect = egui::Rect::from_min_size(
-                        egui::pos2(controls_right - slider_width, volume_slider_rect.max.y + 4.0),
-                        egui::vec2(slider_width, 16.0),
-                    );
+                    let gain_slider_rect = opacity_slider_rect;
                     let current_gain = audio_layer.layer.input_gain;
 
                     // Map gain (0.0-4.0) to slider (0.0-1.0): linear
@@ -2624,8 +2737,8 @@ impl TimelinePane {
 
                     // Label
                     let label_rect = egui::Rect::from_min_size(
-                        egui::pos2(gain_slider_rect.min.x - 26.0, volume_slider_rect.max.y + 4.0),
-                        egui::vec2(24.0, 16.0),
+                        egui::pos2(gain_slider_rect.min.x - 26.0, gain_slider_rect.min.y),
+                        egui::vec2(24.0, gain_slider_rect.height()),
                     );
                     ui.painter().text(
                         label_rect.center(),
@@ -2636,6 +2749,8 @@ impl TimelinePane {
                     );
                 }
             }
+
+            } // end volume/gain sliders
 
             // Per-layer VU meter bar (4px tall at bottom of header)
             {
@@ -5795,8 +5910,14 @@ impl PaneRenderer for TimelinePane {
 
         // Split into layer header column (left) and timeline content (right). On mobile the header
         // column collapses to a minimal color-swatch width.
+        //
+        // Once the pane gets narrow enough that the track area would be a useless sliver, drop it
+        // entirely and give the whole pane to the layer headers — a mixer-style view.
+        let headers_only = !shared.is_mobile && rect.width() < LAYER_HEADER_WIDTH * 1.5;
         let header_width = if shared.is_mobile {
             MOBILE_LAYER_HEADER_WIDTH
+        } else if headers_only {
+            rect.width()
         } else {
             LAYER_HEADER_WIDTH
         };
@@ -5848,20 +5969,29 @@ impl PaneRenderer for TimelinePane {
         ui.set_clip_rect(layer_headers_rect.intersect(original_clip_rect));
         self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers, shared.layer_to_track_map, shared.track_levels, shared.input_level, *shared.playback_time, header_width, shared.is_mobile);
 
-        // Render time ruler (clip to ruler rect)
-        ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
-        let cycle = document
-            .cycle_enabled
-            .then(|| self.shown_cycle_region(document));
-        self.render_ruler(ui, ruler_rect, shared.theme, document.tempo_map(), &document.time_signature, document.framerate, cycle);
+        // The track area only exists when the pane is wide enough for it. The interaction code
+        // further down is naturally inert in headers-only mode, since it all gates on
+        // `content_rect.contains(..)` and the rect is zero-width.
+        let (video_clip_hovers, pending_lane_renders) = if headers_only {
+            (Vec::new(), Vec::new())
+        } else {
+            // Render time ruler (clip to ruler rect)
+            ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
+            let cycle = document
+                .cycle_enabled
+                .then(|| self.shown_cycle_region(document));
+            self.render_ruler(ui, ruler_rect, shared.theme, document.tempo_map(), &document.time_signature, document.framerate, cycle);
 
-        // Render layer rows with clipping
-        ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        let (video_clip_hovers, pending_lane_renders) = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.waveform_minmax_pools, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager, *shared.playback_time);
+            // Render layer rows with clipping
+            ui.set_clip_rect(content_rect.intersect(original_clip_rect));
+            let rendered = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.waveform_minmax_pools, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager, *shared.playback_time);
 
-        // Render playhead on top (clip to timeline area)
-        ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));
-        self.render_playhead(ui, timeline_rect, shared.theme, *shared.playback_time);
+            // Render playhead on top (clip to timeline area)
+            ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));
+            self.render_playhead(ui, timeline_rect, shared.theme, *shared.playback_time);
+
+            rendered
+        };
 
         // Restore original clip rect
         ui.set_clip_rect(original_clip_rect);

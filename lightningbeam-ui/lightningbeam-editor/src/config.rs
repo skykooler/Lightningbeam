@@ -78,6 +78,47 @@ pub struct AppConfig {
     /// Last-used audio-export "Album" tag, remembered so it prefills next time.
     #[serde(default)]
     pub last_audio_album: String,
+
+    /// What the stylus's lower barrel button does while held.
+    #[serde(default = "defaults::tablet_button_lower")]
+    pub tablet_button_lower: TabletButtonAction,
+
+    /// What the stylus's upper barrel button does while held.
+    #[serde(default = "defaults::tablet_button_upper")]
+    pub tablet_button_upper: TabletButtonAction,
+}
+
+/// What a stylus barrel button does while held down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TabletButtonAction {
+    /// Do nothing.
+    None,
+    /// Drag to pan the stage.
+    #[default]
+    Pan,
+    /// Temporarily switch to the eyedropper.
+    Eyedropper,
+    /// Temporarily switch to the eraser.
+    Erase,
+}
+
+impl TabletButtonAction {
+    pub const ALL: [TabletButtonAction; 4] = [
+        TabletButtonAction::None,
+        TabletButtonAction::Pan,
+        TabletButtonAction::Eyedropper,
+        TabletButtonAction::Erase,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TabletButtonAction::None => "None",
+            TabletButtonAction::Pan => "Pan",
+            TabletButtonAction::Eyedropper => "Eyedropper",
+            TabletButtonAction::Erase => "Eraser",
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -100,6 +141,8 @@ impl Default for AppConfig {
             waveform_floor_samples_per_texel: defaults::waveform_floor_samples_per_texel(),
             last_audio_artist: String::new(),
             last_audio_album: String::new(),
+            tablet_button_lower: defaults::tablet_button_lower(),
+            tablet_button_upper: defaults::tablet_button_upper(),
         }
     }
 }
@@ -290,6 +333,9 @@ impl AppConfig {
 
 /// Default values for preferences (matches JS implementation)
 mod defaults {
+    use super::TabletButtonAction;
+    pub fn tablet_button_lower() -> TabletButtonAction { TabletButtonAction::Pan }
+    pub fn tablet_button_upper() -> TabletButtonAction { TabletButtonAction::Eyedropper }
     pub fn bpm() -> u32 { 120 }
     pub fn framerate() -> u32 { 24 }
     pub fn file_width() -> u32 { 800 }

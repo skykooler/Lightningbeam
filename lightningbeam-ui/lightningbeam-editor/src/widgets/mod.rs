@@ -1,6 +1,7 @@
 //! Reusable UI widgets for the editor
 
 mod text_field;
+pub mod color_swatch;
 pub mod dropdown_list;
 
 pub use text_field::ImeTextField;

@@ -5715,9 +5715,14 @@ impl StagePane {
         screen_pos: egui::Pos2,
         shared: &mut SharedPaneState,
     ) {
-        // On click, store the screen position and color mode for sampling
+        // On click, store the screen position and which swatch the sample lands in.
         if self.rsp_clicked(response) {
-            self.pending_eyedropper_sample = Some((screen_pos, *shared.active_color_mode));
+            let mode = if shared.raster_settings.eyedropper_use_fg {
+                super::ColorMode::Stroke
+            } else {
+                super::ColorMode::Fill
+            };
+            self.pending_eyedropper_sample = Some((screen_pos, mode));
         }
     }
 
@@ -6485,15 +6490,16 @@ impl StagePane {
             b.dabs_per_radius = spacing;
             if matches!(blend_mode, RasterBlendMode::Smudge) {
                 b.dabs_per_actual_radius = 0.0;
-                b.smudge_radius_log = shared.raster_settings.smudge_strength;
+                b.smudge_radius_log =
+                    shared.raster_settings.brush(crate::tools::BrushKind::Smudge).strength;
             }
             if matches!(blend_mode, RasterBlendMode::BlurSharpen) {
                 b.dabs_per_actual_radius = 0.0;
             }
-            let color = if matches!(blend_mode, RasterBlendMode::Erase) {
+            let color = if !def.uses_color() {
                 [1.0f32, 1.0, 1.0, 1.0]
             } else {
-                let c = if shared.raster_settings.brush_use_fg {
+                let c = if shared.raster_settings.brush(def.brush_kind()).use_fg {
                     *shared.stroke_color
                 } else {
                     *shared.fill_color
@@ -6702,7 +6708,8 @@ impl StagePane {
                 b.dabs_per_actual_radius = 0.0;
                 // strength controls how far behind the stroke to sample (smudge_dist multiplier).
                 // smudge_dist = radius * exp(smudge_radius_log), so log(strength) gives the ratio.
-                b.smudge_radius_log = shared.raster_settings.smudge_strength; // linear [0,1] strength
+                b.smudge_radius_log =
+                    shared.raster_settings.brush(crate::tools::BrushKind::Smudge).strength;
             }
             if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::BlurSharpen) {
                 // Zero dabs_per_actual_radius so the spacing slider is the sole density control.
@@ -6711,10 +6718,14 @@ impl StagePane {
             b
         };
 
-        let color = if matches!(blend_mode, lightningbeam_core::raster_layer::RasterBlendMode::Erase) {
+        let color = if !def.uses_color() {
             [1.0f32, 1.0, 1.0, 1.0]
         } else {
-            let c = if shared.raster_settings.brush_use_fg { *shared.stroke_color } else { *shared.fill_color };
+            let c = if shared.raster_settings.brush(def.brush_kind()).use_fg {
+                *shared.stroke_color
+            } else {
+                *shared.fill_color
+            };
             let s2l = |v: u8| -> f32 {
                 let f = v as f32 / 255.0;
                 if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
@@ -7429,7 +7440,7 @@ impl StagePane {
             use lightningbeam_core::actions::PaintBucketAction;
             use vello::kurbo::Point;
             let click_point = Point::new(world_pos.x as f64, world_pos.y as f64);
-            let fill_color = ShapeColor::from_egui(*shared.fill_color);
+            let fill_color = ShapeColor::from_egui(bucket_color(shared));
             let action = PaintBucketAction::new(
                 active_layer_id,
                 *shared.playback_time,
@@ -7483,7 +7494,7 @@ impl StagePane {
             return;
         }
 
-        let fill_egui = *shared.fill_color;
+        let fill_egui = bucket_color(shared);
         let fill_color = [fill_egui.r(), fill_egui.g(), fill_egui.b(), fill_egui.a()];
         let threshold  = shared.raster_settings.fill_threshold;
         let softness   = shared.raster_settings.fill_softness;
@@ -11580,7 +11591,11 @@ impl StagePane {
 
         // Handle tool input (only if not using Alt modifier for panning, and not while a
         // double-tap-drag marquee is actively dragging so the tool doesn't act during the gesture).
-        if !alt_held && !self.marquee_gesture_active {
+        // A pen barrel button bound to Pan suppresses the tool the same way Alt does — the pen
+        // tip is still down while panning, so without this the brush would paint as you pan.
+        let pen_panning = crate::tablet::active_button_action()
+            == Some(crate::config::TabletButtonAction::Pan);
+        if !alt_held && !pen_panning && !self.marquee_gesture_active {
             use lightningbeam_core::tool::Tool;
 
             // On a shape-tween in-between frame the active vector layer's geometry is an
@@ -11743,9 +11758,21 @@ impl StagePane {
                 self.pan_offset.y += scroll_delta.y;
             }
 
-            // Handle panning with Alt+Drag
-            if alt_held && response.dragged() {
-                // Alt+Click+Drag panning
+            // Middle-mouse drag pans, independent of the stage's own drag sense.
+            let middle_down = ui.input(|i| i.pointer.middle_down());
+            if middle_down {
+                let delta = ui.input(|i| i.pointer.delta());
+                self.pan_offset += delta;
+                self.is_panning = true;
+            }
+
+            // Holding a pen barrel button bound to Pan turns the pen drag into a pan instead of
+            // a stroke (the tip is still down, so this is a normal primary drag).
+            let pen_pan = crate::tablet::active_button_action()
+                == Some(crate::config::TabletButtonAction::Pan);
+
+            // Handle panning with Alt+Drag (or a pan-bound pen button)
+            if (alt_held || pen_pan) && response.dragged() {
                 if let Some(last_pos) = self.last_pan_pos {
                     if let Some(current_pos) = response.interact_pointer_pos() {
                         let delta = current_pos - last_pos;
@@ -11755,7 +11782,7 @@ impl StagePane {
                 self.last_pan_pos = response.interact_pointer_pos();
                 self.is_panning = true;
             } else {
-                if !response.dragged() {
+                if !response.dragged() && !middle_down {
                     self.is_panning = false;
                     self.last_pan_pos = None;
                 }
@@ -12099,26 +12126,22 @@ impl StagePane {
             let r = shared.raster_settings.quick_select_radius;
             (r, r, 0.0_f32)
         } else if let Some(def) = crate::tools::raster_tool_def(shared.selected_tool) {
+            // Every brush tool can carry an elliptical library brush, so shape the cursor from
+            // whichever slot the active tool paints with.
+            let slot = shared.raster_settings.brush(def.brush_kind());
             let r = def.cursor_radius(shared.raster_settings);
-            // For the standard paint brush, also account for elliptical shape.
-            if matches!(*shared.selected_tool,
-                Tool::Draw | Tool::Pencil | Tool::Pen | Tool::Airbrush)
-            {
-                let bs = &shared.raster_settings.active_brush_settings;
-                let ratio = bs.elliptical_dab_ratio.max(1.0);
-                let expand = 1.0 + bs.offset_by_random;
-                let angle = (bs.elliptical_dab_angle + shared.raster_settings.brush_angle_offset).to_radians();
-                (r * expand, r * expand / ratio, angle)
-            } else {
-                (r, r, 0.0_f32)
-            }
-        } else {
-            let bs = &shared.raster_settings.active_brush_settings;
-            let r = shared.raster_settings.brush_radius;
+            let bs = &slot.settings;
             let ratio = bs.elliptical_dab_ratio.max(1.0);
             let expand = 1.0 + bs.offset_by_random;
-            let angle = (bs.elliptical_dab_angle + shared.raster_settings.brush_angle_offset).to_radians();
+            let angle = (bs.elliptical_dab_angle + slot.angle_offset).to_radians();
             (r * expand, r * expand / ratio, angle)
+        } else {
+            let slot = shared.raster_settings.brush(crate::tools::BrushKind::Paint);
+            let bs = &slot.settings;
+            let ratio = bs.elliptical_dab_ratio.max(1.0);
+            let expand = 1.0 + bs.offset_by_random;
+            let angle = (bs.elliptical_dab_angle + slot.angle_offset).to_radians();
+            (slot.radius * expand, slot.radius * expand / ratio, angle)
         };
 
         let a = a_world * self.zoom; // major semi-axis in screen pixels
@@ -12163,9 +12186,84 @@ impl StagePane {
 
 impl PaneRenderer for StagePane {
     fn render_header(&mut self, ui: &mut egui::Ui, shared: &mut SharedPaneState) -> bool {
-        ui.horizontal(|ui| {
-            // Zoom to fit button
-            if ui.button("⊡ Fit").on_hover_text("Zoom to fit canvas in view").clicked() {
+        // Fill most of the 40px header so the buttons are a comfortable tablet-sized target
+        // rather than the ~20px egui default.
+        const BTN_H: f32 = 27.0;
+        let btn_size = egui::vec2(32.0, BTN_H);
+
+        // Lay the row out in a full-width band of exactly BTN_H centred in the header, so the
+        // buttons sit vertically centred instead of dropping to the bottom of the taller header
+        // rect. Horizontally they still start at the left, as before.
+        let avail = ui.max_rect();
+        let band = egui::Rect::from_min_size(
+            egui::pos2(avail.min.x, avail.center().y - BTN_H / 2.0),
+            egui::vec2(avail.width(), BTN_H),
+        );
+
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(band)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+            // Undo / redo — duplicated here so tablet users don't need the keyboard.
+            let can_undo = shared.action_executor.can_undo();
+            let can_redo = shared.action_executor.can_redo();
+            let icon_btn = |glyph: &str| {
+                egui::Button::new(
+                    egui::RichText::new(glyph).font(crate::mobile::icons::font(16.0)),
+                )
+                .min_size(btn_size)
+            };
+
+            if ui
+                .add_enabled(can_undo, icon_btn(crate::mobile::icons::UNDO_2))
+                .on_hover_text("Undo")
+                .clicked()
+            {
+                shared.pending_menu_actions.push(crate::menu::MenuAction::Undo);
+            }
+            if ui
+                .add_enabled(can_redo, icon_btn(crate::mobile::icons::REDO_2))
+                .on_hover_text("Redo")
+                .clicked()
+            {
+                shared.pending_menu_actions.push(crate::menu::MenuAction::Redo);
+            }
+
+            ui.separator();
+
+            // Zoom to fit: Lucide "maximize" glyph followed by the label. Two fonts in one
+            // button means building the layout job by hand.
+            let fit_label = {
+                let mut job = egui::text::LayoutJob::default();
+                let color = ui.visuals().widgets.inactive.fg_stroke.color;
+                job.append(
+                    crate::mobile::icons::MAXIMIZE,
+                    0.0,
+                    egui::TextFormat {
+                        font_id: crate::mobile::icons::font(15.0),
+                        color,
+                        valign: egui::Align::Center,
+                        ..Default::default()
+                    },
+                );
+                job.append(
+                    "Fit",
+                    6.0,
+                    egui::TextFormat {
+                        font_id: egui::TextStyle::Button.resolve(ui.style()),
+                        color,
+                        valign: egui::Align::Center,
+                        ..Default::default()
+                    },
+                );
+                job
+            };
+            if ui
+                .add(egui::Button::new(fit_label).min_size(egui::vec2(0.0, BTN_H)))
+                .on_hover_text("Zoom to fit canvas in view")
+                .clicked()
+            {
                 self.zoom_to_fit(shared);
             }
 
@@ -12175,7 +12273,8 @@ impl PaneRenderer for StagePane {
             let text_style = shared.theme.style(".text-primary", ui.ctx());
             let text_color = text_style.text_color.unwrap_or(egui::Color32::from_gray(200));
             ui.colored_label(text_color, format!("Zoom: {:.0}%", self.zoom * 100.0));
-        });
+        },
+        );
         true
     }
 
@@ -13102,5 +13201,15 @@ impl PaneRenderer for StagePane {
 
     fn name(&self) -> &str {
         "Stage"
+    }
+}
+
+/// The color the paint bucket fills with. Like the brush, the bucket chooses between the
+/// foreground (stroke) and background (fill) swatch — see `RasterToolSettings::fill_use_fg`.
+fn bucket_color(shared: &SharedPaneState) -> egui::Color32 {
+    if shared.raster_settings.fill_use_fg {
+        *shared.stroke_color
+    } else {
+        *shared.fill_color
     }
 }

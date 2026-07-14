@@ -1136,7 +1136,6 @@ struct EditorApp {
     selected_tool: Tool, // Currently selected drawing tool
     fill_color: egui::Color32, // Fill color for drawing
     stroke_color: egui::Color32, // Stroke color for drawing
-    active_color_mode: panes::ColorMode, // Which color (fill/stroke) was last interacted with
     pane_instances: HashMap<NodePath, PaneInstance>, // Pane instances per path
     menu_system: Option<MenuSystem>, // Native menu system for event checking
     pending_view_action: Option<MenuAction>, // Pending view action (zoom, recenter) to be handled by hovered pane
@@ -1351,9 +1350,9 @@ struct EditorApp {
     effect_thumbnail_generator: Option<EffectThumbnailGenerator>,
 
     /// Custom cursor cache for SVG cursors
-    cursor_cache: custom_cursor::CursorCache,
     /// Cross-platform graphics tablet (pen/stylus) input state
     tablet: tablet::TabletInput,
+    cursor_cache: custom_cursor::CursorCache,
     /// Debug test mode (F5) — input recording, panic capture & visual replay
     #[cfg(debug_assertions)]
     test_mode: test_mode::TestModeState,
@@ -1410,6 +1409,10 @@ impl EditorApp {
 
         // Load application config
         let mut config = AppConfig::load();
+
+        // Mirror the configured stylus barrel-button actions into the tablet layer.
+        tablet::set_button_actions(config.tablet_button_lower, config.tablet_button_upper);
+
         // One-time cleanup: earlier builds added a Recovered file to Recent on restore. Drop any
         // recovery-dir paths that leaked in (and re-save if we removed any) so they don't show in
         // Recent or get auto-reopened below.
@@ -1532,7 +1535,6 @@ impl EditorApp {
             selected_tool: Tool::Select, // Default tool
             fill_color: egui::Color32::from_rgb(100, 100, 255), // Default blue fill
             stroke_color: egui::Color32::from_rgb(0, 0, 0), // Default black stroke
-            active_color_mode: panes::ColorMode::default(), // Default to fill color
             pane_instances: HashMap::new(), // Initialize empty, panes created on-demand
             menu_system,
             pending_view_action: None,
@@ -1645,8 +1647,8 @@ impl EditorApp {
             test_mode: test_mode::TestModeState::new(panic_snapshot, pending_event, is_replaying, pending_geometry),
 
             // Debug overlay (F3)
-            cursor_cache: custom_cursor::CursorCache::new(),
             tablet: tablet::TabletInput::new(cc),
+            cursor_cache: custom_cursor::CursorCache::new(),
             debug_overlay_visible: false,
             debug_stats_collector: debug_overlay::DebugStatsCollector::new(),
             gpu_info,
@@ -7965,7 +7967,6 @@ impl EditorApp {
                     selected_tool: &mut self.selected_tool,
                     fill_color: &mut self.fill_color,
                     stroke_color: &mut self.stroke_color,
-                    active_color_mode: &mut self.active_color_mode,
                     pending_view_action: &mut self.pending_view_action,
                     fallback_pane_priority: &mut scratch.fallback_pane_priority,
                     pending_handlers: &mut scratch.pending_handlers,

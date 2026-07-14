@@ -160,27 +160,27 @@ pub fn gradient_stop_editor(
             delete_idx = Some(i);
         }
 
-        // Color picker popup — opens on click, closes on click-outside.
-        egui::containers::Popup::from_toggle_button_response(&resp)
-            .show(|ui| {
-                ui.spacing_mut().slider_width = 200.0;
-                let stop = &mut gradient.stops[i];
-                let mut c32 = Color32::from_rgba_unmultiplied(
-                    stop.color.r, stop.color.g, stop.color.b, stop.color.a,
-                );
-                if egui::color_picker::color_picker_color32(
-                    ui, &mut c32, egui::color_picker::Alpha::OnlyBlend,
-                ) {
-                    // Color32 stores premultiplied RGB; unmultiply before storing
-                    // as straight-alpha ShapeColor to avoid darkening on round-trip.
-                    let [pr, pg, pb, a] = c32.to_array();
-                    let unpm = |c: u8| -> u8 {
-                        if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 }
-                    };
-                    stop.color = ShapeColor::rgba(unpm(pr), unpm(pg), unpm(pb), a);
-                    changed = true;
-                }
-            });
+        // Color picker popup — opens on click, closes on a press outside it.
+        let stop_color = gradient.stops[i].color;
+        let mut c32 = Color32::from_rgba_unmultiplied(
+            stop_color.r, stop_color.g, stop_color.b, stop_color.a,
+        );
+        if crate::widgets::color_swatch::color_picker_popup(
+            ui,
+            resp.id.with("stop_color_popup"),
+            &resp,
+            &mut c32,
+            resp.rect,
+        ) {
+            // Color32 stores premultiplied RGB; unmultiply before storing as straight-alpha
+            // ShapeColor to avoid darkening on round-trip.
+            let [pr, pg, pb, a] = c32.to_array();
+            let unpm = |c: u8| -> u8 {
+                if a == 0 { 0 } else { ((c as u32 * 255 + a as u32 / 2) / a as u32).min(255) as u8 }
+            };
+            gradient.stops[i].color = ShapeColor::rgba(unpm(pr), unpm(pg), unpm(pb), a);
+            changed = true;
+        }
     }
 
     // Apply drag to whichever stop selected_stop points at.

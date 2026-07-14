@@ -28,14 +28,9 @@ pub struct InfopanelPane {
     tool_section_open: bool,
     /// Whether the shape properties section is expanded
     shape_section_open: bool,
-    /// Index of the selected paint brush preset (None = custom / unset)
-    selected_brush_preset: Option<usize>,
-    /// Whether the paint brush picker is expanded
-    brush_picker_expanded: bool,
-    /// Index of the selected eraser brush preset
-    selected_eraser_preset: Option<usize>,
-    /// Whether the eraser brush picker is expanded
-    eraser_picker_expanded: bool,
+    /// Whether each tool's brush picker is expanded. The *selected* preset lives on the tool's
+    /// `BrushSlot`, since it's part of the document-independent tool state, not panel chrome.
+    brush_picker_expanded: std::collections::HashMap<crate::tools::BrushKind, bool>,
     /// Cached preview textures, one per preset (populated lazily).
     brush_preview_textures: Vec<egui::TextureHandle>,
     /// Selected stop index for gradient editor in shape section.
@@ -61,15 +56,10 @@ impl InfopanelPane {
         // Kick off background loading of the font-picker fonts at startup so the dropdown
         // is ready without a hitch by the time the user opens it.
         lightningbeam_core::fonts::start_preload();
-        let presets = bundled_brushes();
-        let default_eraser_idx = presets.iter().position(|p| p.name == "Brush");
         Self {
             tool_section_open: true,
             shape_section_open: true,
-            selected_brush_preset: None,
-            brush_picker_expanded: false,
-            selected_eraser_preset: default_eraser_idx,
-            eraser_picker_expanded: false,
+            brush_picker_expanded: std::collections::HashMap::new(),
             brush_preview_textures: Vec::new(),
             selected_shape_gradient_stop: None,
             selected_tool_gradient_stop: None,
@@ -251,7 +241,7 @@ impl InfopanelPane {
             || is_raster_select || is_raster_shape || matches!(
             tool,
             Tool::PaintBucket | Tool::RegionSelect | Tool::MagicWand | Tool::QuickSelect
-            | Tool::Warp | Tool::Liquify | Tool::Gradient
+            | Tool::Warp | Tool::Liquify | Tool::Gradient | Tool::Eyedropper
         );
 
         if !has_options {
@@ -285,12 +275,11 @@ impl InfopanelPane {
                     return;
                 }
 
-                // Raster paint tool: delegate to per-tool impl.
+                // Raster paint tool: tool-unique controls, then the shared brush controls
+                // (library, color, size/strength/hardness/spacing) that every brush tool gets.
                 if let Some(def) = raster_tool_def {
                     def.render_ui(ui, shared.raster_settings);
-                    if def.show_brush_preset_picker() {
-                        self.render_raster_tool_options(ui, shared, def.is_eraser());
-                    }
+                    self.render_raster_tool_options(ui, shared, def);
                 }
 
                 match tool {
@@ -344,7 +333,14 @@ impl InfopanelPane {
                         ui.checkbox(shared.fill_enabled, "Fill Shape");
                     }
 
+                    Tool::Eyedropper => {
+                        // Which swatch the sampled color lands in.
+                        render_color_slot_row(ui, &mut shared.raster_settings.eyedropper_use_fg);
+                    }
+
                     Tool::PaintBucket => {
+                        render_color_slot_row(ui, &mut shared.raster_settings.fill_use_fg);
+
                         if active_is_raster {
                             use crate::tools::FillThresholdMode;
                             ui.horizontal(|ui| {
@@ -603,68 +599,66 @@ impl InfopanelPane {
             });
     }
 
-    /// Render all options for a raster paint tool (brush picker + sliders).
-    /// `is_eraser` drives which shared state is read/written.
+    /// Render the shared controls every dab-painting tool has: the brush library, the FG/BG
+    /// color choice, and size/strength/hardness/spacing/angle. `def` supplies the tool's brush
+    /// slot and the label for the one slider whose meaning varies (opacity vs. exposure vs.
+    /// flow vs. strength).
     fn render_raster_tool_options(
         &mut self,
         ui: &mut Ui,
         shared: &mut SharedPaneState,
-        is_eraser: bool,
+        def: &'static dyn crate::tools::RasterToolDef,
     ) {
-        self.render_brush_preset_grid(ui, shared, is_eraser);
+        let kind = def.brush_kind();
+        self.render_brush_preset_grid(ui, shared, kind);
         ui.add_space(2.0);
 
-        let rs = &mut shared.raster_settings;
-
-        if !is_eraser {
-            ui.horizontal(|ui| {
-                ui.label("Color:");
-                ui.selectable_value(&mut rs.brush_use_fg, true, "FG");
-                ui.selectable_value(&mut rs.brush_use_fg, false, "BG");
-            });
+        if def.uses_color() {
+            render_color_slot_row(ui, &mut shared.raster_settings.brush_mut(kind).use_fg);
         }
 
-        macro_rules! field {
-            ($eraser:ident, $brush:ident) => {
-                if is_eraser { &mut rs.$eraser } else { &mut rs.$brush }
-            }
-        }
+        let slot = shared.raster_settings.brush_mut(kind);
 
         ui.horizontal(|ui| {
             ui.label("Size:");
-            ui.add(egui::Slider::new(field!(eraser_radius, brush_radius), 1.0_f32..=200.0).logarithmic(true).suffix(" px"));
+            ui.add(egui::Slider::new(&mut slot.radius, 1.0_f32..=500.0)
+                .logarithmic(true)
+                .suffix(" px"));
         });
         ui.horizontal(|ui| {
-            ui.label("Opacity:");
-            ui.add(egui::Slider::new(field!(eraser_opacity, brush_opacity), 0.0_f32..=1.0)
+            ui.label(format!("{}:", def.strength_label()));
+            ui.add(egui::Slider::new(&mut slot.strength, 0.0_f32..=1.0)
                 .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
         });
         ui.horizontal(|ui| {
             ui.label("Hardness:");
-            ui.add(egui::Slider::new(field!(eraser_hardness, brush_hardness), 0.0_f32..=1.0)
+            ui.add(egui::Slider::new(&mut slot.hardness, 0.0_f32..=1.0)
                 .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
         });
         ui.horizontal(|ui| {
             ui.label("Spacing:");
-            ui.add(egui::Slider::new(field!(eraser_spacing, brush_spacing), 0.01_f32..=1.0)
+            ui.add(egui::Slider::new(&mut slot.spacing, 0.01_f32..=20.0)
                 .logarithmic(true)
-                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
+                .custom_formatter(|v, _| format!("{:.2}", v)));
         });
 
-        let bs = if is_eraser { &rs.active_eraser_settings } else { &rs.active_brush_settings };
-        if bs.elliptical_dab_ratio > 1.001 {
+        if slot.settings.elliptical_dab_ratio > 1.001 {
             ui.horizontal(|ui| {
                 ui.label("Angle:");
-                ui.add(egui::Slider::new(&mut rs.brush_angle_offset, -180.0_f32..=180.0)
+                ui.add(egui::Slider::new(&mut slot.angle_offset, -180.0_f32..=180.0)
                     .suffix("°")
                     .custom_formatter(|v, _| format!("{:.0}°", v)));
             });
         }
     }
 
-    /// Render the brush preset thumbnail grid (collapsible).
-    /// `is_eraser` drives which picker state and which shared settings are updated.
-    fn render_brush_preset_grid(&mut self, ui: &mut Ui, shared: &mut SharedPaneState, is_eraser: bool) {
+    /// Render the brush preset thumbnail grid (collapsible) for one tool's brush slot.
+    fn render_brush_preset_grid(
+        &mut self,
+        ui: &mut Ui,
+        shared: &mut SharedPaneState,
+        kind: crate::tools::BrushKind,
+    ) {
         let presets = bundled_brushes();
         if presets.is_empty() { return; }
 
@@ -690,8 +684,8 @@ impl InfopanelPane {
         }
 
         // Read picker state into locals to avoid multiple &mut self borrows.
-        let mut expanded = if is_eraser { self.eraser_picker_expanded } else { self.brush_picker_expanded };
-        let mut selected = if is_eraser { self.selected_eraser_preset } else { self.selected_brush_preset };
+        let mut expanded = self.brush_picker_expanded.get(&kind).copied().unwrap_or(false);
+        let selected = shared.raster_settings.brush(kind).preset;
 
         let gap = 3.0;
         let cols = 2usize;
@@ -762,25 +756,14 @@ impl InfopanelPane {
                             egui::FontId::proportional(9.5),
                             if is_sel { egui::Color32::from_rgb(140, 190, 255) } else { egui::Color32::from_gray(160) });
                         if resp.clicked() {
-                            selected = Some(idx);
                             expanded = false;
-                            let s = &preset.settings;
-                            let rs = &mut shared.raster_settings;
-                            if is_eraser {
-                                rs.eraser_opacity  = s.opaque.clamp(0.0, 1.0);
-                                rs.eraser_hardness = s.hardness.clamp(0.0, 1.0);
-                                rs.eraser_spacing  = s.dabs_per_radius;
-                                rs.active_eraser_settings = s.clone();
-                            } else {
-                                rs.brush_opacity  = s.opaque.clamp(0.0, 1.0);
-                                rs.brush_hardness = s.hardness.clamp(0.0, 1.0);
-                                rs.brush_spacing  = s.dabs_per_radius;
-                                rs.active_brush_settings = s.clone();
-                                // If the user was on a preset-backed tool (Pencil/Pen/Airbrush)
-                                // and manually picked a different brush, revert to the generic tool.
-                                if matches!(*shared.selected_tool, Tool::Pencil | Tool::Pen | Tool::Airbrush) {
-                                    *shared.selected_tool = Tool::Draw;
-                                }
+                            shared.raster_settings.brush_mut(kind).apply_preset(idx, &preset.settings);
+                            // If the user was on a preset-backed tool (Pencil/Pen/Airbrush)
+                            // and manually picked a different brush, revert to the generic tool.
+                            if kind == crate::tools::BrushKind::Paint
+                                && matches!(*shared.selected_tool, Tool::Pencil | Tool::Pen | Tool::Airbrush)
+                            {
+                                *shared.selected_tool = Tool::Draw;
                             }
                         }
                     }
@@ -789,14 +772,9 @@ impl InfopanelPane {
             }
         }
 
-        // Write back picker state.
-        if is_eraser {
-            self.eraser_picker_expanded = expanded;
-            self.selected_eraser_preset = selected;
-        } else {
-            self.brush_picker_expanded = expanded;
-            self.selected_brush_preset = selected;
-        }
+        // The selected preset lives on the slot itself (written by apply_preset above); only the
+        // expand/collapse state is panel-local.
+        self.brush_picker_expanded.insert(kind, expanded);
     }
 
     // Transform section: deferred to Phase 2 (DCEL elements don't have instance transforms)
@@ -1932,4 +1910,18 @@ impl PaneRenderer for InfopanelPane {
     fn name(&self) -> &str {
         "Info Panel"
     }
+}
+
+/// The FG/BG selector shared by every tool that reads or writes a color (brush, paint bucket,
+/// eyedropper, …), so the choice is made the same way and in the same place regardless of tool.
+/// The wording stays neutral because the eyedropper *writes* to the chosen swatch while the
+/// painting tools *read* from it.
+fn render_color_slot_row(ui: &mut Ui, use_fg: &mut bool) {
+    ui.horizontal(|ui| {
+        ui.label("Color:");
+        ui.selectable_value(use_fg, true, "FG")
+            .on_hover_text("Foreground (stroke) color");
+        ui.selectable_value(use_fg, false, "BG")
+            .on_hover_text("Background (fill) color");
+    });
 }

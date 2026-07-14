@@ -13,6 +13,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use eframe::egui;
 use lightningbeam_core::tool::Tool;
 
+use crate::config::TabletButtonAction;
+
 // ---------------------------------------------------------------------------
 // Global tablet state — read by make_stroke_point() on the UI thread
 // ---------------------------------------------------------------------------
@@ -20,6 +22,58 @@ use lightningbeam_core::tool::Tool;
 static TABLET_PRESSURE_BITS: AtomicU32 = AtomicU32::new(0x3f800000); // 1.0f32
 static TABLET_TILT_X_BITS: AtomicU32 = AtomicU32::new(0); // 0.0f32
 static TABLET_TILT_Y_BITS: AtomicU32 = AtomicU32::new(0); // 0.0f32
+
+/// Bit 0 = lower barrel button held, bit 1 = upper. Read on the UI thread by the stage to
+/// decide whether the pen is currently panning.
+static TABLET_BUTTONS: AtomicU32 = AtomicU32::new(0);
+
+fn button_bit(b: TabletButton) -> u32 {
+    match b {
+        TabletButton::Lower => 1,
+        TabletButton::Upper => 2,
+    }
+}
+
+/// Is the given barrel button currently held?
+pub fn button_held(b: TabletButton) -> bool {
+    TABLET_BUTTONS.load(Ordering::Relaxed) & button_bit(b) != 0
+}
+
+/// The configured action for each barrel button, mirrored from `AppConfig` so the stage can
+/// read it without threading config through every call site.
+static BUTTON_ACTIONS: std::sync::Mutex<(TabletButtonAction, TabletButtonAction)> =
+    std::sync::Mutex::new((TabletButtonAction::Pan, TabletButtonAction::Eyedropper));
+
+/// Mirror the configured barrel-button actions. Call on startup and whenever preferences change.
+pub fn set_button_actions(lower: TabletButtonAction, upper: TabletButtonAction) {
+    if let Ok(mut a) = BUTTON_ACTIONS.lock() {
+        *a = (lower, upper);
+    }
+}
+
+fn action_for(b: TabletButton) -> TabletButtonAction {
+    let actions = BUTTON_ACTIONS
+        .lock()
+        .map(|a| *a)
+        .unwrap_or((TabletButtonAction::Pan, TabletButtonAction::Eyedropper));
+    match b {
+        TabletButton::Lower => actions.0,
+        TabletButton::Upper => actions.1,
+    }
+}
+
+/// The action of whichever barrel button is currently held (lower wins if both are).
+pub fn active_button_action() -> Option<TabletButtonAction> {
+    for b in [TabletButton::Lower, TabletButton::Upper] {
+        if button_held(b) {
+            let a = action_for(b);
+            if a != TabletButtonAction::None {
+                return Some(a);
+            }
+        }
+    }
+    None
+}
 
 /// Current pen pressure (0.0–1.0). Falls back to 1.0 when no tablet is active.
 pub fn current_pressure() -> f32 {
@@ -57,8 +111,30 @@ pub enum RawTabletEvent {
     Tilt { x: f32, y: f32 },
     TipDown,
     TipUp,
+    /// A barrel button on the pen was pressed or released.
+    Button { button: TabletButton, pressed: bool },
     /// End of Wayland tablet event group; commit accumulated state.
     Frame,
+}
+
+/// Which barrel button on the stylus. Most pens have two; some have a third.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabletButton {
+    Lower,
+    Upper,
+}
+
+impl TabletButton {
+    /// Map a Linux evdev button code (used by both the Wayland tablet protocol and X11's
+    /// underlying device) to a barrel button.
+    fn from_evdev(code: u32) -> Option<Self> {
+        // BTN_STYLUS = 0x14b, BTN_STYLUS2 = 0x14c, BTN_STYLUS3 = 0x149.
+        match code {
+            0x14b => Some(TabletButton::Lower),
+            0x14c => Some(TabletButton::Upper),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -91,9 +167,13 @@ pub struct TabletInput {
     /// On X11, clicks already come through winit via OS mouse emulation.
     inject_buttons: bool,
 
-    /// Pending tool switch (eraser in/out). Consumed by `EditorApp::update()`.
+    /// Pending tool switch (eraser in/out, barrel-button override). Consumed by `EditorApp::update()`.
     pub pending_tool_switch: Option<Tool>,
     tool_before_eraser: Option<Tool>,
+    /// Barrel-button state as of last frame, for press/release edge detection.
+    prev_buttons: u32,
+    /// Tool to restore when the barrel button driving a tool override is released.
+    tool_before_button: Option<Tool>,
 
     /// One-shot sender used to hand the egui Context to the background thread
     /// on the first poll() call so it can call request_repaint().
@@ -125,6 +205,8 @@ impl TabletInput {
             inject_buttons,
             pending_tool_switch: None,
             tool_before_eraser: None,
+            prev_buttons: 0,
+            tool_before_button: None,
             repaint_sender,
             backend,
         }
@@ -202,6 +284,9 @@ impl TabletInput {
         // Handle eraser tool switch.
         self.handle_tool_switch(current_tool);
 
+        // Handle barrel-button tool overrides (eyedropper / eraser held on the pen).
+        self.handle_button_tool_override(current_tool);
+
         // Publish globals for make_stroke_point().
         set_pressure(self.pressure);
         let (tx, ty) = self.tilt;
@@ -267,6 +352,8 @@ impl TabletInput {
             RawTabletEvent::ProximityOut => {
                 self.in_proximity = false;
                 self.pressure = 0.0;
+                // Don't let a button stay latched if the pen leaves while it's held.
+                TABLET_BUTTONS.store(0, Ordering::Relaxed);
             }
             RawTabletEvent::Motion { x, y } => {
                 // Wayland gives physical pixels; convert to egui logical points.
@@ -288,6 +375,14 @@ impl TabletInput {
             }
             RawTabletEvent::TipUp => {
                 self.tip_down = Some(false);
+            }
+            RawTabletEvent::Button { button, pressed } => {
+                let bit = button_bit(button);
+                if pressed {
+                    TABLET_BUTTONS.fetch_or(bit, Ordering::Relaxed);
+                } else {
+                    TABLET_BUTTONS.fetch_and(!bit, Ordering::Relaxed);
+                }
             }
             RawTabletEvent::Frame => {
                 // Frame is the commit signal; processing already happened in individual events.
@@ -318,6 +413,39 @@ impl TabletInput {
         }
     }
 
+    /// Barrel buttons bound to Eyedropper/Erase act as a spring-loaded tool override: switch
+    /// while held, restore on release. Pan is handled by the stage instead, since it needs the
+    /// drag delta rather than a tool.
+    fn handle_button_tool_override(&mut self, current_tool: Tool) {
+        let buttons = TABLET_BUTTONS.load(Ordering::Relaxed);
+        if buttons == self.prev_buttons {
+            return;
+        }
+        self.prev_buttons = buttons;
+
+        let override_tool = active_button_action().and_then(|a| match a {
+            TabletButtonAction::Eyedropper => Some(Tool::Eyedropper),
+            TabletButtonAction::Erase => Some(Tool::Erase),
+            TabletButtonAction::Pan | TabletButtonAction::None => None,
+        });
+
+        match (override_tool, self.tool_before_button) {
+            // Button pressed: remember the tool we're overriding, then switch.
+            (Some(tool), None) => {
+                if current_tool != tool {
+                    self.tool_before_button = Some(current_tool);
+                    self.pending_tool_switch = Some(tool);
+                }
+            }
+            // Button released: restore.
+            (None, Some(prev)) => {
+                self.tool_before_button = None;
+                self.pending_tool_switch = Some(prev);
+            }
+            _ => {}
+        }
+    }
+
     fn handle_tool_switch(&mut self, current_tool: Tool) {
         let just_entered = self.in_proximity && !self.was_in_proximity;
         let just_left = !self.in_proximity && self.was_in_proximity;
@@ -343,7 +471,7 @@ impl TabletInput {
 
 #[cfg(target_os = "linux")]
 mod wayland {
-    use super::{RawTabletEvent, TabletToolType};
+    use super::{RawTabletEvent, TabletButton, TabletToolType};
     use eframe::egui;
     use std::collections::HashMap;
     use std::sync::mpsc;
@@ -445,6 +573,7 @@ mod wayland {
         pending_motion: bool,
         pending_tip: Option<bool>,
         pending_proximity: Option<bool>,
+        pending_buttons: Vec<(TabletButton, bool)>,
     }
 
     // -----------------------------------------------------------------------
@@ -585,7 +714,20 @@ mod wayland {
                 Event::Tilt { tilt_x, tilt_y } => {
                     acc.pending_tilt = (tilt_x as f32, tilt_y as f32);
                 }
+                Event::Button { button, state: btn_state, .. } => {
+                    // `button` is a Linux evdev code (BTN_STYLUS / BTN_STYLUS2).
+                    if let Some(b) = TabletButton::from_evdev(button) {
+                        let pressed = matches!(
+                            btn_state.into_result(),
+                            Ok(zwp_tablet_tool_v2::ButtonState::Pressed)
+                        );
+                        acc.pending_buttons.push((b, pressed));
+                    }
+                }
                 Event::Frame { .. } => {
+                    for (b, pressed) in acc.pending_buttons.drain(..) {
+                        let _ = state.tx.send(RawTabletEvent::Button { button: b, pressed });
+                    }
                     // Flush accumulated events to the channel.
                     if let Some(prox) = acc.pending_proximity.take() {
                         if prox {
@@ -630,7 +772,7 @@ mod wayland {
 
 #[cfg(target_os = "linux")]
 mod x11 {
-    use super::{RawTabletEvent, TabletToolType};
+    use super::{RawTabletEvent, TabletButton, TabletToolType};
     use std::sync::mpsc;
     use winit::raw_window_handle::{XcbDisplayHandle, XlibDisplayHandle};
 
@@ -880,17 +1022,44 @@ mod x11 {
                 }
 
                 Event::XinputRawButtonPress(raw) => {
-                    if device_axes.contains_key(&raw.deviceid) && raw.detail == 1 {
-                        let _ = tx.send(RawTabletEvent::TipDown);
-                        let _ = tx.send(RawTabletEvent::Frame);
+                    if device_axes.contains_key(&raw.deviceid) {
+                        // X11 reports the tip as button 1 and the barrel buttons as 2 and 3.
+                        match raw.detail {
+                            1 => {
+                                let _ = tx.send(RawTabletEvent::TipDown);
+                                let _ = tx.send(RawTabletEvent::Frame);
+                            }
+                            2 | 3 => {
+                                let button = if raw.detail == 2 {
+                                    TabletButton::Lower
+                                } else {
+                                    TabletButton::Upper
+                                };
+                                let _ = tx.send(RawTabletEvent::Button { button, pressed: true });
+                                let _ = tx.send(RawTabletEvent::Frame);
+                            }
+                            _ => {}
+                        }
                     }
                 }
 
                 Event::XinputRawButtonRelease(raw) => {
                     if device_axes.contains_key(&raw.deviceid) {
-                        if raw.detail == 1 {
-                            let _ = tx.send(RawTabletEvent::TipUp);
-                            let _ = tx.send(RawTabletEvent::Frame);
+                        match raw.detail {
+                            1 => {
+                                let _ = tx.send(RawTabletEvent::TipUp);
+                                let _ = tx.send(RawTabletEvent::Frame);
+                            }
+                            2 | 3 => {
+                                let button = if raw.detail == 2 {
+                                    TabletButton::Lower
+                                } else {
+                                    TabletButton::Upper
+                                };
+                                let _ = tx.send(RawTabletEvent::Button { button, pressed: false });
+                                let _ = tx.send(RawTabletEvent::Frame);
+                            }
+                            _ => {}
                         }
                         // When all buttons released, synthesise proximity out.
                         in_proximity.remove(&raw.deviceid);
