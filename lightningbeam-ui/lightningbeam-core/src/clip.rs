@@ -14,7 +14,7 @@
 use crate::layer::AnyLayer;
 use crate::layer_tree::LayerTree;
 use crate::object::Transform;
-use daw_backend::{Beats, Seconds};
+use daw_backend::{Beats, ContentTime, Seconds};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -130,10 +130,14 @@ impl VectorClip {
                 let end_beats: Beats = if let Some(td_beats) = ci.timeline_duration {
                     ci.timeline_start + td_beats
                 } else if let Some(te) = ci.trim_end {
-                    let secs = (te - ci.trim_start).max(0.0);
+                    // `clip_duration_fn` hands back seconds, so this whole path treats nested
+                    // content as wall-clock. That's right for the vector/video/audio clips a vector
+                    // clip actually nests; a nested MIDI clip (beats content) would need resolving
+                    // against its clip, which this callback can't do. Pre-existing limitation.
+                    let secs = (te - ci.trim_start).raw().max(0.0);
                     tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(ci.timeline_start) + Seconds(secs))
                 } else if let Some(clip_dur_secs) = clip_duration_fn(&ci.clip_id) {
-                    let secs = (clip_dur_secs - ci.trim_start).max(0.0);
+                    let secs = (clip_dur_secs - ci.trim_start.raw()).max(0.0);
                     tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(ci.timeline_start) + Seconds(secs))
                 } else {
                     continue;
@@ -201,7 +205,9 @@ impl VectorClip {
                     // Convert parent clip time (seconds) to nested clip local time (seconds).
                     // timeline_start is in beats; convert to seconds using document BPM.
                     let start_secs = document.tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
-                    let nested_clip_time = ((clip_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start;
+                    // Nested clips here are vector clips, whose content is wall-clock seconds.
+                    let nested_clip_time =
+                        ((clip_time - start_secs) * clip_instance.playback_speed) + clip_instance.trim_start.raw();
 
                     // Look up the nested clip definition
                     let nested_bounds = if let Some(nested_clip) = document.get_vector_clip(&clip_instance.clip_id) {
@@ -468,6 +474,25 @@ pub enum AudioClipType {
     Recording,
 }
 
+/// One take of a cycle recording — see [`ClipInstance::takes`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AudioTake {
+    /// Display name, e.g. "Take 1". User-editable.
+    pub name: String,
+    /// The recorded content this take points at.
+    pub content: TakeContent,
+}
+
+/// What a take actually holds. An instance's takes are all the same kind — one cycle-record session
+/// captures either audio or MIDI, never a mix.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum TakeContent {
+    /// Sampled audio: index into the audio pool.
+    Audio { audio_pool_index: usize },
+    /// MIDI: backend MIDI clip ID.
+    Midi { midi_clip_id: u32 },
+}
+
 /// A clip's content duration, tagged by its native unit.
 ///
 /// Sampled/recording audio and video measure content in wall-clock **seconds**; MIDI measures
@@ -495,6 +520,17 @@ impl ClipDuration {
         match self {
             ClipDuration::Seconds(s) => s.seconds_to_f64(),
             ClipDuration::Beats(b) => b.beats_to_f64(),
+        }
+    }
+
+    /// Tag a [`ContentTime`] with *this* duration's domain.
+    ///
+    /// Handy when you already hold a clip's content duration (so you know the domain) and need to
+    /// resolve one of its trim bounds, without going back to the clip.
+    pub fn same_domain(self, t: ContentTime) -> ClipDuration {
+        match self {
+            ClipDuration::Seconds(_) => ClipDuration::Seconds(Seconds(t.raw())),
+            ClipDuration::Beats(_) => ClipDuration::Beats(Beats(t.raw())),
         }
     }
 }
@@ -532,11 +568,10 @@ impl AudioClip {
     /// The clip's content duration, tagged with its native domain (seconds for sampled/recording,
     /// beats for MIDI). This is the only sanctioned way to read the raw `duration` field.
     pub fn content_duration(&self) -> ClipDuration {
-        match self.clip_type {
-            AudioClipType::Midi { .. } => ClipDuration::Beats(Beats(self.duration)),
-            AudioClipType::Sampled { .. } | AudioClipType::Recording => {
-                ClipDuration::Seconds(Seconds(self.duration))
-            }
+        if self.is_midi_domain() {
+            ClipDuration::Beats(Beats(self.duration))
+        } else {
+            ClipDuration::Seconds(Seconds(self.duration))
         }
     }
 
@@ -545,13 +580,17 @@ impl AudioClip {
     pub fn set_content_duration(&mut self, duration: ClipDuration) {
         debug_assert!(
             matches!(
-                (&self.clip_type, duration),
-                (AudioClipType::Midi { .. }, ClipDuration::Beats(_))
-                    | (AudioClipType::Sampled { .. } | AudioClipType::Recording, ClipDuration::Seconds(_))
+                (self.is_midi_domain(), duration),
+                (true, ClipDuration::Beats(_)) | (false, ClipDuration::Seconds(_))
             ),
             "clip duration domain must match clip type",
         );
         self.duration = duration.native();
+    }
+
+    /// Whether this clip's `duration` is measured in beats (MIDI) rather than seconds.
+    fn is_midi_domain(&self) -> bool {
+        matches!(self.clip_type, AudioClipType::Midi { .. })
     }
 
     /// Create a new sampled audio clip
@@ -637,6 +676,73 @@ impl AudioClip {
             _ => None,
         }
     }
+
+    /// The clip's own content, ignoring takes.
+    ///
+    /// Callers that are handing content to the backend want [`ClipInstance::resolve`] instead — an
+    /// instance with takes overrides the clip's content with whichever take is active.
+    pub fn resolve(&self) -> ResolvedContent {
+        match &self.clip_type {
+            AudioClipType::Sampled { audio_pool_index } => ResolvedContent::Audio {
+                audio_pool_index: *audio_pool_index,
+            },
+            AudioClipType::Midi { midi_clip_id } => ResolvedContent::Midi {
+                midi_clip_id: *midi_clip_id,
+            },
+            AudioClipType::Recording => ResolvedContent::Recording,
+        }
+    }
+
+    /// Resolve a content time against this clip's domain.
+    ///
+    /// This is the ONLY sanctioned way to turn a [`ContentTime`] into a real duration — the type has
+    /// no `.to_seconds()` of its own precisely so that the clip, which is the one thing that knows
+    /// whether its content is measured in seconds or beats, has to be consulted.
+    pub fn resolve_content_time(&self, t: ContentTime) -> ClipDuration {
+        if self.is_midi_domain() {
+            ClipDuration::Beats(Beats(t.raw()))
+        } else {
+            ClipDuration::Seconds(Seconds(t.raw()))
+        }
+    }
+
+    /// Tag a pair of trim bounds with this clip's content domain, ready for the backend.
+    ///
+    /// Building the [`TrimRange`] from the clip means a caller can't reach for the wrong variant:
+    /// the clip is the one thing that knows the domain.
+    pub fn trim_range(&self, start: ContentTime, end: ContentTime) -> daw_backend::command::TrimRange {
+        if self.is_midi_domain() {
+            daw_backend::command::TrimRange::Beats {
+                start: Beats(start.raw()),
+                end: Beats(end.raw()),
+            }
+        } else {
+            daw_backend::command::TrimRange::Seconds {
+                start: Seconds(start.raw()),
+                end: Seconds(end.raw()),
+            }
+        }
+    }
+
+    /// Whether this clip's own content is the given audio pool index.
+    pub fn owns_audio_pool_index(&self, pool_index: usize) -> bool {
+        self.audio_pool_index() == Some(pool_index)
+    }
+
+    /// Whether this clip's own content is the given backend MIDI clip ID.
+    pub fn owns_midi_clip_id(&self, id: u32) -> bool {
+        self.midi_clip_id() == Some(id)
+    }
+}
+
+/// What a clip instance actually plays, once takes are resolved to the active one.
+/// Produced by [`ClipInstance::resolve`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ResolvedContent {
+    Audio { audio_pool_index: usize },
+    Midi { midi_clip_id: u32 },
+    /// A recording in progress (or an empty take folder) — no backend content yet.
+    Recording,
 }
 
 /// Unified clip enum for polymorphic handling
@@ -715,16 +821,17 @@ pub struct ClipInstance {
     /// Default: None (use trimmed clip duration, no looping)
     pub timeline_duration: Option<Beats>,
 
-    /// Trim start: offset into the clip's internal content, in **seconds**.
-    /// - For audio: byte-offset into the audio file
-    /// - For video: seek position in the video file
-    /// - For vector: time offset into the animation
+    /// Trim start: offset into the clip's internal content.
+    ///
+    /// A [`ContentTime`] — measured in the CLIP's content domain, which is seconds for sampled
+    /// audio/video/vector but BEATS for MIDI. Resolve it against the clip
+    /// ([`Document::resolve_content_time`]) before combining it with anything on the timeline.
     /// Default: 0.0
-    pub trim_start: f64,
+    pub trim_start: ContentTime,
 
-    /// Trim end: offset into the clip's internal content, in **seconds**.
+    /// Trim end: offset into the clip's internal content. See [`Self::trim_start`].
     /// Default: None (use full clip duration)
-    pub trim_end: Option<f64>,
+    pub trim_end: Option<ContentTime>,
 
     /// Playback speed multiplier
     /// 1.0 = normal speed, 0.5 = half speed, 2.0 = double speed
@@ -741,6 +848,35 @@ pub struct ClipInstance {
     /// Default: None (no pre-loop)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loop_before: Option<Beats>,
+
+    /// Alternate takes from cycle recording. Empty = an ordinary instance with no takes.
+    ///
+    /// The takes live on the INSTANCE, not the clip, so managing them is per-instance: deleting or
+    /// renaming a take on one instance leaves every other instance alone. Splitting clones the list
+    /// along with the rest of the instance, so the two halves get independent take lists — and,
+    /// since they can each select a different take, comping still falls out for free.
+    ///
+    /// Every take spans the full cycle region (partial passes are padded with silence at capture
+    /// time), so they're all the same length as the clip's own content. That uniformity is what lets
+    /// a take switch leave the instance's geometry untouched.
+    ///
+    /// When non-empty, these OVERRIDE the clip's own content — see [`Self::resolve`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<AudioTake>,
+
+    /// Which of [`Self::takes`] plays. `None` (or a stale index) means take 0.
+    /// Default: None
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_take: Option<usize>,
+
+    /// The cycle region's length in beats when these takes were recorded.
+    ///
+    /// Audio takes are cut geometrically (by sample count), so they're only meaningful against the
+    /// tempo they were recorded at. Keeping the recorded length lets a future time-stretch/conform
+    /// feature reconcile them if the tempo moves underneath, and lets a new recording tell whether
+    /// it belongs in this take list or a fresh one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_loop_beats: Option<Beats>,
 }
 
 /// High 64-bit sentinel used to identify UUIDs that encode a backend audio clip instance ID.
@@ -794,11 +930,14 @@ impl ClipInstance {
             name: None,
             timeline_start: Beats::ZERO,
             timeline_duration: None,
-            trim_start: 0.0,
+            trim_start: ContentTime::ZERO,
             trim_end: None,
             playback_speed: 1.0,
             gain: 1.0,
             loop_before: None,
+            takes: Vec::new(),
+            active_take: None,
+            recorded_loop_beats: None,
         }
     }
 
@@ -812,11 +951,14 @@ impl ClipInstance {
             name: None,
             timeline_start: Beats::ZERO,
             timeline_duration: None,
-            trim_start: 0.0,
+            trim_start: ContentTime::ZERO,
             trim_end: None,
             playback_speed: 1.0,
             gain: 1.0,
             loop_before: None,
+            takes: Vec::new(),
+            active_take: None,
+            recorded_loop_beats: None,
         }
     }
 
@@ -852,7 +994,7 @@ impl ClipInstance {
     }
 
     /// Set trimming (start and end time within the clip's internal content)
-    pub fn with_trimming(mut self, trim_start: f64, trim_end: Option<f64>) -> Self {
+    pub fn with_trimming(mut self, trim_start: ContentTime, trim_end: Option<ContentTime>) -> Self {
         self.trim_start = trim_start;
         self.trim_end = trim_end;
         self
@@ -876,24 +1018,89 @@ impl ClipInstance {
         self
     }
 
-    /// Content window size in seconds: `trim_end - trim_start`.
+    /// The take this instance plays, if it has any.
+    ///
+    /// A `None`/stale `active_take` falls back to take 0 — an index can go stale (an undo that
+    /// shrank the list, an old `.beam`), and silently playing the first take beats playing nothing.
+    pub fn active_take(&self) -> Option<&AudioTake> {
+        self.takes
+            .get(self.active_take.unwrap_or(0))
+            .or_else(|| self.takes.first())
+    }
+
+    /// The index [`Self::active_take`] actually resolves to, clamped into range.
+    pub fn active_take_index(&self) -> usize {
+        let i = self.active_take.unwrap_or(0);
+        if i < self.takes.len() { i } else { 0 }
+    }
+
+    /// What this instance plays: its active take if it has takes, otherwise the clip's own content.
+    ///
+    /// This is the sanctioned way to ask "what content do I hand the backend for this instance?".
+    /// Takes are never a distinct *case* at the call site — an instance with takes is just an audio
+    /// or MIDI instance whose identity depends on which take is live.
+    pub fn resolve(&self, clip: &AudioClip) -> ResolvedContent {
+        match self.active_take().map(|t| &t.content) {
+            Some(TakeContent::Audio { audio_pool_index }) => ResolvedContent::Audio {
+                audio_pool_index: *audio_pool_index,
+            },
+            Some(TakeContent::Midi { midi_clip_id }) => ResolvedContent::Midi {
+                midi_clip_id: *midi_clip_id,
+            },
+            None => clip.resolve(),
+        }
+    }
+
+    /// The audio pool index this instance plays. See [`Self::resolve`].
+    pub fn resolved_audio_pool_index(&self, clip: &AudioClip) -> Option<usize> {
+        match self.resolve(clip) {
+            ResolvedContent::Audio { audio_pool_index } => Some(audio_pool_index),
+            _ => None,
+        }
+    }
+
+    /// The backend MIDI clip ID this instance plays. See [`Self::resolve`].
+    pub fn resolved_midi_clip_id(&self, clip: &AudioClip) -> Option<u32> {
+        match self.resolve(clip) {
+            ResolvedContent::Midi { midi_clip_id } => Some(midi_clip_id),
+            _ => None,
+        }
+    }
+
+    /// Content window (`trim_end - trim_start`) in the clip's own content domain.
     /// Used for internal looping calculations.
-    pub fn content_window_secs(&self, clip_duration_secs: Seconds) -> Seconds {
-        let end = self.trim_end.unwrap_or(clip_duration_secs.seconds_to_f64());
-        Seconds((end - self.trim_start).max(0.0))
+    pub fn content_window(&self, clip_content: ClipDuration) -> ClipDuration {
+        let end = self.trim_end.map_or(clip_content.native(), |t| t.raw());
+        let window = (end - self.trim_start.raw()).max(0.0);
+        match clip_content {
+            ClipDuration::Beats(_) => ClipDuration::Beats(Beats(window)),
+            ClipDuration::Seconds(_) => ClipDuration::Seconds(Seconds(window)),
+        }
     }
 
     /// How long this instance appears on the timeline, in **beats**.
     ///
-    /// If `timeline_duration` is set, returns that (enabling content looping).
-    /// Otherwise converts the content window from seconds to beats using the tempo map.
-    pub fn effective_duration_beats(&self, clip_duration_secs: Seconds, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
+    /// If `timeline_duration` is set, returns that (enabling content looping). Otherwise the clip
+    /// occupies its content window — converted to beats *in the clip's own domain*:
+    ///
+    /// - MIDI content is already beats and is tempo-invariant, so it carries over directly.
+    /// - Wall-clock content (audio/video/vector) is a seconds span, so it converts at the clip's
+    ///   position on the timeline.
+    ///
+    /// Taking a `ClipDuration` rather than a bare `Seconds` is what keeps those apart: this used to
+    /// take seconds and subtract `trim_start` from it, which for a TRIMMED MIDI clip subtracted a
+    /// beats offset from a seconds duration and got the clip's length wrong.
+    pub fn effective_duration_beats(&self, clip_content: ClipDuration, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
         if let Some(td) = self.timeline_duration {
             return td;
         }
-        let window = self.content_window_secs(clip_duration_secs);
-        let start_secs = tempo_map.beats_to_seconds(self.timeline_start);
-        tempo_map.seconds_to_beats(start_secs + window) - self.timeline_start
+        match self.content_window(clip_content) {
+            ClipDuration::Beats(b) => b,
+            ClipDuration::Seconds(s) => {
+                let start_secs = tempo_map.beats_to_seconds(self.timeline_start);
+                tempo_map.seconds_to_beats(start_secs + s) - self.timeline_start
+            }
+        }
     }
 
     /// Left edge of the clip's visual extent on the timeline, in **beats**.
@@ -902,27 +1109,32 @@ impl ClipInstance {
     }
 
     /// Total visual duration (loop_before + effective_duration), in **beats**.
-    pub fn total_duration(&self, clip_duration_secs: Seconds, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
-        self.loop_before.unwrap_or(Beats::ZERO) + self.effective_duration_beats(clip_duration_secs, tempo_map)
+    pub fn total_duration(&self, clip_content: ClipDuration, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
+        self.loop_before.unwrap_or(Beats::ZERO) + self.effective_duration_beats(clip_content, tempo_map)
     }
 
     /// Map a playback time (in **seconds**) to clip-local content time (in **seconds**).
     ///
-    /// Returns `None` if the clip instance is not active at `time_secs`.
-    pub fn remap_time_secs(&self, time: Seconds, clip_duration_secs: Seconds, tempo_map: &crate::tempo_map::TempoMap) -> Option<Seconds> {
+    /// The trim bounds are resolved through `clip_content`'s domain first, so a MIDI clip's beats
+    /// trims are converted rather than read as seconds. Callers are the wall-clock consumers (video
+    /// seek, vector/raster rendering), which want seconds regardless of how the clip stores content.
+    ///
+    /// Returns `None` if the clip instance is not active at `time`.
+    pub fn remap_time_secs(&self, time: Seconds, clip_content: ClipDuration, tempo_map: &crate::tempo_map::TempoMap) -> Option<Seconds> {
         let start_secs = tempo_map.beats_to_seconds(self.timeline_start);
-        let dur_beats = self.effective_duration_beats(clip_duration_secs, tempo_map);
+        let dur_beats = self.effective_duration_beats(clip_content, tempo_map);
         let end_secs = tempo_map.beats_to_seconds(self.timeline_start + dur_beats);
 
         if time < start_secs || time >= end_secs {
             return None;
         }
 
+        let trim_start_secs = clip_content.same_domain(self.trim_start).to_seconds(tempo_map);
         let content_time = (time - start_secs) * self.playback_speed;
-        let content_window = self.content_window_secs(clip_duration_secs);
+        let content_window = self.content_window(clip_content).to_seconds(tempo_map);
 
         if content_window == Seconds::ZERO {
-            return Some(Seconds(self.trim_start));
+            return Some(trim_start_secs);
         }
 
         let looped = if content_time > content_window {
@@ -931,19 +1143,19 @@ impl ClipInstance {
             content_time
         };
 
-        Some(Seconds(self.trim_start) + looped)
+        Some(trim_start_secs + looped)
     }
 
     /// Alias for `remap_time_secs`.
     #[inline]
-    pub fn remap_time(&self, time: Seconds, clip_duration_secs: Seconds, tempo_map: &crate::tempo_map::TempoMap) -> Option<Seconds> {
-        self.remap_time_secs(time, clip_duration_secs, tempo_map)
+    pub fn remap_time(&self, time: Seconds, clip_content: ClipDuration, tempo_map: &crate::tempo_map::TempoMap) -> Option<Seconds> {
+        self.remap_time_secs(time, clip_content, tempo_map)
     }
 
     /// Alias for `effective_duration_beats`.
     #[inline]
-    pub fn effective_duration(&self, clip_duration_secs: Seconds, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
-        self.effective_duration_beats(clip_duration_secs, tempo_map)
+    pub fn effective_duration(&self, clip_content: ClipDuration, tempo_map: &crate::tempo_map::TempoMap) -> Beats {
+        self.effective_duration_beats(clip_content, tempo_map)
     }
 
     /// Convert to affine transform
@@ -1020,7 +1232,7 @@ mod tests {
         assert_eq!(instance.clip_id, clip_id);
         assert_eq!(instance.opacity, 1.0);
         assert_eq!(instance.timeline_start, Beats::ZERO);
-        assert_eq!(instance.trim_start, 0.0);
+        assert_eq!(instance.trim_start, ContentTime::ZERO);
         assert_eq!(instance.trim_end, None);
         assert_eq!(instance.playback_speed, 1.0);
         assert_eq!(instance.gain, 1.0);
@@ -1030,27 +1242,52 @@ mod tests {
     fn test_clip_instance_trimming() {
         let clip_id = Uuid::new_v4();
         let instance = ClipInstance::new(clip_id)
-            .with_trimming(2.0, Some(8.0));
+            .with_trimming(ContentTime(2.0), Some(ContentTime(8.0)));
 
-        assert_eq!(instance.trim_start, 2.0);
-        assert_eq!(instance.trim_end, Some(8.0));
+        assert_eq!(instance.trim_start, ContentTime(2.0));
+        assert_eq!(instance.trim_end, Some(ContentTime(8.0)));
         // At 60 BPM the tempo map is identity (1 beat == 1 second), so the
         // beats-domain effective duration equals the seconds content window.
         let tempo_map = crate::tempo_map::TempoMap::constant(60.0);
-        assert_eq!(instance.effective_duration(Seconds(10.0), &tempo_map), Beats(6.0));
+        let content = ClipDuration::Seconds(Seconds(10.0));
+        assert_eq!(instance.effective_duration(content, &tempo_map), Beats(6.0));
     }
 
     #[test]
     fn test_clip_instance_no_end_trim() {
         let clip_id = Uuid::new_v4();
         let instance = ClipInstance::new(clip_id)
-            .with_trimming(2.0, None);
+            .with_trimming(ContentTime(2.0), None);
 
-        assert_eq!(instance.trim_start, 2.0);
+        assert_eq!(instance.trim_start, ContentTime(2.0));
         assert_eq!(instance.trim_end, None);
         // At 60 BPM the tempo map is identity (1 beat == 1 second).
         let tempo_map = crate::tempo_map::TempoMap::constant(60.0);
-        assert_eq!(instance.effective_duration(Seconds(10.0), &tempo_map), Beats(8.0));
+        let content = ClipDuration::Seconds(Seconds(10.0));
+        assert_eq!(instance.effective_duration(content, &tempo_map), Beats(8.0));
+    }
+
+    #[test]
+    fn trimmed_midi_clip_keeps_its_beats_length_across_tempo() {
+        // Regression: `effective_duration_beats` used to take a SECONDS clip duration and subtract
+        // `trim_start` from it. For a TRIMMED MIDI clip that subtracted a beats offset from a
+        // seconds duration, so the clip's timeline length came out wrong at any tempo but 60 BPM.
+        //
+        // MIDI content is beats and tempo-invariant: a clip trimmed to beats 2..6 is 4 beats long
+        // whatever the tempo says.
+        let clip_id = Uuid::new_v4();
+        let instance = ClipInstance::new(clip_id)
+            .with_trimming(ContentTime(2.0), Some(ContentTime(6.0)));
+        let content = ClipDuration::Beats(Beats(8.0));
+
+        for bpm in [60.0, 120.0, 90.0] {
+            let tempo_map = crate::tempo_map::TempoMap::constant(bpm);
+            assert_eq!(
+                instance.effective_duration(content, &tempo_map),
+                Beats(4.0),
+                "a MIDI clip trimmed to beats 2..6 is 4 beats long at {bpm} BPM",
+            );
+        }
     }
 
     #[test]
@@ -1069,5 +1306,110 @@ mod tests {
         assert_eq!(instance.name, Some("My Instance".to_string()));
         assert_eq!(instance.playback_speed, 2.0);
         assert_eq!(instance.gain, 0.8);
+    }
+
+    /// A clip whose own content is pool 10, plus an instance carrying takes over the given pools.
+    fn with_takes(pool_indices: &[usize]) -> (AudioClip, ClipInstance) {
+        let clip = AudioClip::new_sampled("Cycle rec", pool_indices[0], 2.0);
+        let mut instance = ClipInstance::new(clip.id);
+        instance.takes = pool_indices
+            .iter()
+            .enumerate()
+            .map(|(i, &audio_pool_index)| AudioTake {
+                name: format!("Take {}", i + 1),
+                content: TakeContent::Audio { audio_pool_index },
+            })
+            .collect();
+        instance.recorded_loop_beats = Some(Beats(8.0));
+        (clip, instance)
+    }
+
+    #[test]
+    fn active_take_selects_the_pool_file() {
+        let (clip, mut instance) = with_takes(&[10, 11, 12]);
+        instance.active_take = Some(0);
+        assert_eq!(instance.resolved_audio_pool_index(&clip), Some(10));
+        instance.active_take = Some(2);
+        assert_eq!(instance.resolved_audio_pool_index(&clip), Some(12));
+        // None means take 0.
+        instance.active_take = None;
+        assert_eq!(instance.resolved_audio_pool_index(&clip), Some(10));
+    }
+
+    #[test]
+    fn out_of_range_take_falls_back_to_the_first() {
+        // An index can go stale (an undo that shrank the list, an old .beam). Playing the first take
+        // beats playing nothing.
+        let (clip, mut instance) = with_takes(&[10, 11]);
+        instance.active_take = Some(99);
+        assert_eq!(instance.resolved_audio_pool_index(&clip), Some(10));
+        assert_eq!(instance.active_take_index(), 0);
+    }
+
+    #[test]
+    fn an_instance_without_takes_plays_the_clips_own_content() {
+        let clip = AudioClip::new_sampled("Plain", 42, 2.0);
+        let instance = ClipInstance::new(clip.id);
+        assert!(instance.takes.is_empty());
+        assert_eq!(instance.resolved_audio_pool_index(&clip), Some(42));
+    }
+
+    #[test]
+    fn midi_takes_resolve_to_midi_content() {
+        let clip = AudioClip::new_midi("Cycle rec", 7, Beats(4.0));
+        let mut instance = ClipInstance::new(clip.id);
+        instance.takes = vec![AudioTake {
+            name: "Take 1".into(),
+            content: TakeContent::Midi { midi_clip_id: 7 },
+        }];
+        assert_eq!(clip.content_duration(), ClipDuration::Beats(Beats(4.0)));
+        assert_eq!(instance.resolved_midi_clip_id(&clip), Some(7));
+        assert_eq!(instance.resolved_audio_pool_index(&clip), None);
+    }
+
+    #[test]
+    fn splitting_gives_each_half_an_independent_take_list() {
+        // Takes live on the INSTANCE, so a split (which clones the instance) hands each half its own
+        // list. Two consequences, both wanted: the halves can select different takes (comping), and
+        // deleting a take from one leaves the other alone.
+        let (clip, left_src) = with_takes(&[10, 11, 12]);
+        let mut left = left_src.clone();
+        let mut right = left_src.clone();
+        right.id = Uuid::new_v4();
+
+        left.active_take = Some(0);
+        right.active_take = Some(2);
+        assert_eq!(left.resolved_audio_pool_index(&clip), Some(10));
+        assert_eq!(right.resolved_audio_pool_index(&clip), Some(12));
+
+        // Delete take 2 (pool 11) from the left half only.
+        left.takes.remove(1);
+        assert_eq!(left.takes.len(), 2);
+        assert_eq!(right.takes.len(), 3, "the other half keeps its own takes");
+        assert_eq!(
+            right.resolved_audio_pool_index(&clip),
+            Some(12),
+            "and its selection still points where it did",
+        );
+    }
+
+    #[test]
+    fn clip_instance_without_active_take_deserializes() {
+        // Back-compat: .beam files written before take folders have no `active_take` field.
+        let json = r#"{
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "clip_id": "550e8400-e29b-41d4-a716-446655440001",
+            "transform": {"x": 0.0, "y": 0.0, "rotation": 0.0, "scale_x": 1.0, "scale_y": 1.0, "skew_x": 0.0, "skew_y": 0.0},
+            "opacity": 1.0,
+            "name": null,
+            "timeline_start": 0.0,
+            "timeline_duration": null,
+            "trim_start": 0.0,
+            "trim_end": null,
+            "playback_speed": 1.0,
+            "gain": 1.0
+        }"#;
+        let instance: ClipInstance = serde_json::from_str(json).expect("old instances must load");
+        assert_eq!(instance.active_take, None);
     }
 }

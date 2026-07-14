@@ -91,7 +91,7 @@ impl Action for LoopClipInstancesAction {
 
 impl LoopClipInstancesAction {
     fn sync_backend(&self, backend: &mut crate::action::BackendContext, document: &Document, rollback: bool) -> Result<(), String> {
-        use crate::clip::AudioClipType;
+        use crate::clip::ResolvedContent;
 
         let controller = match backend.audio_controller.as_mut() {
             Some(c) => c,
@@ -128,26 +128,22 @@ impl LoopClipInstancesAction {
                     (new_dur, new_lb)
                 };
 
-                let content_window = {
-                    let trim_end = instance.trim_end.unwrap_or(clip.content_duration().native());
-                    (trim_end - instance.trim_start).max(0.0) // seconds
-                };
-                // Natural content length as a beats span at the clip's start (the
-                // fallback when no explicit timeline_duration is set).
-                let tempo_map = document.tempo_map();
-                let content_window_beats = tempo_map.seconds_to_beats(
-                    tempo_map.beats_to_seconds(instance.timeline_start)
-                        + daw_backend::Seconds(content_window),
-                ) - instance.timeline_start;
+                // Natural content length as a beats span (the fallback when no explicit
+                // timeline_duration is set). Resolved in the clip's own domain, so MIDI's beats
+                // content carries over directly rather than being read as seconds.
+                let content_window_beats = instance.effective_duration_beats(
+                    clip.content_duration(),
+                    document.tempo_map(),
+                );
                 let right_duration = target_duration.unwrap_or(content_window_beats);
                 let left_duration = target_loop_before.unwrap_or(daw_backend::Beats::ZERO);
                 let external_duration = left_duration + right_duration;
                 let external_start = instance.timeline_start - left_duration;
 
                 let get_backend_clip_id = |inst_id: &Uuid| -> Result<u32, String> {
-                    match &clip.clip_type {
-                        AudioClipType::Midi { midi_clip_id } => Ok(*midi_clip_id),
-                        AudioClipType::Sampled { .. } => {
+                    match &instance.resolve(clip) {
+                        ResolvedContent::Midi { midi_clip_id } => Ok(*midi_clip_id),
+                        ResolvedContent::Audio { .. } => {
                             let backend_id = backend.clip_instance_to_backend_map.get(inst_id)
                                 .ok_or_else(|| format!("Clip instance {} not mapped to backend", inst_id))?;
                             match backend_id {
@@ -155,7 +151,7 @@ impl LoopClipInstancesAction {
                                 _ => Err("Expected audio instance ID for sampled clip".to_string()),
                             }
                         }
-                        AudioClipType::Recording => Err("Cannot sync recording clip".to_string()),
+                        ResolvedContent::Recording => Err("Cannot sync recording clip".to_string()),
                     }
                 };
 

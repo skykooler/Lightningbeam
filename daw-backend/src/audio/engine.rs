@@ -41,6 +41,9 @@ pub struct Engine {
     /// Cycle-region sample bounds frozen for the duration of an **audio** recording.
     /// See `loop_bounds_samples` for why. `None` = derive live from the tempo map.
     loop_bounds_frozen: Option<(i64, i64)>,
+    /// How a cycle MIDI recording treats its passes: merge into one clip (default), or one clip per
+    /// pass for the editor to fold into a take folder.
+    cycle_midi_separate_takes: bool,
 
     // Lock-free communication
     command_rx: rtrb::Consumer<Command>,
@@ -167,6 +170,7 @@ impl Engine {
             loop_region: None,
             loop_enabled: false,
             loop_bounds_frozen: None,
+            cycle_midi_separate_takes: false,
             command_rx,
             midi_command_rx: None,
             event_tx,
@@ -494,6 +498,11 @@ impl Engine {
             self.project.reset_read_ahead_targets();
 
             // Render the entire project hierarchy into the mix buffer
+            // Silence everything else on the track being recorded into (see RenderContext).
+            let recording_midi = self
+                .midi_recording_state
+                .as_ref()
+                .map(|rec| (rec.track_id, rec.clip_id));
             self.project.render(
                 &mut self.mix_buffer,
                 &self.audio_pool,
@@ -503,6 +512,7 @@ impl Engine {
                 self.sample_rate,
                 self.channels,
                 false,
+                recording_midi,
             );
 
             // Copy mix to output
@@ -543,6 +553,63 @@ impl Engine {
                             rec.wrap_at_cycle(le_beats, ls_beats);
                         }
 
+                        // Overdub monitoring. In MERGE mode every pass layers onto the same clip, so
+                        // the next pass has to PLAY BACK what was just laid down — otherwise you're
+                        // overdubbing against silence, which defeats the point of merging (you can't
+                        // put a hi-hat on a kick you can't hear).
+                        //
+                        // The notes only reach the pool clip at stop otherwise, so fold what's been
+                        // captured so far into it now, at the boundary. Disjoint field borrows:
+                        // `midi_recording_state` read, `project` written.
+                        //
+                        // Deliberately NOT done in separate-takes mode: there, each pass is an
+                        // alternative rather than a layer, so hearing the previous take play back
+                        // under you would just be confusing — you'd be playing along with the take
+                        // you're trying to replace.
+                        if let Some(rec) = self.midi_recording_state.as_ref().filter(|_| !self.cycle_midi_separate_takes) {
+                            if let Some(clip) =
+                                self.project.midi_clip_pool.get_clip_mut(rec.clip_id)
+                            {
+                                // Note offsets are relative to `start_time`, which for a cycle
+                                // recording IS the region start — so they're already region-relative
+                                // and drop straight in.
+                                clip.duration = le_beats - ls_beats;
+                                // Reusing the existing Vec keeps this allocation-free after the
+                                // first wrap, which matters on the audio thread. (Mutating the pool
+                                // here is the same thing `Command::UpdateMidiClipNotes` already does
+                                // from this thread.)
+                                clip.events.clear();
+                                for (start, note, velocity, duration) in rec.get_notes() {
+                                    clip.events.push(MidiEvent::note_on(*start, 0, *note, *velocity));
+                                    clip.events.push(MidiEvent::note_off(
+                                        *start + *duration,
+                                        0,
+                                        *note,
+                                        64,
+                                    ));
+                                }
+                                clip.events.sort_by(|a, b| {
+                                    a.timestamp.partial_cmp(&b.timestamp).unwrap()
+                                });
+                            }
+                        }
+                        // The clip INSTANCE is sized by the recording-progress block above, which
+                        // now pins it to the whole region once `cycle_loop_len` is set (this wrap
+                        // sets it). That's what lets the sequencer actually schedule the events we
+                        // just wrote — an instance sized to the elapsed-since-start playhead would
+                        // have collapsed back to nothing here.
+
+                        // An audio recording in progress just completed a pass. This only decides
+                        // *whether* the recording becomes multi-take — the takes themselves are cut
+                        // geometrically at stop, since the playhead advances before the capture
+                        // block below, so the wrap instant isn't sample-exact against the buffer
+                        // that was just captured. The geometry is.
+                        if let Some(ref mut rec) = self.recording_state {
+                            if let Some(ref mut cycle) = rec.cycle {
+                                cycle.wrap_count += 1;
+                            }
+                        }
+
                         if let Some(ref mut dr) = self.disk_reader {
                             dr.send(crate::audio::disk_reader::DiskReaderCommand::Seek {
                                 frame: self.playhead.max(0) as u64,
@@ -561,7 +628,7 @@ impl Engine {
             if self.frames_since_last_event >= self.event_interval_frames / self.channels as usize
             {
                 // Clamp to 0 during count-in pre-roll (negative playhead = before project start)
-                let position_seconds = self.playhead.max(0) as f64 / self.sample_rate as f64;
+                let position_seconds = Seconds(self.playhead.max(0) as f64 / self.sample_rate as f64);
                 let _ = self
                     .event_tx
                     .push(AudioEvent::PlaybackPosition(position_seconds));
@@ -571,8 +638,31 @@ impl Engine {
                 if let Some(recording) = &self.midi_recording_state {
                     let current_time_secs = Seconds(self.playhead as f64 / self.sample_rate as f64);
                     let current_time = self.tempo_map.seconds_to_beats(current_time_secs);
-                    let duration = current_time - recording.start_time;
-                    let notes = recording.get_notes_with_active(current_time);
+                    // Once the transport has wrapped, the recording covers the WHOLE cycle region and
+                    // stays there — every further pass merges into the same clip rather than
+                    // extending it. Measuring from the playhead instead would reset to zero at each
+                    // wrap (the playhead jumps back), which both made the clip bar restart from zero
+                    // every pass and — because this block also resizes the backend clip instance
+                    // below — shrank the instance back to nothing, so the notes just merged into it
+                    // were never scheduled and you overdubbed against silence.
+                    // Pinned only once a pass has actually completed — until then the bar still grows.
+                    let duration = recording
+                        .cycle_loop_len
+                        .filter(|_| recording.wrapped)
+                        .unwrap_or(current_time - recording.start_time);
+                    // In separate-takes mode the preview shows only the pass being played now — the
+                    // earlier passes are alternative takes, not layers, so drawing them all on top of
+                    // each other would misrepresent what's being recorded.
+                    let notes = if self.cycle_midi_separate_takes && recording.cycle_loop_len.is_some() {
+                        let mut current = recording
+                            .notes_by_pass(recording.pass_count())
+                            .pop()
+                            .unwrap_or_default();
+                        current.extend(recording.active_notes_with_provisional_end(current_time));
+                        current
+                    } else {
+                        recording.get_notes_with_active(current_time)
+                    };
                     let _ = self.event_tx.push(AudioEvent::MidiRecordingProgress(
                         recording.track_id,
                         recording.clip_id,
@@ -610,6 +700,7 @@ impl Engine {
                 self.sample_rate,
                 self.channels,
                 true, // live_only
+                None, // no clips are scheduled at all in live_only, so nothing to mute
             );
             output.copy_from_slice(&self.mix_buffer);
         }
@@ -894,6 +985,9 @@ impl Engine {
             Command::SetLoopEnabled(enabled) => {
                 self.loop_enabled = enabled;
             }
+            Command::SetCycleMidiSeparateTakes(separate) => {
+                self.cycle_midi_separate_takes = separate;
+            }
             Command::Stop => {
                 self.playing = false;
                 self.playhead = 0;
@@ -911,7 +1005,7 @@ impl Engine {
                 self.project.stop_all_notes();
             }
             Command::Seek(seconds) => {
-                self.playhead = (seconds * self.sample_rate as f64) as i64;
+                self.playhead = (seconds.seconds_to_f64() * self.sample_rate as f64) as i64;
                 // Clamp to 0 for atomic/disk-reader; negative = count-in pre-roll (no disk reads needed)
                 let clamped = self.playhead.max(0) as u64;
                 self.playhead_atomic.store(clamped, Ordering::Relaxed);
@@ -944,35 +1038,55 @@ impl Engine {
                 match self.project.get_track_mut(track_id) {
                     Some(crate::audio::track::TrackNode::Audio(track)) => {
                         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            clip.external_start = Beats(new_start_time);
+                            clip.external_start = new_start_time;
                         }
                     }
                     Some(crate::audio::track::TrackNode::Midi(track)) => {
                         if let Some(instance) = track.clip_instances.iter_mut().find(|c| c.id == clip_id) {
-                            instance.external_start = Beats(new_start_time);
+                            instance.external_start = new_start_time;
                         }
                     }
                     _ => {}
                 }
                 self.refresh_clip_snapshot();
             }
-            Command::TrimClip(track_id, clip_id, new_internal_start, new_internal_end) => {
-                // Trim changes which portion of the source content is used
-                // Also updates external_duration to match internal duration (no looping after trim)
-                match self.project.get_track_mut(track_id) {
-                    Some(crate::audio::track::TrackNode::Audio(track)) => {
+            Command::TrimClip(track_id, clip_id, range) => {
+                // Trim changes which portion of the source content is used.
+                // Also collapses external_duration to the trimmed content length (no looping after
+                // a trim).
+                let tempo_map = self.tempo_map.clone();
+                match (self.project.get_track_mut(track_id), range) {
+                    (
+                        Some(crate::audio::track::TrackNode::Audio(track)),
+                        crate::command::TrimRange::Seconds { start, end },
+                    ) => {
                         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            clip.internal_start = Seconds(new_internal_start);
-                            clip.internal_end = Seconds(new_internal_end);
-                            clip.external_duration = Beats(new_internal_end - new_internal_start);
+                            clip.internal_start = start;
+                            clip.internal_end = end;
+                            // external_duration is BEATS while the trims are SECONDS, so the span
+                            // has to be converted at the clip's position on the timeline — NOT
+                            // reinterpreted as `Beats(end - start)`, which played a 1-second trim
+                            // back as half a second at 120 BPM.
+                            clip.external_duration = tempo_map.seconds_to_beats(
+                                tempo_map.beats_to_seconds(clip.external_start) + (end - start),
+                            ) - clip.external_start;
                         }
                     }
-                    Some(crate::audio::track::TrackNode::Midi(track)) => {
+                    (
+                        Some(crate::audio::track::TrackNode::Midi(track)),
+                        crate::command::TrimRange::Beats { start, end },
+                    ) => {
                         if let Some(instance) = track.clip_instances.iter_mut().find(|c| c.clip_id == clip_id) {
-                            instance.internal_start = Beats(new_internal_start);
-                            instance.internal_end = Beats(new_internal_end);
-                            instance.external_duration = Beats(new_internal_end - new_internal_start);
+                            instance.internal_start = start;
+                            instance.internal_end = end;
+                            // MIDI content time IS beats, so the span carries over directly.
+                            instance.external_duration = end - start;
                         }
+                    }
+                    // A domain that doesn't match the track kind (seconds at a MIDI track, or vice
+                    // versa) is a caller bug, not something to guess at.
+                    (Some(_), _) => {
+                        debug_assert!(false, "TrimClip domain does not match the track kind");
                     }
                     _ => {}
                 }
@@ -983,12 +1097,12 @@ impl Engine {
                 match self.project.get_track_mut(track_id) {
                     Some(crate::audio::track::TrackNode::Audio(track)) => {
                         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id) {
-                            clip.external_duration = Beats(new_external_duration);
+                            clip.external_duration = new_external_duration;
                         }
                     }
                     Some(crate::audio::track::TrackNode::Midi(track)) => {
                         if let Some(instance) = track.clip_instances.iter_mut().find(|c| c.clip_id == clip_id) {
-                            instance.external_duration = Beats(new_external_duration);
+                            instance.external_duration = new_external_duration;
                         }
                     }
                     _ => {}
@@ -1015,7 +1129,7 @@ impl Engine {
             }
             Command::SetOffset(track_id, offset) => {
                 if let Some(crate::audio::track::TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
-                    metatrack.offset = Seconds(offset);
+                    metatrack.offset = offset;
                 }
             }
             Command::SetPitchShift(track_id, semitones) => {
@@ -1025,12 +1139,12 @@ impl Engine {
             }
             Command::SetTrimStart(track_id, trim_start) => {
                 if let Some(crate::audio::track::TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
-                    metatrack.trim_start = Seconds(trim_start.max(0.0));
+                    metatrack.trim_start = Seconds(trim_start.seconds_to_f64().max(0.0));
                 }
             }
             Command::SetTrimEnd(track_id, trim_end) => {
                 if let Some(crate::audio::track::TrackNode::Group(metatrack)) = self.project.get_track_mut(track_id) {
-                    metatrack.trim_end = trim_end.map(|t| Seconds(t.max(0.0)));
+                    metatrack.trim_end = trim_end.map(|t| Seconds(t.seconds_to_f64().max(0.0)));
                 }
             }
             Command::CreateAudioTrack(name, parent_id) => {
@@ -1084,9 +1198,13 @@ impl Engine {
                     // Send chunks via MPSC channel (will be forwarded by audio thread)
                     if !chunks.is_empty() {
                         println!("📤 [BACKGROUND] Generated {} chunks, sending to audio thread (pool {})", chunks.len(), pool_index);
-                        let event_chunks: Vec<(u32, (f64, f64), Vec<crate::io::WaveformPeak>)> = chunks
+                        let event_chunks: Vec<(u32, (Seconds, Seconds), Vec<crate::io::WaveformPeak>)> = chunks
                             .into_iter()
-                            .map(|chunk| (chunk.chunk_index, chunk.time_range, chunk.peaks))
+                            .map(|chunk| {
+                                // A chunk's time_range is a wall-clock span into the audio file.
+                                let (start, end) = chunk.time_range;
+                                (chunk.chunk_index, (Seconds(start), Seconds(end)), chunk.peaks)
+                            })
                             .collect();
 
                         match chunk_tx.send(AudioEvent::WaveformChunksReady {
@@ -1150,12 +1268,12 @@ impl Engine {
                 let clip_id = self.next_midi_clip_id_atomic.fetch_add(1, Ordering::Relaxed);
 
                 // Create clip content in the pool
-                let clip = MidiClip::empty(clip_id, Beats(duration), format!("MIDI Clip {}", clip_id));
+                let clip = MidiClip::empty(clip_id, duration, format!("MIDI Clip {}", clip_id));
                 self.project.midi_clip_pool.add_existing_clip(clip);
 
                 // Create an instance for this clip on the track
                 let instance_id = self.project.next_midi_clip_instance_id();
-                let instance = MidiClipInstance::from_full_clip(instance_id, clip_id, Beats(duration), Beats(start_time));
+                let instance = MidiClipInstance::from_full_clip(instance_id, clip_id, duration, start_time);
 
                 if let Some(crate::audio::track::TrackNode::Midi(track)) = self.project.get_track_mut(track_id) {
                     track.clip_instances.push(instance);
@@ -1170,11 +1288,11 @@ impl Engine {
                 // Note: clip_id here refers to the clip in the pool, not the instance
                 if let Some(clip) = self.project.midi_clip_pool.get_clip_mut(clip_id) {
                     // Timestamp is in beats (canonical)
-                    let note_on = MidiEvent::note_on(Beats(time_offset), 0, note, velocity);
+                    let note_on = MidiEvent::note_on(time_offset, 0, note, velocity);
                     clip.add_event(note_on);
 
                     // Add note off event
-                    let note_off_time = Beats(time_offset + duration);
+                    let note_off_time = time_offset + duration;
                     let note_off = MidiEvent::note_off(note_off_time, 0, note, 64);
                     clip.add_event(note_off);
                 } else {
@@ -1183,9 +1301,9 @@ impl Engine {
                         if let Some(instance) = track.clip_instances.iter().find(|c| c.clip_id == clip_id) {
                             let actual_clip_id = instance.clip_id;
                             if let Some(clip) = self.project.midi_clip_pool.get_clip_mut(actual_clip_id) {
-                                let note_on = MidiEvent::note_on(Beats(time_offset), 0, note, velocity);
+                                let note_on = MidiEvent::note_on(time_offset, 0, note, velocity);
                                 clip.add_event(note_on);
-                                let note_off_time = Beats(time_offset + duration);
+                                let note_off_time = time_offset + duration;
                                 let note_off = MidiEvent::note_off(note_off_time, 0, note, 64);
                                 clip.add_event(note_off);
                             }
@@ -1195,7 +1313,7 @@ impl Engine {
             }
             Command::AddLoadedMidiClip(track_id, clip, start_time) => {
                 // Add a pre-loaded MIDI clip to the track with the given start time
-                if let Ok(_instance_id) = self.project.add_midi_clip_at(track_id, clip, crate::time::Beats(start_time)) {
+                if let Ok(_instance_id) = self.project.add_midi_clip_at(track_id, clip, start_time) {
                     // instance positions are already in beats; nothing to sync
                 }
                 self.refresh_clip_snapshot();
@@ -1209,11 +1327,11 @@ impl Engine {
                     // Add new events from the notes array
                     // Timestamps are in beats (canonical)
                     for (start_time, note, velocity, duration) in notes {
-                        let note_on = MidiEvent::note_on(Beats(start_time), 0, note, velocity);
+                        let note_on = MidiEvent::note_on(start_time, 0, note, velocity);
                         clip.events.push(note_on);
 
                         // Add note off event
-                        let note_off_time = Beats(start_time + duration);
+                        let note_off_time = start_time + duration;
                         let note_off = MidiEvent::note_off(note_off_time, 0, note, 64);
                         clip.events.push(note_off);
                     }
@@ -1275,7 +1393,7 @@ impl Engine {
             }
             Command::AddAutomationPoint(track_id, lane_id, time, value, curve) => {
                 // Add an automation point to the specified lane
-                let point = crate::audio::AutomationPoint::new(Beats(time), value, curve);
+                let point = crate::audio::AutomationPoint::new(time, value, curve);
 
                 match self.project.get_track_mut(track_id) {
                     Some(crate::audio::track::TrackNode::Audio(track)) => {
@@ -1301,17 +1419,17 @@ impl Engine {
                 match self.project.get_track_mut(track_id) {
                     Some(crate::audio::track::TrackNode::Audio(track)) => {
                         if let Some(lane) = track.get_automation_lane_mut(lane_id) {
-                            lane.remove_point_at_time(Beats(time), Beats(tolerance));
+                            lane.remove_point_at_time(time, tolerance);
                         }
                     }
                     Some(crate::audio::track::TrackNode::Midi(track)) => {
                         if let Some(lane) = track.get_automation_lane_mut(lane_id) {
-                            lane.remove_point_at_time(Beats(time), Beats(tolerance));
+                            lane.remove_point_at_time(time, tolerance);
                         }
                     }
                     Some(crate::audio::track::TrackNode::Group(group)) => {
                         if let Some(lane) = group.get_automation_lane_mut(lane_id) {
-                            lane.remove_point_at_time(Beats(time), Beats(tolerance));
+                            lane.remove_point_at_time(time, tolerance);
                         }
                     }
                     None => {}
@@ -1374,9 +1492,9 @@ impl Engine {
                     None => {}
                 }
             }
-            Command::StartRecording(track_id, start_time) => {
+            Command::StartRecording(track_id, start_time, force_takes) => {
                 // Start recording on the specified track
-                self.handle_start_recording(track_id, start_time);
+                self.handle_start_recording(track_id, start_time, force_takes);
             }
             Command::StopRecording => {
                 // Stop the current recording
@@ -1394,9 +1512,9 @@ impl Engine {
                     recording.resume();
                 }
             }
-            Command::StartMidiRecording(track_id, clip_id, start_time) => {
+            Command::StartMidiRecording(track_id, clip_id, start_time, force_takes) => {
                 // Start MIDI recording on the specified track
-                self.handle_start_midi_recording(track_id, clip_id, start_time);
+                self.handle_start_midi_recording(track_id, clip_id, start_time, force_takes);
             }
             Command::StopMidiRecording => {
                 eprintln!("[ENGINE] Received StopMidiRecording command");
@@ -2400,7 +2518,7 @@ impl Engine {
                         // Downcast to AutomationInputNode using as_any_mut
                         if let Some(auto_node) = graph_node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
                             let keyframe = AutomationKeyframe {
-                                time: Beats(time),
+                                time,
                                 value,
                                 interpolation,
                                 ease_out,
@@ -2428,7 +2546,7 @@ impl Engine {
 
                     if let Some(graph_node) = graph.get_graph_node_mut(node_idx) {
                         if let Some(auto_node) = graph_node.node.as_any_mut().downcast_mut::<AutomationInputNode>() {
-                            auto_node.remove_keyframe_at_time(Beats(time), Beats(0.001)); // 1ms tolerance
+                            auto_node.remove_keyframe_at_time(time, Beats(0.001)); // 1ms tolerance
                         } else {
                             eprintln!("Node {} is not an AutomationInputNode", node_id);
                         }
@@ -2497,9 +2615,12 @@ impl Engine {
 
                         // Send chunks via MPSC channel (will be forwarded by audio thread)
                         if !chunks.is_empty() {
-                            let event_chunks: Vec<(u32, (f64, f64), Vec<crate::io::WaveformPeak>)> = chunks
+                            let event_chunks: Vec<(u32, (Seconds, Seconds), Vec<crate::io::WaveformPeak>)> = chunks
                                 .into_iter()
-                                .map(|chunk| (chunk.chunk_index, chunk.time_range, chunk.peaks))
+                                .map(|chunk| {
+                                    let (start, end) = chunk.time_range;
+                                    (chunk.chunk_index, (Seconds(start), Seconds(end)), chunk.peaks)
+                                })
                                 .collect();
 
                             let _ = chunk_tx.send(AudioEvent::WaveformChunksReady {
@@ -2663,7 +2784,7 @@ impl Engine {
             path: path_str,
             channels: metadata.channels,
             sample_rate: metadata.sample_rate,
-            duration: metadata.duration,
+            duration: Seconds(metadata.duration),
             format: metadata.format,
         });
 
@@ -2771,7 +2892,7 @@ impl Engine {
                 if let Some(clip) = self.project.midi_clip_pool.get_clip(clip_id) {
                     use crate::command::MidiClipData;
                     QueryResponse::MidiClipData(Ok(MidiClipData {
-                        duration: clip.duration.0,
+                        duration: clip.duration,
                         events: clip.events.clone(),
                     }))
                 } else {
@@ -2803,7 +2924,7 @@ impl Engine {
                                         InterpolationType::Hold => "hold",
                                     }.to_string();
                                     AutomationKeyframeData {
-                                        time: kf.time.0,
+                                        time: kf.time,
                                         value: kf.value,
                                         interpolation: interpolation_str,
                                         ease_out: kf.ease_out,
@@ -2972,7 +3093,11 @@ impl Engine {
             }
             Query::GetPoolFileInfo(pool_index) => {
                 match self.audio_pool.get_file_info(pool_index) {
-                    Some(info) => QueryResponse::PoolFileInfo(Ok(info)),
+                    // The pool measures a file's length in wall-clock seconds; name it as such at
+                    // the boundary rather than handing a bare f64 to the UI.
+                    Some((duration, sample_rate, channels)) => {
+                        QueryResponse::PoolFileInfo(Ok((Seconds(duration), sample_rate, channels)))
+                    }
                     None => QueryResponse::PoolFileInfo(Err(format!("Pool index {} not found", pool_index))),
                 }
             }
@@ -3019,7 +3144,7 @@ impl Engine {
             }
             Query::AddMidiClipSync(track_id, clip, start_time) => {
                 // Add MIDI clip to track and return the instance ID (positions already in beats)
-                let result = match self.project.add_midi_clip_at(track_id, clip, crate::time::Beats(start_time)) {
+                let result = match self.project.add_midi_clip_at(track_id, clip, start_time) {
                     Ok(instance_id) => QueryResponse::MidiClipInstanceAdded(Ok(instance_id)),
                     Err(e) => QueryResponse::MidiClipInstanceAdded(Err(e.to_string())),
                 };
@@ -3141,7 +3266,7 @@ impl Engine {
     }
 
     /// Handle starting a recording
-    fn handle_start_recording(&mut self, track_id: TrackId, start_time: Beats) {
+    fn handle_start_recording(&mut self, track_id: TrackId, start_time: Beats, force_takes: bool) {
         use crate::io::WavWriter;
         use std::env;
 
@@ -3212,8 +3337,29 @@ impl Engine {
                     self.recording_state = Some(recording_state);
                     self.recording_progress_counter = 0; // Reset progress counter
 
+                    // Arm cycle recording. `start_time` is the region start (the editor anchors a
+                    // cycle recording there, for punch-in too), while capture actually begins at
+                    // the current playhead — the gap between them is the lead pad that take 1 gets
+                    // prepended as silence so it still spans the whole region.
+                    let cycle_info = if self.loop_enabled {
+                        self.loop_region.map(|(ls_beats, le_beats)| {
+                            let (ls, le) = self.loop_bounds_samples(ls_beats, le_beats);
+                            crate::audio::recording::CycleRecordInfo {
+                                loop_start: ls_beats,
+                                loop_len_beats: le_beats - ls_beats,
+                                loop_len_frames: (le - ls).max(0) as usize,
+                                lead_pad_frames: (self.playhead - ls).max(0) as usize,
+                                wrap_count: 0,
+                                force_takes,
+                            }
+                        })
+                    } else {
+                        None
+                    };
+
                     // Set samples to skip (drained incrementally across callbacks)
                     if let Some(recording) = &mut self.recording_state {
+                        recording.cycle = cycle_info;
                         recording.samples_to_skip = samples_in_buffer;
                         if self.debug_audio && samples_in_buffer > 0 {
                             eprintln!("[AUDIO DEBUG] Will skip {} stale samples from input buffer", samples_in_buffer);
@@ -3236,6 +3382,40 @@ impl Engine {
                 format!("Track {} not found or is not an audio track", track_id)
             ));
         }
+    }
+
+    /// Write one cycle take to a temp WAV, add it to the audio pool, and return its pool index.
+    ///
+    /// Mirrors what the single-recording path does with its own buffer: the pool file is backed by
+    /// the in-memory samples, and the temp WAV is written and then removed (the pool only reads the
+    /// path opportunistically, e.g. to keep original bytes on save).
+    fn write_take_to_pool(
+        &mut self,
+        samples: Vec<f32>,
+        sample_rate: u32,
+        channels: u32,
+        clip_id: ClipId,
+        take_index: usize,
+    ) -> Result<usize, std::io::Error> {
+        use crate::io::WavWriter;
+
+        let path = std::env::temp_dir()
+            .join(format!("daw_take_{}_{}.wav", clip_id, take_index));
+
+        let mut writer = WavWriter::create(&path, sample_rate, channels)?;
+        writer.write_samples(&samples)?;
+        writer.finalize()?;
+
+        let pool_file = crate::audio::pool::AudioFile::with_format(
+            path.clone(),
+            samples,
+            channels,
+            sample_rate,
+            Some("wav".to_string()),
+        );
+        let pool_index = self.audio_pool.add_file(pool_file);
+        let _ = std::fs::remove_file(&path);
+        Ok(pool_index)
     }
 
     /// Handle stopping a recording
@@ -3261,11 +3441,74 @@ impl Engine {
 
             eprintln!("[STOP_RECORDING] Stopping recording for clip_id={}, track_id={}", clip_id, track_id);
 
+            // Slice cycle takes BEFORE finalize consumes the recording. `None` here means the
+            // transport never wrapped, which stays an ordinary single recording on the path below.
+            let cycle = recording.cycle;
+            let frames_per_peak = recording.frames_per_peak;
+            let cycle_takes = recording.slice_takes();
+
             // Finalize the recording (flush buffers, close file, get waveform and audio data)
             let frames_recorded = recording.frames_written;
             eprintln!("[STOP_RECORDING] Calling finalize() - frames_recorded={}", frames_recorded);
             match recording.finalize() {
                 Ok((temp_file_path, waveform, audio_data)) => {
+                    // ---- Cycle recording: one take per pass, each spanning the whole region ----
+                    if let (Some(takes), Some(cycle)) = (cycle_takes, cycle) {
+                        eprintln!(
+                            "[STOP_RECORDING] Cycle recording: {} wraps -> {} takes of {} frames",
+                            cycle.wrap_count, takes.len(), cycle.loop_len_frames
+                        );
+                        let _ = std::fs::remove_file(&temp_file_path);
+
+                        let mut pool_takes: Vec<(usize, Vec<crate::io::WaveformPeak>)> = Vec::new();
+                        for (i, take) in takes.into_iter().enumerate() {
+                            let peaks = crate::audio::recording::compute_peaks(
+                                &take,
+                                channels,
+                                frames_per_peak,
+                            );
+                            match self.write_take_to_pool(take, sample_rate, channels, clip_id, i) {
+                                Ok(pool_index) => pool_takes.push((pool_index, peaks)),
+                                Err(e) => {
+                                    let _ = self.event_tx.push(AudioEvent::RecordingError(
+                                        format!("Failed to store take {}: {}", i + 1, e),
+                                    ));
+                                    return;
+                                }
+                            }
+                        }
+
+                        // Point the engine's clip at the take the editor will make active (the last
+                        // one, GarageBand-style) and stretch it to cover the whole cycle region —
+                        // the clip was created at the punch-in point with zero length.
+                        let loop_len_secs =
+                            Seconds(cycle.loop_len_frames as f64 / sample_rate as f64);
+                        if let Some(&(last_pool_index, _)) = pool_takes.last() {
+                            if let Some(crate::audio::track::TrackNode::Audio(track)) =
+                                self.project.get_track_mut(track_id)
+                            {
+                                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == clip_id)
+                                {
+                                    clip.audio_pool_index = last_pool_index;
+                                    clip.internal_start = Seconds(0.0);
+                                    clip.internal_end = loop_len_secs;
+                                    clip.external_start = cycle.loop_start;
+                                    clip.external_duration = cycle.loop_len_beats;
+                                }
+                            }
+                            self.refresh_clip_snapshot();
+                        }
+
+                        let _ = self.event_tx.push(AudioEvent::CycleRecordingStopped {
+                            clip_id,
+                            takes: pool_takes,
+                            loop_start: cycle.loop_start,
+                            loop_len_beats: cycle.loop_len_beats,
+                            loop_len_seconds: loop_len_secs,
+                        });
+                        return;
+                    }
+
                     eprintln!("[STOP_RECORDING] Finalize succeeded: {} frames written to {:?}, {} waveform peaks generated, {} samples in memory",
                               frames_recorded, temp_file_path, waveform.len(), audio_data.len());
 
@@ -3312,11 +3555,22 @@ impl Engine {
     }
 
     /// Handle starting MIDI recording
-    fn handle_start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: Beats) {
+    fn handle_start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: Beats, force_takes: bool) {
         // Check if track exists and is a MIDI track
         if let Some(crate::audio::track::TrackNode::Midi(_)) = self.project.get_track_mut(track_id) {
             // Create MIDI recording state
             let mut recording_state = MidiRecordingState::new(track_id, clip_id, start_time);
+
+            // Note the cycle region up front. `wrapped` stays false until a pass actually completes,
+            // so the clip bar still grows with the playhead through the first pass.
+            if self.loop_enabled {
+                if let Some((ls, le)) = self.loop_region {
+                    if le > ls {
+                        recording_state.cycle_loop_len = Some(le - ls);
+                        recording_state.force_takes = force_takes;
+                    }
+                }
+            }
 
             // Inject any notes currently held on this track (pressed during count-in pre-roll)
             // so they start at t=0 of the recording rather than being lost
@@ -3355,9 +3609,87 @@ impl Engine {
 
             let clip_id = recording.clip_id;
             let track_id = recording.track_id;
+
+            // ---- Separate takes: one pool clip per cycle pass ----
+            //
+            // Normally only when the transport actually wrapped: a recording that stopped inside the
+            // first pass is an ordinary single recording and falls through to the merge path below,
+            // just as it does for audio. `force_takes` overrides that, because the region already
+            // holds takes and this is another one however short it ran.
+            let takes_mode = self.cycle_midi_separate_takes
+                && (recording.wrapped || recording.force_takes);
+            if let (true, Some(loop_len)) = (takes_mode, recording.cycle_loop_len) {
+                let loop_start = recording.start_time; // a cycle recording is anchored at the region
+                let passes = recording.pass_count();
+                let buckets = recording.notes_by_pass(passes);
+                eprintln!(
+                    "[MIDI_RECORDING] Cycle recording (separate takes): {} passes",
+                    passes
+                );
+
+                let mut clip_ids: Vec<MidiClipId> = Vec::with_capacity(buckets.len());
+                for (i, bucket) in buckets.iter().enumerate() {
+                    // Pass 0 reuses the clip the recording started on; later passes get fresh ones.
+                    let take_clip_id = if i == 0 {
+                        clip_id
+                    } else {
+                        let id = self.next_midi_clip_id_atomic.fetch_add(1, Ordering::Relaxed);
+                        let clip = MidiClip::empty(id, loop_len, format!("Take {}", i + 1));
+                        self.project.midi_clip_pool.add_existing_clip(clip);
+                        id
+                    };
+
+                    if let Some(clip) = self.project.midi_clip_pool.get_clip_mut(take_clip_id) {
+                        clip.events.clear();
+                        clip.duration = loop_len;
+                        for (start, note, velocity, duration) in bucket {
+                            clip.events.push(MidiEvent::note_on(*start, 0, *note, *velocity));
+                            clip.events.push(MidiEvent::note_off(*start + *duration, 0, *note, 64));
+                        }
+                        clip.events
+                            .sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
+                    }
+                    clip_ids.push(take_clip_id);
+                }
+
+                // Point the track's instance at the take the editor will make active (the last one,
+                // GarageBand-style) and stretch it over the region.
+                if let Some(&last) = clip_ids.last() {
+                    if let Some(crate::audio::track::TrackNode::Midi(track)) =
+                        self.project.get_track_mut(track_id)
+                    {
+                        if let Some(instance) =
+                            track.clip_instances.iter_mut().find(|i| i.clip_id == clip_id)
+                        {
+                            instance.clip_id = last;
+                            instance.internal_start = Beats::ZERO;
+                            instance.internal_end = loop_len;
+                            instance.external_start = loop_start;
+                            instance.external_duration = loop_len;
+                        }
+                    }
+                }
+                self.refresh_clip_snapshot();
+
+                let _ = self.event_tx.push(AudioEvent::MidiCycleRecordingStopped {
+                    track_id,
+                    clip_ids,
+                    loop_start,
+                    loop_len_beats: loop_len,
+                });
+                return;
+            }
+
             let notes = recording.get_notes().to_vec();
             let note_count = notes.len();
-            let recording_duration = end_time - recording.start_time;
+            // A cycle MIDI recording that came round is anchored at the region start and every pass
+            // overdubs into the same clip (MERGE), so the clip is exactly one region long — not
+            // however long the user held the record button, which would run past the loop end. One
+            // that stopped inside the first pass is just an ordinary recording.
+            let recording_duration = match recording.cycle_loop_len.filter(|_| recording.wrapped) {
+                Some(loop_len) => loop_len,
+                None => end_time - recording.start_time,
+            };
 
             eprintln!("[MIDI_RECORDING] Stopping MIDI recording for clip_id={}, track_id={}, captured {} notes, duration={:.3} beats",
                       clip_id, track_id, note_count, recording_duration.0);
@@ -3483,6 +3815,12 @@ impl EngineController {
         let _ = self.command_tx.push(Command::SetLoopEnabled(enabled));
     }
 
+    /// How a cycle MIDI recording treats its passes: merge into one clip (false, the default), or
+    /// one clip per pass (true) for the editor to fold into a take folder.
+    pub fn set_cycle_midi_separate_takes(&mut self, separate: bool) {
+        let _ = self.command_tx.push(Command::SetCycleMidiSeparateTakes(separate));
+    }
+
     /// Stop playback and reset to beginning
     pub fn stop(&mut self) {
         let _ = self.command_tx.push(Command::Stop);
@@ -3490,7 +3828,7 @@ impl EngineController {
 
     /// Seek to a specific position in seconds
     pub fn seek(&mut self, seconds: Seconds) {
-        let _ = self.command_tx.push(Command::Seek(seconds.seconds_to_f64()));
+        let _ = self.command_tx.push(Command::Seek(seconds));
     }
 
     /// Set track volume (0.0 = silence, 1.0 = unity gain)
@@ -3522,22 +3860,22 @@ impl EngineController {
 
     /// Move a clip to a new timeline position (changes external_start)
     pub fn move_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_start_time: Beats) {
-        let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time.beats_to_f64()));
+        let _ = self.command_tx.push(Command::MoveClip(track_id, clip_id, new_start_time));
     }
 
-    /// Trim a clip's internal boundaries (changes which portion of source content is used)
-    /// This also resets external_duration to match internal duration (disables looping)
-    /// Trim a clip's internal content bounds. The units are content-domain and depend on the
-    /// track type: SECONDS for a sampled-audio clip, BEATS for a MIDI clip (see the TrimClip
-    /// handler). Left as raw f64 because a single newtype can't express both; callers pass the
-    /// clip's own `trim_start`/`trim_end`, which already match its content domain.
-    pub fn trim_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_internal_start: f64, new_internal_end: f64) {
-        let _ = self.command_tx.push(Command::TrimClip(track_id, clip_id, new_internal_start, new_internal_end));
+    /// Trim a clip's internal content bounds — which portion of the source content plays.
+    ///
+    /// Collapses external_duration to the trimmed length (disables looping). The bounds are
+    /// content-domain, which differs by clip kind, so they're passed as a [`TrimRange`] that names
+    /// the domain: `Seconds` for sampled audio, `Beats` for MIDI. The engine rejects a range whose
+    /// domain doesn't match the track.
+    pub fn trim_clip(&mut self, track_id: TrackId, clip_id: ClipId, range: crate::command::TrimRange) {
+        let _ = self.command_tx.push(Command::TrimClip(track_id, clip_id, range));
     }
 
     /// Extend or shrink a clip's external duration (enables looping if > internal duration)
     pub fn extend_clip(&mut self, track_id: TrackId, clip_id: ClipId, new_external_duration: Beats) {
-        let _ = self.command_tx.push(Command::ExtendClip(track_id, clip_id, new_external_duration.beats_to_f64()));
+        let _ = self.command_tx.push(Command::ExtendClip(track_id, clip_id, new_external_duration));
     }
 
     /// Send a generic command to the audio thread
@@ -3551,9 +3889,9 @@ impl EngineController {
     }
 
     /// Get current playhead position in seconds
-    pub fn get_playhead_seconds(&self) -> f64 {
+    pub fn get_playhead_seconds(&self) -> Seconds {
         let frames = self.playhead.load(Ordering::Relaxed);
-        frames as f64 / self.sample_rate as f64
+        Seconds(frames as f64 / self.sample_rate as f64)
     }
 
     /// Get the shared clip snapshot. The UI can read this each frame to display
@@ -3586,7 +3924,7 @@ impl EngineController {
     /// Set metatrack time offset in seconds
     /// Positive = shift content later, negative = shift earlier
     pub fn set_offset(&mut self, track_id: TrackId, offset: Seconds) {
-        let _ = self.command_tx.push(Command::SetOffset(track_id, offset.seconds_to_f64()));
+        let _ = self.command_tx.push(Command::SetOffset(track_id, offset));
     }
 
     /// Set metatrack pitch shift in semitones (for future use)
@@ -3596,12 +3934,12 @@ impl EngineController {
 
     /// Set metatrack trim start in seconds
     pub fn set_trim_start(&mut self, track_id: TrackId, trim_start: Seconds) {
-        let _ = self.command_tx.push(Command::SetTrimStart(track_id, trim_start.seconds_to_f64()));
+        let _ = self.command_tx.push(Command::SetTrimStart(track_id, trim_start));
     }
 
     /// Set metatrack trim end in seconds (None = no end trim)
     pub fn set_trim_end(&mut self, track_id: TrackId, trim_end: Option<Seconds>) {
-        let _ = self.command_tx.push(Command::SetTrimEnd(track_id, trim_end.map(|s| s.seconds_to_f64())));
+        let _ = self.command_tx.push(Command::SetTrimEnd(track_id, trim_end));
     }
 
     /// Create a new audio track
@@ -3755,23 +4093,22 @@ impl EngineController {
     pub fn create_midi_clip(&mut self, track_id: TrackId, start_time: Beats, duration: Beats) -> MidiClipId {
         // Peek at the next clip ID that will be used
         let clip_id = self.next_midi_clip_id.load(Ordering::Relaxed);
-        let _ = self.command_tx.push(Command::CreateMidiClip(track_id, start_time.beats_to_f64(), duration.beats_to_f64()));
+        let _ = self.command_tx.push(Command::CreateMidiClip(track_id, start_time, duration));
         clip_id
     }
 
     /// Add a MIDI note to a clip
     pub fn add_midi_note(&mut self, track_id: TrackId, clip_id: MidiClipId, time_offset: Beats, note: u8, velocity: u8, duration: Beats) {
-        let _ = self.command_tx.push(Command::AddMidiNote(track_id, clip_id, time_offset.beats_to_f64(), note, velocity, duration.beats_to_f64()));
+        let _ = self.command_tx.push(Command::AddMidiNote(track_id, clip_id, time_offset, note, velocity, duration));
     }
 
     /// Add a pre-loaded MIDI clip to a track at the given timeline position (beats)
     pub fn add_loaded_midi_clip(&mut self, track_id: TrackId, clip: MidiClip, start_time: Beats) {
-        let _ = self.command_tx.push(Command::AddLoadedMidiClip(track_id, clip, start_time.beats_to_f64()));
+        let _ = self.command_tx.push(Command::AddLoadedMidiClip(track_id, clip, start_time));
     }
 
     /// Update all notes in a MIDI clip. Note tuples are (start [beats], note, velocity, duration [beats]).
     pub fn update_midi_clip_notes(&mut self, track_id: TrackId, clip_id: MidiClipId, notes: Vec<(Beats, u8, u8, Beats)>) {
-        let notes = notes.into_iter().map(|(t, n, v, d)| (t.beats_to_f64(), n, v, d.beats_to_f64())).collect();
         let _ = self.command_tx.push(Command::UpdateMidiClipNotes(track_id, clip_id, notes));
     }
 
@@ -3812,7 +4149,7 @@ impl EngineController {
         curve: crate::audio::CurveType,
     ) {
         let _ = self.command_tx.push(Command::AddAutomationPoint(
-            track_id, lane_id, time.beats_to_f64(), value, curve,
+            track_id, lane_id, time, value, curve,
         ));
     }
 
@@ -3825,7 +4162,7 @@ impl EngineController {
         tolerance: Beats,
     ) {
         let _ = self.command_tx.push(Command::RemoveAutomationPoint(
-            track_id, lane_id, time.beats_to_f64(), tolerance.beats_to_f64(),
+            track_id, lane_id, time, tolerance,
         ));
     }
 
@@ -3864,13 +4201,13 @@ impl EngineController {
         time: Beats, value: f32, interpolation: String,
         ease_out: (f32, f32), ease_in: (f32, f32)) {
         let _ = self.command_tx.push(Command::AutomationAddKeyframe(
-            track_id, node_id, time.beats_to_f64(), value, interpolation, ease_out, ease_in));
+            track_id, node_id, time, value, interpolation, ease_out, ease_in));
     }
 
     /// Remove a keyframe from an AutomationInput node
     pub fn automation_remove_keyframe(&mut self, track_id: TrackId, node_id: u32, time: Beats) {
         let _ = self.command_tx.push(Command::AutomationRemoveKeyframe(
-            track_id, node_id, time.beats_to_f64()));
+            track_id, node_id, time));
     }
 
     /// Set the display name of an AutomationInput node
@@ -3885,8 +4222,11 @@ impl EngineController {
     }
 
     /// Start recording on a track
-    pub fn start_recording(&mut self, track_id: TrackId, start_time: Beats) {
-        let _ = self.command_tx.push(Command::StartRecording(track_id, start_time));
+    /// `force_takes`: cut takes even if the transport never wraps, because the cycle region already
+    /// holds takes and this recording is another one. Whether that's so is document state, so only
+    /// the editor can answer it.
+    pub fn start_recording(&mut self, track_id: TrackId, start_time: Beats, force_takes: bool) {
+        let _ = self.command_tx.push(Command::StartRecording(track_id, start_time, force_takes));
     }
 
     /// Stop the current recording
@@ -3905,8 +4245,9 @@ impl EngineController {
     }
 
     /// Start MIDI recording on a track
-    pub fn start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: Beats) {
-        let _ = self.command_tx.push(Command::StartMidiRecording(track_id, clip_id, start_time));
+    /// `force_takes`: see [`EngineController::start_recording`].
+    pub fn start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: Beats, force_takes: bool) {
+        let _ = self.command_tx.push(Command::StartMidiRecording(track_id, clip_id, start_time, force_takes));
     }
 
     /// Stop the current MIDI recording
@@ -4406,7 +4747,7 @@ impl EngineController {
     }
 
     /// Get file info from pool (duration, sample_rate, channels)
-    pub fn get_pool_file_info(&mut self, pool_index: usize) -> Result<(f64, u32, u32), String> {
+    pub fn get_pool_file_info(&mut self, pool_index: usize) -> Result<(Seconds, u32, u32), String> {
         // Send query
         if let Err(_) = self.query_tx.push(Query::GetPoolFileInfo(pool_index)) {
             return Err("Failed to send query - queue full".to_string());

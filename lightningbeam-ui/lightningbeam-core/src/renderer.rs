@@ -9,7 +9,7 @@
 //! The compositing mode enables proper per-layer opacity, blend modes, and effects.
 
 use crate::animation::TransformProperty;
-use crate::clip::{ClipInstance, ImageAsset};
+use crate::clip::{ClipDuration, ClipInstance, ImageAsset};
 use crate::document::Document;
 use daw_backend::Seconds;
 use crate::gpu::BlendMode;
@@ -568,7 +568,7 @@ pub fn render_layer_isolated(
             let tempo_map = document.tempo_map();
             for clip_instance in &video_layer.clip_instances {
                 let Some(video_clip) = document.video_clips.get(&clip_instance.clip_id) else { continue };
-                let Some(clip_time) = clip_instance.remap_time(Seconds(time), Seconds(video_clip.duration), tempo_map) else { continue };
+                let Some(clip_time) = clip_instance.remap_time(Seconds(time), ClipDuration::Seconds(Seconds(video_clip.duration)), tempo_map) else { continue };
                 let clip_time = clip_time.seconds_to_f64();
                 let Some(frame) = video_mgr.get_frame(&clip_instance.clip_id, clip_time, target_w, target_h) else { continue };
 
@@ -1019,7 +1019,10 @@ fn render_clip_instance(
         }
         0.0
     } else {
-        let clip_dur = document.get_clip_duration(&vector_clip.id).unwrap_or(Seconds(vector_clip.duration));
+        // A vector clip's content is wall-clock seconds.
+        let clip_dur = ClipDuration::Seconds(
+            document.get_clip_duration(&vector_clip.id).unwrap_or(Seconds(vector_clip.duration)),
+        );
         let Some(t) = clip_instance.remap_time(Seconds(time), clip_dur, tempo_map) else {
             return; // Clip instance not active at this time
         };
@@ -1174,7 +1177,7 @@ fn render_video_layer(
 
         // Remap timeline time to clip's internal time
         let tempo_map = document.tempo_map();
-        let Some(clip_time) = clip_instance.remap_time(Seconds(time), Seconds(video_clip.duration), tempo_map) else {
+        let Some(clip_time) = clip_instance.remap_time(Seconds(time), ClipDuration::Seconds(Seconds(video_clip.duration)), tempo_map) else {
             continue; // Clip instance not active at this time
         };
         let clip_time = clip_time.seconds_to_f64();
@@ -1910,7 +1913,10 @@ fn render_clip_instance_cpu(
         if time < start_secs || time >= end { return; }
         0.0
     } else {
-        let clip_dur = document.get_clip_duration(&vector_clip.id).unwrap_or(Seconds(vector_clip.duration));
+        // A vector clip's content is wall-clock seconds.
+        let clip_dur = ClipDuration::Seconds(
+            document.get_clip_duration(&vector_clip.id).unwrap_or(Seconds(vector_clip.duration)),
+        );
         let Some(t) = clip_instance.remap_time(Seconds(time), clip_dur, tempo_map) else { return };
         t.seconds_to_f64()
     };

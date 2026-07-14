@@ -35,6 +35,18 @@ pub struct AppConfig {
     #[serde(default = "defaults::audio_buffer_size")]
     pub audio_buffer_size: u32,
 
+    /// How a cycle MIDI recording treats its passes.
+    ///
+    /// `false` (default) = **merge**: every pass overdubs into one clip, and earlier passes play back
+    /// as you record so you can layer against them. `true` = **separate takes**: each pass becomes
+    /// its own take in a take folder, exactly as audio always does, and earlier passes stay silent
+    /// (they're alternatives, not layers).
+    ///
+    /// Only applies when the transport actually wraps; a recording that stops inside the first pass
+    /// is an ordinary single recording either way.
+    #[serde(default = "defaults::cycle_midi_separate_takes")]
+    pub cycle_midi_separate_takes: bool,
+
     /// Reopen last session on startup
     #[serde(default = "defaults::reopen_last_session")]
     pub reopen_last_session: bool,
@@ -131,6 +143,7 @@ impl Default for AppConfig {
             file_height: defaults::file_height(),
             scroll_speed: defaults::scroll_speed(),
             audio_buffer_size: defaults::audio_buffer_size(),
+            cycle_midi_separate_takes: defaults::cycle_midi_separate_takes(),
             reopen_last_session: defaults::reopen_last_session(),
             restore_layout_from_file: defaults::restore_layout_from_file(),
             debug: defaults::debug(),
@@ -342,6 +355,7 @@ mod defaults {
     pub fn file_height() -> u32 { 600 }
     pub fn scroll_speed() -> f64 { 1.0 }
     pub fn audio_buffer_size() -> u32 { 256 }
+    pub fn cycle_midi_separate_takes() -> bool { false }
     pub fn reopen_last_session() -> bool { false }
     pub fn restore_layout_from_file() -> bool { true }
     pub fn debug() -> bool { false }

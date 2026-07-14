@@ -1,6 +1,6 @@
 use super::automation::{AutomationLane, AutomationLaneId, ParameterId};
 use super::clip::{AudioClipInstance, AudioClipInstanceId};
-use super::midi::{MidiClipInstance, MidiClipInstanceId, MidiEvent};
+use super::midi::{MidiClipId, MidiClipInstance, MidiClipInstanceId, MidiEvent};
 use super::midi_pool::MidiClipPool;
 use super::node_graph::AudioGraph;
 use super::node_graph::nodes::{AudioInputNode, AudioOutputNode};
@@ -43,6 +43,13 @@ pub struct RenderContext<'a> {
     /// Used after pause/stop to route note-off tails through the normal group hierarchy
     /// without re-triggering notes from clips at the paused position.
     pub live_only: bool,
+    /// The MIDI recording in progress, if any: (track being recorded to, clip being recorded into).
+    ///
+    /// On that track, every OTHER clip is silenced for the duration of the recording. You're playing
+    /// a part into this region — hearing what's already there (a previous take, say) fighting with
+    /// what you're playing now is just noise. The clip being recorded into is exempt, because in
+    /// merge mode that's exactly what you DO want to hear: the overdub you've been building up.
+    pub recording_midi: Option<(TrackId, MidiClipId)>,
 }
 
 impl<'a> RenderContext<'a> {
@@ -61,6 +68,7 @@ impl<'a> RenderContext<'a> {
             buffer_size,
             time_stretch: 1.0,
             live_only: false,
+            recording_midi: None,
         }
     }
 
@@ -864,9 +872,21 @@ impl MidiTrack {
             let playhead_beats = ctx.playhead_beats();
             let buffer_end_beats = ctx.buffer_end_beats();
 
+            // While recording into this track, every clip EXCEPT the one being recorded into is
+            // silenced. Otherwise a take folder already sitting in the cycle region would play its
+            // active take underneath you on every pass, fighting the part you're trying to record.
+            // The recording clip itself is exempt: in merge mode that's the overdub monitoring.
+            let muted_clip = match ctx.recording_midi {
+                Some((track_id, clip_id)) if track_id == self.id => Some(clip_id),
+                _ => None,
+            };
+
             // Collect MIDI events from all clip instances that overlap with current beat range
             let mut currently_active = HashSet::new();
             for instance in &self.clip_instances {
+                if muted_clip.is_some_and(|recording| instance.clip_id != recording) {
+                    continue;
+                }
                 if instance.overlaps_range(playhead_beats, buffer_end_beats) {
                     currently_active.insert(instance.id);
                 }

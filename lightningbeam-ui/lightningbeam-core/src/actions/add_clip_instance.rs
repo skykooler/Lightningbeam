@@ -89,10 +89,11 @@ impl Action for AddClipInstanceAction {
         // `get_clip_duration` is the content length in seconds; the placement span
         // must be beats (the timeline is beats-domain), so convert via the clip's
         // typed helper rather than treating the seconds span as beats.
-        let clip_duration = document.get_clip_duration(&self.clip_instance.clip_id)
+        // The clip's content duration in ITS OWN domain, so the trims resolve correctly for MIDI.
+        let clip_content = document.clip_trim_duration(&self.clip_instance.clip_id)
             .ok_or_else(|| format!("Clip {} not found", self.clip_instance.clip_id))?;
         let effective_duration = self.clip_instance
-            .effective_duration_beats(clip_duration, document.tempo_map());
+            .effective_duration_beats(clip_content, document.tempo_map());
 
         // Auto-adjust position for audio/video layers to avoid overlaps
         let adjusted_start = document.find_nearest_valid_position(
@@ -196,113 +197,23 @@ impl Action for AddClipInstanceAction {
             return Ok(());
         }
 
-        // Look up the clip from the document
-        let clip = document
-            .get_audio_clip(&self.clip_instance.clip_id)
-            .ok_or_else(|| "Audio clip not found".to_string())?;
-
-        // Look up backend track ID from layer mapping
-        let backend_track_id = backend
-            .layer_to_track_map
-            .get(&self.layer_id)
-            .ok_or_else(|| format!("Layer {} not mapped to backend track", self.layer_id))?;
-
-        // Get audio controller
-        let controller = backend
-            .audio_controller
-            .as_mut()
-            .ok_or_else(|| "Audio controller not available".to_string())?;
-
-        // Handle different clip types
-        use crate::clip::AudioClipType;
-        match &clip.clip_type {
-            AudioClipType::Midi { midi_clip_id } => {
-                // Create a MIDI clip instance referencing the existing clip in the backend pool
-                // No need to add to pool again - it was added during MIDI import
-                use daw_backend::command::{Query, QueryResponse};
-
-                // Calculate internal start/end from trim parameters
-                let internal_start = self.clip_instance.trim_start;
-                let internal_end = self.clip_instance.trim_end.unwrap_or(clip.content_duration().native());
-                let external_start = self.clip_instance.timeline_start;
-
-                // Calculate external duration (for looping if timeline_duration is set).
-                // MIDI trims are beats-domain, so the fallback span is beats too.
-                let external_duration = self.clip_instance.timeline_duration
-                    .unwrap_or(daw_backend::Beats(internal_end - internal_start));
-
-                // Create MidiClipInstance
-                let instance = daw_backend::MidiClipInstance::new(
-                    0, // Instance ID will be assigned by backend
-                    *midi_clip_id,
-                    daw_backend::Beats(internal_start),
-                    daw_backend::Beats(internal_end),
-                    external_start,
-                    external_duration,
-                );
-
-                // Send query to add instance and get instance ID
-                let query = Query::AddMidiClipInstanceSync(*backend_track_id, instance);
-
-                match controller.send_query(query)? {
-                    QueryResponse::MidiClipInstanceAdded(Ok(instance_id)) => {
-                        self.backend_track_id = Some(*backend_track_id);
-                        self.backend_midi_instance_id = Some(instance_id);
-
-                        // Add to global clip instance mapping
-                        backend.clip_instance_to_backend_map.insert(
-                            self.clip_instance.id,
-                            crate::action::BackendClipInstanceId::Midi(instance_id)
-                        );
-
-                        Ok(())
-                    }
-                    QueryResponse::MidiClipInstanceAdded(Err(e)) => Err(e),
-                    _ => Err("Unexpected query response".to_string()),
+        // Add via the shared BackendContext helper — the same one SetActiveTakeAction uses, so
+        // the trim/duration conversions (and take-folder resolution) live in exactly one place.
+        if let Some((track_id, backend_id)) =
+            backend.add_clip_instance(document, &self.layer_id, &self.clip_instance)?
+        {
+            self.backend_track_id = Some(track_id);
+            match backend_id {
+                crate::action::BackendClipInstanceId::Midi(id) => {
+                    self.backend_midi_instance_id = Some(id)
+                }
+                crate::action::BackendClipInstanceId::Audio(id) => {
+                    self.backend_audio_instance_id = Some(id)
                 }
             }
-            AudioClipType::Sampled { audio_pool_index } => {
-                // `trim_*` / `clip.duration` are in SECONDS (audio content time),
-                // while `timeline_*` and the backend's `duration` are in BEATS.
-                let internal_start = self.clip_instance.trim_start;
-                let internal_end = self.clip_instance.trim_end.unwrap_or(clip.content_duration().native());
-                let start_time = self.clip_instance.timeline_start;
-                // `effective_duration` is in BEATS. When `timeline_duration` is set
-                // it already is; otherwise the clip occupies its natural content
-                // length, so convert that seconds-span to beats at the clip's start
-                // (NOT `internal_end - internal_start`, which is seconds — that was
-                // the seconds-as-beats bug that made clips stop early off 60 BPM).
-                let effective_duration = self.clip_instance.timeline_duration.unwrap_or_else(|| {
-                    let tempo_map = document.tempo_map();
-                    let content_secs = daw_backend::Seconds(internal_end - internal_start);
-                    tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(start_time) + content_secs)
-                        - start_time
-                });
-
-                let instance_id = controller.add_audio_clip(
-                    *backend_track_id,
-                    *audio_pool_index,
-                    start_time,
-                    effective_duration,
-                    daw_backend::Seconds(internal_start),
-                );
-
-                self.backend_track_id = Some(*backend_track_id);
-                self.backend_audio_instance_id = Some(instance_id);
-
-                // Add to global clip instance mapping
-                backend.clip_instance_to_backend_map.insert(
-                    self.clip_instance.id,
-                    crate::action::BackendClipInstanceId::Audio(instance_id)
-                );
-
-                Ok(())
-            }
-            AudioClipType::Recording => {
-                // Recording clips are not synced to backend until finalized
-                Ok(())
-            }
         }
+
+        Ok(())
     }
 
     fn rollback_backend(&mut self, backend: &mut BackendContext, _document: &Document) -> Result<(), String> {

@@ -383,6 +383,7 @@ impl Project {
         sample_rate: u32,
         channels: u32,
         live_only: bool,
+        recording_midi: Option<(TrackId, MidiClipId)>,
     ) {
         output.fill(0.0);
 
@@ -391,6 +392,7 @@ impl Project {
         // Create initial render context
         let ctx = RenderContext {
             live_only,
+            recording_midi,
             ..RenderContext::new(playhead_seconds, tempo_map, sample_rate, channels, output.len())
         };
 

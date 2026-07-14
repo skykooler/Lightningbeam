@@ -55,6 +55,7 @@ struct PreferencesState {
     file_height: u32,
     scroll_speed: f64,
     audio_buffer_size: u32,
+    cycle_midi_separate_takes: bool,
     reopen_last_session: bool,
     restore_layout_from_file: bool,
     debug: bool,
@@ -74,6 +75,7 @@ impl From<(&AppConfig, &Theme)> for PreferencesState {
             file_height: config.file_height,
             scroll_speed: config.scroll_speed,
             audio_buffer_size: config.audio_buffer_size,
+            cycle_midi_separate_takes: config.cycle_midi_separate_takes,
             reopen_last_session: config.reopen_last_session,
             restore_layout_from_file: config.restore_layout_from_file,
             debug: config.debug,
@@ -95,6 +97,7 @@ impl Default for PreferencesState {
             file_height: 600,
             scroll_speed: 1.0,
             audio_buffer_size: 256,
+            cycle_midi_separate_takes: false,
             reopen_last_session: false,
             restore_layout_from_file: true,
             debug: false,
@@ -551,6 +554,39 @@ impl PreferencesDialog {
                 });
 
                 ui.label("Requires app restart to take effect");
+
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    ui.label("Cycle MIDI recording:");
+
+                    egui::ComboBox::from_id_salt("cycle_midi_mode")
+                        .selected_text(if self.working_prefs.cycle_midi_separate_takes {
+                            "Separate takes"
+                        } else {
+                            "Merge"
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.working_prefs.cycle_midi_separate_takes,
+                                false,
+                                "Merge",
+                            )
+                            .on_hover_text(
+                                "Every pass overdubs into one clip, and earlier passes play back as \
+                                 you record so you can layer against them.",
+                            );
+                            ui.selectable_value(
+                                &mut self.working_prefs.cycle_midi_separate_takes,
+                                true,
+                                "Separate takes",
+                            )
+                            .on_hover_text(
+                                "Each pass becomes its own take in a take folder, as audio always \
+                                 does. Earlier passes stay silent — they're alternatives, not layers.",
+                            );
+                        });
+                });
             });
     }
 
@@ -684,6 +720,7 @@ impl PreferencesDialog {
         temp_config.file_height = self.working_prefs.file_height;
         temp_config.scroll_speed = self.working_prefs.scroll_speed;
         temp_config.audio_buffer_size = self.working_prefs.audio_buffer_size;
+        temp_config.cycle_midi_separate_takes = self.working_prefs.cycle_midi_separate_takes;
         temp_config.reopen_last_session = self.working_prefs.reopen_last_session;
         temp_config.restore_layout_from_file = self.working_prefs.restore_layout_from_file;
         temp_config.debug = self.working_prefs.debug;
@@ -720,6 +757,7 @@ impl PreferencesDialog {
         config.file_height = self.working_prefs.file_height;
         config.scroll_speed = self.working_prefs.scroll_speed;
         config.audio_buffer_size = self.working_prefs.audio_buffer_size;
+        config.cycle_midi_separate_takes = self.working_prefs.cycle_midi_separate_takes;
         config.reopen_last_session = self.working_prefs.reopen_last_session;
         config.restore_layout_from_file = self.working_prefs.restore_layout_from_file;
         config.debug = self.working_prefs.debug;

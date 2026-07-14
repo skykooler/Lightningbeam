@@ -152,7 +152,12 @@ impl EffectLayer {
         self.clip_instances
             .iter()
             .filter(|e| {
-                let end = e.timeline_start + e.effective_duration(daw_backend::Seconds(EFFECT_DURATION), tempo_map);
+                // Effects have an "infinite" wall-clock content length.
+                let end = e.timeline_start
+                    + e.effective_duration(
+                        crate::clip::ClipDuration::Seconds(daw_backend::Seconds(EFFECT_DURATION)),
+                        tempo_map,
+                    );
                 time_beats >= e.timeline_start && time_beats < end
             })
             .collect()
