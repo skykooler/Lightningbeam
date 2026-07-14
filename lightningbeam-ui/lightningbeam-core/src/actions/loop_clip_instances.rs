@@ -141,7 +141,7 @@ impl LoopClipInstancesAction {
                 let external_start = instance.timeline_start - left_duration;
 
                 let get_backend_clip_id = |inst_id: &Uuid| -> Result<u32, String> {
-                    match &clip.resolve(instance.active_take) {
+                    match &instance.resolve(clip) {
                         ResolvedContent::Midi { midi_clip_id } => Ok(*midi_clip_id),
                         ResolvedContent::Audio { .. } => {
                             let backend_id = backend.clip_instance_to_backend_map.get(inst_id)

@@ -298,6 +298,9 @@ pub struct TimelinePane {
     take_badge_hits: Vec<(egui::Rect, uuid::Uuid, uuid::Uuid, usize, usize)>,
     /// The take-folder instance whose take menu is open, if any.
     open_take_menu: Option<(uuid::Uuid, uuid::Uuid)>,
+    /// The (instance, take index) being renamed inline in the take menu.
+    renaming_take: Option<(uuid::Uuid, usize)>,
+    take_rename_buffer: String,
     /// Seconds between the cycle region's start and where the current recording actually began.
     /// Zero unless the user punched in mid-region. Used to line the live waveform preview up with
     /// the region on each pass.
@@ -741,6 +744,8 @@ impl TimelinePane {
             keyframe_diamond_hits: Vec::new(),
             take_badge_hits: Vec::new(),
             open_take_menu: None,
+            renaming_take: None,
+            take_rename_buffer: String::new(),
             cycle_record_lead_secs: 0.0,
             duration: 10.0,  // Default 10 seconds
             is_scrubbing: false,
@@ -1148,6 +1153,28 @@ impl TimelinePane {
         // The backend records in the beats domain; start_time is the seconds playhead.
         let start_beats = shared.action_executor.document().tempo_map().seconds_to_beats(Seconds(start_time));
 
+        // Does this layer already hold takes over the cycle region? If so this recording is another
+        // take, however short it runs — without this, stopping before the loop came round would land
+        // it as a separate overlapping clip instead of joining the take list. The engine can't work
+        // this out for itself: whether takes exist is document state.
+        let force_takes: std::collections::HashMap<uuid::Uuid, bool> = {
+            let doc = shared.action_executor.document();
+            let region = match (doc.cycle_enabled, doc.cycle_region) {
+                (true, Some((ls, le))) if le > ls => Some((ls, le - ls)),
+                _ => None,
+            };
+            candidates
+                .iter()
+                .map(|&(layer_id, _, _)| {
+                    let forced = region.is_some_and(|(loop_start, loop_len)| {
+                        doc.take_folder_at(&layer_id, loop_start, loop_len, &uuid::Uuid::nil())
+                            .is_some()
+                    });
+                    (layer_id, forced)
+                })
+                .collect()
+        };
+
         // Step 4: Dispatch recording for each candidate
         for &(layer_id, ref cat, _) in &candidates {
             match cat {
@@ -1171,7 +1198,7 @@ impl TimelinePane {
                         }
                         if let Some(controller_arc) = shared.audio_controller {
                             let mut controller = controller_arc.lock().unwrap();
-                            controller.start_recording(track_id, start_beats);
+                            controller.start_recording(track_id, start_beats, force_takes.get(&layer_id).copied().unwrap_or(false));
                             println!("🎤 Started audio recording on track {:?} at {:.2}s", track_id, start_time);
                         }
                         shared.recording_layer_ids.push(layer_id);
@@ -1184,7 +1211,7 @@ impl TimelinePane {
                         if let Some(controller_arc) = shared.audio_controller {
                             let mut controller = controller_arc.lock().unwrap();
                             let clip_id = controller.create_midi_clip(track_id, start_beats, Beats::ZERO);
-                            controller.start_midi_recording(track_id, clip_id, start_beats);
+                            controller.start_midi_recording(track_id, clip_id, start_beats, force_takes.get(&layer_id).copied().unwrap_or(false));
                             shared.recording_clips.insert(layer_id, clip_id);
                             println!("🎹 Started MIDI recording on track {:?} at {:.2}s, clip_id={}",
                                      track_id, start_time, clip_id);
@@ -1695,9 +1722,7 @@ impl TimelinePane {
             return;
         };
 
-        // The instance's *stored* selection, which is what rollback must restore — not `active`,
-        // which is that value clamped for display.
-        let old_take = document
+        let Some(instance) = document
             .get_layer(&layer_id)
             .and_then(|l| match l {
                 lightningbeam_core::layer::AnyLayer::Audio(al) => {
@@ -1705,7 +1730,14 @@ impl TimelinePane {
                 }
                 _ => None,
             })
-            .and_then(|ci| ci.active_take);
+        else {
+            self.open_take_menu = None;
+            return;
+        };
+        // The instance's *stored* selection, which is what rollback must restore — not `active`,
+        // which is that value clamped for display.
+        let old_take = instance.active_take;
+        let take_names: Vec<String> = instance.takes.iter().map(|t| t.name.clone()).collect();
 
         let mut close = false;
         let area = egui::Area::new(ui.id().with(("take_menu", instance_id)))
@@ -1715,22 +1747,53 @@ impl TimelinePane {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     for i in 0..count {
                         let is_active = i == active;
-                        if ui
-                            .selectable_label(is_active, format!("Take {}", i + 1))
-                            .clicked()
-                        {
-                            if !is_active {
-                                pending_actions.push(Box::new(
-                                    lightningbeam_core::actions::SetActiveTakeAction::new(
-                                        layer_id,
-                                        instance_id,
-                                        i,
-                                        old_take,
-                                    ),
-                                ));
+                        let renaming = self.renaming_take == Some((instance_id, i));
+
+                        ui.horizontal(|ui| {
+                            if renaming {
+                                let edit = ui.add(
+                                    egui::TextEdit::singleline(&mut self.take_rename_buffer)
+                                        .desired_width(110.0),
+                                );
+                                edit.request_focus();
+                                // Commit on Enter or on clicking away; Escape abandons.
+                                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                if enter || edit.lost_focus() && !escape {
+                                    let name = self.take_rename_buffer.trim().to_string();
+                                    if !name.is_empty() && name != take_names[i] {
+                                        pending_actions.push(Box::new(
+                                            lightningbeam_core::actions::RenameTakeAction::new(
+                                                layer_id, instance_id, i, name,
+                                            ),
+                                        ));
+                                    }
+                                    self.renaming_take = None;
+                                } else if escape {
+                                    self.renaming_take = None;
+                                }
+                                return;
                             }
-                            close = true;
-                        }
+
+                            let label = ui.selectable_label(is_active, &take_names[i]);
+                            if label.clicked() {
+                                if !is_active {
+                                    pending_actions.push(Box::new(
+                                        lightningbeam_core::actions::SetActiveTakeAction::new(
+                                            layer_id, instance_id, i, old_take,
+                                        ),
+                                    ));
+                                }
+                                close = true;
+                            }
+                            // Double-click a take to rename it in place. Deleting lives on the clip's
+                            // right-click menu, not here — a trash icon per row is a small target
+                            // sitting right next to the one you actually meant to click.
+                            if label.double_clicked() {
+                                self.renaming_take = Some((instance_id, i));
+                                self.take_rename_buffer = take_names[i].clone();
+                            }
+                        });
                     }
                 });
             });
@@ -1743,6 +1806,7 @@ impl TimelinePane {
         }
         if close {
             self.open_take_menu = None;
+            self.renaming_take = None;
         }
     }
 
@@ -3971,7 +4035,7 @@ impl TimelinePane {
                             if let Some(clip) = document.get_audio_clip(&clip_instance.clip_id) {
                                 // Resolve through the instance's active take, so a take folder draws
                                 // whichever take it actually plays.
-                                match &clip.resolve(clip_instance.active_take) {
+                                match &clip_instance.resolve(clip) {
                                     // MIDI: Draw piano roll (with loop iterations)
                                     lightningbeam_core::clip::ResolvedContent::Midi { midi_clip_id } => {
                                         if let Some(events) = midi_event_cache.get(midi_clip_id) {
@@ -4357,12 +4421,10 @@ impl TimelinePane {
                         // only. Records a hit rect so the click that opens the take menu can be
                         // dispatched after rendering (the usual two-phase pattern), rather than
                         // mutating the document mid-paint.
-                        if let Some(take_count) = document
-                            .get_audio_clip(&clip_instance.clip_id)
-                            .and_then(|c| c.takes().map(|t| t.len()))
-                            .filter(|n| *n > 0)
-                        {
-                            let active = clip_instance.active_take.unwrap_or(0).min(take_count - 1);
+                        // Only worth showing when there's actually a choice to make.
+                        if clip_instance.takes.len() > 1 {
+                            let take_count = clip_instance.takes.len();
+                            let active = clip_instance.active_take_index();
                             let label = format!("Take {}/{}", active + 1, take_count);
                             let text_color = theme.text_color(
                                 &["#timeline", ".take-badge"],
@@ -6596,6 +6658,22 @@ impl PaneRenderer for TimelinePane {
                 enabled
             };
 
+            // Take management for the clip that was right-clicked. Only offered when there's more
+            // than one take — with a single take there's nothing to choose between, and "delete the
+            // only take" would leave the instance with nothing to play.
+            let take_target: Option<(uuid::Uuid, uuid::Uuid, usize, String)> = ctx_clip_id.and_then(|instance_id| {
+                let context_layers = document.context_layers(shared.editing_clip_id.as_ref());
+                for (layer, instances) in all_layer_clip_instances(&context_layers) {
+                    if let Some(ci) = instances.iter().find(|ci| ci.id == instance_id) {
+                        if ci.takes.len() > 1 {
+                            let active = ci.active_take_index();
+                            return Some((layer.id(), instance_id, active, ci.takes[active].name.clone()));
+                        }
+                    }
+                }
+                None
+            });
+
             let area_id = ui.id().with("clip_context_menu");
             let mut item_clicked = false;
             let area_response = egui::Area::new(area_id)
@@ -6660,6 +6738,34 @@ impl PaneRenderer for TimelinePane {
                         if menu_item(ui, "Delete", has_clip) {
                             shared.pending_menu_actions.push(crate::menu::MenuAction::Delete);
                             item_clicked = true;
+                        }
+
+                        // Take management, on the clip that was right-clicked. Takes live on the
+                        // INSTANCE, so on a comped split this prunes the half you clicked and leaves
+                        // the other half's alternatives alone.
+                        if let Some((take_layer_id, take_instance_id, active_index, active_name)) = &take_target {
+                            ui.separator();
+                            // Deletes the take that's PLAYING — the one the badge is showing — so
+                            // it's named rather than just "Delete Take".
+                            if menu_item(ui, &format!("Delete \"{}\"", active_name), true) {
+                                shared.pending_actions.push(Box::new(
+                                    lightningbeam_core::actions::DeleteTakeAction::new(
+                                        *take_layer_id,
+                                        *take_instance_id,
+                                        *active_index,
+                                    ),
+                                ));
+                                item_clicked = true;
+                            }
+                            if menu_item(ui, "Delete Unused Takes", true) {
+                                shared.pending_actions.push(Box::new(
+                                    lightningbeam_core::actions::DeleteUnusedTakesAction::new(
+                                        *take_layer_id,
+                                        *take_instance_id,
+                                    ),
+                                ));
+                                item_clicked = true;
+                            }
                         }
                     });
                 });

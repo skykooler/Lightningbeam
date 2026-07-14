@@ -467,7 +467,7 @@ impl PianoRollPane {
                     if let Some(clip) = document.audio_clips.get(&instance.clip_id) {
                         // Resolve through the instance's active take, so a MIDI take folder edits
                         // whichever take it's actually playing.
-                        if let Some(midi_clip_id) = clip.resolved_midi_clip_id(instance.active_take) {
+                        if let Some(midi_clip_id) = instance.resolved_midi_clip_id(clip) {
                             let duration = instance.effective_duration(clip.content_duration(), document.tempo_map());
                             // A MIDI clip's content time IS beats, which is what the piano roll's
                             // x-axis uses.

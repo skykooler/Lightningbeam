@@ -645,8 +645,10 @@ impl Engine {
                     // every pass and — because this block also resizes the backend clip instance
                     // below — shrank the instance back to nothing, so the notes just merged into it
                     // were never scheduled and you overdubbed against silence.
+                    // Pinned only once a pass has actually completed — until then the bar still grows.
                     let duration = recording
                         .cycle_loop_len
+                        .filter(|_| recording.wrapped)
                         .unwrap_or(current_time - recording.start_time);
                     // In separate-takes mode the preview shows only the pass being played now — the
                     // earlier passes are alternative takes, not layers, so drawing them all on top of
@@ -1490,9 +1492,9 @@ impl Engine {
                     None => {}
                 }
             }
-            Command::StartRecording(track_id, start_time) => {
+            Command::StartRecording(track_id, start_time, force_takes) => {
                 // Start recording on the specified track
-                self.handle_start_recording(track_id, start_time);
+                self.handle_start_recording(track_id, start_time, force_takes);
             }
             Command::StopRecording => {
                 // Stop the current recording
@@ -1510,9 +1512,9 @@ impl Engine {
                     recording.resume();
                 }
             }
-            Command::StartMidiRecording(track_id, clip_id, start_time) => {
+            Command::StartMidiRecording(track_id, clip_id, start_time, force_takes) => {
                 // Start MIDI recording on the specified track
-                self.handle_start_midi_recording(track_id, clip_id, start_time);
+                self.handle_start_midi_recording(track_id, clip_id, start_time, force_takes);
             }
             Command::StopMidiRecording => {
                 eprintln!("[ENGINE] Received StopMidiRecording command");
@@ -3264,7 +3266,7 @@ impl Engine {
     }
 
     /// Handle starting a recording
-    fn handle_start_recording(&mut self, track_id: TrackId, start_time: Beats) {
+    fn handle_start_recording(&mut self, track_id: TrackId, start_time: Beats, force_takes: bool) {
         use crate::io::WavWriter;
         use std::env;
 
@@ -3348,6 +3350,7 @@ impl Engine {
                                 loop_len_frames: (le - ls).max(0) as usize,
                                 lead_pad_frames: (self.playhead - ls).max(0) as usize,
                                 wrap_count: 0,
+                                force_takes,
                             }
                         })
                     } else {
@@ -3552,11 +3555,22 @@ impl Engine {
     }
 
     /// Handle starting MIDI recording
-    fn handle_start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: Beats) {
+    fn handle_start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: Beats, force_takes: bool) {
         // Check if track exists and is a MIDI track
         if let Some(crate::audio::track::TrackNode::Midi(_)) = self.project.get_track_mut(track_id) {
             // Create MIDI recording state
             let mut recording_state = MidiRecordingState::new(track_id, clip_id, start_time);
+
+            // Note the cycle region up front. `wrapped` stays false until a pass actually completes,
+            // so the clip bar still grows with the playhead through the first pass.
+            if self.loop_enabled {
+                if let Some((ls, le)) = self.loop_region {
+                    if le > ls {
+                        recording_state.cycle_loop_len = Some(le - ls);
+                        recording_state.force_takes = force_takes;
+                    }
+                }
+            }
 
             // Inject any notes currently held on this track (pressed during count-in pre-roll)
             // so they start at t=0 of the recording rather than being lost
@@ -3598,12 +3612,13 @@ impl Engine {
 
             // ---- Separate takes: one pool clip per cycle pass ----
             //
-            // Only when the transport actually wrapped; a recording that stopped inside the first
-            // pass is an ordinary single recording and falls through to the merge path below, just
-            // as it does for audio.
-            if let (true, Some(loop_len)) =
-                (self.cycle_midi_separate_takes, recording.cycle_loop_len)
-            {
+            // Normally only when the transport actually wrapped: a recording that stopped inside the
+            // first pass is an ordinary single recording and falls through to the merge path below,
+            // just as it does for audio. `force_takes` overrides that, because the region already
+            // holds takes and this is another one however short it ran.
+            let takes_mode = self.cycle_midi_separate_takes
+                && (recording.wrapped || recording.force_takes);
+            if let (true, Some(loop_len)) = (takes_mode, recording.cycle_loop_len) {
                 let loop_start = recording.start_time; // a cycle recording is anchored at the region
                 let passes = recording.pass_count();
                 let buckets = recording.notes_by_pass(passes);
@@ -3667,10 +3682,11 @@ impl Engine {
 
             let notes = recording.get_notes().to_vec();
             let note_count = notes.len();
-            // A cycle MIDI recording is anchored at the region start and every pass overdubs into
-            // the same clip (MERGE), so the clip is exactly one region long — not however long the
-            // user held the record button, which would run past the loop end.
-            let recording_duration = match recording.cycle_loop_len {
+            // A cycle MIDI recording that came round is anchored at the region start and every pass
+            // overdubs into the same clip (MERGE), so the clip is exactly one region long — not
+            // however long the user held the record button, which would run past the loop end. One
+            // that stopped inside the first pass is just an ordinary recording.
+            let recording_duration = match recording.cycle_loop_len.filter(|_| recording.wrapped) {
                 Some(loop_len) => loop_len,
                 None => end_time - recording.start_time,
             };
@@ -4206,8 +4222,11 @@ impl EngineController {
     }
 
     /// Start recording on a track
-    pub fn start_recording(&mut self, track_id: TrackId, start_time: Beats) {
-        let _ = self.command_tx.push(Command::StartRecording(track_id, start_time));
+    /// `force_takes`: cut takes even if the transport never wraps, because the cycle region already
+    /// holds takes and this recording is another one. Whether that's so is document state, so only
+    /// the editor can answer it.
+    pub fn start_recording(&mut self, track_id: TrackId, start_time: Beats, force_takes: bool) {
+        let _ = self.command_tx.push(Command::StartRecording(track_id, start_time, force_takes));
     }
 
     /// Stop the current recording
@@ -4226,8 +4245,9 @@ impl EngineController {
     }
 
     /// Start MIDI recording on a track
-    pub fn start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: Beats) {
-        let _ = self.command_tx.push(Command::StartMidiRecording(track_id, clip_id, start_time));
+    /// `force_takes`: see [`EngineController::start_recording`].
+    pub fn start_midi_recording(&mut self, track_id: TrackId, clip_id: MidiClipId, start_time: Beats, force_takes: bool) {
+        let _ = self.command_tx.push(Command::StartMidiRecording(track_id, clip_id, start_time, force_takes));
     }
 
     /// Stop the current MIDI recording

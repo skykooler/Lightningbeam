@@ -944,31 +944,27 @@ impl Document {
     /// would break the uniform-take invariant comping depends on.
     ///
     /// `exclude` is the in-progress recording's own instance, which is on the layer but isn't a
-    /// candidate. Returns (instance id, clip id).
+    /// candidate. Returns the instance id.
     pub fn take_folder_at(
         &self,
         layer_id: &Uuid,
         loop_start: Beats,
         loop_len: Beats,
         exclude: &Uuid,
-    ) -> Option<(Uuid, Uuid)> {
+    ) -> Option<Uuid> {
         let Some(AnyLayer::Audio(audio_layer)) = self.get_layer(layer_id) else {
             return None;
         };
         const EPS: f64 = 1e-6;
         audio_layer.clip_instances.iter().find_map(|ci| {
-            if ci.id == *exclude || (ci.timeline_start - loop_start).beats_to_f64().abs() > EPS {
+            if ci.id == *exclude
+                || ci.takes.is_empty()
+                || (ci.timeline_start - loop_start).beats_to_f64().abs() > EPS
+            {
                 return None;
             }
-            let clip = self.audio_clips.get(&ci.clip_id)?;
-            match clip.clip_type {
-                crate::clip::AudioClipType::TakeFolder { recorded_loop_beats, .. }
-                    if (recorded_loop_beats - loop_len).beats_to_f64().abs() < EPS =>
-                {
-                    Some((ci.id, ci.clip_id))
-                }
-                _ => None,
-            }
+            let recorded = ci.recorded_loop_beats?;
+            ((recorded - loop_len).beats_to_f64().abs() < EPS).then_some(ci.id)
         })
     }
 

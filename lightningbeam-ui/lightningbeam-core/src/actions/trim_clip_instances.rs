@@ -487,7 +487,7 @@ impl Action for TrimClipInstancesAction {
                     .unwrap_or(ContentTime(clip.content_duration().native()));
 
                 // Handle trim based on clip type
-                match &clip.resolve(instance.active_take) {
+                match &instance.resolve(clip) {
                     ResolvedContent::Midi { midi_clip_id } => {
                         // For MIDI: trim_clip expects the pool clip ID
                         controller.trim_clip(*track_id, *midi_clip_id, clip.trim_range(internal_start, internal_end));
@@ -584,7 +584,7 @@ impl Action for TrimClipInstancesAction {
                 };
 
                 // Handle trim based on clip type
-                match &clip.resolve(instance.active_take) {
+                match &instance.resolve(clip) {
                     ResolvedContent::Midi { midi_clip_id } => {
                         // For MIDI: trim_clip expects the pool clip ID
                         controller.trim_clip(*track_id, *midi_clip_id, clip.trim_range(internal_start, internal_end));

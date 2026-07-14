@@ -24,9 +24,20 @@ pub struct CycleRecordInfo {
     /// punch-in (record while already rolling); take 1 gets this much silence prepended so it still
     /// spans the whole region.
     pub lead_pad_frames: usize,
-    /// How many times the transport wrapped during this recording. Zero means the user stopped
-    /// before completing a pass, which stays an ordinary single recording.
+    /// How many times the transport wrapped during this recording. Zero normally means the user
+    /// stopped before completing a pass, which stays an ordinary single recording — unless
+    /// `force_takes` says otherwise.
     pub wrap_count: usize,
+    /// Cut takes even if the transport never wrapped.
+    ///
+    /// Set when the region already holds takes: a further recording there is another take, however
+    /// short, and it gets padded out to the region like any partial pass. Without this a run that
+    /// stopped before the loop came round would land as a separate overlapping clip instead of
+    /// joining the take list.
+    ///
+    /// The editor decides this at record start, because whether takes already exist is document
+    /// state the engine can't see.
+    pub force_takes: bool,
 }
 
 /// Min/max waveform peaks for a finished buffer of interleaved samples.
@@ -130,7 +141,7 @@ impl RecordingState {
     /// single recording, which keeps the existing path untouched).
     pub fn slice_takes(&self) -> Option<Vec<Vec<f32>>> {
         let cycle = self.cycle?;
-        if cycle.wrap_count == 0 || cycle.loop_len_frames == 0 {
+        if (cycle.wrap_count == 0 && !cycle.force_takes) || cycle.loop_len_frames == 0 {
             return None;
         }
 
@@ -295,13 +306,19 @@ pub struct MidiRecordingState {
     active_notes: HashMap<u8, ActiveMidiNote>,
     /// Completed notes: (time_offset, note, velocity, duration) — all times in beats
     pub completed_notes: Vec<(Beats, u8, u8, Beats)>,
-    /// The cycle region's length in beats, when recording into a cycle.
+    /// The cycle region's length in beats, if one was armed at record start.
     ///
     /// A cycle MIDI recording is anchored at the region start (`start_time == loop_start`), which is
     /// what makes MERGE fall out for free: the transport always wraps back into the region, so every
     /// note's offset already lands inside `[0, loop_len)` and successive passes overdub onto each
-    /// other with no folding needed. Set only if the transport actually wrapped.
+    /// other with no folding needed.
     pub cycle_loop_len: Option<Beats>,
+    /// Whether the transport actually came round. Distinct from `cycle_loop_len`, which only says a
+    /// region was armed: the clip only pins to the full region once a pass has completed, so until
+    /// then the bar still grows with the playhead.
+    pub wrapped: bool,
+    /// Cut takes even if the transport never wrapped — see [`CycleRecordInfo::force_takes`].
+    pub force_takes: bool,
     /// Which cycle pass is currently being recorded (0-based). Bumped at each wrap.
     current_pass: usize,
     /// The pass each completed note belongs to, parallel to `completed_notes`.
@@ -320,6 +337,8 @@ impl MidiRecordingState {
             active_notes: HashMap::new(),
             completed_notes: Vec::new(),
             cycle_loop_len: None,
+            wrapped: false,
+            force_takes: false,
             current_pass: 0,
             note_pass: Vec::new(),
         }
@@ -450,9 +469,10 @@ impl MidiRecordingState {
             self.note_on(note, velocity, region_start);
         }
 
-        // The transport wrapped, so this is a cycle recording: the clip spans the whole region
-        // rather than however long the user happened to hold the record button.
+        // A pass has completed, so from here the clip spans the whole region rather than however long
+        // the user happens to hold the record button.
         self.cycle_loop_len = Some(region_end - region_start);
+        self.wrapped = true;
     }
 }
 
@@ -462,6 +482,14 @@ mod cycle_tests {
 
     /// A recording state holding `audio_data`, armed for cycle recording. Mono, 100 Hz, so a frame
     /// is a sample and 5 frames is 50 ms (exactly the min-take threshold).
+    fn rec_forced(audio: Vec<f32>, loop_len_frames: usize, lead_pad_frames: usize, wraps: usize) -> RecordingState {
+        let mut r = rec(audio, loop_len_frames, lead_pad_frames, wraps);
+        if let Some(c) = r.cycle.as_mut() {
+            c.force_takes = true;
+        }
+        r
+    }
+
     fn rec(audio: Vec<f32>, loop_len_frames: usize, lead_pad_frames: usize, wraps: usize) -> RecordingState {
         let mut r = RecordingState::new(
             0,
@@ -480,6 +508,7 @@ mod cycle_tests {
             loop_len_frames,
             lead_pad_frames,
             wrap_count: wraps,
+            force_takes: false,
         });
         r
     }
@@ -490,6 +519,18 @@ mod cycle_tests {
         // point of triggering on the wrap rather than on the cycle region merely existing.
         let r = rec(vec![1.0; 10], 4, 0, 0);
         assert!(r.slice_takes().is_none());
+    }
+
+    #[test]
+    fn force_takes_makes_a_partial_pass_a_take() {
+        // Recording over a region that already holds takes: this run is another take however short
+        // it ran, so it's cut and padded like any partial pass rather than landing as a separate
+        // overlapping clip. Two real frames of an 8-frame region -> one take, silence for the rest.
+        let takes = rec_forced(vec![1.0, 2.0], 8, 0, 0)
+            .slice_takes()
+            .expect("forced takes");
+        assert_eq!(takes.len(), 1);
+        assert_eq!(takes[0], vec![1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]

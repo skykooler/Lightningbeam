@@ -1112,6 +1112,11 @@ struct PendingTakeAppend {
     /// The throwaway clip + instance the recording itself was captured into.
     recording_instance_id: Uuid,
     recording_clip_id: Uuid,
+    /// The recording's backend clip, which has to be torn down or it keeps playing alongside the
+    /// take folder we're appending to. Carried explicitly rather than looked up in
+    /// `clip_instance_to_backend_map`, because on the audio path the recording instance isn't in
+    /// that map yet — it's only added after promotion, which the append path skips.
+    recording_backend_id: Option<lightningbeam_core::action::BackendClipInstanceId>,
     loop_start: Beats,
     loop_len: Beats,
     takes: Vec<lightningbeam_core::clip::AudioTake>,
@@ -2069,11 +2074,12 @@ impl EditorApp {
         layer_id: uuid::Uuid,
         recording_instance_id: uuid::Uuid,
         recording_clip_id: uuid::Uuid,
+        recording_backend_id: Option<lightningbeam_core::action::BackendClipInstanceId>,
         loop_start: Beats,
         loop_len: Beats,
         takes: Vec<lightningbeam_core::clip::AudioTake>,
     ) -> bool {
-        let Some((target_instance_id, target_clip_id)) = self.action_executor.document().take_folder_at(
+        let Some(target_instance_id) = self.action_executor.document().take_folder_at(
             &layer_id,
             loop_start,
             loop_len,
@@ -2082,9 +2088,12 @@ impl EditorApp {
             return false;
         };
 
-        // Drop the recording's backend clip; the target instance's own clip gets repointed at the
-        // new active take by the action's backend sync.
-        let backend_id = self.clip_instance_to_backend_map.remove(&recording_instance_id);
+        // Tear down the recording's own backend clip. Without this it keeps playing on top of the
+        // take folder we're appending to — two takes sounding at once. The target instance's clip is
+        // separately repointed at the new active take by the action's backend sync below.
+        let backend_id = recording_backend_id
+            .or_else(|| self.clip_instance_to_backend_map.remove(&recording_instance_id));
+        self.clip_instance_to_backend_map.remove(&recording_instance_id);
         let track_id = self.layer_to_track_map.get(&layer_id).copied();
         if let (Some(backend_id), Some(track_id), Some(controller_arc)) =
             (backend_id, track_id, self.audio_controller.as_ref())
@@ -2112,7 +2121,6 @@ impl EditorApp {
         let action = lightningbeam_core::actions::AppendTakesAction::new(
             layer_id,
             target_instance_id,
-            target_clip_id,
             takes,
         );
 
@@ -6692,6 +6700,13 @@ impl eframe::App for EditorApp {
                                             layer_id,
                                             recording_instance_id: instance_id,
                                             recording_clip_id: clip_id,
+                                            // The engine's recording clip. It isn't in
+                                            // clip_instance_to_backend_map yet (that only happens on
+                                            // promotion, which we're skipping), so hand it over
+                                            // directly or it'll keep sounding alongside the folder.
+                                            recording_backend_id: Some(
+                                                lightningbeam_core::action::BackendClipInstanceId::Audio(backend_clip_id),
+                                            ),
                                             loop_start,
                                             loop_len: loop_len_beats,
                                             takes: new_takes,
@@ -6701,22 +6716,18 @@ impl eframe::App for EditorApp {
                                         continue;
                                     }
 
-                                    // Promote the in-progress recording clip to a take folder.
+                                    // Finalize the recording clip, and hang the takes off the INSTANCE.
                                     {
                                         let doc = self.action_executor.document_mut();
                                         if let Some(clip) = doc.audio_clips.get_mut(&clip_id) {
-                                            clip.clip_type = lightningbeam_core::clip::AudioClipType::TakeFolder {
-                                                takes: takes.iter().enumerate().map(|(i, &(pool_index, _))| {
-                                                    lightningbeam_core::clip::AudioTake {
-                                                        name: format!("Take {}", i + 1),
-                                                        content: lightningbeam_core::clip::TakeContent::Audio { audio_pool_index: pool_index },
-                                                    }
-                                                }).collect(),
-                                                recorded_loop_beats: loop_len_beats,
-                                            };
-                                            // Audio takes are seconds-domain, and every take is
-                                            // exactly one cycle region long.
-                                            clip.set_content_duration(ClipDuration::Seconds(loop_len_seconds));
+                                            // The clip's own content is take 1; the instance's take
+                                            // list overrides it with whichever take is active. Every
+                                            // take is exactly one cycle region long, so the clip's
+                                            // duration is the region.
+                                            clip.finalize_recording(
+                                                takes[0].0,
+                                                loop_len_seconds.seconds_to_f64(),
+                                            );
                                             clip.name = format!("Cycle recording ({} takes)", takes.len());
                                         }
 
@@ -6735,7 +6746,14 @@ impl eframe::App for EditorApp {
                                                 inst.trim_start = daw_backend::ContentTime::ZERO;
                                                 inst.trim_end =
                                                     Some(daw_backend::ContentTime(loop_len_seconds.seconds_to_f64()));
+                                                inst.takes = takes.iter().enumerate().map(|(i, &(pool_index, _))| {
+                                                    lightningbeam_core::clip::AudioTake {
+                                                        name: format!("Take {}", i + 1),
+                                                        content: lightningbeam_core::clip::TakeContent::Audio { audio_pool_index: pool_index },
+                                                    }
+                                                }).collect();
                                                 inst.active_take = Some(last_take);
+                                                inst.recorded_loop_beats = Some(loop_len_beats);
                                             }
                                         }
                                     }
@@ -7029,6 +7047,9 @@ impl eframe::App for EditorApp {
                                             layer_id,
                                             recording_instance_id: rec_inst,
                                             recording_clip_id: doc_clip_id,
+                                            // The MIDI path maps its recording instance during
+                                            // MidiRecordingProgress, so the map has it.
+                                            recording_backend_id: None,
                                             loop_start,
                                             loop_len: loop_len_beats,
                                             takes: new_takes,
@@ -7046,17 +7067,10 @@ impl eframe::App for EditorApp {
                                     {
                                         let doc = self.action_executor.document_mut();
                                         if let Some(clip) = doc.audio_clips.get_mut(&doc_clip_id) {
-                                            clip.clip_type = lightningbeam_core::clip::AudioClipType::TakeFolder {
-                                                takes: clip_ids.iter().enumerate().map(|(i, &mid)| {
-                                                    lightningbeam_core::clip::AudioTake {
-                                                        name: format!("Take {}", i + 1),
-                                                        content: lightningbeam_core::clip::TakeContent::Midi { midi_clip_id: mid },
-                                                    }
-                                                }).collect(),
-                                                recorded_loop_beats: loop_len_beats,
-                                            };
-                                            // MIDI takes are beats-domain, and every take spans exactly
-                                            // one cycle region.
+                                            // The clip's own content stays take 1 (the clip the
+                                            // recording started on); the instance's take list
+                                            // overrides it with whichever take is active. MIDI takes
+                                            // are beats-domain and each spans one cycle region.
                                             clip.set_content_duration(ClipDuration::Beats(loop_len_beats));
                                             clip.name = format!("Cycle recording ({} takes)", clip_ids.len());
                                         }
@@ -7071,7 +7085,14 @@ impl eframe::App for EditorApp {
                                                 inst.timeline_duration = None;
                                                 inst.trim_start = daw_backend::ContentTime::ZERO;
                                                 inst.trim_end = Some(daw_backend::ContentTime(loop_len_beats.beats_to_f64()));
+                                                inst.takes = clip_ids.iter().enumerate().map(|(i, &mid)| {
+                                                    lightningbeam_core::clip::AudioTake {
+                                                        name: format!("Take {}", i + 1),
+                                                        content: lightningbeam_core::clip::TakeContent::Midi { midi_clip_id: mid },
+                                                    }
+                                                }).collect();
                                                 inst.active_take = Some(last_take);
+                                                inst.recorded_loop_beats = Some(loop_len_beats);
                                             }
                                         }
                                     }
@@ -7263,6 +7284,7 @@ impl eframe::App for EditorApp {
                 req.layer_id,
                 req.recording_instance_id,
                 req.recording_clip_id,
+                req.recording_backend_id,
                 req.loop_start,
                 req.loop_len,
                 req.takes,

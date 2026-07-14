@@ -1807,16 +1807,10 @@ impl InfopanelPane {
                             ui.label("Name:");
                             ui.label(&clip.name);
                         });
-                        let take_count = clip.takes().map(|t| t.len()).unwrap_or(0);
-                        let take_folder_label;
                         let type_name = match &clip.clip_type {
                             lightningbeam_core::clip::AudioClipType::Sampled { .. } => "Audio (Sampled)",
                             lightningbeam_core::clip::AudioClipType::Midi { .. } => "Audio (MIDI)",
                             lightningbeam_core::clip::AudioClipType::Recording => "Audio (Recording)",
-                            lightningbeam_core::clip::AudioClipType::TakeFolder { .. } => {
-                                take_folder_label = format!("Audio ({} takes)", take_count);
-                                &take_folder_label
-                            }
                         };
                         ui.horizontal(|ui| {
                             ui.label("Type:");

@@ -76,7 +76,7 @@ impl BackendContext<'_> {
             .get(layer_id)
             .ok_or_else(|| format!("Layer {} not mapped to backend track", layer_id))?;
 
-        let resolved = clip.resolve(instance.active_take);
+        let resolved = instance.resolve(clip);
         let content = clip.content_duration();
         let internal_start = instance.trim_start;
         let internal_end = instance

@@ -142,7 +142,9 @@ pub enum Command {
 
     // Recording commands
     /// Start recording on a track (track_id, start_time)
-    StartRecording(TrackId, Beats),
+    /// (track, start_time, force_takes — cut takes even if the transport never wraps, because the
+    /// region already holds takes and this is another one)
+    StartRecording(TrackId, Beats, bool),
     /// Stop the current recording
     StopRecording,
     /// Pause the current recording
@@ -152,7 +154,8 @@ pub enum Command {
 
     // MIDI Recording commands
     /// Start MIDI recording on a track (track_id, clip_id, start_time)
-    StartMidiRecording(TrackId, MidiClipId, Beats),
+    /// (track, clip, start_time, force_takes — see [`Command::StartRecording`])
+    StartMidiRecording(TrackId, MidiClipId, Beats, bool),
     /// Stop the current MIDI recording
     StopMidiRecording,
 

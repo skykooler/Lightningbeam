@@ -364,7 +364,7 @@ impl Action for SplitClipInstanceAction {
             .ok_or_else(|| "Audio clip not found".to_string())?;
 
         use crate::clip::ResolvedContent;
-        if matches!(clip.resolve(original_instance.active_take), ResolvedContent::Recording) {
+        if matches!(original_instance.resolve(clip), ResolvedContent::Recording) {
             return Err("Cannot split a clip that is currently recording".to_string());
         }
 
@@ -455,7 +455,7 @@ impl Action for SplitClipInstanceAction {
 
                             // Restore based on clip type
                             use crate::clip::ResolvedContent;
-                            match &clip.resolve(instance.active_take) {
+                            match &instance.resolve(clip) {
                                 ResolvedContent::Midi { .. } => {
                                     if let Some(crate::action::BackendClipInstanceId::Midi(orig_backend_id)) =
                                         backend.clip_instance_to_backend_map.get(&self.instance_id)

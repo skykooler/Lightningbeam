@@ -7,17 +7,7 @@
 //! - Image Assets (static images)
 
 use eframe::egui;
-use lightningbeam_core::clip::{AudioClip, ResolvedContent, VectorClip};
-
-/// Library label for an audio clip: a take folder advertises how many takes it holds, anything else
-/// just names its kind. The library lists *clips*, not placements, so there's no active take here —
-/// a folder is previewed by its first take.
-fn take_label(clip: &AudioClip, kind: &str) -> String {
-    match clip.takes() {
-        Some(takes) => format!("{} ({} takes)", kind, takes.len()),
-        None => kind.to_string(),
-    }
-}
+use lightningbeam_core::clip::{ResolvedContent, VectorClip};
 use lightningbeam_core::document::Document;
 use lightningbeam_core::layer::AnyLayer;
 use std::collections::{HashMap, HashSet};
@@ -928,9 +918,9 @@ impl AssetLibraryPane {
                 continue;
             }
 
-            let (extra_info, drag_clip_type) = match &clip.resolve(None) {
-                ResolvedContent::Audio { .. } => (take_label(clip, "Sampled"), DragClipType::AudioSampled),
-                ResolvedContent::Midi { .. } => (take_label(clip, "MIDI"), DragClipType::AudioMidi),
+            let (extra_info, drag_clip_type) = match &clip.resolve() {
+                ResolvedContent::Audio { .. } => ("Sampled".to_string(), DragClipType::AudioSampled),
+                ResolvedContent::Midi { .. } => ("MIDI".to_string(), DragClipType::AudioMidi),
                 ResolvedContent::Recording => {
                     // Skip recording-in-progress clips (and empty take folders) from asset library
                     continue;
@@ -1128,12 +1118,12 @@ impl AssetLibraryPane {
 
                 for (id, clip) in &document.audio_clips {
                     if !linked_audio_ids.contains(id) && clip.folder_id == current_folder {
-                        let (extra_info, drag_clip_type) = match &clip.resolve(None) {
+                        let (extra_info, drag_clip_type) = match &clip.resolve() {
                             ResolvedContent::Audio { .. } => {
-                                (take_label(clip, "Sampled"), DragClipType::AudioSampled)
+                                ("Sampled".to_string(), DragClipType::AudioSampled)
                             }
                             ResolvedContent::Midi { .. } => {
-                                (take_label(clip, "MIDI"), DragClipType::AudioMidi)
+                                ("MIDI".to_string(), DragClipType::AudioMidi)
                             }
                             ResolvedContent::Recording => {
                                 // Skip recording-in-progress clips (and empty take folders)
@@ -1775,7 +1765,7 @@ impl AssetLibraryPane {
             let prefetched_waveform: Option<Vec<(f32, f32)>> =
                 if asset_category == AssetCategory::Audio && !self.thumbnail_cache.has(&asset_id) {
                     if let Some(clip) = document.audio_clips.get(&asset_id) {
-                        if let Some(audio_pool_index) = clip.resolved_audio_pool_index(None).as_ref() {
+                        if let Some(audio_pool_index) = clip.audio_pool_index().as_ref() {
                             shared.raw_audio_cache.get(audio_pool_index)
                                 .map(|raw| peaks_from_raw_audio(raw, THUMBNAIL_SIZE as usize))
                         } else {
@@ -1800,7 +1790,7 @@ impl AssetLibraryPane {
                     AssetCategory::Audio => {
                         if let Some(clip) = document.audio_clips.get(&asset_id) {
                             let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
-                            match &clip.resolve(None) {
+                            match &clip.resolve() {
                                 ResolvedContent::Audio { .. } => {
                                     let wave_color = egui::Color32::from_rgb(100, 200, 100);
                                     if let Some(ref peaks) = prefetched_waveform {
@@ -2354,7 +2344,7 @@ impl AssetLibraryPane {
                 AssetCategory::Audio => {
                     if let Some(clip) = document.audio_clips.get(&asset_id) {
                         let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
-                        match &clip.resolve(None) {
+                        match &clip.resolve() {
                             ResolvedContent::Audio { audio_pool_index } => {
                                 let wave_color = egui::Color32::from_rgb(100, 200, 100);
                                 let waveform: Option<Vec<(f32, f32)>> = shared.raw_audio_cache.get(audio_pool_index)
@@ -2491,7 +2481,7 @@ impl AssetLibraryPane {
                 AssetCategory::Audio => {
                     if let Some(clip) = document.audio_clips.get(&asset_id) {
                         let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
-                        match &clip.resolve(None) {
+                        match &clip.resolve() {
                             ResolvedContent::Audio { audio_pool_index } => {
                                 let wave_color = egui::Color32::from_rgb(100, 200, 100);
                                 let waveform: Option<Vec<(f32, f32)>> = shared.raw_audio_cache.get(audio_pool_index)
@@ -2812,7 +2802,7 @@ impl AssetLibraryPane {
                         let prefetched_waveform: Option<Vec<(f32, f32)>> =
                             if asset_category == AssetCategory::Audio && !self.thumbnail_cache.has(&asset_id) {
                                 if let Some(clip) = document.audio_clips.get(&asset_id) {
-                                    if let Some(audio_pool_index) = clip.resolved_audio_pool_index(None).as_ref() {
+                                    if let Some(audio_pool_index) = clip.audio_pool_index().as_ref() {
                                         let waveform: Option<Vec<(f32, f32)>> = shared.raw_audio_cache.get(audio_pool_index)
                                             .map(|raw| peaks_from_raw_audio(raw, THUMBNAIL_SIZE as usize));
                                         if waveform.is_some() {
@@ -2852,7 +2842,7 @@ impl AssetLibraryPane {
                                     // Check if it's sampled or MIDI
                                     if let Some(clip) = document.audio_clips.get(&asset_id) {
                                         let bg_color = egui::Color32::from_rgba_unmultiplied(40, 40, 40, 200);
-                                        match &clip.resolve(None) {
+                                        match &clip.resolve() {
                                             ResolvedContent::Audio { .. } => {
                                                 let wave_color = egui::Color32::from_rgb(100, 200, 100);
                                                 if let Some(ref peaks) = prefetched_waveform {
@@ -3197,7 +3187,7 @@ impl PaneRenderer for AssetLibraryPane {
             println!("🎨 [ASSET_LIB] Checking for thumbnails to invalidate (pools: {:?})", shared.audio_pools_with_new_waveforms);
             let mut invalidated_any = false;
             for (asset_id, clip) in &document_arc.audio_clips {
-                if let Some(audio_pool_index) = clip.resolved_audio_pool_index(None).as_ref() {
+                if let Some(audio_pool_index) = clip.audio_pool_index().as_ref() {
                     if shared.audio_pools_with_new_waveforms.contains(audio_pool_index) {
                         println!("❌ [ASSET_LIB] Invalidating thumbnail for asset {} (pool {})", asset_id, audio_pool_index);
                         self.thumbnail_cache.invalidate(asset_id);

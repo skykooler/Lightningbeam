@@ -247,7 +247,7 @@ impl Action for MoveClipInstancesAction {
                     .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
 
                 // Handle move based on clip type
-                match &clip.resolve(instance.active_take) {
+                match &instance.resolve(clip) {
                     ResolvedContent::Midi { midi_clip_id } => {
                         // For MIDI: move_clip expects the pool clip ID
                         controller.move_clip(*track_id, *midi_clip_id, *new_start);
@@ -332,7 +332,7 @@ impl Action for MoveClipInstancesAction {
                     .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
 
                 // Handle move based on clip type (restore old position)
-                match &clip.resolve(instance.active_take) {
+                match &instance.resolve(clip) {
                     ResolvedContent::Midi { midi_clip_id } => {
                         // For MIDI: move_clip expects the pool clip ID
                         controller.move_clip(*track_id, *midi_clip_id, *old_start);
