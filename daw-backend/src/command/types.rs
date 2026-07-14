@@ -8,6 +8,21 @@ use crate::audio::node_graph::nodes::LoopMode;
 use crate::io::WaveformPeak;
 use crate::time::{Beats, Seconds};
 
+/// A clip's internal (content) boundaries, tagged with the domain they're measured in.
+///
+/// A clip's content time is SECONDS for sampled audio but BEATS for MIDI — the same polymorphism
+/// `ClipInstance::trim_start`/`trim_end` carry. Passing these as bare `f64`s meant the caller and
+/// the engine could disagree about the unit with nothing to catch it: an audio trim of "1.0" was
+/// once stored as `Beats(1.0)` for the clip's external duration, so a 1-second split played back as
+/// half a second at 120 BPM. Tagging the domain makes that a type error instead of a bug report.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrimRange {
+    /// Sampled-audio content time.
+    Seconds { start: Seconds, end: Seconds },
+    /// MIDI content time.
+    Beats { start: Beats, end: Beats },
+}
+
 /// Commands sent from UI/control thread to audio thread
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -19,7 +34,7 @@ pub enum Command {
     /// Pause playback (maintains position)
     Pause,
     /// Seek to a specific position in seconds
-    Seek(f64),
+    Seek(Seconds),
 
     // Track management commands
     /// Set track volume (0.0 = silence, 1.0 = unity gain)
@@ -31,13 +46,12 @@ pub enum Command {
 
     // Clip management commands
     /// Move a clip to a new timeline position (track_id, clip_id, new_external_start)
-    MoveClip(TrackId, ClipId, f64),
-    /// Trim a clip's internal boundaries (track_id, clip_id, new_internal_start, new_internal_end)
-    /// This changes which portion of the source content is used
-    TrimClip(TrackId, ClipId, f64, f64),
+    MoveClip(TrackId, ClipId, Beats),
+    /// Trim a clip's internal boundaries — which portion of the source content is used.
+    TrimClip(TrackId, ClipId, TrimRange),
     /// Extend/shrink a clip's external duration (track_id, clip_id, new_external_duration)
     /// If duration > internal duration, the clip will loop
-    ExtendClip(TrackId, ClipId, f64),
+    ExtendClip(TrackId, ClipId, Beats),
 
     // Metatrack management commands
     /// Create a new metatrack with a name and optional parent group
@@ -53,15 +67,15 @@ pub enum Command {
     SetTimeStretch(TrackId, f32),
     /// Set metatrack time offset in seconds (track_id, offset)
     /// Positive = shift content later, negative = shift earlier
-    SetOffset(TrackId, f64),
+    SetOffset(TrackId, Seconds),
     /// Set metatrack pitch shift in semitones (track_id, semitones) - for future use
     SetPitchShift(TrackId, f32),
     /// Set metatrack trim start in seconds (track_id, trim_start)
     /// Children won't hear content before this point
-    SetTrimStart(TrackId, f64),
+    SetTrimStart(TrackId, Seconds),
     /// Set metatrack trim end in seconds (track_id, trim_end)
     /// None means no end trim
-    SetTrimEnd(TrackId, Option<f64>),
+    SetTrimEnd(TrackId, Option<Seconds>),
 
     // Audio track commands
     /// Create a new audio track with a name and optional parent group
@@ -80,14 +94,14 @@ pub enum Command {
     /// Add a MIDI clip to the pool without placing it on a track
     AddMidiClipToPool(MidiClip),
     /// Create a new MIDI clip on a track (track_id, start_time, duration)
-    CreateMidiClip(TrackId, f64, f64),
+    CreateMidiClip(TrackId, Beats, Beats),
     /// Add a MIDI note to a clip (track_id, clip_id, time_offset, note, velocity, duration)
-    AddMidiNote(TrackId, MidiClipId, f64, u8, u8, f64),
+    AddMidiNote(TrackId, MidiClipId, Beats, u8, u8, Beats),
     /// Add a pre-loaded MIDI clip to a track (track_id, clip, start_time)
-    AddLoadedMidiClip(TrackId, MidiClip, f64),
+    AddLoadedMidiClip(TrackId, MidiClip, Beats),
     /// Update MIDI clip notes (track_id, clip_id, notes: Vec<(start_time, note, velocity, duration)>)
     /// NOTE: May need to switch to individual note operations if this becomes slow on clips with many notes
-    UpdateMidiClipNotes(TrackId, MidiClipId, Vec<(f64, u8, u8, f64)>),
+    UpdateMidiClipNotes(TrackId, MidiClipId, Vec<(Beats, u8, u8, Beats)>),
     /// Replace all events in a MIDI clip (track_id, clip_id, events). Used for CC/pitch bend editing.
     UpdateMidiClipEvents(TrackId, MidiClipId, Vec<MidiEvent>),
     /// Remove a MIDI clip instance from a track (track_id, instance_id) - for undo/redo support
@@ -103,9 +117,9 @@ pub enum Command {
     /// Create a new automation lane on a track (track_id, parameter_id)
     CreateAutomationLane(TrackId, ParameterId),
     /// Add an automation point to a lane (track_id, lane_id, time, value, curve)
-    AddAutomationPoint(TrackId, AutomationLaneId, f64, f32, CurveType),
+    AddAutomationPoint(TrackId, AutomationLaneId, Beats, f32, CurveType),
     /// Remove an automation point at a specific time (track_id, lane_id, time, tolerance)
-    RemoveAutomationPoint(TrackId, AutomationLaneId, f64, f64),
+    RemoveAutomationPoint(TrackId, AutomationLaneId, Beats, Beats),
     /// Clear all automation points from a lane (track_id, lane_id)
     ClearAutomationLane(TrackId, AutomationLaneId),
     /// Remove an automation lane (track_id, lane_id)
@@ -113,9 +127,24 @@ pub enum Command {
     /// Enable/disable an automation lane (track_id, lane_id, enabled)
     SetAutomationLaneEnabled(TrackId, AutomationLaneId, bool),
 
+    // Transport cycle (loop) region
+    /// Set the cycle region the transport loops over, in beats (None clears it).
+    /// Authored in beats so it survives tempo changes.
+    SetLoopRegion(Option<(Beats, Beats)>),
+    /// Enable/disable wrapping at the cycle region's end.
+    SetLoopEnabled(bool),
+    /// How a cycle MIDI recording treats its passes.
+    ///
+    /// `false` (default) = MERGE: every pass overdubs into one clip. `true` = SEPARATE TAKES: each
+    /// pass becomes its own MIDI clip, and the editor folds them into a take folder — the same shape
+    /// audio always gets.
+    SetCycleMidiSeparateTakes(bool),
+
     // Recording commands
     /// Start recording on a track (track_id, start_time)
-    StartRecording(TrackId, Beats),
+    /// (track, start_time, force_takes — cut takes even if the transport never wraps, because the
+    /// region already holds takes and this is another one)
+    StartRecording(TrackId, Beats, bool),
     /// Stop the current recording
     StopRecording,
     /// Pause the current recording
@@ -125,7 +154,8 @@ pub enum Command {
 
     // MIDI Recording commands
     /// Start MIDI recording on a track (track_id, clip_id, start_time)
-    StartMidiRecording(TrackId, MidiClipId, Beats),
+    /// (track, clip, start_time, force_takes — see [`Command::StartRecording`])
+    StartMidiRecording(TrackId, MidiClipId, Beats, bool),
     /// Stop the current MIDI recording
     StopMidiRecording,
 
@@ -237,9 +267,9 @@ pub enum Command {
 
     // Automation Input Node commands
     /// Add or update a keyframe on an AutomationInput node (track_id, node_id, time, value, interpolation, ease_out, ease_in)
-    AutomationAddKeyframe(TrackId, u32, f64, f32, String, (f32, f32), (f32, f32)),
+    AutomationAddKeyframe(TrackId, u32, Beats, f32, String, (f32, f32), (f32, f32)),
     /// Remove a keyframe from an AutomationInput node (track_id, node_id, time)
-    AutomationRemoveKeyframe(TrackId, u32, f64),
+    AutomationRemoveKeyframe(TrackId, u32, Beats),
     /// Set the display name of an AutomationInput node (track_id, node_id, name)
     AutomationSetName(TrackId, u32, String),
 
@@ -271,7 +301,7 @@ pub enum Command {
 #[derive(Debug, Clone)]
 pub enum AudioEvent {
     /// Current playback position in seconds
-    PlaybackPosition(f64),
+    PlaybackPosition(Seconds),
     /// Playback has stopped (reached end of audio)
     PlaybackStopped,
     /// Audio buffer underrun detected
@@ -292,6 +322,35 @@ pub enum AudioEvent {
     RecordingProgress(ClipId, Seconds),
     /// Recording stopped (clip_id, pool_index, waveform)
     RecordingStopped(ClipId, usize, Vec<WaveformPeak>),
+    /// A MIDI recording that wrapped the cycle region at least once, in SEPARATE TAKES mode.
+    ///
+    /// One MIDI clip per pass, in recording order. (Merge mode emits the ordinary
+    /// `MidiRecordingStopped` instead — all passes are already folded into the one clip.)
+    MidiCycleRecordingStopped {
+        track_id: TrackId,
+        /// One pool MIDI clip per pass. The first is the clip the recording started on.
+        clip_ids: Vec<MidiClipId>,
+        /// Where the takes sit on the timeline — the cycle region's start.
+        loop_start: Beats,
+        /// The region's length in beats: every take spans exactly this.
+        loop_len_beats: Beats,
+    },
+    /// A recording that wrapped the cycle region at least once, and so became multi-take.
+    ///
+    /// Each take spans the full region and they're all the same length (partial passes are padded
+    /// with silence), so the editor can promote the recording clip straight to a take folder.
+    CycleRecordingStopped {
+        clip_id: ClipId,
+        /// One entry per pass: (audio pool index, waveform peaks), in recording order.
+        takes: Vec<(usize, Vec<WaveformPeak>)>,
+        /// Where the takes sit on the timeline — the cycle region's start, not the punch-in point.
+        loop_start: Beats,
+        /// The region's length in beats (what the take folder stores as `recorded_loop_beats`).
+        loop_len_beats: Beats,
+        /// The same length in seconds — the take folder's content duration, which is seconds-domain
+        /// for audio.
+        loop_len_seconds: Seconds,
+    },
     /// Recording error (error_message)
     RecordingError(String),
     /// MIDI recording stopped (track_id, clip_id, note_count)
@@ -342,7 +401,7 @@ pub enum AudioEvent {
     WaveformChunksReady {
         pool_index: usize,
         detail_level: u8,
-        chunks: Vec<(u32, (f64, f64), Vec<WaveformPeak>)>,
+        chunks: Vec<(u32, (Seconds, Seconds), Vec<WaveformPeak>)>,
     },
 
     /// An audio file has been imported and is ready for playback.
@@ -353,7 +412,7 @@ pub enum AudioEvent {
         path: String,
         channels: u32,
         sample_rate: u32,
-        duration: f64,
+        duration: Seconds,
         format: crate::io::audio_file::AudioFormat,
     },
 
@@ -427,7 +486,7 @@ pub enum Query {
     /// Export audio to file (settings, output_path)
     ExportAudio(crate::audio::ExportSettings, std::path::PathBuf),
     /// Add a MIDI clip to a track synchronously (track_id, clip, start_time) - returns instance ID
-    AddMidiClipSync(TrackId, crate::audio::midi::MidiClip, f64),
+    AddMidiClipSync(TrackId, crate::audio::midi::MidiClip, Beats),
     /// Add a MIDI clip instance to a track synchronously (track_id, instance) - returns instance ID
     /// The clip must already exist in the MidiClipPool
     AddMidiClipInstanceSync(TrackId, crate::audio::midi::MidiClipInstance),
@@ -472,16 +531,21 @@ pub struct OscilloscopeData {
 }
 
 /// MIDI clip data for serialization
+///
+/// `Beats`/`Seconds` are `#[serde(transparent)]`, so naming the domain here costs nothing on disk —
+/// the `.beam` still holds a plain number.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MidiClipData {
-    pub duration: f64,
+    /// MIDI content length is musical, so beats.
+    pub duration: Beats,
     pub events: Vec<crate::audio::midi::MidiEvent>,
 }
 
 /// Automation keyframe data for serialization
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AutomationKeyframeData {
-    pub time: f64,
+    /// Automation x-axes are all beats.
+    pub time: Beats,
     pub value: f32,
     pub interpolation: String,
     pub ease_out: (f32, f32),
@@ -518,7 +582,7 @@ pub enum QueryResponse {
     /// Pool waveform data
     PoolWaveform(Result<Vec<crate::io::WaveformPeak>, String>),
     /// Pool file info (duration, sample_rate, channels)
-    PoolFileInfo(Result<(f64, u32, u32), String>),
+    PoolFileInfo(Result<(Seconds, u32, u32), String>),
     /// Audio exported
     AudioExported(Result<(), String>),
     /// MIDI clip instance added (returns instance ID)

@@ -35,6 +35,18 @@ pub struct AppConfig {
     #[serde(default = "defaults::audio_buffer_size")]
     pub audio_buffer_size: u32,
 
+    /// How a cycle MIDI recording treats its passes.
+    ///
+    /// `false` (default) = **merge**: every pass overdubs into one clip, and earlier passes play back
+    /// as you record so you can layer against them. `true` = **separate takes**: each pass becomes
+    /// its own take in a take folder, exactly as audio always does, and earlier passes stay silent
+    /// (they're alternatives, not layers).
+    ///
+    /// Only applies when the transport actually wraps; a recording that stops inside the first pass
+    /// is an ordinary single recording either way.
+    #[serde(default = "defaults::cycle_midi_separate_takes")]
+    pub cycle_midi_separate_takes: bool,
+
     /// Reopen last session on startup
     #[serde(default = "defaults::reopen_last_session")]
     pub reopen_last_session: bool,
@@ -78,6 +90,47 @@ pub struct AppConfig {
     /// Last-used audio-export "Album" tag, remembered so it prefills next time.
     #[serde(default)]
     pub last_audio_album: String,
+
+    /// What the stylus's lower barrel button does while held.
+    #[serde(default = "defaults::tablet_button_lower")]
+    pub tablet_button_lower: TabletButtonAction,
+
+    /// What the stylus's upper barrel button does while held.
+    #[serde(default = "defaults::tablet_button_upper")]
+    pub tablet_button_upper: TabletButtonAction,
+}
+
+/// What a stylus barrel button does while held down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TabletButtonAction {
+    /// Do nothing.
+    None,
+    /// Drag to pan the stage.
+    #[default]
+    Pan,
+    /// Temporarily switch to the eyedropper.
+    Eyedropper,
+    /// Temporarily switch to the eraser.
+    Erase,
+}
+
+impl TabletButtonAction {
+    pub const ALL: [TabletButtonAction; 4] = [
+        TabletButtonAction::None,
+        TabletButtonAction::Pan,
+        TabletButtonAction::Eyedropper,
+        TabletButtonAction::Erase,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TabletButtonAction::None => "None",
+            TabletButtonAction::Pan => "Pan",
+            TabletButtonAction::Eyedropper => "Eyedropper",
+            TabletButtonAction::Erase => "Eraser",
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -90,6 +143,7 @@ impl Default for AppConfig {
             file_height: defaults::file_height(),
             scroll_speed: defaults::scroll_speed(),
             audio_buffer_size: defaults::audio_buffer_size(),
+            cycle_midi_separate_takes: defaults::cycle_midi_separate_takes(),
             reopen_last_session: defaults::reopen_last_session(),
             restore_layout_from_file: defaults::restore_layout_from_file(),
             debug: defaults::debug(),
@@ -100,6 +154,8 @@ impl Default for AppConfig {
             waveform_floor_samples_per_texel: defaults::waveform_floor_samples_per_texel(),
             last_audio_artist: String::new(),
             last_audio_album: String::new(),
+            tablet_button_lower: defaults::tablet_button_lower(),
+            tablet_button_upper: defaults::tablet_button_upper(),
         }
     }
 }
@@ -290,12 +346,16 @@ impl AppConfig {
 
 /// Default values for preferences (matches JS implementation)
 mod defaults {
+    use super::TabletButtonAction;
+    pub fn tablet_button_lower() -> TabletButtonAction { TabletButtonAction::Pan }
+    pub fn tablet_button_upper() -> TabletButtonAction { TabletButtonAction::Eyedropper }
     pub fn bpm() -> u32 { 120 }
     pub fn framerate() -> u32 { 24 }
     pub fn file_width() -> u32 { 800 }
     pub fn file_height() -> u32 { 600 }
     pub fn scroll_speed() -> f64 { 1.0 }
     pub fn audio_buffer_size() -> u32 { 256 }
+    pub fn cycle_midi_separate_takes() -> bool { false }
     pub fn reopen_last_session() -> bool { false }
     pub fn restore_layout_from_file() -> bool { true }
     pub fn debug() -> bool { false }

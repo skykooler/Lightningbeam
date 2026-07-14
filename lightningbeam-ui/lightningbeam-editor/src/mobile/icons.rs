@@ -42,6 +42,8 @@ pub const GRIP_HORIZONTAL: &str = "\u{e0ea}";
 pub const CHEVRONS_UP: &str = "\u{e074}";
 pub const PLAY: &str = "\u{e13c}";
 pub const PAUSE: &str = "\u{e12e}";
+pub const REPEAT: &str = "\u{e146}"; // cycle / loop region toggle
+pub const TRASH: &str = "\u{e18d}"; // delete a take
 pub const SETTINGS: &str = "\u{e154}";
 pub const SEARCH: &str = "\u{e151}";
 pub const PLUS: &str = "\u{e13d}";
@@ -81,3 +83,60 @@ pub const FILE_PLUS: &str = "\u{e0c9}";
 pub const COPY: &str = "\u{e09e}";
 pub const LAYERS: &str = "\u{e529}";
 pub const ELLIPSIS: &str = "\u{e0b6}";
+// Undo / redo (stage header).
+pub const UNDO_2: &str = "\u{e2a1}";
+pub const REDO_2: &str = "\u{e2a0}";
+// Tool cursors (see custom_cursor.rs).
+pub const STAMP: &str = "\u{e3bb}";
+pub const SPRAY_CAN: &str = "\u{e495}";
+pub const BANDAGE: &str = "\u{e61d}";
+pub const DROPLET: &str = "\u{e0b4}";
+pub const TEXT_CURSOR: &str = "\u{e264}";
+pub const CROSSHAIR: &str = "\u{e0ac}";
+pub const POINTER: &str = "\u{e1e8}";
+pub const CONTRAST: &str = "\u{e09d}";
+pub const WIND: &str = "\u{e1b0}";
+pub const SUN_MOON: &str = "\u{e2b2}";
+pub const SPLINE: &str = "\u{e38b}";
+pub const DROPLETS: &str = "\u{e0b5}";
+pub const CIRCLE_DASHED: &str = "\u{e4b0}";
+pub const PALETTE: &str = "\u{e1dd}";
+pub const SHAPES: &str = "\u{e4b3}";
+pub const SCALING: &str = "\u{e2ec}";
+pub const FRAME: &str = "\u{e291}";
+// Timeline layer-row toggles.
+pub const VOLUME_2: &str = "\u{e1ab}"; // unmuted
+pub const VOLUME_X: &str = "\u{e1ac}"; // muted
+pub const HEADPHONES: &str = "\u{e0f1}"; // solo
+pub const LOCK: &str = "\u{e10b}";
+pub const LOCK_OPEN: &str = "\u{e10c}";
+pub const EYE: &str = "\u{e0ba}";
+pub const EYE_OFF: &str = "\u{e0bb}";
+pub const VIDEO: &str = "\u{e1a5}"; // camera enabled
+pub const VIDEO_OFF: &str = "\u{e1a6}"; // camera disabled
+
+/// Lucide glyph for tools that have no bundled SVG icon. `None` means the tool has a real SVG
+/// icon in `src/assets/` and the caller should use that instead.
+pub fn tool_glyph(tool: lightningbeam_core::tool::Tool) -> Option<&'static str> {
+    use lightningbeam_core::tool::Tool;
+    Some(match tool {
+        Tool::Pencil => PENCIL,
+        Tool::Pen => PEN_TOOL,
+        Tool::Airbrush => SPRAY_CAN,
+        Tool::CloneStamp => STAMP,
+        Tool::HealingBrush => BANDAGE,
+        Tool::PatternStamp => SHAPES,
+        Tool::DodgeBurn => SUN_MOON,
+        Tool::Sponge => DROPLETS,
+        Tool::BlurSharpen => CONTRAST,
+        Tool::Gradient => BLEND,
+        Tool::CustomShape => HEXAGON,
+        Tool::SelectEllipse => CIRCLE_DASHED,
+        Tool::MagicWand => WAND_SPARKLES,
+        Tool::QuickSelect => BRUSH,
+        Tool::Warp => SCALING,
+        Tool::Liquify => DROPLET,
+        Tool::SelectLasso => LASSO_SELECT,
+        _ => return None,
+    })
+}

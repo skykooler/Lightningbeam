@@ -189,8 +189,6 @@ pub struct SharedPaneState<'a> {
     pub selected_tool: &'a mut Tool,
     pub fill_color: &'a mut egui::Color32,
     pub stroke_color: &'a mut egui::Color32,
-    /// Tracks which color (fill or stroke) was last interacted with, for eyedropper tool
-    pub active_color_mode: &'a mut ColorMode,
     pub pending_view_action: &'a mut Option<crate::menu::MenuAction>,
     /// Tracks the priority of the best fallback pane for view actions
     /// Lower number = higher priority. None = no fallback pane seen yet

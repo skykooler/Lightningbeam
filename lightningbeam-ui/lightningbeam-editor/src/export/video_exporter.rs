@@ -1064,7 +1064,12 @@ fn composite_document_to_hdr(
                     }
                     let tempo_map = document.tempo_map();
                     let effect_end_beats = effect_instance.timeline_start
-                        + effect_instance.effective_duration(daw_backend::Seconds(lightningbeam_core::effect::EFFECT_DURATION), tempo_map);
+                        + effect_instance.effective_duration(
+                            lightningbeam_core::clip::ClipDuration::Seconds(daw_backend::Seconds(
+                                lightningbeam_core::effect::EFFECT_DURATION,
+                            )),
+                            tempo_map,
+                        );
                     let effect_inst = lightningbeam_core::effect::EffectInstance::new(
                         effect_def,
                         tempo_map.beats_to_seconds(effect_instance.timeline_start).seconds_to_f64(),

@@ -7,10 +7,37 @@
 /// - Basic layer visualization
 
 use eframe::egui;
-use daw_backend::{Beats, Seconds};
-use lightningbeam_core::clip::ClipInstance;
+use daw_backend::{Beats, ContentTime, Seconds};
+use lightningbeam_core::clip::{ClipDuration, ClipInstance};
 use lightningbeam_core::layer::{AnyLayer, AudioLayerType, GroupLayer, LayerTrait};
+use crate::mobile::icons;
 use super::{DragClipType, NodePath, PaneRenderer, SharedPaneState};
+
+/// A layer-row toggle button drawn as a Lucide glyph.
+fn icon_button(glyph: &str) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(glyph).font(icons::font(13.0)))
+}
+
+/// Label a layer-row slider with a Lucide glyph just to its left — the sliders are unlabelled
+/// otherwise, and volume vs. opacity are indistinguishable on layers that have both.
+fn draw_slider_icon(
+    ui: &egui::Ui,
+    theme: &crate::theme::Theme,
+    slider_rect: egui::Rect,
+    glyph: &str,
+) {
+    ui.painter().text(
+        egui::pos2(slider_rect.min.x - 5.0, slider_rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        glyph,
+        icons::font(12.0),
+        theme.text_color(
+            &["#timeline", ".slider-icon"],
+            ui.ctx(),
+            egui::Color32::from_gray(140),
+        ),
+    );
+}
 
 const RULER_HEIGHT: f32 = 30.0;
 const LAYER_HEIGHT: f32 = 60.0;
@@ -20,6 +47,18 @@ const MOBILE_LAYER_HEADER_WIDTH: f32 = LAYER_HEIGHT * 0.5;
 const MIN_PIXELS_PER_SECOND: f32 = 1.0;  // Allow zooming out to see 10+ minutes
 const MAX_PIXELS_PER_SECOND: f32 = 500.0;
 const EDGE_DETECTION_PIXELS: f32 = 8.0; // Distance from edge to detect trim handles
+/// Height of the cycle lane carved off the *bottom* of the ruler. Dragging here edits the cycle
+/// region; the ruler above it still scrubs the playhead as before. It goes at the bottom so the
+/// bar numbers (which are drawn at the top of the ruler) stay legible.
+const CYCLE_LANE_HEIGHT: f32 = 11.0;
+
+// Snap "visual coarseness" profiles — the minimum on-screen spacing a grid line may have.
+// See `Timeline::quantize_grid_size`.
+/// Playhead scrubbing and clip edges: snap fine, down to 16ths when there's room.
+const SNAP_PX_FINE: f64 = 15.0;
+/// Cycle region: snap coarse, so loops land on whole bars rather than odd subdivisions.
+/// Only drops to beats once you're zoomed in far enough to clearly be asking for it.
+const SNAP_PX_CYCLE: f64 = 60.0;
 const LOOP_CORNER_SIZE: f32 = 12.0; // Size of loop corner hotzone at top-right of clip
 const MIN_CLIP_WIDTH_PX: f32 = 8.0; // Minimum visible width for very short clips (e.g. groups)
 const AUTOMATION_LANE_HEIGHT: f32 = 40.0;
@@ -77,7 +116,7 @@ fn compute_clip_stacking(
     let tempo_map = document.tempo_map();
     // Stacking only needs relative overlap, so compare in the beats domain.
     let ranges: Vec<(f64, f64)> = clip_instances.iter().map(|ci| {
-        let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(Seconds::ZERO);
+        let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(ClipDuration::Seconds(Seconds::ZERO));
         let start = ci.effective_start();
         let end = start + ci.total_duration(clip_dur, tempo_map);
         (start.beats_to_f64(), end.beats_to_f64())
@@ -191,11 +230,14 @@ fn draw_video_thumbnail_strip(
 /// Get the effective clip duration for a clip instance on a given layer.
 /// For groups on vector layers, the duration spans all consecutive keyframes
 /// where the group is present. For regular clips, returns the clip's internal duration.
+/// A clip's content duration **in its own domain** — seconds for vector/video/effect and sampled
+/// audio, BEATS for MIDI. Returning a `ClipDuration` rather than bare `Seconds` is what lets the
+/// instance's trim bounds (which are content times, in that same domain) be resolved correctly.
 fn effective_clip_duration(
     document: &lightningbeam_core::document::Document,
     layer: &AnyLayer,
     clip_instance: &ClipInstance,
-) -> Option<Seconds> {
+) -> Option<ClipDuration> {
     match layer {
         AnyLayer::Vector(vl) => {
             let vc = document.get_vector_clip(&clip_instance.clip_id)?;
@@ -203,17 +245,21 @@ fn effective_clip_duration(
                 let frame_duration = 1.0 / document.framerate;
                 let start_secs = document.tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64();
                 let end = vl.group_visibility_end(&clip_instance.id, start_secs, frame_duration);
-                Some(Seconds((end - start_secs).max(0.0)))
+                Some(ClipDuration::Seconds(Seconds((end - start_secs).max(0.0))))
             } else {
                 // Movie clips: duration based on all internal content (keyframes + clip instances)
-                document.get_clip_duration(&clip_instance.clip_id)
+                document.get_clip_duration(&clip_instance.clip_id).map(ClipDuration::Seconds)
             }
         }
-        // Delegate to get_clip_duration so MIDI clips (whose `duration` is stored in beats,
-        // not seconds) are converted correctly rather than read as raw seconds.
-        AnyLayer::Audio(_) => document.get_clip_duration(&clip_instance.clip_id),
-        AnyLayer::Video(_) => document.get_video_clip(&clip_instance.clip_id).map(|c| Seconds(c.duration)),
-        AnyLayer::Effect(_) => Some(Seconds(lightningbeam_core::effect::EFFECT_DURATION)),
+        // An audio layer can hold a sampled clip (seconds content) or a MIDI clip (beats content),
+        // so ask the clip which it is rather than flattening both to seconds.
+        AnyLayer::Audio(_) => document.clip_trim_duration(&clip_instance.clip_id),
+        AnyLayer::Video(_) => document
+            .get_video_clip(&clip_instance.clip_id)
+            .map(|c| ClipDuration::Seconds(Seconds(c.duration))),
+        AnyLayer::Effect(_) => Some(ClipDuration::Seconds(Seconds(
+            lightningbeam_core::effect::EFFECT_DURATION,
+        ))),
         AnyLayer::Group(_) => None,
         AnyLayer::Raster(_) => None,
         AnyLayer::Text(_) => None,
@@ -228,6 +274,20 @@ enum ClipDragType {
     TrimRight,
     LoopExtendRight,
     LoopExtendLeft,
+}
+
+/// A drag on the cycle strip (the thin lane at the top of the ruler).
+///
+/// Mirrors `ClipDragType`'s three-zone model (left edge / body / right edge), reusing
+/// `EDGE_DETECTION_PIXELS` for the handles.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CycleDrag {
+    /// Dragging out a brand-new region; `anchor` is the beat the drag started from.
+    Create { anchor: Beats },
+    /// Sliding the whole region; `grab_offset` is where inside it the user grabbed.
+    Move { grab_offset: Beats },
+    ResizeStart,
+    ResizeEnd,
 }
 
 use lightningbeam_core::document::TimelineMode;
@@ -260,12 +320,30 @@ pub struct TimelinePane {
     /// during the last `render_layers`. Used by `handle_input` (next frame) to snap the
     /// playhead exactly to a keyframe when its diamond is clicked.
     keyframe_diamond_hits: Vec<(egui::Rect, f64)>,
+    /// Take-badge click targets recorded during render: (badge rect, layer, instance, active take,
+    /// take count). Collected while painting, dispatched after — the usual two-phase pattern.
+    take_badge_hits: Vec<(egui::Rect, uuid::Uuid, uuid::Uuid, usize, usize)>,
+    /// The take-folder instance whose take menu is open, if any.
+    open_take_menu: Option<(uuid::Uuid, uuid::Uuid)>,
+    /// The (instance, take index) being renamed inline in the take menu.
+    renaming_take: Option<(uuid::Uuid, usize)>,
+    take_rename_buffer: String,
+    /// Seconds between the cycle region's start and where the current recording actually began.
+    /// Zero unless the user punched in mid-region. Used to line the live waveform preview up with
+    /// the region on each pass.
+    cycle_record_lead_secs: f64,
 
     /// Total duration of the animation
     duration: f64,
 
     /// Is the user currently dragging the playhead?
     is_scrubbing: bool,
+
+    /// In-flight drag on the cycle strip, if any.
+    cycle_drag: Option<CycleDrag>,
+    /// Live preview of the cycle region while dragging. The document is only updated on release
+    /// (via one `SetCycleRegionAction`), so a drag doesn't spam the undo stack — same as clip drags.
+    cycle_preview: Option<(Beats, Beats)>,
 
     /// Is the user panning the timeline?
     is_panning: bool,
@@ -691,8 +769,15 @@ impl TimelinePane {
             viewport_start_time: 0.0,
             viewport_scroll_y: 0.0,
             keyframe_diamond_hits: Vec::new(),
+            take_badge_hits: Vec::new(),
+            open_take_menu: None,
+            renaming_take: None,
+            take_rename_buffer: String::new(),
+            cycle_record_lead_secs: 0.0,
             duration: 10.0,  // Default 10 seconds
             is_scrubbing: false,
+            cycle_drag: None,
+            cycle_preview: None,
             is_panning: false,
             last_pan_pos: None,
             lp_time: None,
@@ -813,7 +898,9 @@ impl TimelinePane {
                 .unwrap_or_default()
                 .iter()
                 .map(|k| crate::curve_editor::CurvePoint {
-                    time: k.time,  // beats (backend stores beats; curve editor x-axis is beats)
+                    // The curve editor's x-axis is beats, same as the backend — unwrap at this
+                    // boundary because CurvePoint stores a plain f64.
+                    time: k.time.beats_to_f64(),
                     value: k.value,
                     interpolation: match k.interpolation.as_str() {
                         "bezier" => crate::curve_editor::CurveInterpolation::Bezier,
@@ -856,6 +943,35 @@ impl TimelinePane {
         }
 
         self.automation_cache.insert(layer_id, lanes);
+    }
+
+    /// Toggle the transport cycle (loop) on/off.
+    ///
+    /// This is the only way to arm looping; the cycle strip on the ruler is shown (and draggable)
+    /// only while armed. Arming with no region set seeds a default one at the playhead so the
+    /// button does something immediately rather than revealing an empty strip.
+    pub(crate) fn toggle_cycle(&mut self, shared: &mut SharedPaneState) {
+        let document = shared.action_executor.document();
+        let arming = !document.cycle_enabled;
+
+        let region = if arming && document.cycle_region.is_none() {
+            let tempo_map = document.tempo_map();
+            let beats_per_bar = (document.time_signature.numerator.max(1)) as f64;
+            // Start at the bar containing the playhead, and run for a few bars.
+            let playhead_beats = tempo_map.seconds_to_beats(Seconds(*shared.playback_time));
+            let bar = (playhead_beats.beats_to_f64() / beats_per_bar).floor().max(0.0);
+            let start = Beats(bar * beats_per_bar);
+            const DEFAULT_BARS: f64 = 4.0;
+            Some((start, start + Beats(beats_per_bar * DEFAULT_BARS)))
+        } else {
+            document.cycle_region
+        };
+
+        let action =
+            lightningbeam_core::actions::SetCycleRegionAction::new(document, region, arming);
+        if !action.is_noop() {
+            shared.pending_actions.push(Box::new(action));
+        }
     }
 
     /// Toggle recording on/off
@@ -986,7 +1102,41 @@ impl TimelinePane {
             true
         });
 
-        let start_time = *shared.playback_time;
+        let mut start_time = *shared.playback_time;
+
+        // With a cycle region armed, a recording is anchored at the REGION start rather than the
+        // playhead: every take spans the whole region, so the clip has to as well.
+        //
+        // Two ways in. From stopped, we also move the playhead to the region start, so recording
+        // begins with the loop (the count-in below then rolls in from a measure before it). Punching
+        // in while already rolling leaves the playhead where it is — the backend prepends silence to
+        // take 1's head to fill the gap back to the region start.
+        let cycle_start_secs = {
+            let doc = shared.action_executor.document();
+            match (doc.cycle_enabled, doc.cycle_region) {
+                (true, Some((ls, le))) if le > ls => {
+                    Some(doc.tempo_map().beats_to_seconds(ls).seconds_to_f64())
+                }
+                _ => None,
+            }
+        };
+        if let Some(ls_secs) = cycle_start_secs {
+            // How far into the region we punched in (zero when starting from stopped, since we jump
+            // the playhead to the region start below). The live waveform preview needs this to know
+            // where each pass begins inside the recording buffer.
+            self.cycle_record_lead_secs = if *shared.is_playing {
+                (*shared.playback_time - ls_secs).max(0.0)
+            } else {
+                0.0
+            };
+            start_time = ls_secs;
+            if !*shared.is_playing {
+                if let Some(controller_arc) = shared.audio_controller {
+                    controller_arc.lock().unwrap().seek(Seconds(ls_secs));
+                }
+                *shared.playback_time = ls_secs;
+            }
+        }
 
         // Count-in: seek back N beats, start transport + metronome, defer ALL recording commands.
         // Must happen before Step 4 so no clips or backend recordings are created yet.
@@ -1030,6 +1180,28 @@ impl TimelinePane {
         // The backend records in the beats domain; start_time is the seconds playhead.
         let start_beats = shared.action_executor.document().tempo_map().seconds_to_beats(Seconds(start_time));
 
+        // Does this layer already hold takes over the cycle region? If so this recording is another
+        // take, however short it runs — without this, stopping before the loop came round would land
+        // it as a separate overlapping clip instead of joining the take list. The engine can't work
+        // this out for itself: whether takes exist is document state.
+        let force_takes: std::collections::HashMap<uuid::Uuid, bool> = {
+            let doc = shared.action_executor.document();
+            let region = match (doc.cycle_enabled, doc.cycle_region) {
+                (true, Some((ls, le))) if le > ls => Some((ls, le - ls)),
+                _ => None,
+            };
+            candidates
+                .iter()
+                .map(|&(layer_id, _, _)| {
+                    let forced = region.is_some_and(|(loop_start, loop_len)| {
+                        doc.take_folder_at(&layer_id, loop_start, loop_len, &uuid::Uuid::nil())
+                            .is_some()
+                    });
+                    (layer_id, forced)
+                })
+                .collect()
+        };
+
         // Step 4: Dispatch recording for each candidate
         for &(layer_id, ref cat, _) in &candidates {
             match cat {
@@ -1053,7 +1225,7 @@ impl TimelinePane {
                         }
                         if let Some(controller_arc) = shared.audio_controller {
                             let mut controller = controller_arc.lock().unwrap();
-                            controller.start_recording(track_id, start_beats);
+                            controller.start_recording(track_id, start_beats, force_takes.get(&layer_id).copied().unwrap_or(false));
                             println!("🎤 Started audio recording on track {:?} at {:.2}s", track_id, start_time);
                         }
                         shared.recording_layer_ids.push(layer_id);
@@ -1066,7 +1238,7 @@ impl TimelinePane {
                         if let Some(controller_arc) = shared.audio_controller {
                             let mut controller = controller_arc.lock().unwrap();
                             let clip_id = controller.create_midi_clip(track_id, start_beats, Beats::ZERO);
-                            controller.start_midi_recording(track_id, clip_id, start_beats);
+                            controller.start_midi_recording(track_id, clip_id, start_beats, force_takes.get(&layer_id).copied().unwrap_or(false));
                             shared.recording_clips.insert(layer_id, clip_id);
                             println!("🎹 Started MIDI recording on track {:?} at {:.2}s, clip_id={}",
                                      track_id, start_time, clip_id);
@@ -1332,8 +1504,10 @@ impl TimelinePane {
 
         let tempo_map = document.tempo_map();
         for (_child_layer_id, ci) in &child_clips {
-            let clip_dur = document.get_clip_duration(&ci.clip_id).unwrap_or_else(|| {
-                Seconds(ci.trim_end.unwrap_or(1.0) - ci.trim_start)
+            let clip_dur = document.clip_trim_duration(&ci.clip_id).unwrap_or_else(|| {
+                ClipDuration::Seconds(Seconds(
+                    (ci.trim_end.unwrap_or(ContentTime(1.0)) - ci.trim_start).raw(),
+                ))
             });
             let start = ci.effective_start();
             let end = start + ci.total_duration(clip_dur, tempo_map);
@@ -1418,6 +1592,251 @@ impl TimelinePane {
         self.viewport_start_time = (self.viewport_start_time + time_delta as f64).max(0.0);
     }
 
+    /// The cycle lane: a thin band carved off the *bottom* of the ruler. Dragging here edits the
+    /// cycle region; the ruler above it still scrubs the playhead. Bottom rather than top so it
+    /// doesn't sit on the bar numbers.
+    fn cycle_lane_rect(ruler_rect: egui::Rect) -> egui::Rect {
+        let h = CYCLE_LANE_HEIGHT.min(ruler_rect.height());
+        egui::Rect::from_min_max(
+            egui::pos2(ruler_rect.min.x, ruler_rect.max.y - h),
+            ruler_rect.max,
+        )
+    }
+
+    /// The cycle region currently being shown: the live drag preview if one is in flight,
+    /// otherwise whatever the document has.
+    fn shown_cycle_region(
+        &self,
+        document: &lightningbeam_core::document::Document,
+    ) -> Option<(Beats, Beats)> {
+        self.cycle_preview.or(document.cycle_region)
+    }
+
+    /// Three-zone hit test on the cycle lane: left edge / body / right edge of the existing region,
+    /// mirroring how clips detect their trim handles. Anywhere else draws a fresh region.
+    ///
+    /// `pos_x` is in screen coords; `content_min_x` is the content area's left edge (which the
+    /// ruler shares, so beats→x lands in the same space).
+    fn cycle_drag_at(
+        &self,
+        pos_x: f32,
+        beat: Beats,
+        content_min_x: f32,
+        document: &lightningbeam_core::document::Document,
+    ) -> CycleDrag {
+        let Some((s, e)) = document.cycle_region else {
+            return CycleDrag::Create { anchor: beat };
+        };
+        let sx = content_min_x + self.beats_to_x(s, document.tempo_map());
+        let ex = content_min_x + self.beats_to_x(e, document.tempo_map());
+        if (pos_x - sx).abs() <= EDGE_DETECTION_PIXELS {
+            CycleDrag::ResizeStart
+        } else if (pos_x - ex).abs() <= EDGE_DETECTION_PIXELS {
+            CycleDrag::ResizeEnd
+        } else if pos_x > sx && pos_x < ex {
+            CycleDrag::Move { grab_offset: beat - s }
+        } else {
+            CycleDrag::Create { anchor: beat }
+        }
+    }
+
+    /// Pixel x (relative to the content area) → beats, snapped on the coarse cycle grid.
+    fn x_to_beats_cycle_snapped(
+        &self,
+        x: f32,
+        document: &lightningbeam_core::document::Document,
+    ) -> Beats {
+        let secs = self.snap_to_grid(
+            self.x_to_time(x.max(0.0)).max(0.0),
+            document.tempo_map(),
+            &document.time_signature,
+            document.framerate,
+            SNAP_PX_CYCLE,
+        );
+        document.tempo_map().seconds_to_beats(Seconds(secs.max(0.0)))
+    }
+
+    /// Paint the cycle lane and the cycle region band, *inside* the ruler.
+    ///
+    /// Called from `render_ruler` right after the ruler's background and before its ticks/labels,
+    /// so the tick marks read through the band and the bar numbers (up top) are never covered.
+    ///
+    /// The lane only exists while looping is armed — with cycle off there's no lane and the ruler
+    /// is entirely the playhead scrubber, exactly as before this feature.
+    fn paint_cycle_lane(
+        &self,
+        ui: &egui::Ui,
+        ruler_rect: egui::Rect,
+        theme: &crate::theme::Theme,
+        tempo_map: &daw_backend::TempoMap,
+        region: Option<(Beats, Beats)>,
+    ) {
+        let painter = ui.painter();
+        let lane = Self::cycle_lane_rect(ruler_rect);
+
+        // A faint bed, so the lane still reads as a drag target when there's no region to grab.
+        painter.rect_filled(
+            lane,
+            0.0,
+            theme.bg_color(&["#timeline", ".cycle-lane"], ui.ctx(), egui::Color32::from_gray(48)),
+        );
+
+        let Some((start, end)) = region else { return };
+        if end <= start {
+            return;
+        }
+
+        let sx = self.beats_to_x(start, tempo_map);
+        let ex = self.beats_to_x(end, tempo_map);
+        if ex < 0.0 || sx > ruler_rect.width() {
+            return; // off-screen
+        }
+
+        let fill = theme.bg_color(
+            &["#timeline", ".cycle-region"],
+            ui.ctx(),
+            egui::Color32::from_rgb(230, 190, 60),
+        );
+
+        let band = egui::Rect::from_min_max(
+            egui::pos2((ruler_rect.min.x + sx).max(ruler_rect.min.x), lane.min.y),
+            egui::pos2((ruler_rect.min.x + ex).min(ruler_rect.max.x), lane.max.y),
+        );
+        painter.rect_filled(band, 2.0, fill);
+    }
+
+    /// Click handling + dropdown for the take badge painted on take-folder clips.
+    ///
+    /// Runs after rendering, off the hit rects collected during it: clicking a badge opens (or
+    /// closes) a list of the clip's takes, and picking one dispatches `SetActiveTakeAction`.
+    /// Selection is per-*instance*, so doing this to one half of a split clip and something else to
+    /// the other half is exactly how you comp.
+    fn render_take_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        document: &lightningbeam_core::document::Document,
+        pending_actions: &mut Vec<Box<dyn lightningbeam_core::action::Action>>,
+    ) {
+        let click = ui.input(|i| {
+            i.pointer
+                .primary_pressed()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        });
+
+        if let Some(pos) = click {
+            if let Some((_, layer_id, instance_id, _, _)) =
+                self.take_badge_hits.iter().find(|(r, ..)| r.contains(pos))
+            {
+                let key = (*layer_id, *instance_id);
+                // Clicking the badge of the open menu closes it again.
+                self.open_take_menu = (self.open_take_menu != Some(key)).then_some(key);
+            }
+        }
+
+        let Some((layer_id, instance_id)) = self.open_take_menu else {
+            return;
+        };
+        // The badge is only in the hit list while it's on screen; if the clip scrolled away, the
+        // menu has nothing to hang off, so drop it.
+        let Some((badge, _, _, active, count)) = self
+            .take_badge_hits
+            .iter()
+            .find(|(_, l, i, _, _)| *l == layer_id && *i == instance_id)
+            .copied()
+        else {
+            self.open_take_menu = None;
+            return;
+        };
+
+        let Some(instance) = document
+            .get_layer(&layer_id)
+            .and_then(|l| match l {
+                lightningbeam_core::layer::AnyLayer::Audio(al) => {
+                    al.clip_instances.iter().find(|ci| ci.id == instance_id)
+                }
+                _ => None,
+            })
+        else {
+            self.open_take_menu = None;
+            return;
+        };
+        // The instance's *stored* selection, which is what rollback must restore — not `active`,
+        // which is that value clamped for display.
+        let old_take = instance.active_take;
+        let take_names: Vec<String> = instance.takes.iter().map(|t| t.name.clone()).collect();
+
+        let mut close = false;
+        let area = egui::Area::new(ui.id().with(("take_menu", instance_id)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(badge.min.x, badge.max.y + 2.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    for i in 0..count {
+                        let is_active = i == active;
+                        let renaming = self.renaming_take == Some((instance_id, i));
+
+                        ui.horizontal(|ui| {
+                            if renaming {
+                                let edit = ui.add(
+                                    egui::TextEdit::singleline(&mut self.take_rename_buffer)
+                                        .desired_width(110.0),
+                                );
+                                edit.request_focus();
+                                // Commit on Enter or on clicking away; Escape abandons.
+                                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                if enter || edit.lost_focus() && !escape {
+                                    let name = self.take_rename_buffer.trim().to_string();
+                                    if !name.is_empty() && name != take_names[i] {
+                                        pending_actions.push(Box::new(
+                                            lightningbeam_core::actions::RenameTakeAction::new(
+                                                layer_id, instance_id, i, name,
+                                            ),
+                                        ));
+                                    }
+                                    self.renaming_take = None;
+                                } else if escape {
+                                    self.renaming_take = None;
+                                }
+                                return;
+                            }
+
+                            let label = ui.selectable_label(is_active, &take_names[i]);
+                            if label.clicked() {
+                                if !is_active {
+                                    pending_actions.push(Box::new(
+                                        lightningbeam_core::actions::SetActiveTakeAction::new(
+                                            layer_id, instance_id, i, old_take,
+                                        ),
+                                    ));
+                                }
+                                close = true;
+                            }
+                            // Double-click a take to rename it in place. Deleting lives on the clip's
+                            // right-click menu, not here — a trash icon per row is a small target
+                            // sitting right next to the one you actually meant to click.
+                            if label.double_clicked() {
+                                self.renaming_take = Some((instance_id, i));
+                                self.take_rename_buffer = take_names[i].clone();
+                            }
+                        });
+                    }
+                });
+            });
+
+        // A press anywhere outside the menu (and outside the badge, which toggles) dismisses it.
+        if let Some(pos) = click {
+            if !badge.contains(pos) && !area.response.rect.contains(pos) {
+                close = true;
+            }
+        }
+        if close {
+            self.open_take_menu = None;
+            self.renaming_take = None;
+        }
+    }
+
     /// Convert time (seconds) to pixel x-coordinate
     fn time_to_x(&self, time: f64) -> f32 {
         ((time - self.viewport_start_time) * self.pixels_per_second as f64) as f32
@@ -1439,15 +1858,18 @@ impl TimelinePane {
     /// Effective on-timeline duration for a clip instance, in seconds.
     ///
     /// `total_duration` is in beats; converts to seconds using the current (preview) BPM.
-    fn instance_display_duration(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_dur_secs: Seconds, tempo_map: &daw_backend::TempoMap) -> f64 {
-        (tempo_map.beats_to_seconds(ci.timeline_start + ci.total_duration(clip_dur_secs, tempo_map))
+    fn instance_display_duration(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_content: ClipDuration, tempo_map: &daw_backend::TempoMap) -> f64 {
+        (tempo_map.beats_to_seconds(ci.timeline_start + ci.total_duration(clip_content, tempo_map))
             - tempo_map.beats_to_seconds(ci.effective_start())).seconds_to_f64()
     }
 
-    /// Returns the clip content start (trim_start) and duration in display seconds.
-    fn content_display_range(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_dur_secs: Seconds, _bpm: f64) -> (f64, f64) {
-        let trim_end = ci.trim_end.unwrap_or(clip_dur_secs.seconds_to_f64());
-        (ci.trim_start, (trim_end - ci.trim_start).max(0.0))
+    /// The clip's content start (trim_start) and window length, as raw magnitudes in the clip's own
+    /// content domain — seconds for audio/video/vector, beats for MIDI. The drag/preview math below
+    /// works in that domain throughout, converting to the timeline only at the edges.
+    fn content_display_range(&self, ci: &lightningbeam_core::clip::ClipInstance, clip_content: ClipDuration, _bpm: f64) -> (f64, f64) {
+        let trim_end = ci.trim_end.map_or(clip_content.native(), |t| t.raw());
+        let start = ci.trim_start.raw();
+        (start, (trim_end - start).max(0.0))
     }
 
     /// Convert pixel x-coordinate to time (seconds)
@@ -1459,11 +1881,19 @@ impl TimelinePane {
     /// - Measures mode: zoom-adaptive (coarser when zoomed out, None when very zoomed in)
     /// - Frames mode: always 1/framerate regardless of zoom
     /// - Seconds mode: no snapping
+    ///
+    /// `min_grid_px` is the **visual coarseness**: the smallest on-screen spacing a grid line is
+    /// allowed to have. The finest musical subdivision at least that wide wins, so a larger value
+    /// snaps to coarser units at the same zoom. Callers pick a profile: [`SNAP_PX_FINE`] for the
+    /// playhead and clip edges, [`SNAP_PX_CYCLE`] for the cycle region (you nearly always want to
+    /// loop whole bars — "four bars and an eighth" is essentially never intended; zoom in if you
+    /// really do want it).
     fn quantize_grid_size(
         &self,
         tempo_map: &daw_backend::TempoMap,
         time_sig: &lightningbeam_core::document::TimeSignature,
         framerate: f64,
+        min_grid_px: f64,
     ) -> Option<f64> {
         match self.time_display_format {
             TimelineMode::Frames => Some(1.0 / framerate),
@@ -1472,17 +1902,17 @@ impl TimelinePane {
                 let beat = beat_duration(0.0, tempo_map);
                 let measure = measure_duration(0.0, tempo_map, time_sig);
                 let pps = self.pixels_per_second as f64;
-                // Very zoomed in: 16th note > 40px → no snap
-                if pps * beat / 4.0 > 40.0 { return None; }
-                // Find finest subdivision with >= 15px spacing (finest → coarsest)
-                const MIN_PX: f64 = 15.0;
+                // So zoomed in that even the finest subdivision is a huge target → free positioning.
+                // Scaled off the coarseness so a coarse profile doesn't give up snapping early.
+                if pps * beat / 4.0 > min_grid_px * 2.5 { return None; }
+                // Find the finest subdivision with >= min_grid_px spacing (finest → coarsest)
                 for &sub in &[beat / 4.0, beat / 2.0, beat, beat * 2.0, measure] {
-                    if pps * sub >= MIN_PX { return Some(sub); }
+                    if pps * sub >= min_grid_px { return Some(sub); }
                 }
                 // Very zoomed out: try 2x, 4x, ... multiples of a measure
                 let mut m = measure * 2.0;
                 for _ in 0..10 {
-                    if pps * m >= MIN_PX { return Some(m); }
+                    if pps * m >= min_grid_px { return Some(m); }
                     m *= 2.0;
                 }
                 Some(measure)
@@ -1492,14 +1922,16 @@ impl TimelinePane {
     }
 
     /// Snap a time value to the nearest quantization grid point (or return unchanged).
+    /// See [`Self::quantize_grid_size`] for `min_grid_px` (the visual coarseness).
     fn snap_to_grid(
         &self,
         t: f64,
         tempo_map: &daw_backend::TempoMap,
         time_sig: &lightningbeam_core::document::TimeSignature,
         framerate: f64,
+        min_grid_px: f64,
     ) -> f64 {
-        match self.quantize_grid_size(tempo_map, time_sig, framerate) {
+        match self.quantize_grid_size(tempo_map, time_sig, framerate, min_grid_px) {
             Some(grid) => (t / grid).round() * grid,
             None => t,
         }
@@ -1516,7 +1948,7 @@ impl TimelinePane {
         framerate: f64,
     ) -> Beats {
         let anchor = self.drag_anchor_start; // seconds
-        let target = match self.quantize_grid_size(tempo_map, time_sig, framerate) {
+        let target = match self.quantize_grid_size(tempo_map, time_sig, framerate, SNAP_PX_FINE) {
             Some(grid) => ((anchor + self.drag_offset) / grid).round() * grid,
             None => anchor + self.drag_offset,
         };
@@ -1564,13 +1996,20 @@ impl TimelinePane {
 
     /// Render the time ruler at the top
     fn render_ruler(&self, ui: &mut egui::Ui, rect: egui::Rect, theme: &crate::theme::Theme,
-                    tempo_map: &daw_backend::TempoMap, time_sig: &lightningbeam_core::document::TimeSignature, framerate: f64) {
+                    tempo_map: &daw_backend::TempoMap, time_sig: &lightningbeam_core::document::TimeSignature, framerate: f64,
+                    cycle: Option<Option<(Beats, Beats)>>) {
         let painter = ui.painter();
 
         // Background
         let bg_style = theme.style(".timeline-background", ui.ctx());
         let bg_color = bg_style.background_color().unwrap_or(egui::Color32::from_rgb(34, 34, 34));
         painter.rect_filled(rect, 0.0, bg_color);
+
+        // Cycle lane goes under the ticks/labels: `Some(region)` when looping is armed (the region
+        // itself may still be `None`), `None` when it's off and the lane shouldn't exist at all.
+        if let Some(region) = cycle {
+            self.paint_cycle_lane(ui, rect, theme, tempo_map, region);
+        }
 
         let text_style = theme.style(".text-primary", ui.ctx());
         let text_color = text_style.text_color.unwrap_or(egui::Color32::from_gray(200));
@@ -2170,32 +2609,53 @@ impl TimelinePane {
 
             let Some(layer_for_controls) = any_layer_for_controls else { continue; };
 
-            // Layer controls: volume slider top-right, buttons below it
+            // Layer controls, right-aligned in three stacked tiers: volume, opacity, buttons.
+            // A layer only shows the sliders that mean something for it (a raster layer has no
+            // volume; an audio layer has no opacity), but the buttons sit at a fixed offset so
+            // they line up across rows regardless of which sliders are present.
             let controls_right = header_rect.max.x - 8.0;
             let button_size = egui::vec2(20.0, 20.0);
             let slider_width = 60.0;
+            let slider_height = 14.0;
 
             let volume_slider_rect = egui::Rect::from_min_size(
-                egui::pos2(controls_right - slider_width, header_rect.min.y + 4.0),
-                egui::vec2(slider_width, 20.0),
+                egui::pos2(controls_right - slider_width, header_rect.min.y + 2.0),
+                egui::vec2(slider_width, slider_height),
+            );
+            let opacity_slider_rect = egui::Rect::from_min_size(
+                egui::pos2(controls_right - slider_width, header_rect.min.y + 17.0),
+                egui::vec2(slider_width, slider_height),
             );
 
-            // Buttons sit below the slider, right-aligned to match it
-            let buttons_top = volume_slider_rect.max.y + 4.0;
-            let lock_button_rect = egui::Rect::from_min_size(
-                egui::pos2(controls_right - button_size.x, buttons_top),
-                button_size,
-            );
+            // Which controls apply to this layer. Vector and Video layers can hold movie clips
+            // with audio *and* draw pixels, so they get both.
+            let (has_volume, has_opacity) = match layer_for_controls {
+                lightningbeam_core::layer::AnyLayer::Raster(_)
+                | lightningbeam_core::layer::AnyLayer::Text(_) => (false, true),
+                lightningbeam_core::layer::AnyLayer::Audio(_) => (true, false),
+                _ => (true, true),
+            };
+            let is_video_layer =
+                matches!(layer_for_controls, lightningbeam_core::layer::AnyLayer::Video(_));
 
-            let solo_button_rect = egui::Rect::from_min_size(
-                egui::pos2(lock_button_rect.min.x - button_size.x - 4.0, buttons_top),
-                button_size,
-            );
+            // Buttons are laid out right-to-left, and a layer only gets the ones that mean
+            // something for it: [eye] [mute | camera] [solo] [lock].
+            let buttons_top = header_rect.min.y + 34.0;
+            let mut next_x = controls_right;
+            let mut next_button_rect = || {
+                next_x -= button_size.x;
+                let r = egui::Rect::from_min_size(egui::pos2(next_x, buttons_top), button_size);
+                next_x -= 4.0;
+                r
+            };
 
-            let mute_button_rect = egui::Rect::from_min_size(
-                egui::pos2(solo_button_rect.min.x - button_size.x - 4.0, buttons_top),
-                button_size,
-            );
+            let lock_button_rect = next_button_rect();
+            let solo_button_rect = has_volume.then(&mut next_button_rect);
+            // Video layers use this slot for the camera toggle instead of a mute button.
+            let mute_button_rect =
+                (has_volume && !is_video_layer).then(&mut next_button_rect);
+            let camera_button_rect = is_video_layer.then(&mut next_button_rect);
+            let visibility_button_rect = has_opacity.then(&mut next_button_rect);
 
             // Get layer ID and current property values from the layer we already have
             // Check if there's a Volume automation lane; use it to drive the slider
@@ -2223,30 +2683,66 @@ impl TimelinePane {
             let is_soloed = layer_for_controls.soloed();
             let is_locked = layer_for_controls.locked();
 
-            // Mute button — or camera toggle for video layers
-            let is_video_layer = matches!(layer_for_controls, lightningbeam_core::layer::AnyLayer::Video(_));
-            let camera_enabled = if let lightningbeam_core::layer::AnyLayer::Video(v) = layer_for_controls {
-                v.camera_enabled
-            } else {
-                false
-            };
+            // Visibility toggle — on any layer that draws something.
+            if let Some(rect) = visibility_button_rect {
+                let is_visible = layer_for_controls.visible();
+                let response = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    let button = icon_button(if is_visible { icons::EYE } else { icons::EYE_OFF })
+                        .fill(if is_visible {
+                            theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
+                        } else {
+                            theme.bg_color(&["#timeline", ".btn-hidden", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(120, 120, 120, 100))
+                        })
+                        .stroke(egui::Stroke::NONE);
+                    ui.add(button)
+                        .on_hover_text(if is_visible { "Hide layer" } else { "Show layer" })
+                }).inner;
 
-            let first_btn_response = ui.scope_builder(egui::UiBuilder::new().max_rect(mute_button_rect), |ui| {
-                if is_video_layer {
-                    // Camera toggle for video layers
-                    let cam_text = if camera_enabled { "📹" } else { "📷" };
-                    let button = egui::Button::new(cam_text)
+                if response.clicked() {
+                    self.layer_control_clicked = true;
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                            layer_id,
+                            lightningbeam_core::actions::LayerProperty::Visible(!is_visible),
+                        )
+                    ));
+                }
+            }
+
+            // Camera toggle — video layers only.
+            if let Some(rect) = camera_button_rect {
+                let camera_enabled =
+                    matches!(layer_for_controls, lightningbeam_core::layer::AnyLayer::Video(v) if v.camera_enabled);
+                let response = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    let button = icon_button(if camera_enabled { icons::VIDEO } else { icons::VIDEO_OFF })
                         .fill(if camera_enabled {
                             theme.bg_color(&["#timeline", ".btn-toggle", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100))
                         } else {
                             theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
                         })
                         .stroke(egui::Stroke::NONE);
-                    ui.add(button)
-                } else {
-                    // Mute button for non-video layers
-                    let mute_text = if is_muted { "🔇" } else { "🔊" };
-                    let button = egui::Button::new(mute_text)
+                    ui.add(button).on_hover_text(if camera_enabled {
+                        "Disable camera preview"
+                    } else {
+                        "Enable camera preview"
+                    })
+                }).inner;
+
+                if response.clicked() {
+                    self.layer_control_clicked = true;
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                            layer_id,
+                            lightningbeam_core::actions::LayerProperty::CameraEnabled(!camera_enabled),
+                        )
+                    ));
+                }
+            }
+
+            // Mute button — only where there's audio to mute.
+            if let Some(rect) = mute_button_rect {
+                let response = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    let button = icon_button(if is_muted { icons::VOLUME_X } else { icons::VOLUME_2 })
                         .fill(if is_muted {
                             theme.bg_color(&["#timeline", ".btn-mute", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(255, 100, 100, 100))
                         } else {
@@ -2254,19 +2750,11 @@ impl TimelinePane {
                         })
                         .stroke(egui::Stroke::NONE);
                     ui.add(button)
-                }
-            }).inner;
+                        .on_hover_text(if is_muted { "Unmute layer" } else { "Mute layer" })
+                }).inner;
 
-            if first_btn_response.clicked() {
-                self.layer_control_clicked = true;
-                if is_video_layer {
-                    pending_actions.push(Box::new(
-                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
-                            layer_id,
-                            lightningbeam_core::actions::LayerProperty::CameraEnabled(!camera_enabled),
-                        )
-                    ));
-                } else {
+                if response.clicked() {
+                    self.layer_control_clicked = true;
                     pending_actions.push(Box::new(
                         lightningbeam_core::actions::SetLayerPropertiesAction::new(
                             layer_id,
@@ -2277,33 +2765,34 @@ impl TimelinePane {
             }
 
             // Solo button
-            // TODO: Replace with SVG headphones icon
-            let solo_response = ui.scope_builder(egui::UiBuilder::new().max_rect(solo_button_rect), |ui| {
-                let button = egui::Button::new("🎧")
-                    .fill(if is_soloed {
-                        theme.bg_color(&["#timeline", ".btn-solo", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100))
-                    } else {
-                        theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
-                    })
-                    .stroke(egui::Stroke::NONE);
-                ui.add(button)
-            }).inner;
+            // Solo is an audio control, so it follows mute: only where there's audio.
+            if let Some(rect) = solo_button_rect {
+                let solo_response = ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
+                    let button = icon_button(icons::HEADPHONES)
+                        .fill(if is_soloed {
+                            theme.bg_color(&["#timeline", ".btn-solo", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(100, 200, 100, 100))
+                        } else {
+                            theme.bg_color(&["#timeline", ".btn-toggle"], ui.ctx(), egui::Color32::from_gray(40))
+                        })
+                        .stroke(egui::Stroke::NONE);
+                    ui.add(button)
+                        .on_hover_text(if is_soloed { "Unsolo layer" } else { "Solo layer" })
+                }).inner;
 
-            if solo_response.clicked() {
-                self.layer_control_clicked = true;
-                pending_actions.push(Box::new(
-                    lightningbeam_core::actions::SetLayerPropertiesAction::new(
-                        layer_id,
-                        lightningbeam_core::actions::LayerProperty::Soloed(!is_soloed),
-                    )
-                ));
+                if solo_response.clicked() {
+                    self.layer_control_clicked = true;
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                            layer_id,
+                            lightningbeam_core::actions::LayerProperty::Soloed(!is_soloed),
+                        )
+                    ));
+                }
             }
 
             // Lock button
-            // TODO: Replace with SVG lock/lock-open icons
             let lock_response = ui.scope_builder(egui::UiBuilder::new().max_rect(lock_button_rect), |ui| {
-                let lock_text = if is_locked { "🔒" } else { "🔓" };
-                let button = egui::Button::new(lock_text)
+                let button = icon_button(if is_locked { icons::LOCK } else { icons::LOCK_OPEN })
                     .fill(if is_locked {
                         theme.bg_color(&["#timeline", ".btn-lock", ".active"], ui.ctx(), egui::Color32::from_rgba_unmultiplied(200, 150, 100, 100))
                     } else {
@@ -2311,6 +2800,7 @@ impl TimelinePane {
                     })
                     .stroke(egui::Stroke::NONE);
                 ui.add(button)
+                    .on_hover_text(if is_locked { "Unlock layer" } else { "Lock layer (prevent edits)" })
             }).inner;
 
             if lock_response.clicked() {
@@ -2323,9 +2813,40 @@ impl TimelinePane {
                 ));
             }
 
+            // Opacity slider.
+            if has_opacity {
+                draw_slider_icon(ui, theme, opacity_slider_rect, icons::BLEND);
+                let current_opacity = layer_for_controls.opacity() as f32;
+                let mut new_opacity = current_opacity;
+                let opacity_response = ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(opacity_slider_rect),
+                    |ui| {
+                        ui.spacing_mut().slider_width = slider_width;
+                        ui.add(egui::Slider::new(&mut new_opacity, 0.0..=1.0).show_value(false))
+                    },
+                ).inner
+                    .on_hover_text(format!("Opacity: {:.0}%", current_opacity * 100.0));
+
+                // Block layer drag while interacting with the slider
+                if opacity_response.dragged() || opacity_response.has_focus() {
+                    self.layer_control_clicked = true;
+                }
+                if opacity_response.changed() {
+                    self.layer_control_clicked = true;
+                    pending_actions.push(Box::new(
+                        lightningbeam_core::actions::SetLayerPropertiesAction::new(
+                            layer_id,
+                            lightningbeam_core::actions::LayerProperty::Opacity(new_opacity as f64),
+                        )
+                    ));
+                }
+            }
+
             // Volume slider (nonlinear: 0-70% slider = 0-100% volume, 70-100% slider = 100-200% volume)
             // Disabled when the user has edited the Volume automation curve beyond the default single keyframe
-            let volume_response = ui.scope_builder(egui::UiBuilder::new().max_rect(volume_slider_rect), |ui| {
+            if has_volume {
+            draw_slider_icon(ui, theme, volume_slider_rect, icons::VOLUME_2);
+            let mut volume_response = ui.scope_builder(egui::UiBuilder::new().max_rect(volume_slider_rect), |ui| {
                 ui.spacing_mut().slider_width = slider_width;
                 // Map volume (0.0-2.0) to slider position (0.0-1.0)
                 let slider_value = if current_volume <= 1.0 {
@@ -2343,6 +2864,12 @@ impl TimelinePane {
                 let response = ui.add_enabled(!volume_is_automated, slider);
                 (response, temp_slider_value)
             }).inner;
+
+            volume_response.0 = volume_response.0.on_hover_text(if volume_is_automated {
+                format!("Volume: {:.0}% (automated)", current_volume * 100.0)
+            } else {
+                format!("Volume: {:.0}%", current_volume * 100.0)
+            });
 
             // Block layer drag while interacting with the slider
             if volume_response.0.dragged() || volume_response.0.has_focus() {
@@ -2397,13 +2924,11 @@ impl TimelinePane {
                 }
             }
 
-            // Input gain slider for sampled audio layers (below volume slider)
+            // Input gain slider for sampled audio layers. Audio layers have no opacity, so this
+            // takes the opacity tier.
             if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer_for_controls {
                 if audio_layer.audio_layer_type == lightningbeam_core::layer::AudioLayerType::Sampled {
-                    let gain_slider_rect = egui::Rect::from_min_size(
-                        egui::pos2(controls_right - slider_width, volume_slider_rect.max.y + 4.0),
-                        egui::vec2(slider_width, 16.0),
-                    );
+                    let gain_slider_rect = opacity_slider_rect;
                     let current_gain = audio_layer.layer.input_gain;
 
                     // Map gain (0.0-4.0) to slider (0.0-1.0): linear
@@ -2431,8 +2956,8 @@ impl TimelinePane {
 
                     // Label
                     let label_rect = egui::Rect::from_min_size(
-                        egui::pos2(gain_slider_rect.min.x - 26.0, volume_slider_rect.max.y + 4.0),
-                        egui::vec2(24.0, 16.0),
+                        egui::pos2(gain_slider_rect.min.x - 26.0, gain_slider_rect.min.y),
+                        egui::vec2(24.0, gain_slider_rect.height()),
                     );
                     ui.painter().text(
                         label_rect.center(),
@@ -2443,6 +2968,8 @@ impl TimelinePane {
                     );
                 }
             }
+
+            } // end volume/gain sliders
 
             // Per-layer VU meter bar (4px tall at bottom of header)
             {
@@ -2703,6 +3230,7 @@ impl TimelinePane {
         let mut pending_lane_renders: Vec<AutomationLaneRender> = Vec::new();
         // Rebuilt each frame; consumed by handle_input (next frame) for click-to-seek.
         self.keyframe_diamond_hits.clear();
+        self.take_badge_hits.clear();
 
         // Collect video clip rects for hover detection (to avoid borrow conflicts)
         let mut video_clip_hovers: Vec<(egui::Rect, uuid::Uuid, f64, f32)> = Vec::new();
@@ -2920,8 +3448,10 @@ impl TimelinePane {
                 let is_move_drag = self.clip_drag_state == Some(ClipDragType::Move);
                 let mut ranges: Vec<(Beats, Beats)> = Vec::new();
                 for (_child_layer_id, ci) in &child_clips {
-                    let clip_dur = document.get_clip_duration(&ci.clip_id).unwrap_or_else(|| {
-                        Seconds(ci.trim_end.unwrap_or(1.0) - ci.trim_start)
+                    let clip_dur = document.clip_trim_duration(&ci.clip_id).unwrap_or_else(|| {
+                        ClipDuration::Seconds(Seconds(
+                            (ci.trim_end.unwrap_or(ContentTime(1.0)) - ci.trim_start).raw(),
+                        ))
                     });
                     let mut start = ci.effective_start();
                     let dur = ci.total_duration(clip_dur, document.tempo_map());
@@ -2994,8 +3524,10 @@ impl TimelinePane {
                     if let Some(video_child) = g.children.iter().find(|c| matches!(c, AnyLayer::Video(_))) {
                         if let AnyLayer::Video(vl) = video_child {
                             for ci in &vl.clip_instances {
-                                let clip_dur = document.get_clip_duration(&ci.clip_id)
-                                    .unwrap_or_else(|| Seconds(ci.trim_end.unwrap_or(1.0) - ci.trim_start));
+                                let clip_dur = document.clip_trim_duration(&ci.clip_id)
+                                    .unwrap_or_else(|| ClipDuration::Seconds(Seconds(
+                                        (ci.trim_end.unwrap_or(ContentTime(1.0)) - ci.trim_start).raw(),
+                                    )));
                                 let mut ci_start = ci.effective_start();
                                 if is_move_drag && selection.contains_clip_instance(&ci.id) {
                                     ci_start = self.moved_start(ci_start, document.tempo_map(), &document.time_signature, document.framerate);
@@ -3022,7 +3554,8 @@ impl TimelinePane {
                                 );
                                 // 4th elem = clip's TRUE (unclamped) origin x, for correct
                                 // hover content time when scrolled partly off the left.
-                                video_clip_hovers.push((hover_rect, ci.clip_id, ci.trim_start, rect.min.x + sx));
+                                // Video content is wall-clock, so its content time IS seconds.
+                                video_clip_hovers.push((hover_rect, ci.clip_id, ci.trim_start.raw(), rect.min.x + sx));
 
                                 let thumb_display_height = (thumb_y_max - span_y_min) - 4.0;
                                 if thumb_display_height > 8.0 {
@@ -3035,7 +3568,7 @@ impl TimelinePane {
                                         &video_mgr,
                                         &mut self.video_thumbnail_textures,
                                         ci.clip_id,
-                                        ci.trim_start,
+                                        ci.trim_start.raw(),
                                         rect.min.x + sx,
                                         ex - sx,
                                         ci_rect,
@@ -3084,7 +3617,7 @@ impl TimelinePane {
                                 };
                                 let audio_file_duration = total_frames as f64 / eff_sr as f64;
 
-                                let clip_dur = audio_clip.content_duration().to_seconds(document.tempo_map());
+                                let clip_dur = audio_clip.content_duration();
                                 let mut ci_start = ci.effective_start();
                                 if is_move_drag && selection.contains_clip_instance(&ci.id) {
                                     ci_start = self.moved_start(ci_start, document.tempo_map(), &document.time_signature, document.framerate);
@@ -3135,7 +3668,8 @@ impl TimelinePane {
                                             audio_duration: audio_file_duration as f32,
                                             sample_rate: eff_sr,
                                             clip_start_time: ci_screen_start,
-                                            trim_start: ci.trim_start as f32,
+                                            // A sampled clip's content time is seconds.
+                                            trim_start: ci.trim_start.raw() as f32,
                                             tex_width: crate::waveform_gpu::tex_width() as f32,
                                             total_frames: total_frames as f32,
                                             segment_start_frame: 0.0,
@@ -3218,7 +3752,7 @@ impl TimelinePane {
                 let group: Vec<(uuid::Uuid, Beats, Beats)> = clip_instances.iter()
                     .filter(|ci| selection.contains_clip_instance(&ci.id))
                     .filter_map(|ci| {
-                        let dur = document.get_clip_duration(&ci.clip_id)?;
+                        let dur = document.clip_trim_duration(&ci.clip_id)?;
                         Some((ci.id, ci.effective_start(), ci.total_duration(dur, document.tempo_map())))
                     })
                     .collect();
@@ -3242,8 +3776,11 @@ impl TimelinePane {
                     let shift_beats = |anchor: Beats, secs: f64|
                         tmap.seconds_to_beats(tmap.beats_to_seconds(anchor) + Seconds(secs));
 
-                    let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(Seconds::ZERO);
-                    let clip_dur_secs = clip_dur.seconds_to_f64();
+                    let clip_dur = effective_clip_duration(document, layer, ci).unwrap_or(ClipDuration::Seconds(Seconds::ZERO));
+                    // Raw magnitudes in the clip's own content domain — the drag math below stays in
+                    // that domain and only converts at the timeline edges.
+                    let clip_dur_secs = clip_dur.native();
+                    let ci_trim_start = ci.trim_start.raw();
                     let mut start = ci.effective_start();
                     let mut duration = ci.total_duration(clip_dur, tmap);
 
@@ -3265,37 +3802,37 @@ impl TimelinePane {
                                     }
                                 }
                                 ClipDragType::TrimLeft => {
-                                    let new_trim = self.snap_to_grid(ci.trim_start + self.drag_offset, tmap, &document.time_signature, document.framerate).max(0.0).min(clip_dur_secs);
-                                    let trim_offset_secs = new_trim - ci.trim_start;
+                                    let new_trim = self.snap_to_grid(ci_trim_start + self.drag_offset, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE).max(0.0).min(clip_dur_secs);
+                                    let trim_offset_secs = new_trim - ci_trim_start;
                                     start = shift_beats(ci.timeline_start, trim_offset_secs).max(Beats::ZERO);
                                     let dur_secs = if let Some(trim_end) = ci.trim_end {
-                                        (trim_end - new_trim).max(0.0)
+                                        (trim_end.raw() - new_trim).max(0.0)
                                     } else {
                                         (clip_dur_secs - new_trim).max(0.0)
                                     };
                                     duration = secs_to_beats_at(start, dur_secs);
                                 }
                                 ClipDragType::TrimRight => {
-                                    let old_trim_end = ci.trim_end.unwrap_or(clip_dur_secs);
-                                    let new_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, tmap, &document.time_signature, document.framerate).max(ci.trim_start).min(clip_dur_secs);
-                                    let dur_secs = (new_trim_end - ci.trim_start).max(0.0);
+                                    let old_trim_end = ci.trim_end.map_or(clip_dur_secs, |t| t.raw());
+                                    let new_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE).max(ci_trim_start).min(clip_dur_secs);
+                                    let dur_secs = (new_trim_end - ci_trim_start).max(0.0);
                                     duration = secs_to_beats_at(start, dur_secs);
                                 }
                                 ClipDragType::LoopExtendRight => {
-                                    let trim_end = ci.trim_end.unwrap_or(clip_dur_secs);
-                                    let content_window_secs = (trim_end - ci.trim_start).max(0.0);
+                                    let trim_end = ci.trim_end.map_or(clip_dur_secs, |t| t.raw());
+                                    let content_window_secs = (trim_end - ci_trim_start).max(0.0);
                                     let content_window = secs_to_beats_at(ci.timeline_start, content_window_secs);
                                     let current_right = ci.timeline_duration.unwrap_or(content_window);
                                     let right_edge_secs = tmap.beats_to_seconds(ci.timeline_start + current_right).seconds_to_f64() + self.drag_offset;
-                                    let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate);
+                                    let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE);
                                     let snapped_edge = tmap.seconds_to_beats(Seconds(snapped_edge_secs));
                                     let new_right = (snapped_edge - ci.timeline_start).max(content_window);
                                     let loop_before = ci.loop_before.unwrap_or(Beats::ZERO);
                                     duration = loop_before + new_right;
                                 }
                                 ClipDragType::LoopExtendLeft => {
-                                    let trim_end = ci.trim_end.unwrap_or(clip_dur_secs);
-                                    let content_window_secs = (trim_end - ci.trim_start).max(0.001);
+                                    let trim_end = ci.trim_end.map_or(clip_dur_secs, |t| t.raw());
+                                    let content_window_secs = (trim_end - ci_trim_start).max(0.001);
                                     let content_window = secs_to_beats_at(ci.timeline_start, content_window_secs);
                                     let current_loop_before = ci.loop_before.unwrap_or(Beats::ZERO);
                                     // drag_offset (seconds) as a beats delta at this clip's start.
@@ -3356,6 +3893,9 @@ impl TimelinePane {
                     // Track preview trim values for note/waveform rendering.
                     // In Measures mode, derive from beats so they track BPM during live drag.
                     let (base_trim_start, base_clip_duration) = self.content_display_range(clip_instance, clip_duration, document.bpm());
+                    // The instance's trim start as a raw magnitude in the clip's content domain; the
+                    // preview math below stays in that domain.
+                    let ci_trim_start = clip_instance.trim_start.raw();
                     let mut preview_trim_start = base_trim_start;
                     let mut preview_clip_duration = base_clip_duration;
 
@@ -3371,11 +3911,11 @@ impl TimelinePane {
                                 }
                                 ClipDragType::TrimLeft => {
                                     // Trim left: calculate new trim_start with snap to adjacent clips
-                                    let desired_trim_start = self.snap_to_grid(clip_instance.trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate)
+                                    let desired_trim_start = self.snap_to_grid(ci_trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE)
                                         .max(0.0)
-                                        .min(clip_duration.seconds_to_f64());
+                                        .min(clip_duration.native());
 
-                                    let new_trim_start = if desired_trim_start < clip_instance.trim_start {
+                                    let new_trim_start = if desired_trim_start < ci_trim_start {
                                         // Extending left - limit is the content-seconds gap to the previous clip.
                                         let max_extend_secs = document.find_max_trim_extend_left(
                                             &layer.id(),
@@ -3383,25 +3923,25 @@ impl TimelinePane {
                                             clip_instance.effective_start(),
                                         ).seconds_to_f64();
 
-                                        let desired_extend = clip_instance.trim_start - desired_trim_start;
+                                        let desired_extend = ci_trim_start - desired_trim_start;
                                         let actual_extend = desired_extend.min(max_extend_secs);
-                                        clip_instance.trim_start - actual_extend
+                                        ci_trim_start - actual_extend
                                     } else {
                                         // Shrinking - no snap needed
                                         desired_trim_start
                                     };
 
-                                    let actual_offset = new_trim_start - clip_instance.trim_start;
+                                    let actual_offset = new_trim_start - ci_trim_start;
 
                                     // Move start (display seconds) and reduce duration by the clamped offset.
                                     instance_start = (document.tempo_map().beats_to_seconds(clip_instance.timeline_start).seconds_to_f64() + actual_offset)
                                         .max(0.0);
 
-                                    instance_duration = (clip_duration.seconds_to_f64() - new_trim_start).max(0.0);
+                                    instance_duration = (clip_duration.native() - new_trim_start).max(0.0);
 
                                     // Adjust for existing trim_end
                                     if let Some(trim_end) = clip_instance.trim_end {
-                                        instance_duration = (trim_end - new_trim_start).max(0.0);
+                                        instance_duration = (trim_end.raw() - new_trim_start).max(0.0);
                                     }
 
                                     // Update preview trim for waveform rendering
@@ -3410,14 +3950,14 @@ impl TimelinePane {
                                 }
                                 ClipDragType::TrimRight => {
                                     // Trim right: extend or reduce duration with snap to adjacent clips
-                                    let old_trim_end = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
-                                    let desired_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate)
-                                        .max(clip_instance.trim_start)
-                                        .min(clip_duration.seconds_to_f64());
+                                    let old_trim_end = clip_instance.trim_end.map_or(clip_duration.native(), |t| t.raw());
+                                    let desired_trim_end = self.snap_to_grid(old_trim_end + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE)
+                                        .max(ci_trim_start)
+                                        .min(clip_duration.native());
 
                                     let new_trim_end = if desired_trim_end > old_trim_end {
                                         // Extending right - limit is the content-seconds gap to the next clip.
-                                        let current_duration_secs = old_trim_end - clip_instance.trim_start;
+                                        let current_duration_secs = old_trim_end - ci_trim_start;
                                         let tmap = document.tempo_map();
                                         let current_duration = tmap.seconds_to_beats(
                                             tmap.beats_to_seconds(clip_instance.timeline_start) + Seconds(current_duration_secs)
@@ -3437,7 +3977,7 @@ impl TimelinePane {
                                         desired_trim_end
                                     };
 
-                                    instance_duration = (new_trim_end - clip_instance.trim_start).max(0.0);
+                                    instance_duration = (new_trim_end - ci_trim_start).max(0.0);
 
                                     // Update preview clip duration for waveform rendering
                                     // (the waveform system uses clip_duration to determine visible range)
@@ -3445,8 +3985,8 @@ impl TimelinePane {
                                 }
                                 ClipDragType::LoopExtendRight => {
                                     // Loop extend right: extend clip beyond content window
-                                    let trim_end = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
-                                    let content_window_secs = (trim_end - clip_instance.trim_start).max(0.0);
+                                    let trim_end = clip_instance.trim_end.map_or(clip_duration.native(), |t| t.raw());
+                                    let content_window_secs = (trim_end - ci_trim_start).max(0.0);
                                     let tmap = document.tempo_map();
                                     let ts = clip_instance.timeline_start;
                                     // content window and right-duration are beats-domain timeline spans.
@@ -3454,7 +3994,7 @@ impl TimelinePane {
                                     let current_right = clip_instance.timeline_duration.unwrap_or(content_window);
                                     // Snap the right edge in the seconds/pixel domain (drag_offset is seconds).
                                     let right_edge_secs = tmap.beats_to_seconds(ts + current_right).seconds_to_f64() + self.drag_offset;
-                                    let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate);
+                                    let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE);
                                     let snapped_edge = tmap.seconds_to_beats(Seconds(snapped_edge_secs));
                                     let desired_right = (snapped_edge - ts).max(content_window);
 
@@ -3481,8 +4021,8 @@ impl TimelinePane {
                                 ClipDragType::LoopExtendLeft => {
                                     // Loop extend left: extend loop_before (pre-loop region)
                                     // Snap to multiples of content_window so iterations align with backend
-                                    let trim_end = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
-                                    let content_window_secs = (trim_end - clip_instance.trim_start).max(0.001);
+                                    let trim_end = clip_instance.trim_end.map_or(clip_duration.native(), |t| t.raw());
+                                    let content_window_secs = (trim_end - ci_trim_start).max(0.001);
                                     let tmap = document.tempo_map();
                                     let ts = clip_instance.timeline_start;
                                     // content window is a beats-domain span; guard against zero for division.
@@ -3608,9 +4148,11 @@ impl TimelinePane {
                         // AUDIO VISUALIZATION: Draw piano roll or waveform overlay
                         if let lightningbeam_core::layer::AnyLayer::Audio(_) = layer {
                             if let Some(clip) = document.get_audio_clip(&clip_instance.clip_id) {
-                                match &clip.clip_type {
+                                // Resolve through the instance's active take, so a take folder draws
+                                // whichever take it actually plays.
+                                match &clip_instance.resolve(clip) {
                                     // MIDI: Draw piano roll (with loop iterations)
-                                    lightningbeam_core::clip::AudioClipType::Midi { midi_clip_id } => {
+                                    lightningbeam_core::clip::ResolvedContent::Midi { midi_clip_id } => {
                                         if let Some(events) = midi_event_cache.get(midi_clip_id) {
                                             // Calculate content window for loop detection
                                             // preview_clip_duration accounts for TrimLeft/TrimRight drag previews
@@ -3669,7 +4211,7 @@ impl TimelinePane {
                                         }
                                     }
                                     // Sampled Audio: Draw waveform via GPU
-                                    lightningbeam_core::clip::AudioClipType::Sampled { audio_pool_index } => {
+                                    lightningbeam_core::clip::ResolvedContent::Audio { audio_pool_index } => {
                                         if let Some((samples, sr, ch)) = raw_audio_cache.get(audio_pool_index) {
                                             // Min/max overview pools: 4 f32/texel at rate sr/B.
                                             let minmax_b = waveform_minmax_pools.get(audio_pool_index).copied();
@@ -3720,7 +4262,7 @@ impl TimelinePane {
 
                                             // Calculate content window for loop detection
                                             // Use trimmed content window (preview_trim_start accounts for TrimLeft drag)
-                                            let preview_trim_end = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
+                                            let preview_trim_end = clip_instance.trim_end.map_or(clip_duration.native(), |t| t.raw());
                                             let content_window = (preview_trim_end - preview_trim_start).max(0.0);
                                             let is_looping = instance_duration > content_window + 0.001;
 
@@ -3798,7 +4340,7 @@ impl TimelinePane {
                                         }
                                     }
                                     // Recording in progress: show live waveform
-                                    lightningbeam_core::clip::AudioClipType::Recording => {
+                                    lightningbeam_core::clip::ResolvedContent::Recording => {
                                         let rec_pool_idx = usize::MAX;
                                         if let Some((samples, sr, ch)) = raw_audio_cache.get(&rec_pool_idx) {
                                             let total_frames = samples.len() / (*ch).max(1) as usize;
@@ -3833,6 +4375,36 @@ impl TimelinePane {
                                                     egui::pos2(clip_screen_end.min(clip_rect.max.x), clip_rect.max.y),
                                                 );
 
+                                                // Cycle recording: the clip covers ONE region, but the
+                                                // recorded buffer keeps growing across passes. Show the
+                                                // *current* pass by offsetting into the buffer to where
+                                                // that pass began, so the waveform restarts at the region
+                                                // start on each wrap and fills in behind the playhead —
+                                                // rather than running on past the clip's end.
+                                                //
+                                                // The playhead gives the position within the region
+                                                // directly, so a punch-in (whose first pass starts partway
+                                                // in) needs no extra bookkeeping here.
+                                                let mut rec_trim_start = preview_trim_start;
+                                                if let (true, Some((ls, le))) = (document.cycle_enabled, document.cycle_region) {
+                                                    let tm = document.tempo_map();
+                                                    let loop_len = (tm.beats_to_seconds(le)
+                                                        - tm.beats_to_seconds(ls))
+                                                    .seconds_to_f64();
+                                                    if loop_len > 0.0 {
+                                                        // Which pass we're on, straight from how much
+                                                        // audio has been captured. Deriving this from
+                                                        // the playhead instead would jitter: the
+                                                        // playhead and the recording buffer advance on
+                                                        // different clocks, so their difference wobbles
+                                                        // frame to frame and the waveform slides
+                                                        // horizontally.
+                                                        let lead = self.cycle_record_lead_secs;
+                                                        let pass = ((lead + audio_file_duration) / loop_len).floor();
+                                                        rec_trim_start = (pass * loop_len - lead).max(0.0);
+                                                    }
+                                                }
+
                                                 if waveform_rect.width() > 0.0 && waveform_rect.height() > 0.0 {
                                                     let instance_id = clip_instance.id.as_u128() as u64;
                                                     let callback = crate::waveform_gpu::WaveformCallback {
@@ -3845,7 +4417,7 @@ impl TimelinePane {
                                                             audio_duration: audio_file_duration as f32,
                                                             sample_rate: *sr as f32,
                                                             clip_start_time: clip_screen_start,
-                                                            trim_start: preview_trim_start as f32,
+                                                            trim_start: rec_trim_start as f32,
                                                             tex_width: crate::waveform_gpu::tex_width() as f32,
                                                             total_frames: total_frames as f32,
                                                             segment_start_frame: 0.0,
@@ -3887,7 +4459,7 @@ impl TimelinePane {
                                     &video_mgr,
                                     &mut self.video_thumbnail_textures,
                                     clip_instance.clip_id,
-                                    clip_instance.trim_start,
+                                    clip_instance.trim_start.raw(),
                                     rect.min.x + start_x,
                                     end_x - start_x,
                                     clip_rect,
@@ -3902,7 +4474,7 @@ impl TimelinePane {
                         // clip's TRUE (unclamped) origin x so the hover content time is
                         // correct even when the clip is scrolled partly off the left.
                         if let lightningbeam_core::layer::AnyLayer::Video(_) = layer {
-                            video_clip_hovers.push((clip_rect, clip_instance.clip_id, clip_instance.trim_start, rect.min.x + start_x));
+                            video_clip_hovers.push((clip_rect, clip_instance.clip_id, clip_instance.trim_start.raw(), rect.min.x + start_x));
                         }
 
                         // Draw border per segment (per loop iteration for looping clips)
@@ -3957,6 +4529,66 @@ impl TimelinePane {
                                     egui::FontId::proportional(11.0),
                                     egui::Color32::WHITE,
                                 );
+                            }
+                        }
+
+                        // Take badge — "Take 2/4" in the clip's bottom-left, on take-folder clips
+                        // only. Records a hit rect so the click that opens the take menu can be
+                        // dispatched after rendering (the usual two-phase pattern), rather than
+                        // mutating the document mid-paint.
+                        // Only worth showing when there's actually a choice to make.
+                        if clip_instance.takes.len() > 1 {
+                            let take_count = clip_instance.takes.len();
+                            let active = clip_instance.active_take_index();
+                            let label = format!("Take {}/{}", active + 1, take_count);
+                            let text_color = theme.text_color(
+                                &["#timeline", ".take-badge"],
+                                ui.ctx(),
+                                egui::Color32::WHITE,
+                            );
+                            let galley = painter.layout_no_wrap(
+                                label,
+                                egui::FontId::proportional(10.0),
+                                text_color,
+                            );
+                            let pad = egui::vec2(4.0, 2.0);
+                            let size = galley.size() + pad * 2.0;
+                            // Bottom-left of the clip, but only when the clip is wide enough that
+                            // the badge wouldn't swamp it.
+                            if clip_rect.width() > size.x + 10.0 && clip_rect.height() > size.y + 4.0 {
+                                let badge = egui::Rect::from_min_size(
+                                    egui::pos2(
+                                        clip_rect.min.x + 4.0,
+                                        clip_rect.max.y - size.y - 3.0,
+                                    ),
+                                    size,
+                                );
+                                let hovered = ui
+                                    .ctx()
+                                    .pointer_hover_pos()
+                                    .is_some_and(|p| badge.contains(p));
+                                let bg = if hovered {
+                                    theme.bg_color(
+                                        &["#timeline", ".take-badge:hover"],
+                                        ui.ctx(),
+                                        egui::Color32::from_black_alpha(210),
+                                    )
+                                } else {
+                                    theme.bg_color(
+                                        &["#timeline", ".take-badge"],
+                                        ui.ctx(),
+                                        egui::Color32::from_black_alpha(150),
+                                    )
+                                };
+                                painter.rect_filled(badge, 3.0, bg);
+                                painter.galley(badge.min + pad, galley, text_color);
+                                self.take_badge_hits.push((
+                                    badge,
+                                    layer.id(),
+                                    clip_instance.id,
+                                    active,
+                                    take_count,
+                                ));
                             }
                         }
                     }
@@ -4438,7 +5070,12 @@ impl TimelinePane {
         if !alt_held && !self.is_scrubbing && !self.is_panning {
             if response.drag_started() {
                 // Use cached mousedown position for edge detection
-                if let Some(mousedown_pos) = self.mousedown_pos {
+                if let Some(mousedown_pos) = self
+                    .mousedown_pos
+                    // A press that landed on a take badge is opening the take menu, not grabbing
+                    // the clip it sits on.
+                    .filter(|p| !self.take_badge_hits.iter().any(|(r, ..)| r.contains(*p)))
+                {
                     if let Some((drag_type, clip_id)) = self.detect_clip_at_pointer(
                         mousedown_pos,
                         document,
@@ -4575,18 +5212,23 @@ impl TimelinePane {
                                 for clip_instance in clip_instances {
                                     if selection.contains_clip_instance(&clip_instance.id) {
                                         let clip_duration = effective_clip_duration(document, layer, clip_instance);
+                                        // Raw magnitude in the clip's content domain; re-tagged as a
+                                        // ContentTime when it goes back into TrimData.
+                                        let ci_trim_start = clip_instance.trim_start.raw();
 
                                         if let Some(clip_duration) = clip_duration {
                                             match drag_type {
                                                 ClipDragType::TrimLeft => {
-                                                    let old_trim_start = clip_instance.trim_start;
+                                                    // Raw magnitude in the clip's content domain; re-tagged as a
+                                                    // ContentTime when it goes back into TrimData below.
+                                                    let old_trim_start = clip_instance.trim_start.raw();
                                                     let old_timeline_start =
                                                         clip_instance.timeline_start;
 
                                                     // New trim_start is snapped then clamped to valid range
                                                     let desired_trim_start = self.snap_to_grid(
-                                                        old_trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate,
-                                                    ).max(0.0).min(clip_duration.seconds_to_f64());
+                                                        old_trim_start + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE,
+                                                    ).max(0.0).min(clip_duration.native());
 
                                                     // Apply overlap prevention when extending left (content-seconds gap).
                                                     let new_trim_start = if desired_trim_start < old_trim_start {
@@ -4616,11 +5258,11 @@ impl TimelinePane {
                                                             clip_instance.id,
                                                             lightningbeam_core::actions::TrimType::TrimLeft,
                                                             lightningbeam_core::actions::TrimData::left(
-                                                                old_trim_start,
+                                                                ContentTime(old_trim_start),
                                                                 old_timeline_start,
                                                             ),
                                                             lightningbeam_core::actions::TrimData::left(
-                                                                new_trim_start,
+                                                                ContentTime(new_trim_start),
                                                                 new_timeline_start,
                                                             ),
                                                         ));
@@ -4631,10 +5273,10 @@ impl TimelinePane {
                                                     // Calculate new trim_end based on current duration
                                                     let current_duration =
                                                         clip_instance.effective_duration(clip_duration, document.tempo_map());
-                                                    let old_trim_end_val = clip_instance.trim_end.unwrap_or(clip_duration.seconds_to_f64());
+                                                    let old_trim_end_val = clip_instance.trim_end.map_or(clip_duration.native(), |t| t.raw());
                                                     let desired_trim_end = self.snap_to_grid(
-                                                        old_trim_end_val + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate,
-                                                    ).max(clip_instance.trim_start).min(clip_duration.seconds_to_f64());
+                                                        old_trim_end_val + self.drag_offset, document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE,
+                                                    ).max(ci_trim_start).min(clip_duration.native());
 
                                                     // Apply overlap prevention when extending right (content-seconds gap).
                                                     let new_trim_end_val = if desired_trim_end > old_trim_end_val {
@@ -4651,13 +5293,15 @@ impl TimelinePane {
                                                         desired_trim_end
                                                     };
 
-                                                    let new_duration = (new_trim_end_val - clip_instance.trim_start).max(0.0);
+                                                    let new_duration = (new_trim_end_val - ci_trim_start).max(0.0);
 
                                                     // Convert new duration back to trim_end value
-                                                    let new_trim_end = if new_duration >= clip_duration.seconds_to_f64() {
+                                                    let new_trim_end = if new_duration >= clip_duration.native() {
                                                         None // Use full clip duration
                                                     } else {
-                                                        Some((clip_instance.trim_start + new_duration).min(clip_duration.seconds_to_f64()))
+                                                        Some(ContentTime(
+                                                            (ci_trim_start + new_duration).min(clip_duration.native()),
+                                                        ))
                                                     };
 
                                                     layer_trims
@@ -4709,13 +5353,14 @@ impl TimelinePane {
                                         if let Some(clip_duration) = clip_duration {
                                             let tmap = document.tempo_map();
                                             let ts = clip_instance.timeline_start;
-                                            let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
-                                            let content_window_secs = (trim_end - clip_instance.trim_start).max(0.0);
+                                            let ci_trim_start = clip_instance.trim_start.raw();
+                                            let trim_end = clip_instance.trim_end.map_or(clip_duration, |t| t.raw());
+                                            let content_window_secs = (trim_end - ci_trim_start).max(0.0);
                                             let content_window = tmap.seconds_to_beats(tmap.beats_to_seconds(ts) + Seconds(content_window_secs)) - ts;
                                             let current_right = clip_instance.timeline_duration.unwrap_or(content_window);
                                             // Snap the right edge in the seconds/pixel domain.
                                             let right_edge_secs = tmap.beats_to_seconds(ts + current_right).seconds_to_f64() + self.drag_offset;
-                                            let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate);
+                                            let snapped_edge_secs = self.snap_to_grid(right_edge_secs, tmap, &document.time_signature, document.framerate, SNAP_PX_FINE);
                                             let desired_right = tmap.seconds_to_beats(Seconds(snapped_edge_secs)) - ts;
 
                                             let new_right = if desired_right > current_right {
@@ -4783,8 +5428,9 @@ impl TimelinePane {
                                         if let Some(clip_duration) = clip_duration {
                                             let tmap = document.tempo_map();
                                             let ts = clip_instance.timeline_start;
-                                            let trim_end = clip_instance.trim_end.unwrap_or(clip_duration);
-                                            let content_window_secs = (trim_end - clip_instance.trim_start).max(0.001);
+                                            let ci_trim_start = clip_instance.trim_start.raw();
+                                            let trim_end = clip_instance.trim_end.map_or(clip_duration, |t| t.raw());
+                                            let content_window_secs = (trim_end - ci_trim_start).max(0.001);
                                             let content_window = tmap.seconds_to_beats(tmap.beats_to_seconds(ts) + Seconds(content_window_secs)) - ts;
                                             let cw = content_window.beats_to_f64().max(1e-9);
                                             let current_loop_before = clip_instance.loop_before.unwrap_or(Beats::ZERO);
@@ -4917,14 +5563,120 @@ impl TimelinePane {
         let visible_height = content_rect.height();
         let max_scroll_y = (total_content_height - visible_height).max(0.0);
 
-        // Scrubbing (clicking/dragging on ruler, but only when not panning)
-        let cursor_over_ruler = ruler_rect.contains(ui.input(|i| i.pointer.hover_pos().unwrap_or_default()));
+        // ---- Cycle region (the lane along the bottom of the ruler) ----
+        // The lane only exists while looping is armed; with cycle off the ruler is entirely the
+        // playhead scrubber, as it was before this feature.
+        //
+        // The lane is driven straight off raw pointer state rather than an egui `Response`. It sits
+        // inside the timeline's content response — which spans the whole ruler + content and already
+        // drives scrubbing, clip drags and panning — so registering a second widget on the same
+        // pixels just makes the two contest hover every frame (the cursor visibly flickers and
+        // neither reliably owns the press). Reading the pointer directly sidesteps egui's widget
+        // layering entirely. The lane is also carved out of the scrub area below, so a loop drag
+        // never also yanks the playhead.
+        let cycle_armed = document.cycle_enabled;
+        let cycle_lane = Self::cycle_lane_rect(ruler_rect);
+        let hover_pos = ui.input(|i| i.pointer.hover_pos());
+        let (primary_pressed, primary_down, interact_pos) = ui.input(|i| {
+            (
+                i.pointer.primary_pressed(),
+                i.pointer.primary_down(),
+                i.pointer.interact_pos(),
+            )
+        });
+
+        if cycle_armed {
+            // Begin: press inside the lane. Three-zone hit test picks resize / move / draw-new.
+            if self.cycle_drag.is_none() && !alt_held && !self.is_panning && primary_pressed {
+                if let Some(pos) = interact_pos.filter(|p| cycle_lane.contains(*p)) {
+                    let beat = self.x_to_beats_cycle_snapped(pos.x - content_rect.min.x, document);
+                    self.cycle_drag =
+                        Some(self.cycle_drag_at(pos.x, beat, content_rect.min.x, document));
+                    self.cycle_preview = document.cycle_region;
+                }
+            }
+
+            // Telegraph what a press would do: resize at the edges, move over the body.
+            if let Some(pos) = hover_pos.filter(|p| cycle_lane.contains(*p)) {
+                let zone = self.cycle_drag.unwrap_or_else(|| {
+                    let beat = self.x_to_beats_cycle_snapped(pos.x - content_rect.min.x, document);
+                    self.cycle_drag_at(pos.x, beat, content_rect.min.x, document)
+                });
+                ui.output_mut(|o| {
+                    o.cursor_icon = match zone {
+                        CycleDrag::ResizeStart | CycleDrag::ResizeEnd => {
+                            egui::CursorIcon::ResizeHorizontal
+                        }
+                        CycleDrag::Move { .. } => egui::CursorIcon::Grab,
+                        CycleDrag::Create { .. } => egui::CursorIcon::Crosshair,
+                    }
+                });
+            }
+
+            if let Some(drag) = self.cycle_drag {
+                if primary_down {
+                    // Track the pointer even when it leaves the lane, like any other drag.
+                    if let Some(pos) = interact_pos {
+                        let beat =
+                            self.x_to_beats_cycle_snapped(pos.x - content_rect.min.x, document);
+                        let base = self.cycle_preview.or(document.cycle_region);
+                        self.cycle_preview = match drag {
+                            CycleDrag::Create { anchor } => {
+                                let (a, b) =
+                                    if beat < anchor { (beat, anchor) } else { (anchor, beat) };
+                                Some((a, b))
+                            }
+                            CycleDrag::ResizeStart => base.map(|(_, e)| (beat.min(e), e)),
+                            CycleDrag::ResizeEnd => base.map(|(s, _)| (s, beat.max(s))),
+                            CycleDrag::Move { grab_offset } => base.map(|(s, e)| {
+                                let len = e - s;
+                                let ns = (beat - grab_offset).max(Beats::ZERO);
+                                (ns, ns + len)
+                            }),
+                        };
+                    }
+                } else {
+                    // Released — commit the gesture as ONE undoable action (the drag itself only
+                    // ever touched `cycle_preview`, so the undo stack doesn't get a frame-by-frame
+                    // trail). Looping is already armed (the lane wouldn't be there otherwise), so
+                    // `cycle_enabled` is left alone.
+                    let preview = self.cycle_preview.take();
+                    let collapsed = preview.map_or(true, |(s, e)| e <= s);
+                    let drawing_new = matches!(drag, CycleDrag::Create { .. });
+                    self.cycle_drag = None;
+
+                    // A bare click on empty lane is a zero-width "draw" — treat it as nothing
+                    // happened rather than silently wiping the region out from under the user.
+                    // Collapsing an *existing* region by dragging an edge past the other one is
+                    // still a deliberate "clear it".
+                    if !(collapsed && drawing_new) {
+                        let action = lightningbeam_core::actions::SetCycleRegionAction::new(
+                            document,
+                            preview.filter(|(s, e)| e > s),
+                            document.cycle_enabled,
+                        );
+                        if !action.is_noop() {
+                            pending_actions.push(Box::new(action));
+                        }
+                    }
+                }
+            }
+        } else if self.cycle_drag.is_some() {
+            // Looping was disarmed mid-drag — abandon the gesture rather than commit it.
+            self.cycle_drag = None;
+            self.cycle_preview = None;
+        }
+
+        // Scrubbing (clicking/dragging on ruler, but only when not panning).
+        let cursor_over_ruler = hover_pos.map_or(false, |p| {
+            ruler_rect.contains(p) && !(cycle_armed && cycle_lane.contains(p))
+        }) && self.cycle_drag.is_none();
 
         // Start scrubbing if cursor is over ruler and we click/drag
         if cursor_over_ruler && !alt_held && (response.clicked() || (response.dragged() && !self.is_panning)) {
             if let Some(pos) = response.interact_pointer_pos() {
                 let x = (pos.x - content_rect.min.x).max(0.0);
-                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.tempo_map(), &document.time_signature, document.framerate);
+                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE);
                 *playback_time = new_time;
                 self.is_scrubbing = true;
                 // Seek immediately so it works while playing
@@ -4938,7 +5690,7 @@ impl TimelinePane {
         else if self.is_scrubbing && response.dragged() && !self.is_panning {
             if let Some(pos) = response.interact_pointer_pos() {
                 let x = (pos.x - content_rect.min.x).max(0.0);
-                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.tempo_map(), &document.time_signature, document.framerate);
+                let new_time = self.snap_to_grid(self.x_to_time(x).max(0.0), document.tempo_map(), &document.time_signature, document.framerate, SNAP_PX_FINE);
                 *playback_time = new_time;
                 if let Some(controller_arc) = audio_controller {
                     let mut controller = controller_arc.lock().unwrap();
@@ -5177,6 +5929,27 @@ impl PaneRenderer for TimelinePane {
 
                 if ui.add_sized(button_size, record_button).clicked() {
                     self.toggle_recording(shared);
+                }
+
+                // Cycle (loop) toggle. This is the only way to arm looping — the cycle strip on the
+                // ruler is only shown (and only draggable) while it's armed.
+                let cycle_on = shared.action_executor.document().cycle_enabled;
+                let cycle_color = if cycle_on {
+                    egui::Color32::from_rgb(230, 190, 60)
+                } else {
+                    egui::Color32::from_gray(140)
+                };
+                let cycle_button = egui::Button::new(
+                    egui::RichText::new(crate::mobile::icons::REPEAT)
+                        .font(crate::mobile::icons::font(15.0))
+                        .color(cycle_color),
+                );
+                if ui
+                    .add_sized(button_size, cycle_button)
+                    .on_hover_text("Cycle (loop region)")
+                    .clicked()
+                {
+                    self.toggle_cycle(shared);
                 }
 
                 // Request repaint while recording for pulse animation
@@ -5475,8 +6248,14 @@ impl PaneRenderer for TimelinePane {
 
         // Split into layer header column (left) and timeline content (right). On mobile the header
         // column collapses to a minimal color-swatch width.
+        //
+        // Once the pane gets narrow enough that the track area would be a useless sliver, drop it
+        // entirely and give the whole pane to the layer headers — a mixer-style view.
+        let headers_only = !shared.is_mobile && rect.width() < LAYER_HEADER_WIDTH * 1.5;
         let header_width = if shared.is_mobile {
             MOBILE_LAYER_HEADER_WIDTH
+        } else if headers_only {
+            rect.width()
         } else {
             LAYER_HEADER_WIDTH
         };
@@ -5528,17 +6307,29 @@ impl PaneRenderer for TimelinePane {
         ui.set_clip_rect(layer_headers_rect.intersect(original_clip_rect));
         self.render_layer_headers(ui, layer_headers_rect, shared.theme, shared.active_layer_id, shared.focus, &mut shared.pending_actions, document, &context_layers, shared.layer_to_track_map, shared.track_levels, shared.input_level, *shared.playback_time, header_width, shared.is_mobile);
 
-        // Render time ruler (clip to ruler rect)
-        ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
-        self.render_ruler(ui, ruler_rect, shared.theme, document.tempo_map(), &document.time_signature, document.framerate);
+        // The track area only exists when the pane is wide enough for it. The interaction code
+        // further down is naturally inert in headers-only mode, since it all gates on
+        // `content_rect.contains(..)` and the rect is zero-width.
+        let (video_clip_hovers, pending_lane_renders) = if headers_only {
+            (Vec::new(), Vec::new())
+        } else {
+            // Render time ruler (clip to ruler rect)
+            ui.set_clip_rect(ruler_rect.intersect(original_clip_rect));
+            let cycle = document
+                .cycle_enabled
+                .then(|| self.shown_cycle_region(document));
+            self.render_ruler(ui, ruler_rect, shared.theme, document.tempo_map(), &document.time_signature, document.framerate, cycle);
 
-        // Render layer rows with clipping
-        ui.set_clip_rect(content_rect.intersect(original_clip_rect));
-        let (video_clip_hovers, pending_lane_renders) = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.waveform_minmax_pools, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager, *shared.playback_time);
+            // Render layer rows with clipping
+            ui.set_clip_rect(content_rect.intersect(original_clip_rect));
+            let rendered = self.render_layers(ui, content_rect, shared.theme, document, shared.active_layer_id, shared.focus, shared.selection, shared.midi_event_cache, shared.raw_audio_cache, shared.waveform_gpu_dirty, shared.waveform_minmax_pools, shared.target_format, shared.waveform_stereo, &context_layers, shared.video_manager, *shared.playback_time);
 
-        // Render playhead on top (clip to timeline area)
-        ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));
-        self.render_playhead(ui, timeline_rect, shared.theme, *shared.playback_time);
+            // Render playhead on top (clip to timeline area)
+            ui.set_clip_rect(timeline_rect.intersect(original_clip_rect));
+            self.render_playhead(ui, timeline_rect, shared.theme, *shared.playback_time);
+
+            rendered
+        };
 
         // Restore original clip rect
         ui.set_clip_rect(original_clip_rect);
@@ -5728,6 +6519,8 @@ impl PaneRenderer for TimelinePane {
             editing_clip_id.as_ref(),
         );
 
+        self.render_take_menu(ui, document, shared.pending_actions);
+
         // Render automation lanes AFTER handle_input so our ui.interact registers last and wins
         // egui's interaction priority over handle_input's full-content-area allocation.
         // All automation lanes use beats as the x-axis; convert via the tempo map.
@@ -5895,7 +6688,7 @@ impl PaneRenderer for TimelinePane {
                         let instances = layer_clips(layer);
                         for inst in instances {
                             if !shared.selection.contains_clip_instance(&inst.id) { continue; }
-                            if let Some(dur) = document.get_clip_duration(&inst.clip_id) {
+                            if let Some(dur) = document.clip_trim_duration(&inst.clip_id) {
                                 let eff = inst.effective_duration(dur, document.tempo_map());
                                 let start = document.tempo_map().beats_to_seconds(inst.timeline_start).seconds_to_f64();
                                 let end = document.tempo_map().beats_to_seconds(inst.timeline_start + eff).seconds_to_f64();
@@ -5921,7 +6714,7 @@ impl PaneRenderer for TimelinePane {
                         enabled = instances.iter()
                             .filter(|ci| shared.selection.contains_clip_instance(&ci.id))
                             .all(|ci| {
-                                if let Some(dur) = document.get_clip_duration(&ci.clip_id) {
+                                if let Some(dur) = document.clip_trim_duration(&ci.clip_id) {
                                     let eff = ci.effective_duration(dur, document.tempo_map());
                                     // Room to duplicate = seconds gap to the right ≥ this clip's own length.
                                     let max_extend_secs = document.find_max_trim_extend_right(
@@ -5966,7 +6759,7 @@ impl PaneRenderer for TimelinePane {
 
                                         enabled = instances.iter().all(|ci| {
                                             let paste_start = (ci.timeline_start + offset).max(Beats::ZERO);
-                                            if let Some(dur) = document.get_clip_duration(&ci.clip_id) {
+                                            if let Some(dur) = document.clip_trim_duration(&ci.clip_id) {
                                                 let eff = ci.effective_duration(dur, document.tempo_map());
                                                 document
                                                     .find_nearest_valid_position(
@@ -5994,6 +6787,22 @@ impl PaneRenderer for TimelinePane {
                 }
                 enabled
             };
+
+            // Take management for the clip that was right-clicked. Only offered when there's more
+            // than one take — with a single take there's nothing to choose between, and "delete the
+            // only take" would leave the instance with nothing to play.
+            let take_target: Option<(uuid::Uuid, uuid::Uuid, usize, String)> = ctx_clip_id.and_then(|instance_id| {
+                let context_layers = document.context_layers(shared.editing_clip_id.as_ref());
+                for (layer, instances) in all_layer_clip_instances(&context_layers) {
+                    if let Some(ci) = instances.iter().find(|ci| ci.id == instance_id) {
+                        if ci.takes.len() > 1 {
+                            let active = ci.active_take_index();
+                            return Some((layer.id(), instance_id, active, ci.takes[active].name.clone()));
+                        }
+                    }
+                }
+                None
+            });
 
             let area_id = ui.id().with("clip_context_menu");
             let mut item_clicked = false;
@@ -6059,6 +6868,34 @@ impl PaneRenderer for TimelinePane {
                         if menu_item(ui, "Delete", has_clip) {
                             shared.pending_menu_actions.push(crate::menu::MenuAction::Delete);
                             item_clicked = true;
+                        }
+
+                        // Take management, on the clip that was right-clicked. Takes live on the
+                        // INSTANCE, so on a comped split this prunes the half you clicked and leaves
+                        // the other half's alternatives alone.
+                        if let Some((take_layer_id, take_instance_id, active_index, active_name)) = &take_target {
+                            ui.separator();
+                            // Deletes the take that's PLAYING — the one the badge is showing — so
+                            // it's named rather than just "Delete Take".
+                            if menu_item(ui, &format!("Delete \"{}\"", active_name), true) {
+                                shared.pending_actions.push(Box::new(
+                                    lightningbeam_core::actions::DeleteTakeAction::new(
+                                        *take_layer_id,
+                                        *take_instance_id,
+                                        *active_index,
+                                    ),
+                                ));
+                                item_clicked = true;
+                            }
+                            if menu_item(ui, "Delete Unused Takes", true) {
+                                shared.pending_actions.push(Box::new(
+                                    lightningbeam_core::actions::DeleteUnusedTakesAction::new(
+                                        *take_layer_id,
+                                        *take_instance_id,
+                                    ),
+                                ));
+                                item_clicked = true;
+                            }
                         }
                     });
                 });

@@ -1105,6 +1105,23 @@ impl EditingContext {
     }
 }
 
+/// A finished cycle recording whose takes belong to a take folder that already exists at that
+/// region, queued for [`EditorApp::append_cycle_takes`].
+struct PendingTakeAppend {
+    layer_id: Uuid,
+    /// The throwaway clip + instance the recording itself was captured into.
+    recording_instance_id: Uuid,
+    recording_clip_id: Uuid,
+    /// The recording's backend clip, which has to be torn down or it keeps playing alongside the
+    /// take folder we're appending to. Carried explicitly rather than looked up in
+    /// `clip_instance_to_backend_map`, because on the audio path the recording instance isn't in
+    /// that map yet — it's only added after promotion, which the append path skips.
+    recording_backend_id: Option<lightningbeam_core::action::BackendClipInstanceId>,
+    loop_start: Beats,
+    loop_len: Beats,
+    takes: Vec<lightningbeam_core::clip::AudioTake>,
+}
+
 struct EditorApp {
     layouts: Vec<LayoutDefinition>,
     current_layout_index: usize,
@@ -1136,7 +1153,6 @@ struct EditorApp {
     selected_tool: Tool, // Currently selected drawing tool
     fill_color: egui::Color32, // Fill color for drawing
     stroke_color: egui::Color32, // Stroke color for drawing
-    active_color_mode: panes::ColorMode, // Which color (fill/stroke) was last interacted with
     pane_instances: HashMap<NodePath, PaneInstance>, // Pane instances per path
     menu_system: Option<MenuSystem>, // Native menu system for event checking
     pending_view_action: Option<MenuAction>, // Pending view action (zoom, recenter) to be handled by hovered pane
@@ -1213,6 +1229,10 @@ struct EditorApp {
     metronome_enabled: bool,              // Whether metronome clicks during recording
     count_in_enabled: bool,              // Whether count-in fires before recording
     recording_clips: HashMap<Uuid, u32>,  // layer_id -> backend clip_id during recording
+    /// Cycle takes waiting to be folded into an existing take folder. Queued from the audio-event
+    /// loop (which holds a borrow on the event queue, so it can't call a `&mut self` method) and
+    /// drained just after it.
+    pending_take_appends: Vec<PendingTakeAppend>,
     recording_start_time: f64,            // Playback time when recording started
     recording_layer_ids: Vec<Uuid>,       // Layers being recorded to (for creating clips)
     // Asset drag-and-drop state
@@ -1351,9 +1371,9 @@ struct EditorApp {
     effect_thumbnail_generator: Option<EffectThumbnailGenerator>,
 
     /// Custom cursor cache for SVG cursors
-    cursor_cache: custom_cursor::CursorCache,
     /// Cross-platform graphics tablet (pen/stylus) input state
     tablet: tablet::TabletInput,
+    cursor_cache: custom_cursor::CursorCache,
     /// Debug test mode (F5) — input recording, panic capture & visual replay
     #[cfg(debug_assertions)]
     test_mode: test_mode::TestModeState,
@@ -1410,6 +1430,10 @@ impl EditorApp {
 
         // Load application config
         let mut config = AppConfig::load();
+
+        // Mirror the configured stylus barrel-button actions into the tablet layer.
+        tablet::set_button_actions(config.tablet_button_lower, config.tablet_button_upper);
+
         // One-time cleanup: earlier builds added a Recovered file to Recent on restore. Drop any
         // recovery-dir paths that leaked in (and re-save if we removed any) so they don't show in
         // Recent or get auto-reopened below.
@@ -1532,7 +1556,6 @@ impl EditorApp {
             selected_tool: Tool::Select, // Default tool
             fill_color: egui::Color32::from_rgb(100, 100, 255), // Default blue fill
             stroke_color: egui::Color32::from_rgb(0, 0, 0), // Default black stroke
-            active_color_mode: panes::ColorMode::default(), // Default to fill color
             pane_instances: HashMap::new(), // Initialize empty, panes created on-demand
             menu_system,
             pending_view_action: None,
@@ -1581,6 +1604,7 @@ impl EditorApp {
             metronome_enabled: false,         // Metronome off by default
             count_in_enabled: false,         // Count-in off by default
             recording_clips: HashMap::new(),  // No active recording clips
+            pending_take_appends: Vec::new(),
             recording_start_time: 0.0,        // Will be set when recording starts
             recording_layer_ids: Vec::new(),  // Will be populated when recording starts
             dragging_asset: None, // No asset being dragged initially
@@ -1645,8 +1669,8 @@ impl EditorApp {
             test_mode: test_mode::TestModeState::new(panic_snapshot, pending_event, is_replaying, pending_geometry),
 
             // Debug overlay (F3)
-            cursor_cache: custom_cursor::CursorCache::new(),
             tablet: tablet::TabletInput::new(cc),
+            cursor_cache: custom_cursor::CursorCache::new(),
             debug_overlay_visible: false,
             debug_stats_collector: debug_overlay::DebugStatsCollector::new(),
             gpu_info,
@@ -2036,8 +2060,112 @@ impl EditorApp {
     /// 2. For MIDI: Loads the default instrument
     /// 3. Stores the bidirectional mapping
     /// 4. Syncs any existing clips on the layer
+    /// Fold freshly-recorded cycle takes into an existing take folder covering the same region, if
+    /// there is one. Returns true if it did.
+    ///
+    /// Recording more takes over a region you've already recorded should extend that folder, not
+    /// stack a second clip on top of it — otherwise the new takes are stranded in an overlapping
+    /// clip and you can't audition them against the ones already there.
+    ///
+    /// The in-progress recording's own clip and instance are throwaway scaffolding in this case (the
+    /// takes themselves already live in the backend pools), so they're discarded. They were never
+    /// committed as an action, so there's nothing on the undo stack to unwind — the single
+    /// `AppendTakesAction` is the whole undoable step.
+    fn append_cycle_takes(
+        &mut self,
+        layer_id: uuid::Uuid,
+        recording_instance_id: uuid::Uuid,
+        recording_clip_id: uuid::Uuid,
+        recording_backend_id: Option<lightningbeam_core::action::BackendClipInstanceId>,
+        loop_start: Beats,
+        loop_len: Beats,
+        takes: Vec<lightningbeam_core::clip::AudioTake>,
+    ) -> bool {
+        let Some(target_instance_id) = self.action_executor.document().take_folder_at(
+            &layer_id,
+            loop_start,
+            loop_len,
+            &recording_instance_id,
+        ) else {
+            return false;
+        };
+
+        // Tear down the recording's own backend clip. Without this it keeps playing on top of the
+        // take folder we're appending to — two takes sounding at once. The target instance's clip is
+        // separately repointed at the new active take by the action's backend sync below.
+        let backend_id = recording_backend_id
+            .or_else(|| self.clip_instance_to_backend_map.remove(&recording_instance_id));
+        self.clip_instance_to_backend_map.remove(&recording_instance_id);
+        let track_id = self.layer_to_track_map.get(&layer_id).copied();
+        if let (Some(backend_id), Some(track_id), Some(controller_arc)) =
+            (backend_id, track_id, self.audio_controller.as_ref())
+        {
+            let mut controller = controller_arc.lock().unwrap();
+            match backend_id {
+                lightningbeam_core::action::BackendClipInstanceId::Audio(id) => {
+                    controller.remove_audio_clip(track_id, id)
+                }
+                lightningbeam_core::action::BackendClipInstanceId::Midi(id) => {
+                    controller.remove_midi_clip(track_id, id)
+                }
+            }
+        }
+
+        // Discard the scaffolding clip + instance.
+        {
+            let doc = self.action_executor.document_mut();
+            if let Some(AnyLayer::Audio(al)) = doc.get_layer_mut(&layer_id) {
+                al.clip_instances.retain(|ci| ci.id != recording_instance_id);
+            }
+            doc.audio_clips.remove(&recording_clip_id);
+        }
+
+        let action = lightningbeam_core::actions::AppendTakesAction::new(
+            layer_id,
+            target_instance_id,
+            takes,
+        );
+
+        if let Some(controller_arc) = self.audio_controller.clone() {
+            let mut controller = controller_arc.lock().unwrap();
+            let mut backend_context = lightningbeam_core::action::BackendContext {
+                audio_controller: Some(&mut *controller),
+                layer_to_track_map: &self.layer_to_track_map,
+                clip_instance_to_backend_map: &mut self.clip_instance_to_backend_map,
+            };
+            if let Err(e) = self
+                .action_executor
+                .execute_with_backend(Box::new(action), &mut backend_context)
+            {
+                eprintln!("Failed to append cycle takes: {}", e);
+            }
+        }
+
+        self.autosave.pending_event = true;
+        true
+    }
+
     fn sync_audio_layers_to_backend(&mut self) {
         use lightningbeam_core::layer::{AnyLayer, AudioLayerType};
+
+        // Push the document's cycle region to the engine. Needed on load/new: the region is
+        // document state, but the engine starts blank (and is cleared on Reset), so without this a
+        // loaded project would show its cycle strip while the transport never actually looped.
+        // Changes made later go through SetCycleRegionAction's execute_backend.
+        {
+            let (region, enabled) = {
+                let doc = self.action_executor.document();
+                (doc.cycle_region, doc.cycle_enabled)
+            };
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                controller.set_loop_region(region);
+                controller.set_loop_enabled(enabled);
+                // Cycle MIDI mode is a *preference*, not document state, so it rides along here
+                // rather than through an action.
+                controller.set_cycle_midi_separate_takes(self.config.cycle_midi_separate_takes);
+            }
+        }
 
         // Ensure the master layer has a backend group track.
         let master_layer_id = self.action_executor.document().master_layer.layer.id;
@@ -2371,7 +2499,7 @@ impl EditorApp {
         ) -> Vec<uuid::Uuid> {
             let mut result = Vec::new();
             for instance in clip_instances {
-                if let Some(clip_duration) = document.get_clip_duration(&instance.clip_id) {
+                if let Some(clip_duration) = document.clip_trim_duration(&instance.clip_id) {
                     let effective_duration = instance.effective_duration(clip_duration, document.tempo_map());
                     let timeline_end = instance.timeline_start + effective_duration;
 
@@ -3260,7 +3388,9 @@ impl EditorApp {
             let duplicates: Vec<lightningbeam_core::clip::ClipInstance> = clips_to_duplicate.iter().map(|original| {
                 let mut duplicate = original.clone();
                 duplicate.id = uuid::Uuid::new_v4();
-                let clip_duration = document.get_clip_duration(&original.clip_id).unwrap_or(Seconds(1.0));
+                let clip_duration = document
+                    .clip_trim_duration(&original.clip_id)
+                    .unwrap_or(ClipDuration::Seconds(Seconds(1.0)));
                 let effective_duration = original.effective_duration(clip_duration, document.tempo_map());
                 duplicate.timeline_start = original.timeline_start + effective_duration;
                 if let Some((new_clip_def_id, _)) = midi_clip_replacements.get(&original.clip_id) {
@@ -5461,7 +5591,7 @@ impl EditorApp {
                     // matches the video clip exactly).
                     let (_dur, sample_rate, channels) = controller
                         .get_pool_file_info(pool_index)
-                        .unwrap_or((video_duration, 0, 0));
+                        .unwrap_or((Seconds(video_duration), 0, 0));
                     drop(controller);
 
                     let audio_clip_name = format!("{} (Audio)", video_name);
@@ -6368,7 +6498,9 @@ impl eframe::App for EditorApp {
                     use daw_backend::AudioEvent;
                     match event {
                         AudioEvent::PlaybackPosition(time) => {
-                            self.playback_time = time;
+                            // `playback_time` is the UI's seconds playhead (see the timeline's
+                            // seconds/beats model); unwrap at this boundary, not before it.
+                            self.playback_time = time.seconds_to_f64();
                         }
                         AudioEvent::PlaybackStopped => {
                             self.is_playing = false;
@@ -6474,6 +6606,25 @@ impl eframe::App for EditorApp {
                                         })
                                 };
 
+                                // While cycling, the recording keeps running but the clip only ever
+                                // occupies ONE region — each further pass is a new take layered on
+                                // the same span, not more length. Cap the preview there so the bar
+                                // doesn't grow off past the loop end while the playhead wraps.
+                                let cycle_cap = {
+                                    let doc = self.action_executor.document();
+                                    match (doc.cycle_enabled, doc.cycle_region) {
+                                        (true, Some((ls, le))) if le > ls => {
+                                            let tm = doc.tempo_map();
+                                            Some(tm.beats_to_seconds(le) - tm.beats_to_seconds(ls))
+                                        }
+                                        _ => None,
+                                    }
+                                };
+                                let duration = match cycle_cap {
+                                    Some(cap) if duration > cap => cap,
+                                    _ => duration,
+                                };
+
                                 // Then update the clip duration (mutable borrow)
                                 if let Some(doc_clip_id) = doc_clip_id {
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
@@ -6484,6 +6635,158 @@ impl eframe::App for EditorApp {
                                 }
                             }
                             ctx.request_repaint();
+                        }
+                        AudioEvent::CycleRecordingStopped { clip_id: backend_clip_id, takes, loop_start, loop_len_beats, loop_len_seconds } => {
+                            eprintln!("[STOP] CycleRecordingStopped: {} takes", takes.len());
+
+                            // Clean up the live-recording waveform cache (keyed usize::MAX).
+                            self.raw_audio_cache.remove(&usize::MAX);
+                            self.waveform_gpu_dirty.remove(&usize::MAX);
+
+                            // Pull every take's samples in for waveform rendering — the user can
+                            // switch to any of them, not just the active one.
+                            if let Some(ref controller_arc) = self.audio_controller {
+                                let mut controller = controller_arc.lock().unwrap();
+                                for &(pool_index, _) in &takes {
+                                    match controller.get_pool_audio_samples(pool_index) {
+                                        Ok((samples, sr, ch)) => {
+                                            self.raw_audio_cache.insert(pool_index, (Arc::new(samples), sr, ch));
+                                            self.waveform_gpu_dirty.insert(pool_index);
+                                            self.audio_pools_with_new_waveforms.insert(pool_index);
+                                        }
+                                        Err(e) => eprintln!("Failed to fetch take audio: {}", e),
+                                    }
+                                    self.audio_duration_cache.insert(pool_index, loop_len_seconds.seconds_to_f64());
+                                }
+                            }
+
+                            let recording_layer = self.recording_clips.iter()
+                                .find(|(_, &cid)| cid == backend_clip_id)
+                                .map(|(&lid, _)| lid);
+
+                            if let (Some(layer_id), false) = (recording_layer, takes.is_empty()) {
+                                let (clip_id, instance_id) = {
+                                    let document = self.action_executor.document();
+                                    document.get_layer(&layer_id)
+                                        .and_then(|layer| {
+                                            if let lightningbeam_core::layer::AnyLayer::Audio(audio_layer) = layer {
+                                                audio_layer.clip_instances.last().map(|i| (i.clip_id, i.id))
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .unwrap_or((uuid::Uuid::nil(), uuid::Uuid::nil()))
+                                };
+
+                                if !clip_id.is_nil() {
+                                    self.autosave.pending_event = true;
+                                    let last_take = takes.len() - 1;
+
+                                    let new_takes: Vec<lightningbeam_core::clip::AudioTake> = takes
+                                        .iter()
+                                        .map(|&(pool_index, _)| lightningbeam_core::clip::AudioTake {
+                                            // Renumbered by the folder that ends up owning them.
+                                            name: String::new(),
+                                            content: lightningbeam_core::clip::TakeContent::Audio { audio_pool_index: pool_index },
+                                        })
+                                        .collect();
+
+                                    // If this region already holds a take folder, extend it rather
+                                    // than dropping a second clip on top. Queued and run just after
+                                    // this loop, which holds a borrow on the event queue.
+                                    if self.action_executor.document()
+                                        .take_folder_at(&layer_id, loop_start, loop_len_beats, &instance_id)
+                                        .is_some()
+                                    {
+                                        self.pending_take_appends.push(PendingTakeAppend {
+                                            layer_id,
+                                            recording_instance_id: instance_id,
+                                            recording_clip_id: clip_id,
+                                            // The engine's recording clip. It isn't in
+                                            // clip_instance_to_backend_map yet (that only happens on
+                                            // promotion, which we're skipping), so hand it over
+                                            // directly or it'll keep sounding alongside the folder.
+                                            recording_backend_id: Some(
+                                                lightningbeam_core::action::BackendClipInstanceId::Audio(backend_clip_id),
+                                            ),
+                                            loop_start,
+                                            loop_len: loop_len_beats,
+                                            takes: new_takes,
+                                        });
+                                        self.recording_clips.retain(|_, &mut cid| cid != backend_clip_id);
+                                        ctx.request_repaint();
+                                        continue;
+                                    }
+
+                                    // Finalize the recording clip, and hang the takes off the INSTANCE.
+                                    {
+                                        let doc = self.action_executor.document_mut();
+                                        if let Some(clip) = doc.audio_clips.get_mut(&clip_id) {
+                                            // The clip's own content is take 1; the instance's take
+                                            // list overrides it with whichever take is active. Every
+                                            // take is exactly one cycle region long, so the clip's
+                                            // duration is the region.
+                                            clip.finalize_recording(
+                                                takes[0].0,
+                                                loop_len_seconds.seconds_to_f64(),
+                                            );
+                                            clip.name = format!("Cycle recording ({} takes)", takes.len());
+                                        }
+
+                                        // Anchor the instance to the region and select the most
+                                        // recent take, GarageBand-style.
+                                        //
+                                        // timeline_duration stays None on purpose: pinning it would
+                                        // make a later tempo change loop/repeat the take's content
+                                        // to fill the span instead of letting it drift naturally.
+                                        if let Some(lightningbeam_core::layer::AnyLayer::Audio(al)) = doc.get_layer_mut(&layer_id) {
+                                            if let Some(inst) = al.clip_instances.iter_mut().find(|ci| ci.id == instance_id) {
+                                                inst.timeline_start = loop_start;
+                                                inst.timeline_duration = None;
+                                                // Audio take content is seconds, and each take spans
+                                                // exactly one cycle region.
+                                                inst.trim_start = daw_backend::ContentTime::ZERO;
+                                                inst.trim_end =
+                                                    Some(daw_backend::ContentTime(loop_len_seconds.seconds_to_f64()));
+                                                inst.takes = takes.iter().enumerate().map(|(i, &(pool_index, _))| {
+                                                    lightningbeam_core::clip::AudioTake {
+                                                        name: format!("Take {}", i + 1),
+                                                        content: lightningbeam_core::clip::TakeContent::Audio { audio_pool_index: pool_index },
+                                                    }
+                                                }).collect();
+                                                inst.active_take = Some(last_take);
+                                                inst.recorded_loop_beats = Some(loop_len_beats);
+                                            }
+                                        }
+                                    }
+
+                                    // The backend already has a clip for the active take (the engine
+                                    // pointed it at the last take on stop), so map to it rather than
+                                    // adding a duplicate.
+                                    let backend_id = lightningbeam_core::action::BackendClipInstanceId::Audio(backend_clip_id);
+                                    self.clip_instance_to_backend_map.insert(instance_id, backend_id);
+
+                                    // Commit the whole cycle-record session as ONE undoable action.
+                                    let clip_instance = self.layer_to_track_map.get(&layer_id).copied().and_then(|track_id| {
+                                        self.action_executor.document()
+                                            .get_layer(&layer_id)
+                                            .and_then(|l| if let AnyLayer::Audio(al) = l {
+                                                al.clip_instances.iter().find(|ci| ci.id == instance_id).cloned()
+                                            } else { None })
+                                            .map(|ci| (track_id, ci))
+                                    });
+                                    if let Some((track_id, clip_instance)) = clip_instance {
+                                        let action = lightningbeam_core::actions::AddClipInstanceAction::already_applied(
+                                            layer_id, clip_instance, track_id, backend_id,
+                                        );
+                                        self.action_executor.push_applied(Box::new(action));
+                                    } else {
+                                        self.media_modified = true;
+                                    }
+                                }
+                            }
+
+                            self.recording_clips.retain(|_, &mut cid| cid != backend_clip_id);
                         }
                         AudioEvent::RecordingStopped(_backend_clip_id, pool_index, _waveform) => {
                             eprintln!("[STOP] AudioEvent::RecordingStopped received (pool_index={})", pool_index);
@@ -6510,6 +6813,7 @@ impl eframe::App for EditorApp {
                                 let mut controller = controller_arc.lock().unwrap();
                                 match controller.get_pool_file_info(pool_index) {
                                     Ok((dur, _, _)) => {
+                                        let dur = dur.seconds_to_f64();
                                         eprintln!("[AUDIO] Got duration from backend: {:.4}s", dur);
                                         self.audio_duration_cache.insert(pool_index, dur);
                                         dur
@@ -6543,7 +6847,7 @@ impl eframe::App for EditorApp {
                                                 None
                                             }
                                         })
-                                        .unwrap_or((uuid::Uuid::nil(), uuid::Uuid::nil(), Beats::ZERO, 0.0))
+                                        .unwrap_or((uuid::Uuid::nil(), uuid::Uuid::nil(), Beats::ZERO, daw_backend::ContentTime::ZERO))
                                 };
 
                                 if !clip_id.is_nil() {
@@ -6667,7 +6971,11 @@ impl eframe::App for EditorApp {
                                             );
                                         }
                                     }
-                                    // Update the clip's duration so the timeline bar grows
+                                    // Update the clip's duration so the timeline bar grows. Once the
+                                    // transport has wrapped, the backend reports the whole cycle
+                                    // region here and keeps reporting it, so the bar grows through
+                                    // the first pass and then holds — every further pass merges into
+                                    // the same clip rather than extending it.
                                     if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
                                         clip.set_content_duration(ClipDuration::Beats(duration));
                                     }
@@ -6684,6 +6992,144 @@ impl eframe::App for EditorApp {
                                 }
                                 events.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap());
                                 self.midi_event_cache.insert(clip_id, events);
+                            }
+                            ctx.request_repaint();
+                        }
+                        AudioEvent::MidiCycleRecordingStopped { track_id, clip_ids, loop_start, loop_len_beats } => {
+                            println!("🎹 MIDI cycle recording stopped: {} takes", clip_ids.len());
+
+                            // Pull every take's events into the cache — the user can switch to any of
+                            // them, not just the active one.
+                            if let Some(ref controller_arc) = self.audio_controller {
+                                let mut controller = controller_arc.lock().unwrap();
+                                for &take_clip_id in &clip_ids {
+                                    if let Ok(data) = controller.query_midi_clip(track_id, take_clip_id) {
+                                        self.midi_event_cache.insert(take_clip_id, data.events);
+                                    }
+                                }
+                            }
+
+                            let layer_id = self.track_to_layer_map.get(&track_id).copied();
+                            if let (Some(layer_id), Some(&first_clip_id)) = (layer_id, clip_ids.first()) {
+                                // The doc clip is the one the recording started on — which the backend
+                                // reused as take 1.
+                                let doc_clip_id = self.action_executor.document()
+                                    .audio_clip_by_midi_clip_id(first_clip_id)
+                                    .map(|(id, _)| id);
+
+                                if let Some(doc_clip_id) = doc_clip_id {
+                                    self.autosave.pending_event = true;
+                                    let last_take = clip_ids.len() - 1;
+
+                                    let recording_instance_id = self.action_executor.document()
+                                        .get_layer(&layer_id)
+                                        .and_then(|l| if let AnyLayer::Audio(al) = l {
+                                            al.clip_instances.iter().find(|ci| ci.clip_id == doc_clip_id).map(|ci| ci.id)
+                                        } else { None });
+
+                                    let new_takes: Vec<lightningbeam_core::clip::AudioTake> = clip_ids
+                                        .iter()
+                                        .map(|&mid| lightningbeam_core::clip::AudioTake {
+                                            // Renumbered by the folder that ends up owning them.
+                                            name: String::new(),
+                                            content: lightningbeam_core::clip::TakeContent::Midi { midi_clip_id: mid },
+                                        })
+                                        .collect();
+
+                                    // If this region already holds a take folder, extend it rather
+                                    // than dropping a second clip on top. Queued and run just after
+                                    // this loop, which holds a borrow on the event queue.
+                                    let existing_folder = recording_instance_id.filter(|rec_inst| {
+                                        self.action_executor.document()
+                                            .take_folder_at(&layer_id, loop_start, loop_len_beats, rec_inst)
+                                            .is_some()
+                                    });
+                                    if let Some(rec_inst) = existing_folder {
+                                        self.pending_take_appends.push(PendingTakeAppend {
+                                            layer_id,
+                                            recording_instance_id: rec_inst,
+                                            recording_clip_id: doc_clip_id,
+                                            // The MIDI path maps its recording instance during
+                                            // MidiRecordingProgress, so the map has it.
+                                            recording_backend_id: None,
+                                            loop_start,
+                                            loop_len: loop_len_beats,
+                                            takes: new_takes,
+                                        });
+                                        self.recording_layer_ids.retain(|id| *id != layer_id);
+                                        self.recording_clips.remove(&layer_id);
+                                        if self.recording_layer_ids.is_empty() {
+                                            self.is_recording = false;
+                                            self.recording_clips.clear();
+                                        }
+                                        ctx.request_repaint();
+                                        continue;
+                                    }
+
+                                    {
+                                        let doc = self.action_executor.document_mut();
+                                        if let Some(clip) = doc.audio_clips.get_mut(&doc_clip_id) {
+                                            // The clip's own content stays take 1 (the clip the
+                                            // recording started on); the instance's take list
+                                            // overrides it with whichever take is active. MIDI takes
+                                            // are beats-domain and each spans one cycle region.
+                                            clip.set_content_duration(ClipDuration::Beats(loop_len_beats));
+                                            clip.name = format!("Cycle recording ({} takes)", clip_ids.len());
+                                        }
+
+                                        // Anchor to the region and select the most recent take.
+                                        // timeline_duration stays None on purpose — pinning it would
+                                        // make a later tempo change loop the take's content to fill
+                                        // the span instead of letting it drift naturally.
+                                        if let Some(AnyLayer::Audio(al)) = doc.get_layer_mut(&layer_id) {
+                                            if let Some(inst) = al.clip_instances.iter_mut().find(|ci| ci.clip_id == doc_clip_id) {
+                                                inst.timeline_start = loop_start;
+                                                inst.timeline_duration = None;
+                                                inst.trim_start = daw_backend::ContentTime::ZERO;
+                                                inst.trim_end = Some(daw_backend::ContentTime(loop_len_beats.beats_to_f64()));
+                                                inst.takes = clip_ids.iter().enumerate().map(|(i, &mid)| {
+                                                    lightningbeam_core::clip::AudioTake {
+                                                        name: format!("Take {}", i + 1),
+                                                        content: lightningbeam_core::clip::TakeContent::Midi { midi_clip_id: mid },
+                                                    }
+                                                }).collect();
+                                                inst.active_take = Some(last_take);
+                                                inst.recorded_loop_beats = Some(loop_len_beats);
+                                            }
+                                        }
+                                    }
+
+                                    // Commit the whole cycle-record session as ONE undoable action.
+                                    // The backend instance was mapped during MidiRecordingProgress and
+                                    // the engine already repointed it at the active take.
+                                    let instance = self.action_executor.document()
+                                        .get_layer(&layer_id)
+                                        .and_then(|l| if let AnyLayer::Audio(al) = l {
+                                            al.clip_instances.iter().find(|ci| ci.clip_id == doc_clip_id).cloned()
+                                        } else { None });
+                                    if let Some(instance) = instance {
+                                        match (self.layer_to_track_map.get(&layer_id).copied(),
+                                               self.clip_instance_to_backend_map.get(&instance.id).copied()) {
+                                            (Some(tid), Some(backend_id)) => {
+                                                let action = lightningbeam_core::actions::AddClipInstanceAction::already_applied(
+                                                    layer_id, instance, tid, backend_id,
+                                                );
+                                                self.action_executor.push_applied(Box::new(action));
+                                            }
+                                            _ => self.media_modified = true,
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Clear recording state, same as the single-clip MIDI path.
+                            if let Some(&layer_id) = self.track_to_layer_map.get(&track_id) {
+                                self.recording_layer_ids.retain(|id| *id != layer_id);
+                                self.recording_clips.remove(&layer_id);
+                            }
+                            if self.recording_layer_ids.is_empty() {
+                                self.is_recording = false;
+                                self.recording_clips.clear();
                             }
                             ctx.request_repaint();
                         }
@@ -6705,7 +7151,7 @@ impl eframe::App for EditorApp {
                                             .map(|(id, _)| id);
                                         if let Some(doc_clip_id) = doc_clip_id {
                                             if let Some(clip) = self.action_executor.document_mut().audio_clips.get_mut(&doc_clip_id) {
-                                                clip.set_content_duration(ClipDuration::Beats(Beats(midi_clip_data.duration)));
+                                                clip.set_content_duration(ClipDuration::Beats(midi_clip_data.duration));
                                                 clip.name = format!("MIDI Recording {}", clip_id);
                                             }
                                         }
@@ -6831,6 +7277,20 @@ impl eframe::App for EditorApp {
                     }
                 }
 
+        }
+
+        // Cycle takes that landed on an existing take folder. Deferred out of the event loop above,
+        // which holds a borrow on the event queue and so can't call a `&mut self` method.
+        for req in std::mem::take(&mut self.pending_take_appends) {
+            self.append_cycle_takes(
+                req.layer_id,
+                req.recording_instance_id,
+                req.recording_clip_id,
+                req.recording_backend_id,
+                req.loop_start,
+                req.loop_len,
+                req.takes,
+            );
         }
 
         // Update input monitoring based on active layer (only send command when changed)
@@ -7026,6 +7486,11 @@ impl eframe::App for EditorApp {
         if let Some(result) = self.preferences_dialog.render(ctx, &mut self.config, &mut self.theme, mobile) {
             if result.buffer_size_changed {
                 println!("⚠️  Audio buffer size will be applied on next app restart");
+            }
+            // Cycle MIDI mode takes effect immediately — no restart needed, unlike the buffer size.
+            if let Some(ref controller_arc) = self.audio_controller {
+                let mut controller = controller_arc.lock().unwrap();
+                controller.set_cycle_midi_separate_takes(self.config.cycle_midi_separate_takes);
             }
             // Apply new keybindings if changed
             if let Some(new_keymap) = result.new_keymap {
@@ -7949,7 +8414,6 @@ impl EditorApp {
                     selected_tool: &mut self.selected_tool,
                     fill_color: &mut self.fill_color,
                     stroke_color: &mut self.stroke_color,
-                    active_color_mode: &mut self.active_color_mode,
                     pending_view_action: &mut self.pending_view_action,
                     fallback_pane_priority: &mut scratch.fallback_pane_priority,
                     pending_handlers: &mut scratch.pending_handlers,

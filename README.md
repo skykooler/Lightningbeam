@@ -58,13 +58,21 @@ Lightningbeam is developed on the `main` branch. The project has been rewritten 
 - ✅ Audio engine with node graph processing
 - ✅ GPU waveform rendering with mipmaps
 - ✅ Video decoding integration
-- 🚧 Export system (in progress)
-- 🚧 Node editor UI (planned)
-- 🚧 Piano roll editor (planned)
+- ✅ Export system (video, image, audio, animated GIF, SVG)
+- ✅ Node editor UI
+- 🚧 Piano roll editor (in progress)
 
 ## Getting Started
 
-### Prerequisites
+### Download a prebuilt release
+
+If you don't want to build from source, prebuilt binaries for each release are on the
+[GitHub releases page](https://github.com/skykooler/lightningbeam/releases). Download the build for
+your platform and run it directly.
+
+### Building from source
+
+#### Prerequisites
 
 - Rust (stable toolchain via [rustup](https://rustup.rs/))
 - System dependencies:
@@ -74,7 +82,7 @@ Lightningbeam is developed on the `main` branch. The project has been rewritten 
 
 See [docs/BUILDING.md](docs/BUILDING.md) for detailed setup instructions.
 
-### Building and Running
+#### Building and Running
 
 ```bash
 # Clone the repository

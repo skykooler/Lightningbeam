@@ -39,3 +39,6 @@ packaging/squashfs-root/
 
 # Wrapper script (generated, not needed with static FFmpeg)
 lightningbeam-ui/lightningbeam-editor/debian/
+
+# Personal working notes (not version-controlled)
+TODO.md

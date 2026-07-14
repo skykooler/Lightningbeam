@@ -1,6 +1,6 @@
-use super::{BrushParams, RasterToolDef, RasterToolSettings};
+use super::{BrushKind, RasterToolDef, RasterToolSettings};
 use eframe::egui;
-use lightningbeam_core::{brush_settings::BrushSettings, raster_layer::RasterBlendMode};
+use lightningbeam_core::raster_layer::RasterBlendMode;
 
 pub struct SpongeTool;
 pub static SPONGE: SpongeTool = SpongeTool;
@@ -8,19 +8,11 @@ pub static SPONGE: SpongeTool = SpongeTool;
 impl RasterToolDef for SpongeTool {
     fn blend_mode(&self) -> RasterBlendMode { RasterBlendMode::Sponge }
     fn header_label(&self) -> &'static str { "Sponge" }
-    fn brush_params(&self, s: &RasterToolSettings) -> BrushParams {
-        BrushParams {
-            base_settings: BrushSettings::default(),
-            radius: s.sponge_radius,
-            opacity: s.sponge_flow,
-            hardness: s.sponge_hardness,
-            spacing: s.sponge_spacing,
-        }
-    }
+    fn brush_kind(&self) -> BrushKind { BrushKind::Sponge }
     fn tool_params(&self, s: &RasterToolSettings) -> [f32; 4] {
         [s.sponge_mode as f32, 0.0, 0.0, 0.0]
     }
-    fn show_brush_preset_picker(&self) -> bool { false }
+    fn strength_label(&self) -> &'static str { "Flow" }
     fn render_ui(&self, ui: &mut egui::Ui, s: &mut RasterToolSettings) {
         ui.horizontal(|ui| {
             if ui.selectable_label(s.sponge_mode == 0, "Saturate").clicked() {
@@ -29,26 +21,6 @@ impl RasterToolDef for SpongeTool {
             if ui.selectable_label(s.sponge_mode == 1, "Desaturate").clicked() {
                 s.sponge_mode = 1;
             }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Size:");
-            ui.add(egui::Slider::new(&mut s.sponge_radius, 1.0_f32..=500.0).logarithmic(true).suffix(" px"));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Flow:");
-            ui.add(egui::Slider::new(&mut s.sponge_flow, 0.0_f32..=1.0)
-                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Hardness:");
-            ui.add(egui::Slider::new(&mut s.sponge_hardness, 0.0_f32..=1.0)
-                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)));
-        });
-        ui.horizontal(|ui| {
-            ui.label("Spacing:");
-            ui.add(egui::Slider::new(&mut s.sponge_spacing, 0.5_f32..=20.0)
-                .logarithmic(true)
-                .custom_formatter(|v, _| format!("{:.1}", v)));
         });
     }
 }

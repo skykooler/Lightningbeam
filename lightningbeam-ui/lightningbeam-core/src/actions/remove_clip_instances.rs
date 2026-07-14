@@ -138,92 +138,23 @@ impl Action for RemoveClipInstancesAction {
         backend: &mut BackendContext,
         document: &Document,
     ) -> Result<(), String> {
-        use crate::clip::AudioClipType;
+        if backend.audio_controller.is_none() {
+            return Ok(());
+        }
 
-        let controller = match backend.audio_controller.as_mut() {
-            Some(c) => c,
-            None => return Ok(()),
-        };
-
-        // Re-add clips that were removed from backend
-        for (layer_id, instance) in &self.saved {
-            let layer = match document.get_layer(layer_id) {
-                Some(l) => l,
-                None => continue,
-            };
-            if !matches!(layer, AnyLayer::Audio(_)) {
+        // Re-add the clips that were removed. `BackendContext::add_clip_instance` is the same
+        // helper the add and split actions use, so the trim/duration conversions (and take-folder
+        // resolution) stay in exactly one place instead of being copied into every action that has
+        // to put a clip back.
+        let saved = std::mem::take(&mut self.saved);
+        for (layer_id, instance) in &saved {
+            if !matches!(document.get_layer(layer_id), Some(AnyLayer::Audio(_))) {
                 continue;
             }
-
-            let track_id = match backend.layer_to_track_map.get(layer_id) {
-                Some(id) => *id,
-                None => continue,
-            };
-
-            let clip = match document.get_audio_clip(&instance.clip_id) {
-                Some(c) => c,
-                None => continue,
-            };
-
-            match &clip.clip_type {
-                AudioClipType::Midi { midi_clip_id } => {
-                    use daw_backend::command::{Query, QueryResponse};
-
-                    let internal_start = instance.trim_start;
-                    let internal_end = instance.trim_end.unwrap_or(clip.content_duration().native());
-                    let external_start = instance.timeline_start;
-                    // MIDI trims are beats-domain, so the fallback span is beats too.
-                    let external_duration = instance
-                        .timeline_duration
-                        .unwrap_or(daw_backend::Beats(internal_end - internal_start));
-
-                    let midi_instance = daw_backend::MidiClipInstance::new(
-                        0,
-                        *midi_clip_id,
-                        daw_backend::Beats(internal_start),
-                        daw_backend::Beats(internal_end),
-                        external_start,
-                        external_duration,
-                    );
-
-                    let query = Query::AddMidiClipInstanceSync(track_id, midi_instance);
-                    if let Ok(QueryResponse::MidiClipInstanceAdded(Ok(new_id))) =
-                        controller.send_query(query)
-                    {
-                        backend.clip_instance_to_backend_map.insert(
-                            instance.id,
-                            BackendClipInstanceId::Midi(new_id),
-                        );
-                    }
-                }
-                AudioClipType::Sampled { audio_pool_index } => {
-                    let internal_start = instance.trim_start;
-                    let internal_end = instance.trim_end.unwrap_or(clip.content_duration().native());
-                    let start_time = instance.timeline_start;
-                    // Fallback span is the content seconds converted to beats at the
-                    // clip's start (not the seconds span treated as beats).
-                    let effective_duration = instance.timeline_duration.unwrap_or_else(|| {
-                        let tempo_map = document.tempo_map();
-                        let content_secs = daw_backend::Seconds(internal_end - internal_start);
-                        tempo_map.seconds_to_beats(tempo_map.beats_to_seconds(start_time) + content_secs)
-                            - start_time
-                    });
-
-                    let new_id = controller.add_audio_clip(
-                        track_id,
-                        *audio_pool_index,
-                        start_time,
-                        effective_duration,
-                        daw_backend::Seconds(internal_start),
-                    );
-                    backend.clip_instance_to_backend_map.insert(
-                        instance.id,
-                        BackendClipInstanceId::Audio(new_id),
-                    );
-                }
-                AudioClipType::Recording => {}
-            }
+            // A missing track/clip just means there's nothing to restore on the backend.
+            let _ = backend.add_clip_instance(document, layer_id, instance);
         }
+        self.saved = saved;
 
         // Clear saved backend IDs
         self.saved_backend_ids.clear();

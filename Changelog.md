@@ -1,3 +1,25 @@
+# 1.0.10-alpha:
+Changes:
+- Cycle recording: highlight a range on the timeline ruler (the cycle strip, shown when looping is armed) and the transport loops it. Recording round the loop turns each pass into a separate take you can choose between afterwards, and recording again over the same region adds more takes rather than stacking a second clip on top. Starting playback from outside the region jumps to its start
+- Takes: a "Take N/M" badge on the clip picks which take plays. Splitting a clip lets each half play a different take, so you can comp a part together from the best bits of several passes. Right-click a clip to delete the take that's playing or to delete all the unused ones; double-click a take in the list to rename it
+- MIDI cycle recording can either merge every pass into one clip (the default — earlier passes play back as you record, so you can layer a hi-hat over a kick) or keep each pass as a separate take, like audio does. Set it in Preferences → Audio
+- Painting: every colour-using tool (brush, paint bucket, eyedropper) now shares one Foreground/Background swatch row, and the eyedropper has an explicit toggle for which of the two it fills
+- Painting: the effect brushes (dodge/burn, sponge, blur, smudge, clone stamp, healing brush, pattern stamp) were stuck on a single fixed brush shape. They now each have their own size, strength, hardness and spacing, and can use any brush from the library
+- Tablet: stylus barrel buttons now work, with actions you can bind in Preferences (Pan, Eyedropper, or Eraser). Middle-mouse panning added too
+- Timeline: raster and text layers get an opacity slider; each layer row now shows only the controls that mean anything for it (volume for audio, opacity for raster/text, both for vector and video), and layers gain a visibility (eye) toggle
+- The stage gains undo/redo buttons, sized for touch and tablet use
+
+Bugfixes:
+- Splitting an audio clip made it play back at the wrong length (a clip split at 1 second cut off after half a second at 120 BPM)
+- Trimmed MIDI clips were the wrong length on the timeline at any tempo other than 60 BPM
+- The paint bucket always filled with the background colour, whatever the brush was set to
+- Where an eyedropper sample landed (foreground or background) depended on which colour picker you had opened last
+- Stylus barrel buttons were silently ignored on Wayland
+- The opacity slider on a raster layer actually changed its volume, which means nothing on a raster layer
+- Tool cursors lagged behind the pointer while drawing; they're now drawn by the system rather than into the canvas
+- Colour picker popups wouldn't close when you dragged on the stage, so drawing left one hanging open, and clicking inside a picker's own hue slider closed it
+- The toolbar could not be scrolled when the pane was too short to show every tool
+
 # 1.0.9-alpha:
 Bugfixes:
 - Fix audio recording placement: a second recording landed at the wrong spot (and clicking/dragging clips was similarly off) at any tempo other than 60 BPM — recordings now start exactly at the playhead at any tempo

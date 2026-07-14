@@ -105,7 +105,7 @@ impl Action for MoveClipInstancesAction {
 
             let group: Vec<(Uuid, Beats, Beats)> = moves.iter().filter_map(|(id, old_start, _)| {
                 let inst = clip_instances.iter().find(|ci| &ci.id == id)?;
-                let dur = document.get_clip_duration(&inst.clip_id)?;
+                let dur = document.clip_trim_duration(&inst.clip_id)?;
                 let eff = inst.effective_duration_beats(dur, document.tempo_map());
                 Some((*id, *old_start, eff))
             }).collect();
@@ -190,7 +190,7 @@ impl Action for MoveClipInstancesAction {
 
     fn execute_backend(&mut self, backend: &mut crate::action::BackendContext, document: &Document) -> Result<(), String> {
         use crate::layer::AnyLayer;
-        use crate::clip::AudioClipType;
+        use crate::clip::ResolvedContent;
 
         // Get audio controller
         let controller = match backend.audio_controller.as_mut() {
@@ -211,8 +211,9 @@ impl Action for MoveClipInstancesAction {
                         // Check if this clip has a metatrack
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(*new_start));
-                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
-                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
+                            // A vector clip's content is wall-clock, so its content times ARE seconds.
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start.raw()));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(|t| daw_backend::Seconds(t.raw())));
                         }
                     }
                 }
@@ -246,12 +247,12 @@ impl Action for MoveClipInstancesAction {
                     .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
 
                 // Handle move based on clip type
-                match &clip.clip_type {
-                    AudioClipType::Midi { midi_clip_id } => {
+                match &instance.resolve(clip) {
+                    ResolvedContent::Midi { midi_clip_id } => {
                         // For MIDI: move_clip expects the pool clip ID
                         controller.move_clip(*track_id, *midi_clip_id, *new_start);
                     }
-                    AudioClipType::Sampled { .. } => {
+                    ResolvedContent::Audio { .. } => {
                         // For sampled audio: move_clip expects the instance ID
                         let backend_instance_id = backend.clip_instance_to_backend_map.get(instance_id)
                             .ok_or_else(|| format!("Clip instance {} not mapped to backend", instance_id))?;
@@ -263,7 +264,7 @@ impl Action for MoveClipInstancesAction {
                             _ => return Err("Expected audio instance ID for sampled clip".to_string()),
                         }
                     }
-                    AudioClipType::Recording => {
+                    ResolvedContent::Recording => {
                         // Recording clips cannot be moved - skip
                     }
                 }
@@ -275,7 +276,7 @@ impl Action for MoveClipInstancesAction {
 
     fn rollback_backend(&mut self, backend: &mut crate::action::BackendContext, document: &Document) -> Result<(), String> {
         use crate::layer::AnyLayer;
-        use crate::clip::AudioClipType;
+        use crate::clip::ResolvedContent;
 
         // Get audio controller
         let controller = match backend.audio_controller.as_mut() {
@@ -295,8 +296,9 @@ impl Action for MoveClipInstancesAction {
                     if let Some(instance) = vl.clip_instances.iter().find(|ci| ci.id == *instance_id) {
                         if let Some(&metatrack_id) = backend.layer_to_track_map.get(&instance.clip_id) {
                             controller.set_offset(metatrack_id, document.tempo_map().beats_to_seconds(*old_start));
-                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start));
-                            controller.set_trim_end(metatrack_id, instance.trim_end.map(daw_backend::Seconds));
+                            // A vector clip's content is wall-clock, so its content times ARE seconds.
+                            controller.set_trim_start(metatrack_id, daw_backend::Seconds(instance.trim_start.raw()));
+                            controller.set_trim_end(metatrack_id, instance.trim_end.map(|t| daw_backend::Seconds(t.raw())));
                         }
                     }
                 }
@@ -330,12 +332,12 @@ impl Action for MoveClipInstancesAction {
                     .ok_or_else(|| format!("Audio clip {} not found", instance.clip_id))?;
 
                 // Handle move based on clip type (restore old position)
-                match &clip.clip_type {
-                    AudioClipType::Midi { midi_clip_id } => {
+                match &instance.resolve(clip) {
+                    ResolvedContent::Midi { midi_clip_id } => {
                         // For MIDI: move_clip expects the pool clip ID
                         controller.move_clip(*track_id, *midi_clip_id, *old_start);
                     }
-                    AudioClipType::Sampled { .. } => {
+                    ResolvedContent::Audio { .. } => {
                         // For sampled audio: move_clip expects the instance ID
                         let backend_instance_id = backend.clip_instance_to_backend_map.get(instance_id)
                             .ok_or_else(|| format!("Clip instance {} not mapped to backend", instance_id))?;
@@ -347,7 +349,7 @@ impl Action for MoveClipInstancesAction {
                             _ => return Err("Expected audio instance ID for sampled clip".to_string()),
                         }
                     }
-                    AudioClipType::Recording => {
+                    ResolvedContent::Recording => {
                         // Recording clips cannot be moved - skip
                     }
                 }

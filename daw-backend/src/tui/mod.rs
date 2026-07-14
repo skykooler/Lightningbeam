@@ -556,7 +556,7 @@ pub fn run_tui(
             while let Ok(event) = rx.pop() {
                 match event {
                     AudioEvent::PlaybackPosition(pos) => {
-                        app.update_playback_position(pos);
+                        app.update_playback_position(pos.seconds_to_f64());
                     }
                     AudioEvent::PlaybackStopped => {
                         app.set_playing(false);

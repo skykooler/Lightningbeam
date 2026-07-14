@@ -1,4 +1,4 @@
-use super::{BrushParams, RasterToolDef, RasterToolSettings};
+use super::{BrushKind, RasterToolDef, RasterToolSettings};
 use eframe::egui;
 use lightningbeam_core::raster_layer::RasterBlendMode;
 
@@ -12,18 +12,12 @@ const PATTERN_NAMES: &[&str] = &[
 impl RasterToolDef for PatternStampTool {
     fn blend_mode(&self) -> RasterBlendMode { RasterBlendMode::PatternStamp }
     fn header_label(&self) -> &'static str { "Pattern Stamp" }
-    fn brush_params(&self, s: &RasterToolSettings) -> BrushParams {
-        BrushParams {
-            base_settings: s.active_brush_settings.clone(),
-            radius: s.brush_radius,
-            opacity: s.brush_opacity,
-            hardness: s.brush_hardness,
-            spacing: s.brush_spacing,
-        }
-    }
+    fn brush_kind(&self) -> BrushKind { BrushKind::PatternStamp }
     fn tool_params(&self, s: &RasterToolSettings) -> [f32; 4] {
         [s.pattern_type as f32, s.pattern_scale, 0.0, 0.0]
     }
+    /// The pattern is stamped in the brush color (see `brush_dab.wgsl`, blend mode 5).
+    fn uses_color(&self) -> bool { true }
     fn render_ui(&self, ui: &mut egui::Ui, s: &mut RasterToolSettings) {
         let selected_name = PATTERN_NAMES
             .get(s.pattern_type as usize)
@@ -44,6 +38,5 @@ impl RasterToolDef for PatternStampTool {
             ui.add(egui::Slider::new(&mut s.pattern_scale, 4.0_f32..=256.0)
                 .logarithmic(true).suffix(" px"));
         });
-        ui.add_space(4.0);
     }
 }
